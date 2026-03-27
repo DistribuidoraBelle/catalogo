@@ -233,6 +233,7 @@ td{padding:.55rem .8rem;font-size:.8rem;color:var(--tx2);vertical-align:middle;w
     <div class="sb-sec admin-only">Sistema</div>
     <div class="sb-item admin-only" onclick="navTo('cuentas',this)"><span>&#128100;</span><span>Gestion de Cuentas</span></div>
     <div class="sb-item admin-only" onclick="navTo('clientes',this)"><span>&#128101;</span><span>Clientes</span></div>
+    <div class="sb-item admin-only" onclick="navTo('cotizaciones',this)"><span>&#128228;</span><span>Cotizaciones<span class="dot" id="dotCotiz" style="display:inline-block;width:8px;height:8px;border-radius:50%;background:var(--red);margin-left:4px;vertical-align:middle"></span></span></div>
   </div>
   <div class="sb-bottom">
     <div class="sb-user" id="sbUser">admin</div>
@@ -816,6 +817,10 @@ td{padding:.55rem .8rem;font-size:.8rem;color:var(--tx2);vertical-align:middle;w
     </div>
 
     <div class="page" id="page-cuentas">
+
+    <!-- COTIZACIONES ADMIN -->
+    <div class="page" id="page-cotizaciones">
+    </div>
       <div style="display:grid;grid-template-columns:1fr 1fr;gap:1rem">
         <div class="tbl-wrap" style="padding:1.1rem">
           <div class="sec-title">Cuentas del sistema</div>
@@ -1291,6 +1296,8 @@ td{padding:.55rem .8rem;font-size:.8rem;color:var(--tx2);vertical-align:middle;w
     <div class="mf" style="flex-shrink:0"><div style="display:flex;gap:.5rem"><button class="btn btn-g" onclick="cerrarModal('moControlPedido')">Cancelar</button><button class="btn btn-a" id="ctrlGuardarBtn" onclick="guardarControlPedido()" style="font-weight:600">&#10003; Guardar control</button></div></div>
   </div>
 </div>
+
+
 
 
 
@@ -10521,6 +10528,131 @@ function adminRechazarComision(id){
 function adminMarcarCobrada(id){
   if(!confirm('¿Marcar como cobrada? Confirma que el dinero fue entregado a Marcela.')) return;
   apiPatch('gastos_vendedor',{estado_comision:'cobrada',aprobado:true},'id=eq.'+id).then(function(){toast('💰 Marcada como cobrada','tok');adminLoadComisionesPanel();loadVendedores();});
+}
+
+
+// ═══ COTIZACIONES ADMIN ══════════════════════════════════════════════
+function loadCotizacionesAdmin(){
+  var pg=document.getElementById('page-cotizaciones');
+  if(!pg) return;
+  pg.innerHTML="<div class='loading'><div class='spin'></div>Cargando...</div>";
+
+  Promise.all([
+    apiGet('cotizaciones','select=*&order=created_at.desc&limit=100'),
+    apiGet('encargos','select=*&estado=eq.caido&order=created_at.desc&limit=50')
+  ]).then(function(res){
+    var cotizs=Array.isArray(res[0])?res[0]:[];
+    var caidos=Array.isArray(res[1])?res[1]:[];
+
+    var pend=cotizs.filter(function(c){return c.estado==='pendiente';});
+    var incid=cotizs.filter(function(c){return c.estado==='incidencia';});
+    var proc=cotizs.filter(function(c){return c.estado==='agregado'||c.estado==='descartado';});
+
+    var dot=document.getElementById('dotCotiz');
+    if(dot) dot.classList.toggle('show',pend.length>0||incid.length>0);
+
+    // Config calculadora
+    var configHtml=
+      "<div class='tbl-wrap' style='padding:.8rem;margin-bottom:.8rem'>"+
+        "<div style='font-size:.78rem;font-weight:700;color:var(--acc);margin-bottom:.5rem'>&#9881; Par\u00e1metros calculadora</div>"+
+        "<div style='display:grid;grid-template-columns:1fr 1fr 1fr;gap:.5rem;margin-bottom:.5rem'>"+
+          "<div><label style='font-size:.68rem;color:var(--tx3)'>Costo log\u00edstica USD</label><input class='fi' id='cfgCalcLog' type='number' step='0.5' placeholder='3'></div>"+
+          "<div><label style='font-size:.68rem;color:var(--tx3)'>Rendimientos % (separados por coma)</label><input class='fi' id='cfgCalcRend' type='text' placeholder='20,30,40,50,60,70'></div>"+
+          "<div><label style='font-size:.68rem;color:var(--tx3)'>Ganancias ind USD</label><input class='fi' id='cfgCalcGan' type='text' placeholder='5,6,7,8,12,15'></div>"+
+        "</div>"+
+        "<button class='btn btn-a' onclick='guardarConfigCalc()' style='font-size:.72rem'>Guardar par\u00e1metros</button>"+
+      "</div>";
+
+    // Load config values
+    apiGet('configuracion','select=clave,valor&clave=in.(costo_log,calc_rendimientos,calc_gan_ind)').then(function(rows){
+      if(Array.isArray(rows)) rows.forEach(function(r){
+        var map={costo_log:'cfgCalcLog',calc_rendimientos:'cfgCalcRend',calc_gan_ind:'cfgCalcGan'};
+        var el=document.getElementById(map[r.clave]);
+        if(el) el.value=r.valor;
+      });
+    });
+
+    function renderCotiz(c){
+      var fecha=new Date(c.created_at).toLocaleDateString('es-AR');
+      var esIncid=c.estado==='incidencia';
+      var acciones='';
+      if(c.estado==='pendiente'||c.estado==='incidencia'){
+        acciones=
+          "<button onclick='cotizAgregarCatalogo("+c.id+")' class='btn btn-a' style='font-size:.62rem;padding:.2rem .4rem'>+ Al cat\u00e1logo</button>"+
+          "<button onclick='cotizDescartar("+c.id+")' class='btn btn-red' style='font-size:.62rem;padding:.2rem .4rem'>Descartar</button>";
+      }
+      return "<div class='tbl-wrap' style='padding:.65rem;margin-bottom:.4rem;border-left:3px solid "+(esIncid?'var(--red)':'var(--acc)')+";'>"+
+        "<div style='display:flex;justify-content:space-between;align-items:flex-start;gap:.5rem'>"+
+          "<div style='flex:1'>"+
+            (esIncid?"<div style='font-size:.6rem;font-weight:700;color:var(--red);text-transform:uppercase;margin-bottom:.2rem'>&#9888; Incidencia - Encargo ca\u00eddo</div>":"")+
+            "<div style='font-size:.78rem;font-weight:600;color:var(--tx)'>"+c.producto_nombre+"</div>"+
+            "<div style='font-size:.65rem;color:var(--tx3)'>"+fecha+(c.marca?' \u2022 '+c.marca:'')+"</div>"+
+            (c.descripcion?"<div style='font-size:.65rem;color:var(--tx3);margin-top:.2rem'>"+c.descripcion+"</div>":"")+
+            (c.notas?"<div style='font-size:.65rem;color:var(--yel);font-style:italic;margin-top:.15rem'>"+c.notas+"</div>":"")+
+          "</div>"+
+          "<div style='text-align:right;flex-shrink:0'>"+
+            "<div style='font-size:.85rem;font-weight:700;color:var(--acc)'>"+fmt(c.precio_sugerido||0)+"</div>"+
+            "<div style='display:flex;gap:.3rem;margin-top:.3rem;flex-wrap:wrap;justify-content:flex-end'>"+acciones+"</div>"+
+          "</div>"+
+        "</div>"+
+      "</div>";
+    }
+
+    var html=configHtml;
+
+    if(pend.length||incid.length){
+      html+="<div style='font-size:.75rem;font-weight:700;color:var(--acc);margin-bottom:.4rem'>Pendientes de revisi\u00f3n ("+( pend.length+incid.length)+")</div>";
+      incid.forEach(function(c){html+=renderCotiz(c);});
+      pend.forEach(function(c){html+=renderCotiz(c);});
+    } else {
+      html+="<div class='empty' style='padding:1rem'>Sin cotizaciones pendientes</div>";
+    }
+
+    if(proc.length){
+      html+="<div style='font-size:.7rem;color:var(--tx3);margin-top:.8rem;margin-bottom:.3rem'>Procesadas ("+proc.length+")</div>";
+      proc.forEach(function(c){html+=renderCotiz(c);});
+    }
+
+    pg.innerHTML=html;
+  });
+}
+
+function cotizAgregarCatalogo(cotizId){
+  apiGet('cotizaciones','select=*&id=eq.'+cotizId).then(function(data){
+    if(!Array.isArray(data)||!data.length) return;
+    var c=data[0];
+    // Pre-fill modal de nuevo producto
+    var mo=document.getElementById('moProd');
+    if(!mo){toast('Abriendo formulario...','tok');return;}
+    // Reset and fill
+    document.getElementById('fpId').value='';
+    var fields={fpNombre:c.producto_nombre,fpMarca:c.marca||'',fpImg:c.imagen_url||''};
+    Object.keys(fields).forEach(function(k){var el=document.getElementById(k);if(el)el.value=fields[k];});
+    // Mark as from cotizacion
+    mo._cotizId=cotizId;
+    mo.classList.add('open');
+    // When saved, mark cotizacion as processed
+    toast('Complet\u00e1 los datos y guard\u00e1 — la cotizaci\u00f3n se marcar\u00e1 como agregada','tok');
+  });
+}
+
+function cotizDescartar(id){
+  if(!confirm('\u00bfDescartar esta cotizaci\u00f3n?')) return;
+  apiPatch('cotizaciones',{estado:'descartado'},'id=eq.'+id).then(function(){
+    toast('Descartada','twarn');
+    loadCotizacionesAdmin();
+  });
+}
+
+function guardarConfigCalc(){
+  var log=(document.getElementById('cfgCalcLog')||{}).value||'3';
+  var rend=(document.getElementById('cfgCalcRend')||{}).value||'20,30,40,50,60,70';
+  var gan=(document.getElementById('cfgCalcGan')||{}).value||'5,6,7,8,12,15';
+  Promise.all([
+    apiPatch('configuracion',{valor:log},'clave=eq.costo_log'),
+    apiPatch('configuracion',{valor:rend},'clave=eq.calc_rendimientos'),
+    apiPatch('configuracion',{valor:gan},'clave=eq.calc_gan_ind')
+  ]).then(function(){toast('Par\u00e1metros guardados','tok');});
 }
 //]]>
 </script>
