@@ -446,6 +446,10 @@ select.sel{padding:.38rem .6rem;background:var(--sur);border:1px solid var(--bd)
 
 
 
+
+
+
+
 <script>
 //<![CDATA[
 var SB_URL="https://syylbuvjuekkanxynpps.supabase.co";
@@ -1336,7 +1340,9 @@ function confirmarConReserva(descontarReserva){
 }
 
 function executeVenta(items,reservaDecs){
-  var allItems=Object.values(cart);
+  // Use items param (already recalculated with correct seg/price) + decans from cart
+  var decans=Object.values(cart).filter(function(i){return i.isDecan;});
+  var allItems=items.concat(decans);
   var promises=[];
   var nroOrden=genOrden(); // Un solo numero de orden para toda la venta
 
@@ -1932,16 +1938,26 @@ function confirmarTransf(id,btn){
       }));
     });
     if(v.con_reserva){
-      // Stock already reserved - just release the reserva counter
+      // Stock already reserved - release reserva, update vendido_david
       if(Array.isArray(items))items.forEach(function(it){
         var pid=it.producto_id;
-        if(pid){var p=prods.find(function(x){return x.id===pid;});if(p){var nr=Math.max(0,(p.reserva||0)-(it.qty||1));p.reserva=nr;promises.push(apiPatch("productos",{reserva:nr},"id=eq."+pid));}}
+        if(pid){var p=prods.find(function(x){return x.id===pid;});if(p){
+          var nr=Math.max(0,(p.reserva||0)-(it.qty||1));
+          var nv=(p.vendido_david||0)+(it.qty||1);
+          p.reserva=nr;p.vendido_david=nv;
+          promises.push(apiPatch("productos",{reserva:nr,vendido_david:nv},"id=eq."+pid));
+        }}
       });
     } else {
-      // No reserva - discount stock now
+      // No reserva - discount stock, update vendido_david
       if(Array.isArray(items))items.forEach(function(it){
         var pid=it.producto_id||it.id;
-        if(pid){var p=prods.find(function(x){return x.id===pid;});if(p){var ns=Math.max(0,(p.stock_actual||0)-(it.qty||1));p.stock_actual=ns;promises.push(apiPatch("productos",{stock_actual:ns},"id=eq."+pid));}}
+        if(pid){var p=prods.find(function(x){return x.id===pid;});if(p){
+          var ns=Math.max(0,(p.stock_actual||0)-(it.qty||1));
+          var nv=(p.vendido_david||0)+(it.qty||1);
+          p.stock_actual=ns;p.vendido_david=nv;
+          promises.push(apiPatch("productos",{stock_actual:ns,vendido_david:nv},"id=eq."+pid));
+        }}
       });
     }
     Promise.all(promises).then(function(){
@@ -1991,9 +2007,8 @@ function loadHistorial(){
     // Agrupar ventas por nro_orden, fallback por fecha+hora para ventas sin orden
     var ordenMap={};
     ventas.forEach(function(v){
-      // Group by nro_orden if available, else by minute (fecha truncada a minuto)
-      var fallbackKey=v.created_at?v.created_at.substring(0,16):("sin-orden-"+v.id);
-      var key=v.nro_orden||fallbackKey;
+      // Group by nro_orden if available and non-empty, else each venta is its own row
+      var key=(v.nro_orden&&v.nro_orden.trim())?v.nro_orden:("venta-"+v.id);
       if(!ordenMap[key]){
         ordenMap[key]={
           nro_orden:v.nro_orden||"—",
@@ -2061,7 +2076,7 @@ function loadHistorial(){
       "</div>";
     }).join("")||"<div class='empty'>Sin ventas</div>";
 
-    // Tab 2: Por producto
+    // Tab 2: Por producto (referencial - suma totales reales por producto)
     var prodMap={};
     ventas.forEach(function(v){
       var key=v.producto_nombre||"Desconocido";
@@ -2073,24 +2088,38 @@ function loadHistorial(){
     });
     var prodArr=Object.values(prodMap).sort(function(a,b){return b.total-a.total;});
     var maxT=prodArr.length?prodArr[0].total:1;
-    var prodRows=prodArr.map(function(p){
-      var segFreq=Object.keys(p.segs).sort(function(a,b){return p.segs[b]-p.segs[a];})[0]||"pi";
-      var segBadge=segFreq==="pm"?"<span class='badge bg-green' style='font-size:.58rem'>x10</span>":segFreq==="pe"?"<span class='badge' style='background:var(--cdim);color:var(--cyan);font-size:.58rem'>x3</span>":"<span class='badge bg-yel' style='font-size:.58rem'>x1</span>";
-      var ticket=p.unidades>0?Math.round(p.total/p.unidades):0;
+    var prodRows="<div style='font-size:.68rem;color:var(--tx3);background:var(--sur2);padding:.4rem .6rem;border-radius:6px;margin-bottom:.5rem'>&#8505; Vista referencial — muestra la suma real cobrada por producto en cada segmento. No recalcula precios.</div>"+
+    prodArr.map(function(p){
+      // Show each segment separately with its own total
+      var segLines=Object.keys(p.segs).map(function(sg){
+        var segTotal=0; var segUnits=0;
+        ventas.forEach(function(v){
+          if((v.producto_nombre||"")===(p.nombre)&&(v.segmento||"pi")===sg){
+            segTotal+=v.total||0; segUnits+=v.cantidad||1;
+          }
+        });
+        var badge=sg==="pm"?"<span class='badge bg-green' style='font-size:.58rem'>x10</span>":
+                  sg==="pe"?"<span class='badge' style='background:var(--cdim);color:var(--cyan);font-size:.58rem'>x3</span>":
+                  "<span class='badge bg-yel' style='font-size:.58rem'>x1</span>";
+        return "<div style='display:flex;justify-content:space-between;align-items:center;margin-top:.2rem'>"+
+          "<span style='font-size:.65rem'>"+badge+" "+segUnits+" u.</span>"+
+          "<span style='font-size:.68rem;font-weight:600;color:var(--acc)'>"+fmt(segTotal)+"</span>"+
+        "</div>";
+      }).join("");
       var pct=Math.round(p.total/maxT*100);
       return"<div style='background:var(--sur);border:1px solid var(--bd);border-radius:var(--r);padding:.65rem .8rem;margin-bottom:.4rem'>"+
-        "<div style='display:flex;justify-content:space-between;align-items:center;margin-bottom:.3rem'>"+
-          "<div>"+
+        "<div style='display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:.3rem'>"+
+          "<div style='flex:1;min-width:0'>"+
             "<div style='font-size:.72rem;color:var(--tx3)'>"+p.marca+"</div>"+
             "<div style='font-size:.78rem;font-weight:500;color:var(--tx)'>"+p.nombre.replace(p.marca+" - ","")+"</div>"+
           "</div>"+
-          "<div style='text-align:right'>"+
+          "<div style='text-align:right;flex-shrink:0;padding-left:.4rem'>"+
             "<div style='color:var(--green);font-weight:700'>"+fmt(p.total)+"</div>"+
-            "<div style='font-size:.65rem;color:var(--tx3)'>"+p.unidades+" u. &bull; prom: "+fmt(ticket)+"</div>"+
+            "<div style='font-size:.62rem;color:var(--tx3)'>total cobrado</div>"+
           "</div>"+
         "</div>"+
-        "<div style='height:4px;background:var(--sur3);border-radius:2px;margin-bottom:.3rem'><div style='height:4px;background:var(--green);border-radius:2px;width:"+pct+"%'></div></div>"+
-        "<div>"+segBadge+"</div>"+
+        segLines+
+        "<div style='height:4px;background:var(--sur3);border-radius:2px;margin-top:.4rem'><div style='height:4px;background:var(--green);border-radius:2px;width:"+pct+"%'></div></div>"+
       "</div>";
     }).join("")||"<div class='empty'>Sin datos</div>";
 
@@ -5121,5 +5150,5 @@ function calcRestaurar(idx){
 //]]>
 </script>
 </body>
-<!-- build:20260328-153105 -->
+<!-- build:20260328-192747 -->
 </html>
