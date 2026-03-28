@@ -1362,6 +1362,9 @@ td{padding:.35rem .5rem;font-size:.78rem;color:var(--tx2);vertical-align:middle;
 
 
 
+
+
+
 <script>
 //<![CDATA[
 var drafts=[];
@@ -4658,6 +4661,8 @@ function confirmarControl(){
         toast("Control completado por "+userName,"tok");
         if(btn){btn.disabled=false;btn.textContent="Confirmar control";}
         loadPedidosProveedor();
+        // Reload prods and refresh stock page
+        apiGet("productos","select=*&order=empresa,nombre&limit=1000").then(function(d){if(Array.isArray(d))prods=d;renderStockPage();});
         // Launch new products wizard
         var nuevos=_controlItems.filter(function(it){
           return _controlDecisions[it.id]&&_controlDecisions[it.id].catalogoAccion==="nuevo";
@@ -4706,7 +4711,22 @@ function confirmarControl(){
     // Use a timeout to ensure saveNext always fires
     var _saveTimer=setTimeout(function(){console.warn("apiPatch timeout, continuing");saveNext();},5000);
     apiPatch("pedidos_proveedor_items",patch,"id=eq."+it.id)
-      .then(function(){clearTimeout(_saveTimer);saveNext();})
+      .then(function(){
+        clearTimeout(_saveTimer);
+        // ── Actualizar stock_actual y en_viaje en productos ──
+        if(d.prodId && cantRec>0){
+          var p=prods.find(function(x){return x.id===d.prodId;});
+          if(p){
+            var ns=(p.stock_actual||0)+cantRec;
+            var nv=Math.max(0,(p.en_viaje||0)-it.cantidad_pedida);
+            p.stock_actual=ns;
+            p.en_viaje=nv;
+            apiPatch("productos",{stock_actual:ns,en_viaje:nv},"id=eq."+d.prodId)
+              .catch(function(e){console.error("Error actualizando stock:",e);});
+          }
+        }
+        saveNext();
+      })
       .catch(function(e){clearTimeout(_saveTimer);console.error("item patch err:",e);saveNext();});
   }
 
@@ -8558,15 +8578,35 @@ function bcConfirmarPedido(k){
     var pedidoId=res&&res[0]?res[0].id:null;
     if(!pedidoId){toast('Error guardando pedido en DB','terr');return;}
     var proms=sel.map(function(it){
+      // Try to match item with catalog
+      var match=bcFindInProds({nombre_norm:it.nombre,nombre_proveedor:it.nombre});
+      var prodId=match?match.id:null;
       return apiPost('pedidos_proveedor_items',{
         pedido_id:pedidoId, nombre_proveedor:it.nombre, marca:k,
         precio_usd:it.precio, cantidad_pedida:it.qty, cantidad_recibida:0,
-        codigo_proveedor:'', producto_id:null, estado_item:'pendiente', observacion:''
+        codigo_proveedor:'', producto_id:prodId,
+        es_nuevo:!prodId, estado_item:'pendiente', observacion:''
       });
     });
     return Promise.all(proms);
   }).then(function(){
     toast('Pedido '+nro+' guardado en Pedidos al Proveedor','tok');
+    // ── Actualizar en_viaje para cada item que matchea con el catálogo ──
+    var viajeProms=[];
+    sel.forEach(function(it){
+      // Find match in catalog using manual matches or auto-match
+      var match=bcFindInProds({nombre_norm:it.nombre,nombre_proveedor:it.nombre});
+      if(!match) return;
+      var nv=(match.en_viaje||0)+it.qty;
+      match.en_viaje=nv;
+      viajeProms.push(apiPatch('productos',{en_viaje:nv},'id=eq.'+match.id));
+    });
+    if(viajeProms.length){
+      Promise.all(viajeProms).then(function(){
+        toast(viajeProms.length+' productos actualizados en viaje','tok');
+        renderStockPage();
+      });
+    }
   }).catch(function(err){toast('Error DB: '+err.message,'terr');});
 
   // ── Guardar como borrador en Bellcito ──
@@ -11106,5 +11146,5 @@ function bcRenderAllViews(){
 //]]>
 </script>
 </body>
-<!-- build:20260328-210053 -->
+<!-- build:20260328-213201 -->
 </html>
