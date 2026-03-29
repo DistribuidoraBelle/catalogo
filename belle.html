@@ -1465,6 +1465,8 @@ td{padding:.35rem .5rem;font-size:.78rem;color:var(--tx2);vertical-align:middle;
 
 
 
+
+
 <script>
 //<![CDATA[
 function rentColor(pct){
@@ -11938,6 +11940,7 @@ function loadPeriodos() {
 
     renderPeriodosPage(cont);
     setupAutoClose();
+    setTimeout(perMostrarConfigActual,100);
   }).catch(function() {
     cont.innerHTML = '<div class="empty">Error cargando periodos</div>';
   });
@@ -11988,8 +11991,9 @@ function renderPeriodosPage(cont) {
 
   html += '</div>';
   html += '<div style="margin-top:.6rem;display:flex;gap:.5rem">';
-  html += '<button class="btn btn-a" onclick="perGuardarConfig()" style="font-size:.75rem">Guardar configuración</button>';
+  html += '<button class="btn btn-a" onclick="perGuardarConfig()" style="font-size:.75rem">Guardar configuracion</button>';
   html += '</div>';
+  html += '<div id="perConfigActual" style="margin-top:.7rem;display:none"></div>';
   html += '</div>';
 
   // ── RESUMEN DEL PERIODO ACTUAL ──────────────────────────────────────
@@ -12296,111 +12300,138 @@ function calcNextPeriodo() {
 // ── EJECUTAR CIERRE ───────────────────────────────────────────────────────
 function adminEjecutarCierrePeriodo() {
   var nuevoPer = (document.getElementById('cper-nuevo')||{}).value||'';
-  if (!nuevoPer) { toast('Ingresá el nombre del nuevo periodo','twarn'); return; }
-  if (!confirm('¿CONFIRMAR CIERRE DEL PERIODO "'+periodoActual+'"?\nEsto no se puede deshacer.')) return;
+  if (!nuevoPer) { toast('Ingresa el nombre del nuevo periodo','twarn'); return; }
+  if (!confirm('CONFIRMAR CIERRE DEL PERIODO "'+periodoActual+'"?\nEsto no se puede deshacer.')) return;
 
-  var cerrarDavid = (document.getElementById('cper-david')||{checked:true}).checked;
-  var cerrarFacu = (document.getElementById('cper-facu')||{checked:true}).checked;
-  var cerrarMarcela = (document.getElementById('cper-marcela')||{checked:true}).checked;
+  var cerrarDavid   = document.getElementById('cper-david')   ? document.getElementById('cper-david').checked   : true;
+  var cerrarFacu    = document.getElementById('cper-facu')    ? document.getElementById('cper-facu').checked    : true;
+  var cerrarMarcela = document.getElementById('cper-marcela') ? document.getElementById('cper-marcela').checked : true;
 
   var vends = [];
-  if (cerrarDavid) vends.push({id:1,n:'David'});
-  if (cerrarFacu) vends.push({id:2,n:'Facu'});
-  if (cerrarMarcela) vends.push({id:3,n:'Marcela'});
+  if (cerrarDavid)   vends.push({id:1, n:'David'});
+  if (cerrarFacu)    vends.push({id:2, n:'Facu'});
+  if (cerrarMarcela) vends.push({id:3, n:'Marcela'});
 
-  toast('Cerrando periodo... espera', 'twarn');
-
+  toast('Cerrando periodo... aguarda', 'twarn');
   var fechaCierre = new Date().toISOString().split('T')[0];
 
-  // Step 1: Calculate saldo per vendor
+  // PASO 1: Calcular saldos por vendedor
   Promise.all(vends.map(function(v) {
     return Promise.all([
-      apiGet('ventas','select=total,id&vendedor_id=eq.'+v.id+'&estado=eq.confirmada&periodo=eq.'+encodeURIComponent(periodoActual)),
-      apiGet('gastos_vendedor','select=monto,id&vendedor_id=eq.'+v.id+'&aprobado=is.true&periodo_cerrado=is.false'),
-      apiGet('rendiciones','select=monto,id&vendedor_id=eq.'+v.id+'&estado=eq.aprobada&periodo=eq.'+encodeURIComponent(periodoActual))
+      apiGet('ventas',          'select=total,id&vendedor_id=eq.'+v.id+'&estado=eq.confirmada'),
+      apiGet('gastos_vendedor', 'select=monto,id,concepto,estado_comision&vendedor_id=eq.'+v.id+'&aprobado=is.true&periodo_cerrado=is.null'),
+      apiGet('rendiciones',     'select=monto,id&vendedor_id=eq.'+v.id+'&estado=eq.aprobada&tipo=neq.saldo_arrastrado')
     ]).then(function(r) {
-      var ventas = Array.isArray(r[0]) ? r[0] : [];
-      var gastos = Array.isArray(r[1]) ? r[1] : [];
+      var ventas  = Array.isArray(r[0]) ? r[0] : [];
+      var gastos  = Array.isArray(r[1]) ? r[1] : [];
       var rendics = Array.isArray(r[2]) ? r[2] : [];
-      var tv = ventas.reduce(function(s,x){return s+(x.total||0);},0);
-      var tg = gastos.reduce(function(s,x){return s+(x.monto||0);},0);
-      var tr = rendics.reduce(function(s,x){return s+(x.monto||0);},0);
-      return {id:v.id,n:v.n,tv:tv,tg:tg,tr:tr,saldo:tv-tg-tr,gastosIds:gastos.map(function(g){return g.id;})};
-    });
-  })).then(function(resultados) {
 
-    // Build historial record
+      // Separar comisiones Marcela cobradas de gastos regulares
+      var gastosCerrar  = gastos.filter(function(g){ return g.estado_comision !== 'pendiente' && g.estado_comision !== 'confirmada'; });
+      var gastosQuedan  = gastos.filter(function(g){ return g.estado_comision === 'pendiente' || g.estado_comision === 'confirmada'; });
+
+      var tv = ventas.reduce( function(s,x){return s+(x.total||0);},  0);
+      var tg = gastosCerrar.reduce(function(s,x){return s+(x.monto||0);}, 0);
+      var tr = rendics.reduce(function(s,x){return s+(x.monto||0);},  0);
+
+      return {
+        id: v.id, n: v.n,
+        tv: tv, tg: tg, tr: tr,
+        saldo: tv - tg - tr,
+        ventasIds:      ventas.map(function(x){return x.id;}),
+        gastosCerrarIds:gastosCerrar.map(function(x){return x.id;}),
+        rendicsIds:     rendics.map(function(x){return x.id;})
+      };
+    });
+  }))
+
+  // PASO 2: Guardar historial del periodo
+  .then(function(resultados) {
     var hData = {
-      periodo: periodoActual,
-      fecha_inicio: null,
-      fecha_cierre: fechaCierre,
-      total_ventas: resultados.reduce(function(s,r){return s+r.tv;},0),
-      total_gastos: resultados.reduce(function(s,r){return s+r.tg;},0),
-      total_rendido: resultados.reduce(function(s,r){return s+r.tr;},0),
-      saldo_arrastrado: resultados.reduce(function(s,r){return s+Math.max(0,r.saldo);},0)
+      periodo:          periodoActual,
+      fecha_cierre:     fechaCierre,
+      total_ventas:     resultados.reduce(function(s,r){return s+r.tv;}, 0),
+      total_gastos:     resultados.reduce(function(s,r){return s+r.tg;}, 0),
+      total_rendido:    resultados.reduce(function(s,r){return s+r.tr;}, 0),
+      saldo_arrastrado: resultados.reduce(function(s,r){return s+Math.max(0,r.saldo);}, 0)
     };
+    resultados.forEach(function(r){ hData['saldo_arrastrado_'+r.id] = Math.max(0, r.saldo); });
+
+    return apiPost('historial_periodos', hData).then(function(){ return resultados; });
+  })
+
+  // PASO 3: Archivar ventas confirmadas del periodo
+  .then(function(resultados) {
+    var ps = [];
     resultados.forEach(function(r) {
-      hData['saldo_arrastrado_'+r.id] = Math.max(0, r.saldo);
-    });
-
-    // Step 2: Save historial period
-    return apiPost('historial_periodos', hData).then(function() {
-
-      // Step 3: Mark gastos as periodo_cerrado
-      var gastoPromises = [];
-      resultados.forEach(function(r) {
-        if (r.gastosIds.length) {
-          r.gastosIds.forEach(function(gid) {
-            gastoPromises.push(
-              apiPatch('gastos_vendedor', {periodo_cerrado: periodoActual}, 'id=eq.'+gid)
-            );
-          });
-        }
-      });
-
-      return Promise.all(gastoPromises).then(function() {
-
-        // Step 4: Create arrastrado renditions for vendors with positive balance
-        var arrastradoPromises = [];
-        resultados.forEach(function(r) {
-          if (r.saldo > 0) {
-            arrastradoPromises.push(
-              apiPost('rendiciones', {
-                vendedor_id: r.id,
-                monto: r.saldo,
-                concepto: 'Saldo arrastrado del periodo '+periodoActual,
-                tipo: 'saldo_arrastrado',
-                estado: 'aprobada',
-                periodo: nuevoPer,
-                aprobado_por: 'admin',
-                aprobado_at: new Date().toISOString()
-              })
-            );
-          }
-        });
-
-        return Promise.all(arrastradoPromises);
+      r.ventasIds.forEach(function(id) {
+        ps.push(apiPatch('ventas', {estado:'archivada_periodo', periodo:periodoActual}, 'id=eq.'+id));
       });
     });
+    return Promise.all(ps).then(function(){ return resultados; });
+  })
 
-  }).then(function() {
+  // PASO 4: Cerrar gastos aprobados (marcar periodo_cerrado) y archivar rendiciones
+  .then(function(resultados) {
+    var ps = [];
+    resultados.forEach(function(r) {
+      // Gastos: marcar periodo_cerrado
+      r.gastosCerrarIds.forEach(function(id) {
+        ps.push(apiPatch('gastos_vendedor', {periodo_cerrado: periodoActual}, 'id=eq.'+id));
+      });
+      // Rendiciones aprobadas: archivar
+      r.rendicsIds.forEach(function(id) {
+        ps.push(apiPatch('rendiciones', {estado:'archivada', periodo:periodoActual}, 'id=eq.'+id));
+      });
+    });
+    return Promise.all(ps).then(function(){ return resultados; });
+  })
 
-    // Step 5: Update periodoActual in config
+  // PASO 5: Arrastrar saldo positivo al nuevo periodo
+  .then(function(resultados) {
+    var ps = [];
+    resultados.forEach(function(r) {
+      if (r.saldo > 0) {
+        ps.push(apiPost('rendiciones', {
+          vendedor_id:  r.id,
+          monto:        Math.round(r.saldo),
+          concepto:     'Saldo arrastrado del periodo '+periodoActual,
+          tipo:         'saldo_arrastrado',
+          estado:       'aprobada',
+          periodo:      nuevoPer,
+          aprobado_por: 'admin',
+          aprobado_at:  new Date().toISOString()
+        }));
+      }
+    });
+    return Promise.all(ps).then(function(){ return resultados; });
+  })
+
+  // PASO 6: Actualizar periodo actual en config
+  .then(function() {
     return apiPatch('configuracion', {valor: nuevoPer}, 'clave=eq.periodo_actual').then(function() {
       periodoActual = nuevoPer;
       var el = document.getElementById('periodoLabel');
       if (el) el.textContent = nuevoPer;
     });
+  })
 
-  }).then(function() {
-    toast('✅ Periodo cerrado. Nuevo periodo: '+nuevoPer, 'tok');
+  // PASO 7: Recargar todo
+  .then(function() {
+    toast('Periodo cerrado. Nuevo periodo: '+nuevoPer, 'tok');
     _mc('moAdminCierrePeriodo');
     loadPeriodos();
     loadVendedores();
-  }).catch(function(e) {
+    // Reload David's historial data in memory
+    if (typeof loadHistorialDavid === 'function') loadHistorialDavid();
+  })
+
+  .catch(function(e) {
     toast('Error cerrando periodo: '+(e.message||e), 'terr');
+    console.error('Cierre periodo error:', e);
   });
 }
+
 
 // ── GUARDAR CONFIGURACION ─────────────────────────────────────────────────
 function perGuardarConfig() {
@@ -12431,7 +12462,53 @@ function perGuardarConfig() {
   })).then(function(){
     toast('Configuracion guardada','tok');
     setupAutoClose();
+    perMostrarConfigActual();
   }).catch(function(e){toast('Error guardando config: '+(e.message||e),'terr');});
+}
+
+function perMostrarConfigActual(){
+  var el=document.getElementById('perConfigActual');
+  if(!el)return;
+  var dias=['Domingo','Lunes','Martes','Miercoles','Jueves','Viernes','Sabado'];
+  var tipo=_periodoConfig.tipo==='semanal'?'Semanal':'Personalizado';
+  var dia=dias[_periodoConfig.diaCierre]||'Domingo';
+  var auto=_periodoConfig.autoClose;
+  var hora=_periodoConfig.autoCloseHora;
+  el.innerHTML=
+    '<div style="font-size:.72rem;font-weight:700;color:var(--tx2);margin-bottom:.4rem">Configuracion actual guardada:</div>'+
+    '<div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(160px,1fr));gap:.4rem;font-size:.72rem">'+
+    '<div style="background:var(--sur3);border-radius:5px;padding:.4rem .6rem">'+
+      '<div style="color:var(--tx3);font-size:.62rem">DURACION</div>'+
+      '<div style="font-weight:600">'+tipo+'</div>'+
+    '</div>'+
+    '<div style="background:var(--sur3);border-radius:5px;padding:.4rem .6rem">'+
+      '<div style="color:var(--tx3);font-size:.62rem">DIA DE CIERRE</div>'+
+      '<div style="font-weight:600">'+dia+'</div>'+
+    '</div>'+
+    '<div style="background:var(--sur3);border-radius:5px;padding:.4rem .6rem">'+
+      '<div style="color:var(--tx3);font-size:.62rem">CIERRE AUTO</div>'+
+      '<div style="font-weight:600;color:'+(auto?'var(--green)':'var(--tx3)')+'">'+( auto?'Activado a las '+hora:'Desactivado')+'</div>'+
+    '</div>'+
+    '<div style="background:var(--sur3);border-radius:5px;padding:.4rem .6rem">'+
+      '<div style="color:var(--tx3);font-size:.62rem">PROXIMO CIERRE</div>'+
+      '<div style="font-weight:600;color:var(--acc)">'+perProximoCierre()+'</div>'+
+    '</div>'+
+    '</div>';
+  el.style.display='block';
+}
+
+function perProximoCierre(){
+  var dias=['Domingo','Lunes','Martes','Miercoles','Jueves','Viernes','Sabado'];
+  var hoy=new Date();
+  var diaHoy=hoy.getDay();
+  var diaObj=_periodoConfig.diaCierre;
+  var diff=diaObj-diaHoy;
+  if(diff<=0)diff+=7;
+  var prox=new Date(hoy);
+  prox.setDate(hoy.getDate()+diff);
+  var d=String(prox.getDate()).padStart(2,'0');
+  var meses=['Ene','Feb','Mar','Abr','May','Jun','Jul','Ago','Sep','Oct','Nov','Dic'];
+  return dias[diaObj]+' '+d+'/'+meses[prox.getMonth()]+(_periodoConfig.autoClose?' a las '+_periodoConfig.autoCloseHora:' (manual)');
 }
 
 // ── AUTO CIERRE ───────────────────────────────────────────────────────────
@@ -12468,5 +12545,5 @@ function perConfigChange() {
 //]]>
 </script>
 </body>
-<!-- build:20260329-205728 -->
+<!-- build:20260329-211045 -->
 </html>
