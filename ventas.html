@@ -464,6 +464,9 @@ select.sel{padding:.38rem .6rem;background:var(--sur);border:1px solid var(--bd)
 
 
 
+
+
+
 <script>
 //<![CDATA[
 function rentColor(pct){
@@ -1521,6 +1524,12 @@ function executeVenta(items,reservaDecs){
     cart={};cstate={};decanState={};reservaDecisions={};
     updateCartBar();closeDrawer();renderCat();loadDineroData();
     toast("Venta registrada","tok");
+    if(window._pendingDepositoIds&&window._pendingDepositoIds.length){
+      Promise.all(window._pendingDepositoIds.map(function(did){
+        return apiPatch("ventas",{estado:"reemplazada"},"id=eq."+did);
+      })).catch(function(){});
+      window._pendingDepositoIds=null;
+    }
     navTo("historial",document.querySelector(".tab:nth-child(4)"));loadHistorial();
     // Refresh stock
     apiGet("productos","select=id,stock_actual,en_viaje&activo=is.true&limit=500").then(function(d){
@@ -1893,6 +1902,7 @@ function loadTransferidas(){
         html+="<span style='font-size:.65rem;color:var(--tx3)'>"+fecha+"</span>";
         html+="<button class='btn btn-a' onclick='aprobarGrupoDep("+JSON.stringify(g.ids)+",this)' style='padding:.22rem .5rem;font-size:.7rem'>Aprobar</button>";
         html+="<button class='btn btn-red' onclick='rechazarGrupoDep("+JSON.stringify(g.ids)+",this)' style='padding:.22rem .5rem;font-size:.7rem'>Rechazar</button>";
+        html+="<button onclick='editarGrupoDeposito("+JSON.stringify(g.ids)+")'style='padding:.22rem .5rem;font-size:.68rem;background:transparent;border:1px solid var(--bd2);color:var(--tx3);border-radius:var(--rs);cursor:pointer'>Editar</button>";
         html+="</div></div>";
       });
     }
@@ -1913,27 +1923,68 @@ function loadTransferidas(){
 }
 
 function editarVentaDeposito(ventaId){
-  // Load venta into cart for David to edit, add discounts, confirm normally
+  // Load single venta - find nro_orden then load all of the group
   apiGet("ventas","select=*&id=eq."+ventaId+"&limit=1").then(function(data){
     if(!Array.isArray(data)||!data.length){toast("Venta no encontrada","err");return;}
-    var v=data[0];
-    var p=prods.find(function(x){return x.id===v.producto_id;});
-    if(!p){toast("Producto no encontrado en catalogo","twarn");return;}
-    // Load into cart
-    cart={};cstate={};decanState={};
-    cstate[p.id]={qty:v.cantidad};
-    cart[p.id]={
-      id:p.id,nombre:v.producto_nombre,
-      qty:v.cantidad,seg:v.segmento==="minorista"?"pi":"pm",
-      price:v.precio_unitario,isDecan:false,
-      _depositoVentaId:ventaId  // mark as from deposito
-    };
-    updateCartBar();
-    // Store the original venta ID to delete when confirmed
-    window._pendingDepositoVentaId=ventaId;
-    navTo("catalogo",document.querySelector(".tab"));
-    toast("Venta cargada en carrito. Edita y confirma normalmente.","ok");
+    var nroOrden=data[0].nro_orden;
+    // If has nro_orden, load all ventas of that group
+    var q2=nroOrden
+      ?"select=*&nro_orden=eq."+encodeURIComponent(nroOrden)+"&estado=eq.pendiente_aprobacion&origen=eq.deposito"
+      :"select=*&id=eq."+ventaId;
+    return apiGet("ventas",q2).then(function(rows){
+      _cargarGrupoEnCarrito(Array.isArray(rows)?rows:[data[0]], nroOrden);
+    });
   }).catch(function(e){toast("Error: "+e.message,"err");});
+}
+
+function editarGrupoDeposito(ids){
+  // Load first item to get nro_orden, then load all
+  apiGet("ventas","select=*&id=eq."+ids[0]).then(function(data){
+    if(!Array.isArray(data)||!data.length)return;
+    var nroOrden=data[0].nro_orden;
+    var q=nroOrden
+      ?"select=*&nro_orden=eq."+encodeURIComponent(nroOrden)+"&estado=eq.pendiente_aprobacion&origen=eq.deposito"
+      :"select=*&id=in.("+ids.join(",")+")";
+    return apiGet("ventas",q).then(function(rows){
+      _cargarGrupoEnCarrito(Array.isArray(rows)?rows:data, nroOrden);
+    });
+  }).catch(function(e){toast("Error: "+e.message,"err");});
+}
+
+function _cargarGrupoEnCarrito(ventas, nroOrden){
+  cart={};cstate={};decanState={};
+  var ids=ventas.map(function(v){return v.id;});
+  window._pendingDepositoIds=ids;
+  window._pendingDepositoOrden=nroOrden;
+
+  ventas.forEach(function(v){
+    if(v.segmento==="decan"){
+      // Decan item
+      var prodId=v.producto_id;
+      var key="decan_"+prodId;
+      cart[key]={
+        id:key,nombre:v.producto_nombre,qty:v.cantidad,
+        seg:"decan",price:v.precio_unitario,
+        isDecan:true,prodId:prodId
+      };
+      decanState[prodId]=(decanState[prodId]||0)+v.cantidad;
+    } else {
+      // Any other product: perfume, combo, kit, whatever
+      var prodId=v.producto_id||v.id;
+      var key=String(prodId);
+      cart[key]={
+        id:prodId,nombre:v.producto_nombre,qty:v.cantidad,
+        seg:v.segmento==="minorista"?"pi":v.segmento==="mayorista"?"pm":"pe",
+        price:v.precio_unitario,isDecan:false
+      };
+      cstate[prodId]={qty:v.cantidad};
+    }
+  });
+
+  updateCartBar();
+  navTo("catalogo",document.querySelector(".tab"));
+  setTimeout(function(){openDrawer();},300);
+  toast("Pedido cargado en carrito — editá y confirmá normalmente","ok");
 }
 
 function aprobarDepDeposito(ventaId){
@@ -5388,5 +5439,5 @@ function compartirProducto(prodId){
 //]]>
 </script>
 </body>
-<!-- build:20260329-144421 -->
+<!-- build:20260329-144806 -->
 </html>
