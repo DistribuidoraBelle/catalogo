@@ -1901,6 +1901,16 @@ function cancelarTransf(id,conReserva,btn){
       });
     }
     Promise.all(promises).then(function(){
+      // If from Marcela, delete her pending commission (it shouldn't be paid)
+      if(v.creada_por==='Marcela'&&v.nro_orden){
+        apiGet('gastos_vendedor','select=id&vendedor_id=eq.3&aprobado=is.false&concepto=like.*'+v.nro_orden+'*').then(function(gastos){
+          if(Array.isArray(gastos)&&gastos.length){
+            return Promise.all(gastos.map(function(g){
+              return apiPatch('gastos_vendedor',{aprobado:false,concepto:g.concepto+' [CANCELADA]'},'id=eq.'+g.id);
+            }));
+          }
+        }).catch(function(e){console.warn('Error marcando comision cancelada:',e);});
+      }
       toast("Transferencia cancelada"+(conReserva?" - stock devuelto":""),"twarn");
       loadTransferidas();renderCat();
     }).catch(function(){if(btn)btn.disabled=false;});
@@ -2188,6 +2198,17 @@ function confirmarTransf(id,btn){
       });
     }
     Promise.all(promises).then(function(){
+      // If this transfer was from Marcela (deposito), approve her commission
+      if(v.creada_por==='Marcela'&&v.nro_orden){
+        // Find gastos_vendedor with this nro_orden in concepto and approve it
+        apiGet('gastos_vendedor','select=id&vendedor_id=eq.3&aprobado=is.false&concepto=like.*'+v.nro_orden+'*').then(function(gastos){
+          if(Array.isArray(gastos)&&gastos.length){
+            return Promise.all(gastos.map(function(g){
+              return apiPatch('gastos_vendedor',{aprobado:true},'id=eq.'+g.id);
+            }));
+          }
+        }).catch(function(e){console.warn('Error aprobando comision Marcela:',e);});
+      }
       toast("Cobro confirmado!"+(v.con_reserva?" (reserva liberada)":" (stock descontado)"),"tok");
       loadTransferidas();loadDineroData();renderCat();
     }).catch(function(){if(btn)btn.disabled=false;});
@@ -2699,7 +2720,7 @@ function loadReservas(){
 
   function render(){
     var dot=document.getElementById("dotReservas");
-    if(dot)dot.classList.toggle("show",reservadas.length>0||pedidos.length>0||encargos.length>0);
+    if(dot)dot.classList.toggle("show",reservadas.length>0||pedidos.length>0||encargos.length>0||entregados.length>0);
     var html="<div class='form-card'><div class='form-title'>Agregar reserva de producto</div>"+
       "<div class='sbox' style='width:100%;margin-bottom:.6rem'><span class='sbi'>&#128269;</span>"+
       "<input type='text' id='resSrch' placeholder='Buscar producto...' oninput='filterResProds()' style='width:100%'></div>"+
@@ -2773,6 +2794,38 @@ function loadReservas(){
       }).join("");
     }
 
+    // ── ENTREGADOS POR DEPOSITO — PENDIENTES DE COBRO ─────────────────
+    if(entregados.length){
+      html+="<div class='sec-title' style='margin-top:.5rem;color:var(--yel)'>&#127968; Entregados por dep\u00f3sito \u2014 cobrar al cliente <span style='color:var(--acc)'>"+entregados.length+"</span></div>";
+      html+=entregados.map(function(p){
+        var items=[];try{items=typeof p.items==="string"?JSON.parse(p.items):p.items||[];}catch(ex){}
+        var fecha=new Date(p.created_at).toLocaleString("es-AR",{day:"2-digit",month:"2-digit",year:"2-digit",hour:"2-digit",minute:"2-digit"});
+        var totalUnits=items.reduce(function(s,it){return s+(it.qty||1);},0);
+        var segLabel=totalUnits>=10?"MAY x10":totalUnits>=3?"MED x3":"MIN x1";
+        var notas=(p.notas||"").replace(/\s*\|?\s*Entrega:[^|]*/g,"").trim();
+        return "<div class='ped-card nuevo' style='border-left:3px solid var(--yel)'>"+
+          "<div class='ped-header'><div>"+
+            "<div style='font-size:.72rem;font-weight:700;color:var(--yel)'>&#127968; Entregado por dep\u00f3sito</div>"+
+            "<div style='font-size:.78rem;font-weight:500;color:var(--tx)'>"+(notas||"Pedido")+"</div>"+
+            "<div class='ped-fecha'>"+fecha+" \u2022 "+(p.nro_orden||"")+" \u2022 "+totalUnits+" u. ("+segLabel+")</div>"+
+          "</div><div style='text-align:right'>"+
+            "<div class='ped-total'>"+fmt(p.total)+"</div>"+
+          "</div></div>"+
+          "<div style='font-size:.73rem;color:var(--tx2);line-height:1.7;margin:.4rem 0'>"+
+            items.map(function(it){
+              return "<div style='display:flex;justify-content:space-between'>"+
+                "<span>"+it.nombre+" x"+(it.qty||1)+"</span>"+
+                "<span style='color:var(--acc)'>"+fmt(it.total||0)+"</span></div>";
+            }).join("")+
+          "</div>"+
+          "<div style='display:flex;gap:.35rem;flex-wrap:wrap'>"+
+            "<button class='btn btn-green' style='flex:1;font-size:.72rem' onclick='cobrarParcialPedido("+p.id+")'>&#128176; Cobrar parcial</button>"+
+            "<button class='btn btn-a' style='font-size:.72rem;padding:.35rem .5rem' onclick='confirmarPedReservado("+p.id+",this)'>&#10003; Cobrar todo</button>"+
+            "<button class='btn btn-g' style='font-size:.72rem;padding:.35rem .5rem' onclick='editarPedido("+p.id+")'>Editar</button>"+
+          "</div></div>";
+      }).join("");
+    }
+
     // ── STOCK RESERVADO ──────────────────────────────────────────────
     html+="<div class='sec-title' style='margin-top:.5rem'>Stock reservado <span style='color:var(--acc)'>"+reservadas.length+"</span></div>";
     if(!reservadas.length){
@@ -2802,11 +2855,15 @@ function loadReservas(){
 }
 
   // Load independently - if one fails the others still show
+  var entregados=[];
   apiGet("productos","select=id,nombre,empresa,stock_actual,reserva&reserva=gt.0&order=empresa,nombre")
     .then(function(d){if(Array.isArray(d))reservadas=d;}).catch(function(){})
     .then(function(){
       return apiGet("pedidos_catalogo","select=*&estado=eq.reservado&order=created_at.desc");
     }).then(function(d){if(Array.isArray(d))pedidos=d;}).catch(function(){})
+    .then(function(){
+      return apiGet("pedidos_catalogo","select=*&estado=eq.entregado&order=created_at.desc");
+    }).then(function(d){if(Array.isArray(d))entregados=d;}).catch(function(){})
     .then(function(){
       return apiGet("encargos","select=*&vendedor_id=eq."+VENDEDOR_ID+"&estado=eq.pendiente&order=created_at.desc");
     }).then(function(d){if(Array.isArray(d))encargos=d;}).catch(function(e){console.warn("encargos load failed:",e);})
@@ -6294,3 +6351,5 @@ function ppFiltrarDavid(){
 <!-- build:20260330-214444 -->
 <!-- build:20260330-215452 -->
 <!-- build:20260330-215847 -->
+<!-- build:20260330-223442 -->
+<!-- build:20260330-225513 -->
