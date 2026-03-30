@@ -1096,6 +1096,7 @@ td{padding:.35rem .5rem;font-size:.78rem;color:var(--tx2);vertical-align:middle;
     </div>
 
     <div class="page" id="page-cotizaciones"></div>
+    <div class="page" id="page-reservas"></div>
     <div class="page" id="page-eliminados">
       <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:1rem">
         <div style="font-size:1.1rem;font-weight:700">Productos Eliminados</div>
@@ -10961,6 +10962,7 @@ function navTo(pg,el){
   if(pg==="deposito")loadDeposito();
   if(pg==="deposito-marcela")loadDepositoMarcela();
   if(pg==="cotizaciones")loadCotizacionesAdmin();
+  if(pg==="reservas")loadReservasAdmin();
   if(pg==="eliminados")loadEliminados();
 }
 
@@ -11621,18 +11623,75 @@ function cotizAgregarCatalogo(cotizId){
   apiGet('cotizaciones','select=*&id=eq.'+cotizId).then(function(data){
     if(!Array.isArray(data)||!data.length) return;
     var c=data[0];
-    // Pre-fill modal de nuevo producto
     var mo=document.getElementById('moProd');
-    if(!mo){toast('Abriendo formulario...','tok');return;}
-    // Reset and fill
-    document.getElementById('fpId').value='';
-    var fields={fpNombre:c.producto_nombre,fpMarca:c.marca||'',fpImg:c.imagen_url||''};
-    Object.keys(fields).forEach(function(k){var el=document.getElementById(k);if(el)el.value=fields[k];});
-    // Mark as from cotizacion
-    mo._cotizId=cotizId;
+    if(!mo){toast('Formulario de producto no disponible','terr');return;}
+
+    // Reset modal first
+    document.getElementById('mProdTit').textContent='Agregar producto desde cotizacion';
+    window._editProdId=null;
+
+    // Helper
+    var s=function(id,v){var e=document.getElementById(id);if(e)e.value=v||'';};
+    var sc=function(id,v){var e=document.getElementById(id);if(e)e.checked=!!v;};
+
+    // Identification
+    s('fpNom', c.producto_nombre||'');
+    s('fpEmp', c.marca||'');
+
+    // Precio mode
+    var isDin=(c.tipo!=='precio_unico')&&(c.costo_usd||0)>0;
+    var pmD=document.getElementById('pmDinamico');
+    var pmF=document.getElementById('pmFijo');
+    if(isDin){if(pmD)pmD.checked=true;}
+    else{if(pmF)pmF.checked=true;}
+    if(typeof togglePrecioMode==='function')togglePrecioMode();
+
+    if(isDin){
+      // Dynamic pricing fields
+      s('fpCI', c.costo_usd||0);      // costo_ind
+      s('fpCL', c.costo_log||3);      // costo_log
+      s('fpGM', c.gan_usd_may||0);    // gan_usd_may
+      s('fpGE', c.gan_usd_med||0);    // gan_usd_med
+      s('fpML', c.precio_ml||0);      // precio_ml
+    } else {
+      // Precio único
+      s('fpPrecioFijo', c.precio_min_ars||c.precio_sugerido||0);
+    }
+
+    // Pre-calculated prices (override if admin wants to adjust)
+    s('fpPM', c.precio_may_ars||0);   // precio_may_ars
+    s('fpPE', c.precio_med_ars||0);   // precio_med_ars
+    s('fpPI', c.precio_min_ars||0);   // precio_min_ars
+    s('fpPD', c.precio_decan||0);     // precio_decan
+
+    // Stock
+    s('fpSA', c.cantidad||1);
+    s('fpSO', c.cantidad||1);
+
+    // Image
+    s('fpImgUrl', c.imagen_url||'');
+    if(c.imagen_url){
+      var prev=document.getElementById('fpImgPreview');
+      if(prev){prev.src=c.imagen_url;prev.style.display='block';}
+    }
+
+    // Notes
+    if(c.notas_vendedor){
+      var cbN=document.getElementById('fpTieneNotas');
+      if(cbN){cbN.checked=true;}
+      var nbk=document.getElementById('fpNotasBlock');
+      if(nbk)nbk.style.display='block';
+      s('fpNotas',c.notas_vendedor);
+    }
+
+    // Store cotiz id to mark as agregado after save
+    window._cotizIdToMark=cotizId;
+
+    if(mo.parentNode!==document.body)document.body.appendChild(mo);
     mo.classList.add('open');
-    // When saved, mark cotizacion as processed
-    toast('Complet\u00e1 los datos y guard\u00e1 — la cotizaci\u00f3n se marcar\u00e1 como agregada','tok');
+    if(typeof calcModalP==='function')calcModalP();
+
+    toast('Datos de la cotizacion cargados en el formulario','tok');
   });
 }
 
@@ -13601,6 +13660,46 @@ function guardarEditCotizAdmin(){
     loadCotizacionesAdmin();
   }).catch(function(){toast('Error al guardar','terr');});
 }
+
+function loadReservasAdmin(){
+  var pg=document.getElementById('page-reservas');
+  if(!pg)return;
+  pg.innerHTML="<div class='loading'><div class='spin'></div>Cargando...</div>";
+  Promise.all([
+    apiGet('productos','select=id,nombre,empresa,stock_actual,reserva&reserva=gt.0&order=empresa,nombre'),
+    apiGet('encargos','select=*&estado=eq.pendiente&order=created_at.desc&limit=100')
+  ]).then(function(res){
+    var prods=Array.isArray(res[0])?res[0]:[];
+    var enc=Array.isArray(res[1])?res[1]:[];
+    var html='';
+    if(enc.length){
+      html+="<div style='font-size:.75rem;font-weight:700;color:var(--acc);margin-bottom:.5rem'>Encargos pendientes ("+enc.length+")</div>";
+      html+=enc.map(function(e){
+        var fecha=new Date(e.created_at).toLocaleDateString('es-AR');
+        var vNom=['','David','Facu','Marcela'][e.vendedor_id]||'Vendedor';
+        return "<div class='tbl-wrap' style='padding:.7rem .9rem;margin-bottom:.4rem'>"+
+          "<div style='display:flex;justify-content:space-between'>"+
+            "<div><b style='font-size:.8rem'>"+e.producto_nombre+"</b>"+
+              "<div style='font-size:.65rem;color:var(--tx3)'>"+vNom+" &bull; "+fecha+(e.cliente_nombre?' &bull; '+e.cliente_nombre:'')+"</div></div>"+
+            "<div style='text-align:right'><div style='color:var(--acc);font-weight:700'>"+fmt(e.total||0)+"</div>"+
+              "<div style='font-size:.62rem;color:var(--tx3)'>Saldo: "+fmt(e.saldo||0)+"</div></div>"+
+          "</div></div>";
+      }).join('');
+    }
+    if(prods.length){
+      html+="<div style='font-size:.75rem;font-weight:700;color:var(--cyan);margin:.8rem 0 .4rem'>Stock reservado ("+prods.length+")</div>";
+      html+=prods.map(function(p){
+        return "<div class='tbl-wrap' style='padding:.6rem .9rem;margin-bottom:.3rem;display:flex;justify-content:space-between;align-items:center'>"+
+          "<div><div style='font-size:.78rem;color:var(--tx)'>"+p.nombre+"</div>"+
+            "<div style='font-size:.65rem;color:var(--tx3)'>Stock: "+p.stock_actual+" | Reservado: "+p.reserva+"</div></div>"+
+          "<div style='font-size:.9rem;font-weight:700;color:var(--cyan)'>"+p.reserva+"u</div>"+
+        "</div>";
+      }).join('');
+    }
+    if(!html)html="<div class='empty' style='padding:1rem'>Sin reservas ni encargos pendientes</div>";
+    pg.innerHTML=html;
+  });
+}
 //]]>
 </script>
 </body>
@@ -13662,3 +13761,5 @@ function guardarEditCotizAdmin(){
 <!-- build:20260330-191923 -->
 <!-- build:20260330-195012 -->
 <!-- build:20260330-195504 -->
+<!-- build:20260330-203355 -->
+<!-- build:20260330-203419 -->
