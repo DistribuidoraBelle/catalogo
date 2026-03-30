@@ -4711,11 +4711,21 @@ function _doAgregarAlStock(pedidoId,items){
       var p=prods.find(function(x){return x.id===it.producto_id;});
       var cantOk=Math.max((it.cantidad_recibida||it.cantidad_pedida||0)-(it.cantidad_fallada||0),0);
       if(cantOk<=0){processNext();return;}
-      var ns=(p?p.stock_actual:0)+cantOk;
+      var stockExistente=p?p.stock_actual||0:0;
+      var ns=stockExistente+cantOk;
       var nv=Math.max(0,(p?p.en_viaje:0)-it.cantidad_pedida);
-      if(p){p.stock_actual=ns;p.en_viaje=nv;}
+      // Precio promedio ponderado: (stock_actual * costo_ind + cantOk * precio_compra) / nuevo_total
+      var costoActual=p?p.costo_ind||0:0;
+      var precioCompra=it.precio_usd||0;
+      var nuevoCosto=costoActual;
+      if(precioCompra>0&&ns>0){
+        nuevoCosto=Math.round(((stockExistente*costoActual)+(cantOk*precioCompra))/ns*100)/100;
+      }
+      var patchProd={stock_actual:ns,en_viaje:nv};
+      if(nuevoCosto>0&&nuevoCosto!==costoActual) patchProd.costo_ind=nuevoCosto;
+      if(p){p.stock_actual=ns;p.en_viaje=nv;if(nuevoCosto>0)p.costo_ind=nuevoCosto;}
       Promise.all([
-        apiPatch("productos",{stock_actual:ns,en_viaje:nv},"id=eq."+it.producto_id),
+        apiPatch("productos",patchProd,"id=eq."+it.producto_id),
         apiPatch("pedidos_proveedor_items",{estado_item:"en_stock"},"id=eq."+it.id)
       ]).then(function(){addedCount++;processNext();}).catch(function(){processNext();});
     } else {
@@ -5325,11 +5335,20 @@ function confirmarControl(){
         if(d.prodId && cantRec>0){
           var p=prods.find(function(x){return x.id===d.prodId;});
           if(p){
-            var ns=(p.stock_actual||0)+cantRec;
+            var stockEx=p.stock_actual||0;
+            var ns=stockEx+cantRec;
             var nv=Math.max(0,(p.en_viaje||0)-it.cantidad_pedida);
-            p.stock_actual=ns;
-            p.en_viaje=nv;
-            apiPatch("productos",{stock_actual:ns,en_viaje:nv},"id=eq."+d.prodId)
+            // Precio promedio ponderado
+            var cActual=p.costo_ind||0;
+            var pCompra=it.precio_usd||0;
+            var nCosto=cActual;
+            if(pCompra>0&&ns>0){
+              nCosto=Math.round(((stockEx*cActual)+(cantRec*pCompra))/ns*100)/100;
+            }
+            var patchC={stock_actual:ns,en_viaje:nv};
+            if(nCosto>0&&nCosto!==cActual) patchC.costo_ind=nCosto;
+            p.stock_actual=ns;p.en_viaje=nv;if(nCosto>0)p.costo_ind=nCosto;
+            apiPatch("productos",patchC,"id=eq."+d.prodId)
               .catch(function(e){console.error("Error actualizando stock:",e);});
           }
         }
@@ -11958,11 +11977,14 @@ function guardarBorradorControl(){
     },'id=eq.'+itemId));
   });
 
-  // Mark pedido as en_curso (partial control, not yet confirmed)
-  proms.push(apiPatch('pedidos_proveedor',{
-    estado:'en_curso',
-    notas:'Borrador de control - pendiente completar recepcion'
-  },'id=eq.'+_controlPedidoId));
+  // Solo marcamos en_curso si estaba pendiente — nunca revertimos estado
+  var pedActual=window._ppData&&window._ppData.find(function(x){return x.id===_controlPedidoId;});
+  var estadoActual=pedActual?pedActual.estado:'pendiente';
+  if(estadoActual==='pendiente'){
+    proms.push(apiPatch('pedidos_proveedor',{
+      estado:'en_curso'
+    },'id=eq.'+_controlPedidoId));
+  }
 
   Promise.all(proms).then(function(){
     toast('Borrador guardado. Podes retomar el control cuando llegue el resto.','tok');
@@ -13487,3 +13509,4 @@ async function enviarBackupEmail(csv,fileName,emailDest,fecha){
 <!-- build:20260330-164527 -->
 <!-- build:20260330-171807 -->
 <!-- build:20260330-172610 -->
+<!-- build:20260330-174516 -->
