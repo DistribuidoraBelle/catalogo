@@ -1724,8 +1724,9 @@ td{padding:.35rem .5rem;font-size:.78rem;color:var(--tx2);vertical-align:middle;
 //<![CDATA[
 // Config vendedores — al inicio para disponibilidad global
 var VENDEDORES_CFG = [
-  {id:1, nombre:"David",  pass:"david123"},
-  {id:2, nombre:"Facu",   pass:"facu123"}
+  {id:1, nombre:"David",   pass:"david123"},
+  {id:2, nombre:"Facu",    pass:"facu123"},
+  {id:3, nombre:"Marcela", pass:"marcela123", rol:"deposito"}
 ];
 
 
@@ -3701,10 +3702,78 @@ function hdRenderIndividual(ventas, cont){
       "<span style='font-size:.75rem;color:var(--tx)'>Total: <b style='color:var(--acc)'>$"+Math.round(tTotal).toLocaleString('es-AR')+"</b></span>"+
       "<span style='font-size:.72rem;color:var(--green)'>✓ "+tConf+" confirmadas</span>"+
       (tPend?"<span style='font-size:.72rem;color:var(--yel)'>⏳ "+tPend+" pendientes</span>":"")+
+      "<button onclick='sincronizarComisiones()' style='margin-left:auto;font-size:.68rem;padding:.2rem .6rem;background:rgba(91,141,238,.15);border:1px solid var(--blue);color:var(--blue);border-radius:5px;cursor:pointer'>&#128260; Sincronizar comisiones</button>"+
     "</div>";
     html=tSummary+html;
   }
   cont.innerHTML=html;
+}
+
+function sincronizarComisiones(){
+  // Find all confirmed Marcela transfers and create missing commission gastos for David
+  if(!confirm('Revisar todas las transferencias confirmadas de Marcela y crear los gastos de comision faltantes para David?')) return;
+  toast('Sincronizando comisiones...','tok');
+
+  apiGet('ventas_transferidas','select=*&creada_por=eq.Marcela&estado=eq.confirmada&order=created_at.desc').then(function(transferidas){
+    if(!Array.isArray(transferidas)||!transferidas.length){
+      toast('No hay transferencias confirmadas de Marcela','twarn'); return;
+    }
+
+    // Get existing David gastos to check which ones already exist
+    apiGet('gastos_vendedor','select=id,concepto&vendedor_id=eq.1&concepto=like.Comision%20Marcela%20%25').then(function(existentes){
+      var existNros=(existentes||[]).map(function(g){
+        var m=g.concepto.match(/ORD-\w+/); return m?m[0]:'';
+      }).filter(Boolean);
+
+      var toCreate=transferidas.filter(function(t){
+        return t.nro_orden && existNros.indexOf(t.nro_orden)<0;
+      });
+
+      if(!toCreate.length){
+        toast('Todas las comisiones ya estan registradas \u2705','tok'); return;
+      }
+
+      // Load comision config
+      apiGet('configuracion','select=clave,valor&clave=in.(comision_perfume,comision_decan,comision_minorista)').then(function(cfg){
+        var com={perfume:2000,decan:500,minorista:5000};
+        (cfg||[]).forEach(function(r){
+          if(r.clave==='comision_perfume') com.perfume=parseFloat(r.valor)||2000;
+          if(r.clave==='comision_decan') com.decan=parseFloat(r.valor)||500;
+          if(r.clave==='comision_minorista') com.minorista=parseFloat(r.valor)||5000;
+        });
+
+        var proms=toCreate.map(function(t){
+          var items=[];try{items=typeof t.items==='string'?JSON.parse(t.items):t.items||[];}catch(e){}
+          var perfs=items.filter(function(it){return !it.isDecan;});
+          var decans=items.filter(function(it){return it.isDecan;});
+          var totalUn=perfs.reduce(function(s,it){return s+(it.qty||1);},0);
+          var totalDecansUn=decans.reduce(function(s,it){return s+(it.qty||1);},0);
+          var segTotal=totalUn>=10?'pm':totalUn>=3?'pe':'pi';
+          var comUnBase=segTotal==='pi'?com.minorista:com.perfume;
+          var comUn=totalDecansUn>0?(comUnBase+com.decan):comUnBase;
+          var totalCom=Math.round((totalUn*comUn)+(totalDecansUn*com.decan));
+          var concepto='Comision Marcela \u2014 '+t.nro_orden+' ('+totalUn+'u x $'+comUn.toLocaleString('es-AR')+')';
+
+          return apiPost('gastos_vendedor',{
+            vendedor_id:1,
+            concepto:concepto,
+            monto:totalCom,
+            periodo:t.periodo||'general',
+            aprobado:true,
+            periodo_cerrado:false
+          });
+        });
+
+        Promise.all(proms).then(function(){
+          toast(toCreate.length+' comision(es) de Marcela registradas para David \u2705','tok');
+          loadVendedores();
+        }).catch(function(e){
+          toast('Error al sincronizar: '+(e.message||'ver consola'),'terr');
+          console.error(e);
+        });
+      });
+    });
+  });
 }
 
 function hdRenderGrupoPedido(ventas, cont){
@@ -7731,9 +7800,11 @@ function loadVendedores(){
       var tvDevSemana=devs.reduce(function(s,x){return s+(x.total||0);},0); // negative
       var misGastos=gastos.filter(function(x){return x.vendedor_id===vid;});
       var gastosAprobados=misGastos.filter(function(g){return g.aprobado;});
-      var gastosPend=misGastos.filter(function(g){return !g.aprobado&&!(g.concepto&&g.concepto.indexOf("Comision Marcela")===0);});
+      // Show ALL pending gastos - commissions included
+      var gastosPend=misGastos.filter(function(g){return !g.aprobado;});
       // Separate "Dinero enviado" from regular expenses
       var dineroEnviado=gastosAprobados.filter(function(g){return g.concepto&&g.concepto.indexOf('Dinero enviado')===0;}).reduce(function(s,g){return s+(g.monto||0);},0);
+      var gastosComision=gastosAprobados.filter(function(g){return g.concepto&&g.concepto.indexOf('Comision Marcela')===0;}).reduce(function(s,g){return s+(g.monto||0);},0);
       var tGastosReales=gastosAprobados.filter(function(g){return !g.concepto||g.concepto.indexOf('Dinero enviado')!==0;}).reduce(function(s,g){return s+(g.monto||0);},0);
       var tGastos=tGastosReales+dineroEnviado;
       var misRend=rendiciones.filter(function(x){return x.vendedor_id===vid;});
@@ -7751,22 +7822,22 @@ function loadVendedores(){
           // Header
           "<div style='background:var(--sur3);padding:.7rem 1rem;border-bottom:1px solid var(--bd);display:flex;justify-content:space-between;align-items:center'>"+
             "<div style='font-size:1rem;font-weight:700;color:var(--acc)'>"+v.nombre+"</div>"+
-            "<div style='font-size:.7rem;color:var(--tx3)'>"+mis.length+" ventas esta semana</div>"+
+            "<div style='font-size:.7rem;color:var(--tx3)'>"+(v.rol==='deposito'?'Deposito &bull; ':'')+mis.length+" ventas esta semana</div>"+
           "</div>"+
           // Stats grid
           "<div style='display:grid;grid-template-columns:repeat(3,1fr);gap:0;border-bottom:1px solid var(--bd)'>"+
             "<div style='padding:.5rem .7rem;border-right:1px solid var(--bd);text-align:center'>"+
-              "<div style='font-size:.6rem;color:var(--tx3);text-transform:uppercase'>Vendido</div>"+
-              "<div style='font-size:.9rem;font-weight:700;color:var(--green)'>"+fmt(tvSemana)+"</div>"+
+              "<div style='font-size:.6rem;color:var(--tx3);text-transform:uppercase'>"+(v.rol==='deposito'?'Transf. enviadas':'Vendido')+"</div>"+
+              "<div style='font-size:.9rem;font-weight:700;color:var(--green)'>"+(v.rol==='deposito'?mis.length+' op.':fmt(tvSemana))+"</div>"+
             "</div>"+
             "<div style='padding:.5rem .7rem;border-right:1px solid var(--bd);text-align:center'>"+
-              "<div style='font-size:.6rem;color:var(--tx3);text-transform:uppercase'>Gastos</div>"+
-              "<div style='font-size:.9rem;font-weight:700;color:var(--red)'>"+fmt(tGastosReales)+"</div>"+
+              "<div style='font-size:.6rem;color:var(--tx3);text-transform:uppercase'>"+(v.rol==='deposito'?'Comisiones':'Gastos')+"</div>"+
+              "<div style='font-size:.9rem;font-weight:700;color:"+(v.rol==='deposito'?'var(--green)':'var(--red)')+"'>"+fmt(tGastosReales)+"</div>"+
               (dineroEnviado>0?"<div style='font-size:.6rem;color:var(--cyan)'>+"+fmt(dineroEnviado)+" enviado</div>":"")+
               (gastosPend.length?"<div style='font-size:.6rem;color:var(--yel)'>"+gastosPend.length+" pend.</div>":"")+
             "</div>"+
             "<div style='padding:.5rem .7rem;text-align:center'>"+
-              "<div style='font-size:.6rem;color:var(--tx3);text-transform:uppercase'>Rendido</div>"+
+              "<div style='font-size:.6rem;color:var(--tx3);text-transform:uppercase'>"+(v.rol==='deposito'?'Cobradas':'Rendido')+"</div>"+
               "<div style='font-size:.9rem;font-weight:700;color:var(--acc)'>"+fmt(tvRendSemana)+"</div>"+
               (rendPend.length?"<div style='font-size:.6rem;color:var(--yel)'>"+rendPend.length+" pend.</div>":"")+
             "</div>"+
@@ -7783,7 +7854,7 @@ function loadVendedores(){
           (gastosPend.length||rendPend.length?
             "<div style='padding:.5rem .8rem;border-bottom:1px solid var(--bd)'>"+
               (gastosPend.length?
-                "<div style='font-size:.68rem;color:var(--tx3);margin-bottom:.3rem;text-transform:uppercase'>Gastos pendientes</div>"+
+                "<div style='font-size:.68rem;color:var(--tx3);margin-bottom:.3rem;text-transform:uppercase'>"+(v.rol==='deposito'?'Comisiones pendientes':'Gastos pendientes')+"</div>"+
                 gastosPend.map(function(g){
                   return"<div style='display:flex;justify-content:space-between;align-items:center;padding:.2rem 0'>"+
                     "<span style='font-size:.72rem;color:var(--tx)'>"+g.concepto+"</span>"+
@@ -13879,3 +13950,6 @@ function loadReservasAdmin(){
 <!-- build:20260330-215838 -->
 <!-- build:20260330-232957 -->
 <!-- build:20260330-234454 -->
+<!-- build:20260331-001203 -->
+<!-- build:20260331-001342 -->
+<!-- build:20260331-003005 -->
