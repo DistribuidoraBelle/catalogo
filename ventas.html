@@ -1965,7 +1965,24 @@ function loadTransferidas(){
   ]).then(function(res){
     var data=Array.isArray(res[0])?res[0]:[];
     var deposito=Array.isArray(res[1])?res[1]:[];
+
+    // ── STATS DE TRANSFERENCIAS ──────────────────────────────────────
+    var tTotal=data.reduce(function(s,t){return s+(t.total||0);},0);
+    var tConf=data.filter(function(t){return t.estado==='confirmada';});
+    var tPend=data.filter(function(t){return t.estado==='pendiente';});
+    var tCanc=data.filter(function(t){return t.estado==='cancelada';});
+    var tConfTotal=tConf.reduce(function(s,t){return s+(t.total||0);},0);
+    var tPendTotal=tPend.reduce(function(s,t){return s+(t.total||0);},0);
     var html="";
+    if(data.length){
+      html+="<div style='display:grid;grid-template-columns:repeat(2,1fr);gap:.5rem;margin-bottom:.8rem'>"+
+        "<div class='sum-card' style='border-top:2px solid var(--blue)'><div class='sum-lbl'>Total enviado</div><div class='sum-val' style='color:var(--blue)'>"+fmt(tTotal)+"</div><div style='font-size:.62rem;color:var(--tx3)'>"+data.length+" transferencias</div></div>"+
+        "<div class='sum-card' style='border-top:2px solid var(--green)'><div class='sum-lbl'>Cobrado</div><div class='sum-val' style='color:var(--green)'>"+fmt(tConfTotal)+"</div><div style='font-size:.62rem;color:var(--tx3)'>"+tConf.length+" confirmadas</div></div>"+
+        "<div class='sum-card' style='border-top:2px solid var(--yel)'><div class='sum-lbl'>Pendiente de cobro</div><div class='sum-val' style='color:var(--yel)'>"+fmt(tPendTotal)+"</div><div style='font-size:.62rem;color:var(--tx3)'>"+tPend.length+" pendientes</div></div>"+
+        "<div class='sum-card'><div class='sum-lbl'>Canceladas</div><div class='sum-val' style='color:var(--red)'>"+tCanc.length+"</div></div>"+
+      "</div>";
+    }
+
     // Show Marcela's pending transfers first
     if(deposito.length){
       html+="<div class='sec-title' style='color:var(--yel)'>&#127968; Dep. Marcela - Pendientes de aprobacion <span style='color:var(--acc)'>"+deposito.length+"</span></div>";
@@ -2241,10 +2258,13 @@ function confirmarTransf(id,btn){
 function loadHistorial(){
   var pg=document.getElementById("pg-historial");
   pg.innerHTML="<div class='loading'><div class='spin'></div>Cargando...</div>";
+  // Facu (VENDEDOR_ID=2): only show records from 2026-03-29T19:24:00 onwards
+  var FACU_DESDE="2026-03-29T22:24:00"; // UTC = 19:24 ARG
+  var fechaFiltro=VENDEDOR_ID===2?"&created_at=gte."+FACU_DESDE:"";
   Promise.all([
-    apiGet("ventas","select=*&vendedor_id=eq."+VENDEDOR_ID+"&estado=eq.confirmada&order=created_at.desc"),
-    apiGet("rendiciones","select=*&vendedor_id=eq."+VENDEDOR_ID+"&tipo=neq.reclamo&estado=neq.archivada&order=created_at.desc"),
-    apiGet("gastos_vendedor","select=*&vendedor_id=eq."+VENDEDOR_ID+"&order=created_at.desc")
+    apiGet("ventas","select=*&vendedor_id=eq."+VENDEDOR_ID+"&estado=eq.confirmada&order=created_at.desc"+fechaFiltro),
+    apiGet("rendiciones","select=*&vendedor_id=eq."+VENDEDOR_ID+"&tipo=neq.reclamo&estado=neq.archivada&order=created_at.desc"+(VENDEDOR_ID===2?"&created_at=gte."+FACU_DESDE:"")),
+    apiGet("gastos_vendedor","select=*&vendedor_id=eq."+VENDEDOR_ID+"&order=created_at.desc"+(VENDEDOR_ID===2?"&created_at=gte."+FACU_DESDE:""))
   ]).then(function(res){
     var ventas=Array.isArray(res[0])?res[0]:[];
     var rendics=Array.isArray(res[1])?res[1]:[];
@@ -2470,10 +2490,12 @@ function hvSetTab(n){
 
 
 function loadDineroData(){
+  var FACU_DESDE="2026-03-29T22:24:00"; // UTC (=19:24 ARG)
+  var fq=VENDEDOR_ID===2?"&created_at=gte."+FACU_DESDE:"";
   Promise.all([
-    apiGet("ventas","select=total&vendedor_id=eq."+VENDEDOR_ID+"&estado=eq.confirmada"),
-    apiGet("gastos_vendedor","select=monto&vendedor_id=eq."+VENDEDOR_ID+"&aprobado=is.true"),
-    apiGet("rendiciones","select=monto,estado&vendedor_id=eq."+VENDEDOR_ID+"&tipo=neq.reclamo&estado=neq.archivada")
+    apiGet("ventas","select=total&vendedor_id=eq."+VENDEDOR_ID+"&estado=eq.confirmada"+fq),
+    apiGet("gastos_vendedor","select=monto&vendedor_id=eq."+VENDEDOR_ID+"&aprobado=is.true"+fq),
+    apiGet("rendiciones","select=monto,estado&vendedor_id=eq."+VENDEDOR_ID+"&tipo=neq.reclamo&estado=neq.archivada"+fq)
   ]).then(function(res){
     var ventas=Array.isArray(res[0])?res[0]:[];
     var gastos=Array.isArray(res[1])?res[1]:[];
@@ -2894,7 +2916,40 @@ function loadReservas(){
 
 function confirmarPedReservado(pedId,btn){
   if(btn)btn.disabled=true;
-  if(!confirm("Confirmar cobro de este pedido reservado?"))return;
+  // Ask forma de cobro before confirming
+  var mo=document.getElementById('moFormaCobroReserva');
+  if(!mo){
+    mo=document.createElement('div');mo.id='moFormaCobroReserva';mo.className='mo';
+    mo.innerHTML="<div class='md' style='max-width:360px;width:95%'>"+
+      "<div class='md-h'><span>Forma de cobro</span>"+
+      "<button onclick='this.closest(\".mo\").classList.remove(\"open\")' class='xb'>&#10005;</button></div>"+
+      "<div class='md-b'>"+
+        "<div style='font-size:.78rem;color:var(--tx2);margin-bottom:.7rem'>&#128176; &#191;C\u00f3mo cobr\u00f3 el cliente?</div>"+
+        "<select id='fcrSelect' class='fi' style='font-size:.85rem;padding:.4rem .6rem;margin-bottom:.8rem'>"+
+          "<option value='efectivo'>&#128181; Efectivo</option>"+
+          "<option value='transferencia'>&#127974; Transferencia</option>"+
+          "<option value='debito'>&#128179; D\u00e9bito</option>"+
+          "<option value='credito'>&#128179; Cr\u00e9dito</option>"+
+          "<option value='mixto'>Mixto</option>"+
+        "</select>"+
+        "<div style='display:flex;gap:.5rem'>"+
+          "<button id='fcrConfirmarBtn' class='btn btn-green' style='flex:1'>&#10003; Confirmar cobro</button>"+
+          "<button onclick='if(window._fcrBtn)window._fcrBtn.disabled=false;this.closest(\".mo\").classList.remove(\"open\")' class='btn btn-g'>Cancelar</button>"+
+        "</div>"+
+      "</div></div>";
+    document.body.appendChild(mo);
+  }
+  window._fcrPedId=pedId;
+  window._fcrBtn=btn;
+  document.getElementById('fcrConfirmarBtn').onclick=function(){
+    var formaCobro=(document.getElementById('fcrSelect')||{}).value||'efectivo';
+    mo.classList.remove('open');
+    _ejecutarCobrarReservado(pedId,btn,formaCobro);
+  };
+  mo.classList.add('open');
+}
+
+function _ejecutarCobrarReservado(pedId,btn,formaCobro){
   apiGet("pedidos_catalogo","select=*&id=eq."+pedId).then(function(data){
     if(!Array.isArray(data)||!data.length)return;
     var ped=data[0];var items=[];
@@ -2913,12 +2968,12 @@ function confirmarPedReservado(pedId,btn){
       promises.push(apiPost("ventas",{
         vendedor_id:VENDEDOR_ID,producto_id:it.producto_id,producto_nombre:it.nombre,
         cantidad:it.qty||1,precio_unitario:it.precio||0,segmento:it.segmento||"x1",
-        total:it.total||0,periodo:periodoActual,estado:"confirmada",origen:"vendedor",
-        nro_orden:nroOrden,forma_cobro:getFormaCobro()||"efectivo",descuento:0,descuento_motivo:""
+        total:it.total||0,periodo:periodoActual,estado:"confirmada",origen:"reserva",
+        nro_orden:nroOrden,forma_cobro:formaCobro,descuento:0,descuento_motivo:""
       }));
     });
     Promise.all(promises).then(function(){
-      toast("Pedido confirmado!","tok");loadReservas();loadDineroData();renderCat();
+      toast("Pedido confirmado! ("+formaCobro+")","tok");loadReservas();loadDineroData();renderCat();
     }).catch(function(){if(btn)btn.disabled=false;});
   });
 }
@@ -4577,6 +4632,15 @@ function cerrarMoBuscador(){
   if(mo) mo.style.display='none';
 }
 
+function bepSetTab(tab){
+  window._bepTab=tab;
+  var tP=document.getElementById('bepTabPerf');
+  var tD=document.getElementById('bepTabDec');
+  if(tP){tP.style.background=tab==='perf'?'var(--acc)':'transparent';tP.style.color=tab==='perf'?'#000':'var(--tx3)';tP.style.borderColor=tab==='perf'?'var(--acc)':'var(--bd2)';}
+  if(tD){tD.style.background=tab==='dec'?'var(--acc)':'transparent';tD.style.color=tab==='dec'?'#000':'var(--tx3)';tD.style.borderColor=tab==='dec'?'var(--acc)':'var(--bd2)';}
+  filtrarBepProds();
+}
+
 function filtrarBepProds(){
   var q=(document.getElementById('bepSearch').value||'').toLowerCase();
   var list=document.getElementById('bepList');
@@ -4584,7 +4648,8 @@ function filtrarBepProds(){
   var isDecan=(window._bepTab==='dec');
   var filtered=(prods||[]).filter(function(p){
     if(!p.activo)return false;
-    if(isDecan){if(!(p.precio_decan>0))return false;}
+    if(isDecan){// precio_decan=-1 means no decan; 0=auto-calc; >0=manual price
+      var pd=p.precio_decan;if(pd===-1||(pd===undefined&&pd!==0))return false;}
     else{if((p.stock_actual||0)<=0)return false;}
     if(!q)return true;
     return norm(p.nombre||'').indexOf(norm(q))>=0||norm(p.empresa||'').indexOf(norm(q))>=0;
@@ -4595,7 +4660,8 @@ function filtrarBepProds(){
   }
   list.innerHTML=filtered.map(function(p){
     if(isDecan){
-      var dp=p.precio_decan||0;
+      var r=calcP(p);
+      var dp=r.decan||0;
       return "<div style='display:flex;align-items:center;gap:.5rem;padding:.4rem .5rem;border-radius:8px;margin-bottom:.25rem;border:1px solid var(--bd);background:var(--sur3)'>"+
         "<div style='flex:1;min-width:0'>"+
           "<div style='font-size:.62rem;color:var(--tx3)'>"+p.empresa+"</div>"+
@@ -5353,6 +5419,15 @@ function cobrarParcialPedido(pedId){
       "<div style='margin-bottom:.6rem'>"+itemsHtml+"</div>"+
       "<div id='cpResumen' style='background:var(--sur3);border-radius:6px;padding:.5rem;margin-bottom:.5rem;font-size:.75rem'>"+
         "<div style='color:var(--tx3)'>Selecciona productos para ver el total</div></div>"+
+      "<div class='fg' style='margin-bottom:.5rem'><label style='font-size:.72rem;color:var(--tx3)'>Forma de cobro</label>"+
+        "<select id='cpFormaCobro' class='fi' style='font-size:.75rem;padding:.3rem .5rem'>"+
+          "<option value='efectivo'>&#128181; Efectivo</option>"+
+          "<option value='transferencia'>&#127974; Transferencia</option>"+
+          "<option value='debito'>&#128179; D\u00e9bito</option>"+
+          "<option value='credito'>&#128179; Cr\u00e9dito</option>"+
+          "<option value='mixto'>Mixto</option>"+
+        "</select>"+
+      "</div>"+
       "<div style='display:flex;gap:.5rem'>"+
         "<button class='btn btn-green' onclick='cpConfirmar("+pedId+","+cobradoYa+","+ped.total+",window._cpPedItems)' style='flex:1'>Registrar cobro</button>"+
         "<button class='btn btn-g' onclick='document.getElementById(\"moCobParcial\").classList.remove(\"open\")'>Cancelar</button>"+
@@ -5404,6 +5479,7 @@ function cpRecalc(totalUnitsOrig){
 function cpConfirmar(pedId,cobradoYa,totalPed,pedItems){
   pedItems=pedItems||window._cpPedItems||[];
   var montoCob=0; var idxsCobrados=[]; var nombresCob=[];
+  var formaCobro=(document.getElementById('cpFormaCobro')||{}).value||'efectivo';
   document.querySelectorAll(".cpCb:checked").forEach(function(cb){
     var qty=parseInt(cb.dataset.qty)||1;
     var precio=parseFloat(cb.dataset.precio)||0;
@@ -5442,7 +5518,7 @@ function cpConfirmar(pedId,cobradoYa,totalPed,pedItems){
           producto_nombre:it.nombre,cantidad:it.qty||1,
           precio_unitario:it.precio||0,segmento:it.segmento||"x1",
           total:it.total||0,periodo:periodo,estado:"confirmada",
-          origen:"reserva",nro_orden:nro
+          origen:"reserva",nro_orden:nro,forma_cobro:formaCobro
         }));
       }
     });
@@ -6180,7 +6256,8 @@ function addDecanToEditPed(prodId){
   var p=prods.find(function(x){return x.id===prodId;});
   if(!p)return;
   var qty=parseInt((document.getElementById('bep-qty-d-'+prodId)||{}).value)||1;
-  var price=p.precio_decan||0;
+  var r=calcP(p);
+  var price=r.decan||p.precio_decan||0;
   var tbody=document.getElementById('editPedItems');
   if(!tbody)return;
   var idx=tbody.querySelectorAll('tr').length;
@@ -6378,3 +6455,4 @@ function ppFiltrarDavid(){
 <!-- build:20260330-230337 -->
 <!-- build:20260331-001203 -->
 <!-- build:20260331-001342 -->
+<!-- build:20260331-032757 -->
