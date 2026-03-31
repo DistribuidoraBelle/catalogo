@@ -1767,19 +1767,62 @@ function confirmarTransf(id,btn){
       }));
     });
     if(v.con_reserva){
-      // Stock already reserved - just release the reserva counter
+      // Stock already reserved - release reserva, update vendido_david
       if(Array.isArray(items))items.forEach(function(it){
         var pid=it.producto_id;
-        if(pid){var p=prods.find(function(x){return x.id===pid;});if(p){var nr=Math.max(0,(p.reserva||0)-(it.qty||1));p.reserva=nr;promises.push(apiPatch("productos",{reserva:nr},"id=eq."+pid));}}
+        if(pid){var p=prods.find(function(x){return x.id===pid;});if(p){
+          var nr=Math.max(0,(p.reserva||0)-(it.qty||1));
+          var nv=(p.vendido_david||0)+(it.qty||1);
+          p.reserva=nr;p.vendido_david=nv;
+          promises.push(apiPatch("productos",{reserva:nr,vendido_david:nv},"id=eq."+pid));
+        }}
       });
     } else {
-      // No reserva - discount stock now
+      // No reserva - discount stock, update vendido_david
       if(Array.isArray(items))items.forEach(function(it){
         var pid=it.producto_id||it.id;
-        if(pid){var p=prods.find(function(x){return x.id===pid;});if(p){var ns=Math.max(0,(p.stock_actual||0)-(it.qty||1));p.stock_actual=ns;promises.push(apiPatch("productos",{stock_actual:ns},"id=eq."+pid));}}
+        if(pid){var p=prods.find(function(x){return x.id===pid;});if(p){
+          var ns=Math.max(0,(p.stock_actual||0)-(it.qty||1));
+          var nv=(p.vendido_david||0)+(it.qty||1);
+          p.stock_actual=ns;p.vendido_david=nv;
+          promises.push(apiPatch("productos",{stock_actual:ns,vendido_david:nv},"id=eq."+pid));
+        }}
       });
     }
     Promise.all(promises).then(function(){
+      // If this transfer was from Marcela (deposito), handle commissions
+      if(v.creada_por==='Marcela'&&v.nro_orden){
+        // Calculate commission from items
+        var comItems=Array.isArray(items)?items:[];
+        var perfs=comItems.filter(function(it){return !it.isDecan;});
+        var decans=comItems.filter(function(it){return it.isDecan;});
+        var totalUn=perfs.reduce(function(s,it){return s+(it.qty||1);},0);
+        var totalDecansUn=decans.reduce(function(s,it){return s+(it.qty||1);},0);
+        var segTotal=totalUn>=10?'pm':totalUn>=3?'pe':'pi';
+        var comUnBase=segTotal==='pi'?_comisiones.minorista:_comisiones.perfume;
+        var comUn=totalDecansUn>0?(comUnBase+_comisiones.decan):comUnBase;
+        var totalCom=Math.round((totalUn*comUn)+(totalDecansUn*_comisiones.decan));
+        var comDesc='Comision Marcela — '+v.nro_orden+' ('+totalUn+'u x $'+comUn.toLocaleString('es-AR')+')';
+
+        // 1. Register commission debit for David
+        apiPost('gastos_vendedor',{
+          vendedor_id:VENDEDOR_ID,
+          concepto:comDesc,
+          monto:totalCom,
+          periodo:periodoActual,
+          aprobado:true,  // auto-approved: David already confirmed the sale
+          periodo_cerrado:false
+        }).catch(function(e){console.warn('Error registrando comision David:',e);});
+
+        // 2. Approve Marcela's commission gasto
+        apiGet('gastos_vendedor','select=id&vendedor_id=eq.3&aprobado=eq.false&concepto=like.%25'+v.nro_orden+'%25').then(function(gastos){
+          if(Array.isArray(gastos)&&gastos.length){
+            return Promise.all(gastos.map(function(g){
+              return apiPatch('gastos_vendedor',{aprobado:true},'id=eq.'+g.id);
+            }));
+          }
+        }).catch(function(e){console.warn('Error aprobando comision Marcela:',e);});
+      }
       toast("Cobro confirmado!"+(v.con_reserva?" (reserva liberada)":" (stock descontado)"),"tok");
       loadTransferidas();loadDineroData();renderCat();
     }).catch(function(){if(btn)btn.disabled=false;});
@@ -4021,3 +4064,4 @@ function notificarEntregaMarcela(pedId,btn){
 <!-- build:20260330-225924 -->
 <!-- build:20260330-230337 -->
 <!-- build:20260330-231433 -->
+<!-- build:20260331-003437 -->
