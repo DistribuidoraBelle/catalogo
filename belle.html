@@ -13993,45 +13993,90 @@ function loadResumenPeriodoActual(){
     return;
   }
   var VENDS=[{id:1,n:'David'},{id:2,n:'Facu'},{id:3,n:'Marcela'}];
-  Promise.all(VENDS.map(function(v){
-    return Promise.all([
-      // Ventas confirmadas (no archivadas) — las del periodo actual
-      apiGet('ventas','select=total,cantidad&vendedor_id=eq.'+v.id+'&estado=eq.confirmada').catch(function(){return [];}),
-      // Gastos aprobados sin periodo cerrado — son los del periodo activo
-      apiGet('gastos_vendedor','select=monto,aprobado&vendedor_id=eq.'+v.id+'&periodo_cerrado=is.null').catch(function(){return [];}),
-      // Rendiciones aprobadas activas (no archivadas)
-      apiGet('rendiciones','select=monto,tipo&vendedor_id=eq.'+v.id+'&estado=eq.aprobada').catch(function(){return [];}),
-      // Comisiones Marcela pendientes
-      v.id===3?apiGet('gastos_vendedor','select=monto&vendedor_id=eq.3&estado_comision=in.(pendiente,confirmada)').catch(function(){return [];}):Promise.resolve([])
-    ]).then(function(r){
-      var ventas=r[0]||[];
-      var gastos=(r[1]||[]).filter(function(g){return g.aprobado;});
-      var rendics=(r[2]||[]).filter(function(x){return x.tipo!=='saldo_arrastrado';});
-      var arrastrado=(r[2]||[]).filter(function(x){return x.tipo==='saldo_arrastrado';});
-      var comis=r[3]||[];
+  var cotiz=cotizActual||1520;
+
+  // Cargar en paralelo: ventas confirmadas, gastos, rendiciones, productos (para costo), cotizacion
+  Promise.all([
+    // Ventas confirmadas de todos los vendedores
+    apiGet('ventas','select=vendedor_id,total,cantidad,producto_id,segmento&estado=eq.confirmada').catch(function(){return [];}),
+    // Gastos aprobados del periodo activo (sin periodo_cerrado = no archivados)
+    apiGet('gastos_vendedor','select=vendedor_id,monto,aprobado,concepto,estado_comision&periodo_cerrado=is.null').catch(function(){return [];}),
+    // Rendiciones aprobadas activas
+    apiGet('rendiciones','select=vendedor_id,monto,tipo&estado=eq.aprobada').catch(function(){return [];}),
+    // Productos con sus costos (solo los que tienen costo cargado)
+    apiGet('productos','select=id,costo_ind,costo_log&costo_ind=gt.0').catch(function(){return [];}),
+    // Cotización actual
+    apiGet('configuracion','select=valor&clave=eq.cotizacion_usd').catch(function(){return [];})
+  ]).then(function(res){
+    var todasVentas=res[0]||[];
+    var todosGastos=res[1]||[];
+    var todasRendics=res[2]||[];
+    var productos=res[3]||[];
+    var cfgCotiz=res[4]||[];
+
+    // Actualizar cotización si viene de Supabase
+    if(cfgCotiz.length&&cfgCotiz[0].valor) cotiz=parseFloat(cfgCotiz[0].valor)||cotiz;
+
+    // Mapa de costos por producto
+    var costoMap={};
+    productos.forEach(function(p){
+      costoMap[p.id]=(parseFloat(p.costo_ind)||0)+(parseFloat(p.costo_log)||0);
+    });
+
+    // Calcular costo total de mercadería vendida (todos los vendedores)
+    var costoMercTotal=0;
+    todasVentas.forEach(function(v){
+      if(v.producto_id&&costoMap[v.producto_id]){
+        costoMercTotal+=costoMap[v.producto_id]*cotiz*(v.cantidad||1);
+      }
+    });
+
+    // Por vendedor
+    var datosVend=VENDS.map(function(v){
+      var ventas=todasVentas.filter(function(x){return x.vendedor_id===v.id;});
+      var gastos=todosGastos.filter(function(x){return x.vendedor_id===v.id&&x.aprobado;});
+      var rendics=todasRendics.filter(function(x){return x.vendedor_id===v.id&&x.tipo!=='saldo_arrastrado';});
+      var arrastrado=todasRendics.filter(function(x){return x.vendedor_id===v.id&&x.tipo==='saldo_arrastrado';});
+      var comis=v.id===3?todosGastos.filter(function(x){return x.vendedor_id===3&&(x.estado_comision==='pendiente'||x.estado_comision==='confirmada');}):[];
       var tv=ventas.reduce(function(s,x){return s+(x.total||0);},0);
       var tg=gastos.reduce(function(s,x){return s+(x.monto||0);},0);
-      var tc=comis.reduce(function(s,x){return s+(x.monto||0);},0);
       var tr=rendics.reduce(function(s,x){return s+(x.monto||0);},0);
       var ta=arrastrado.reduce(function(s,x){return s+(x.monto||0);},0);
-      // Saldo = ventas - gastos - rendido - arrastrado que ya entregó
-      var saldo=tv-tg-tr+ta; // arrastrado suma porque ya lo tiene encima
+      var tc=comis.reduce(function(s,x){return s+(x.monto||0);},0);
+      var saldo=tv-tg-tr+ta;
       return {id:v.id,n:v.n,tv:tv,tg:tg,tc:tc,tr:tr,ta:ta,saldo:saldo,
               nv:ventas.length,ng:gastos.length,nr:rendics.length};
     });
-  })).then(function(res){
-    var tV=res.reduce(function(s,r){return s+r.tv;},0);
-    var tG=res.reduce(function(s,r){return s+r.tg;},0);
-    var tS=res.reduce(function(s,r){return s+Math.max(0,r.saldo);},0);
+
+    var tV=datosVend.reduce(function(s,r){return s+r.tv;},0);
+    var tG=datosVend.reduce(function(s,r){return s+r.tg;},0);
+    var tS=datosVend.reduce(function(s,r){return s+Math.max(0,r.saldo);},0);
+
     var h='<div style="background:var(--sur2);border-radius:var(--r);border:1px solid var(--bd);padding:.9rem 1rem;margin-bottom:1rem">';
       h+='<div style="font-size:.8rem;font-weight:700;margin-bottom:.6rem;color:var(--tx2)">\ud83d\udcca Periodo activo: <span style="color:var(--acc)">'+periodoActual+'</span></div>';
-      h+='<div style="display:grid;grid-template-columns:repeat(3,1fr);gap:.4rem;margin-bottom:.7rem">';
-        h+='<div style="background:var(--sur3);border-radius:7px;padding:.5rem .6rem;text-align:center"><div style="font-size:.58rem;color:var(--tx3);text-transform:uppercase;letter-spacing:.04em">Ventas</div><div style="font-size:.95rem;font-weight:700;color:var(--green)">'+fmt(tV)+'</div></div>';
-        h+='<div style="background:var(--sur3);border-radius:7px;padding:.5rem .6rem;text-align:center"><div style="font-size:.58rem;color:var(--tx3);text-transform:uppercase;letter-spacing:.04em">Gastos</div><div style="font-size:.95rem;font-weight:700;color:var(--red)">'+fmt(tG)+'</div></div>';
-        h+='<div style="background:var(--sur3);border-radius:7px;padding:.5rem .6rem;text-align:center"><div style="font-size:.58rem;color:var(--tx3);text-transform:uppercase;letter-spacing:.04em">En mano</div><div style="font-size:.95rem;font-weight:700;color:var(--yel)">'+fmt(tS)+'</div></div>';
+      // Totales globales — ahora 4 cards incluyendo costo mercadería
+      h+='<div style="display:grid;grid-template-columns:repeat(4,1fr);gap:.4rem;margin-bottom:.7rem">';
+        h+='<div style="background:var(--sur3);border-radius:7px;padding:.5rem .6rem;text-align:center">';
+          h+='<div style="font-size:.56rem;color:var(--tx3);text-transform:uppercase;letter-spacing:.04em">Ventas</div>';
+          h+='<div style="font-size:.9rem;font-weight:700;color:var(--green)">'+fmt(tV)+'</div>';
+        h+='</div>';
+        h+='<div style="background:var(--sur3);border-radius:7px;padding:.5rem .6rem;text-align:center">';
+          h+='<div style="font-size:.56rem;color:var(--tx3);text-transform:uppercase;letter-spacing:.04em">Gastos</div>';
+          h+='<div style="font-size:.9rem;font-weight:700;color:var(--red)">'+fmt(tG)+'</div>';
+        h+='</div>';
+        h+='<div style="background:var(--sur3);border-radius:7px;padding:.5rem .6rem;text-align:center;cursor:pointer" title="Costo de productos vendidos (costo_ind+log)\u00d7cotiz\u00d7cant">';
+          h+='<div style="font-size:.56rem;color:var(--tx3);text-transform:uppercase;letter-spacing:.04em">Costo merch.</div>';
+          h+='<div style="font-size:.9rem;font-weight:700;color:var(--cyan)">'+fmt(Math.round(costoMercTotal))+'</div>';
+          h+='<div style="font-size:.52rem;color:var(--tx3)">@'+cotiz+'</div>';
+        h+='</div>';
+        h+='<div style="background:var(--sur3);border-radius:7px;padding:.5rem .6rem;text-align:center">';
+          h+='<div style="font-size:.56rem;color:var(--tx3);text-transform:uppercase;letter-spacing:.04em">En mano</div>';
+          h+='<div style="font-size:.9rem;font-weight:700;color:var(--yel)">'+fmt(tS)+'</div>';
+        h+='</div>';
       h+='</div>';
+      // Por vendedor
       h+='<div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(210px,1fr));gap:.5rem">';
-      res.forEach(function(r){
+      datosVend.forEach(function(r){
         var isMarcela=r.id===3;
         var sc=r.saldo>0?'var(--yel)':'var(--green)';
         h+='<div style="background:var(--sur3);border-radius:7px;padding:.55rem .75rem">';
@@ -14052,7 +14097,7 @@ function loadResumenPeriodoActual(){
     cont.innerHTML=h;
   }).catch(function(e){
     console.warn('resumen error:',e);
-    cont.innerHTML='<div class="empty">Error calculando resumen</div>';
+    cont.innerHTML='<div class="empty">Error calculando resumen: '+e.message+'</div>';
   });
 }
 
