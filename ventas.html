@@ -2580,25 +2580,35 @@ function loadTransferidas(){
   // Load both: ventas_transferidas AND ventas from deposito pending approval
   Promise.all([
     apiGet("ventas_transferidas","select=*&asignada_a=eq."+VENDEDOR_ID+"&order=created_at.desc&limit=200"),
-    apiGet("ventas","select=*&estado=eq.pendiente_aprobacion&origen=eq.deposito&order=created_at.desc")
+    apiGet("ventas","select=*&estado=eq.pendiente_aprobacion&origen=eq.deposito&order=created_at.desc"),
+    apiGet("ventas_transferidas","select=*&creada_por=eq."+VENDEDOR_NOMBRE+"&order=created_at.desc&limit=200")
   ]).then(function(res){
     var _allTransf=Array.isArray(res[0])?res[0]:[];
     var deposito=Array.isArray(res[1])?res[1]:[];
-    // Mostrar: todas las pendientes (cualquier período) + las del período actual
+    var _enviadas=Array.isArray(res[2])?res[2]:[];
+    // Recibidas: pendientes (cualquier período) + confirmadas/canceladas del período actual
     var data=_allTransf.filter(function(t){
+      return t.estado==='pendiente'||t.periodo===periodoActual;
+    });
+    // Enviadas por mí: pendientes siempre + del período actual
+    var enviadas=_enviadas.filter(function(t){
       return t.estado==='pendiente'||t.periodo===periodoActual;
     });
 
     // ── STATS DE TRANSFERENCIAS ──────────────────────────────────────
-    var tConf=data.filter(function(t){return t.estado==='confirmada';});
-    var tPend=data.filter(function(t){return t.estado==='pendiente';});
-    var tCanc=data.filter(function(t){return t.estado==='cancelada';});
-    var tTotal=data.reduce(function(s,t){return s+(t.total||0);},0);
+    // Combinar recibidas + enviadas para las stats
+    var _todas=data.concat(enviadas.filter(function(t){
+      return !data.some(function(d){return d.id===t.id;});
+    }));
+    var tConf=_todas.filter(function(t){return t.estado==='confirmada';});
+    var tPend=_todas.filter(function(t){return t.estado==='pendiente';});
+    var tCanc=_todas.filter(function(t){return t.estado==='cancelada';});
+    var tTotal=_todas.reduce(function(s,t){return s+(t.total||0);},0);
     var tConfTotal=tConf.reduce(function(s,t){return s+(t.total||0);},0);
     var tPendTotal=tPend.reduce(function(s,t){return s+(t.total||0);},0);
-    // Calcular unidades y productos más enviados
+    // Calcular unidades y productos
     var _prodMap={};
-    data.forEach(function(t){
+    _todas.forEach(function(t){
       var items=[];try{items=typeof t.items==='string'?JSON.parse(t.items):t.items||[];}catch(e){}
       items.forEach(function(it){
         var key=it.nombre||'?';
@@ -2612,12 +2622,12 @@ function loadTransferidas(){
     var html="";
     // Stats siempre visibles (incluso con 0 transferencias)
     html+="<div class='tbl-wrap' style='padding:.8rem;margin-bottom:.8rem'>"+
-      "<div style='font-size:.78rem;font-weight:700;color:var(--blue);margin-bottom:.6rem'>↔ Estadísticas del período</div>"+
+      "<div style='font-size:.78rem;font-weight:700;color:var(--blue);margin-bottom:.6rem'>↔ Transferencias del período</div>"+
       "<div style='display:grid;grid-template-columns:repeat(2,1fr);gap:.4rem;margin-bottom:.6rem'>"+
         "<div style='background:var(--sur2);border:1px solid var(--blue);border-radius:8px;padding:.55rem .7rem;text-align:center'>"+
           "<div style='font-size:.58rem;color:var(--tx3);text-transform:uppercase;letter-spacing:.04em'>Total enviado</div>"+
           "<div style='font-size:1rem;font-weight:700;color:var(--blue)'>"+fmt(tTotal)+"</div>"+
-          "<div style='font-size:.6rem;color:var(--tx3)'>"+data.length+" oper. &bull; "+totalUnidades+"u</div>"+
+          "<div style='font-size:.6rem;color:var(--tx3)'>"+_todas.length+" oper. &bull; "+totalUnidades+"u</div>"+
         "</div>"+
         "<div style='background:var(--sur2);border:1px solid var(--green);border-radius:8px;padding:.55rem .7rem;text-align:center'>"+
           "<div style='font-size:.58rem;color:var(--tx3);text-transform:uppercase;letter-spacing:.04em'>Cobrado por David</div>"+
@@ -2703,9 +2713,28 @@ function loadTransferidas(){
       html+="<div class='sec-title' style='margin-top:1rem;color:var(--red)'>Canceladas</div>";
       canc.forEach(function(v){html+=renderTransfCard(v,true);});
     }
+    // ── ENVIADAS POR MÍ ────────────────────────────────────────────────
+    if(enviadas.length){
+      html+="<div class='sec-title' style='margin-top:1rem;color:var(--blue)'>↗ Enviadas por mí <span style='color:var(--acc)'>"+enviadas.length+"</span></div>";
+      var envPend=enviadas.filter(function(t){return t.estado==='pendiente';});
+      var envConf=enviadas.filter(function(t){return t.estado==='confirmada';});
+      var envCanc=enviadas.filter(function(t){return t.estado==='cancelada';});
+      if(envPend.length){
+        html+="<div style='font-size:.68rem;color:var(--yel);margin:.3rem 0 .2rem'>⏳ Pendientes de cobro ("+envPend.length+")</div>";
+        envPend.forEach(function(v){html+=renderEnviadaCard(v);});
+      }
+      if(envConf.length){
+        html+="<div style='font-size:.68rem;color:var(--green);margin:.5rem 0 .2rem'>✅ Cobradas ("+envConf.length+")</div>";
+        envConf.forEach(function(v){html+=renderEnviadaCard(v);});
+      }
+      if(envCanc.length){
+        html+="<div style='font-size:.68rem;color:var(--red);margin:.5rem 0 .2rem'>✕ Canceladas</div>";
+        envCanc.forEach(function(v){html+=renderEnviadaCard(v);});
+      }
+    }
     if(!html)html="<div class='empty'>Sin transferencias</div>";
     pg.innerHTML=html;
-    var total_pend=pend.length+deposito.length;
+    var total_pend=pend.length+deposito.length+enviadas.filter(function(t){return t.estado==='pendiente';}).length;
     var d=document.getElementById("dotTransf");if(d)d.classList.toggle("show",total_pend>0);
   });
 }
@@ -2816,6 +2845,27 @@ function rechazarDepDeposito(ventaId){
     toast("Venta rechazada","ok");
     loadTransferidas();
   }).catch(function(e){toast("Error: "+e.message,"err");});  });
+}
+
+function renderEnviadaCard(v){
+  var items=[];try{items=typeof v.items==="string"?JSON.parse(v.items):v.items;}catch(e){}
+  var fecha=new Date(v.created_at).toLocaleString("es-AR",{day:"2-digit",month:"2-digit",year:"2-digit",hour:"2-digit",minute:"2-digit",timeZone:"America/Argentina/Buenos_Aires"});
+  var dest=v.asignada_a===1?"David":v.asignada_a===2?"Facu":"Vendedor "+v.asignada_a;
+  var estC=v.estado==="confirmada"?"var(--green)":v.estado==="cancelada"?"var(--red)":"var(--yel)";
+  var html="<div class='ped-card' style='border-left:3px solid "+estC+"'>";
+  html+="<div class='ped-header'>";
+  html+="<div><div style='font-size:.78rem;font-weight:500;color:var(--tx)'>→ Para: <b>"+dest+"</b>"+(v.con_reserva?"<span class='badge bg-cyan' style='margin-left:.3rem'>Con reserva</span>":"")+"</div>";
+  html+="<div class='ped-fecha'>"+fecha+(v.nro_orden?" | "+v.nro_orden:"")+"</div></div>";
+  html+="<div style='text-align:right'>";
+  html+="<div class='ped-total'>"+fmt(v.total)+"</div>";
+  html+="<span style='font-size:.65rem;color:"+estC+"'>"+v.estado+"</span>";
+  html+="</div></div>";
+  html+="<div style='font-size:.73rem;color:var(--tx2);line-height:1.7;margin-bottom:.3rem'>";
+  if(Array.isArray(items))items.forEach(function(it){
+    html+="<div style='display:flex;justify-content:space-between;padding:.05rem 0'><span>"+it.nombre+" x"+(it.qty||1)+"</span><span style='font-weight:600'>"+fmt(it.total||0)+"</span></div>";
+  });
+  html+="</div></div>";
+  return html;
 }
 
 function renderTransfCard(v,done){
@@ -5581,9 +5631,14 @@ function ejecutarTransfer(targetId,targetNombre){
       notas:"De "+VENDEDOR_NOMBRE+" para "+targetNombre+(conReserva?" [CON RESERVA]":"")
     });
   }).then(function(){
+    // Generar comisión pendiente para Marcela si el vendedor la recibe
+    // Solo aplica cuando la transferencia viene DE Marcela (chequeo por nombre del origen)
+    // En ventas.html: Facu o David pueden enviar desde su panel — NO generan comisión de Marcela
+    // La comisión se genera en marcela.html cuando Marcela transfiere
     document.getElementById("moTransfer").classList.remove("open");
     cart={};cstate={};decanState={};
     updateCartBar();closeDrawer();renderCat();
+    loadTransferidas();
     toast("Venta transferida a "+targetNombre+" - "+nroOrden+(conReserva?" (stock reservado)":""),"tok");
   }).catch(function(){toast("Error al transferir","terr");});
 }
