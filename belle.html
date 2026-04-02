@@ -8299,37 +8299,26 @@ function loadVendedores(){
   var desde=isoDate(week.desde);
   var hasta=isoDate(week.hasta);
 
-  // Load data for all vendors
+  // Load data for all vendors — todo filtrado por período actual
   Promise.all([
-    // This week ventas - all estados
-    apiGet("ventas","select=vendedor_id,total,estado,producto_nombre,cantidad,created_at&created_at=gte."+desde+"T00:00:00&created_at=lte."+hasta+"T23:59:59&order=created_at.desc&limit=500").catch(function(e){console.error("loadVendedores query failed:",e);return [];}),
-    // Devoluciones this week
-    apiGet("ventas","select=vendedor_id,total,estado&created_at=gte."+desde+"T00:00:00&created_at=lte."+hasta+"T23:59:59&limit=200").catch(function(e){console.error("loadVendedores query failed:",e);return [];}),
-    // Gastos - no periodo_cerrado filter (may be null)
-    apiGet("gastos_vendedor","select=vendedor_id,monto,concepto,aprobado,created_at,id&order=created_at.desc&limit=500").catch(function(e){console.error("loadVendedores query failed:",e);return [];}),
-    // Rendiciones - all
-    apiGet("rendiciones","select=vendedor_id,monto,estado,concepto,created_at,id&order=created_at.desc&limit=500").catch(function(e){console.error("loadVendedores query failed:",e);return [];}),
-    // All ventas before this week
-    apiGet("ventas","select=vendedor_id,total,estado&created_at=lt."+desde+"T00:00:00&limit=1000").catch(function(e){console.error("loadVendedores query failed:",e);return [];}),
-    // All rendiciones before this week
-    apiGet("rendiciones","select=vendedor_id,monto,estado&created_at=lt."+desde+"T00:00:00&limit=500").catch(function(e){console.error("loadVendedores query failed:",e);return [];}),
+    // Ventas de esta semana calendar (para el header "N ventas esta semana")
+    apiGet("ventas","select=vendedor_id,total,estado,producto_nombre,cantidad,created_at&created_at=gte."+desde+"T00:00:00&created_at=lte."+hasta+"T23:59:59&order=created_at.desc&limit=500").catch(function(){return [];}),
+    // Gastos del período actual solamente
+    apiGet("gastos_vendedor","select=vendedor_id,monto,concepto,aprobado,periodo_cerrado,created_at,id&periodo_cerrado=eq.false&order=created_at.desc&limit=500").catch(function(){return [];}),
+    // Rendiciones del período actual solamente
+    apiGet("rendiciones","select=vendedor_id,monto,estado,tipo,concepto,created_at,id&order=created_at.desc&limit=500").catch(function(){return [];}),
+    // Ventas del período actual (para calcular total vendido real del período)
+    apiGet("ventas","select=vendedor_id,total,estado&estado=neq.archivada_periodo&limit=2000").catch(function(){return [];}),
   ]).then(function(res){
-    // Debug: log what we got
-    var ok=res.every(function(r){return Array.isArray(r);});
-    if(!ok){
-      var failed=res.map(function(r,i){return Array.isArray(r)?null:('query'+i+':'+JSON.stringify(r));}).filter(Boolean);
-      console.warn('loadVendedores queries failed:',failed);
-    }
-    var allVentasSem=Array.isArray(res[0])?res[0]:[];
-    var gastos=Array.isArray(res[2])?res[2]:[];
-    var rendiciones=Array.isArray(res[3])?res[3]:[];
-    var allVentasAntes=Array.isArray(res[4])?res[4]:[];
-    var rendAntes=Array.isArray(res[5])?res[5]:[];
-    // Filter client-side for confirmed sales
+    var allVentasSem  = Array.isArray(res[0])?res[0]:[];
+    var gastos        = Array.isArray(res[1])?res[1]:[];
+    var rendiciones   = Array.isArray(res[2])?res[2]:[];
+    var allVentasPer  = Array.isArray(res[3])?res[3]:[];
+
     var confirmedEstados=['confirmada','dev_parcial','devuelta','completada','pagada'];
-    var ventasSemana=allVentasSem.filter(function(v){return confirmedEstados.indexOf(v.estado)>=0;});
-    var devSemana=allVentasSem.filter(function(v){return v.estado==='devolucion'||v.estado==='devuelta';});
-    var ventasAntes=allVentasAntes.filter(function(v){return confirmedEstados.indexOf(v.estado)>=0;});
+    var ventasSemana  = allVentasSem.filter(function(v){return confirmedEstados.indexOf(v.estado)>=0;});
+    var devSemana     = allVentasSem.filter(function(v){return v.estado==='devolucion'||v.estado==='devuelta';});
+    var ventasPeriodo = allVentasPer.filter(function(v){return confirmedEstados.indexOf(v.estado)>=0;});
 
     var html="<div style='display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:.5rem;margin-bottom:1rem'>"+
       "<div style='font-size:1rem;font-weight:700;color:var(--tx)'>&#128101; Vendedores</div>"+
@@ -8340,36 +8329,37 @@ function loadVendedores(){
     try{
     VENDEDORES_CFG.forEach(function(v){
       var vid=v.id;
-      // This week
+      // Ventas esta semana (solo para el contador del header)
       var mis=ventasSemana.filter(function(x){return x.vendedor_id===vid;});
       var devs=devSemana.filter(function(x){return x.vendedor_id===vid;});
       var tvSemana=mis.reduce(function(s,x){return s+(x.total||0);},0);
-      var tvDevSemana=devs.reduce(function(s,x){return s+(x.total||0);},0); // negative
+
+      // Ventas del período completo (lo que realmente tiene David encima)
+      var misPeriodo=ventasPeriodo.filter(function(x){return x.vendedor_id===vid;});
+      var tvPeriodo=misPeriodo.reduce(function(s,x){return s+(x.total||0);},0);
+
+      // Gastos del período (ya filtrados por periodo_cerrado=false)
       var misGastos=gastos.filter(function(x){return x.vendedor_id===vid;});
       var gastosAprobados=misGastos.filter(function(g){return g.aprobado;});
-      // Show ALL pending gastos - commissions included
       var gastosPend=misGastos.filter(function(g){return !g.aprobado;});
-      // Separate "Dinero enviado" from regular expenses
       var dineroEnviado=gastosAprobados.filter(function(g){return g.concepto&&g.concepto.indexOf('Dinero enviado')===0;}).reduce(function(s,g){return s+(g.monto||0);},0);
-      var gastosComision=gastosAprobados.filter(function(g){return g.concepto&&g.concepto.indexOf('Comision Marcela')===0;}).reduce(function(s,g){return s+(g.monto||0);},0);
       var tGastosReales=gastosAprobados.filter(function(g){return !g.concepto||g.concepto.indexOf('Dinero enviado')!==0;}).reduce(function(s,g){return s+(g.monto||0);},0);
       var tGastos=tGastosReales+dineroEnviado;
-      // Marcela deposito: comisiones desglose
-      var mComPend=misGastos.filter(function(g){return !g.aprobado&&!g.periodo_cerrado&&g.concepto.indexOf('[CANCELADA]')<0;}).reduce(function(s,g){return s+(g.monto||0);},0);
-      var mComAcept=misGastos.filter(function(g){return g.aprobado&&!g.periodo_cerrado;}).reduce(function(s,g){return s+(g.monto||0);},0);
-      var mComCobr=misGastos.filter(function(g){return g.periodo_cerrado;}).reduce(function(s,g){return s+(g.monto||0);},0);
+
+      // Marcela comisiones
+      var mComPend=misGastos.filter(function(g){return !g.aprobado&&(!g.periodo_cerrado||g.periodo_cerrado==='false')&&g.concepto.indexOf('[CANCELADA]')<0;}).reduce(function(s,g){return s+(g.monto||0);},0);
+      var mComAcept=misGastos.filter(function(g){return g.aprobado&&(!g.periodo_cerrado||g.periodo_cerrado==='false');}).reduce(function(s,g){return s+(g.monto||0);},0);
+      var mComCobr=misGastos.filter(function(g){return g.periodo_cerrado&&g.periodo_cerrado!=='false';}).reduce(function(s,g){return s+(g.monto||0);},0);
+
+      // Rendiciones: separar arrastrado de rendido real
       var misRend=rendiciones.filter(function(x){return x.vendedor_id===vid;});
       var rendPend=misRend.filter(function(r){return r.estado==="pendiente";});
-      // Excluir saldo_arrastrado del rendido: no es una entrega real de dinero
-      var tvRendSemana=misRend.filter(function(r){return r.estado==="aprobada"&&r.tipo!=='saldo_arrastrado';}).reduce(function(s,r){return s+(r.monto||0);},0);
-      // El saldo_arrastrado se suma como positivo al saldo actual (David lo tiene encima)
-      var taArrastrado=misRend.filter(function(r){return r.tipo==='saldo_arrastrado';}).reduce(function(s,r){return s+(r.monto||0);},0);
-      // Carry-over saldo from before this week
-      var tvAntes=ventasAntes.filter(function(x){return x.vendedor_id===vid;}).reduce(function(s,x){return s+(x.total||0);},0);
-      var trAntes=rendAntes.filter(function(x){return x.vendedor_id===vid;}).reduce(function(s,x){return s+(x.monto||0);},0);
-      var saldoAnterior=tvAntes-trAntes;
-      // Current saldo
-      var saldoActual=saldoAnterior+(tvSemana+tvDevSemana)-tGastos-tvRendSemana+taArrastrado;
+      var rendAprobadas=misRend.filter(function(r){return r.estado==="aprobada";});
+      var tvRendido=rendAprobadas.filter(function(r){return r.tipo!=='saldo_arrastrado';}).reduce(function(s,r){return s+(r.monto||0);},0);
+      var taArrastrado=rendAprobadas.filter(function(r){return r.tipo==='saldo_arrastrado';}).reduce(function(s,r){return s+(r.monto||0);},0);
+
+      // Saldo real: lo que tiene encima = vendido período + arrastrado - gastos - rendido real
+      var saldoActual=tvPeriodo+taArrastrado-tGastos-tvRendido;
 
       html+=
         "<div class='tbl-wrap' style='padding:0;overflow:hidden'>"+
@@ -8381,8 +8371,9 @@ function loadVendedores(){
           // Stats grid
           "<div style='display:grid;grid-template-columns:repeat(3,1fr);gap:0;border-bottom:1px solid var(--bd)'>"+
             "<div style='padding:.5rem .7rem;border-right:1px solid var(--bd);text-align:center'>"+
-              "<div style='font-size:.6rem;color:var(--tx3);text-transform:uppercase'>"+(v.rol==='deposito'?'Transf. enviadas':'Vendido')+"</div>"+
-              "<div style='font-size:.9rem;font-weight:700;color:var(--green)'>"+(v.rol==='deposito'?mis.length+' op.':fmt(tvSemana))+"</div>"+
+              "<div style='font-size:.6rem;color:var(--tx3);text-transform:uppercase'>"+(v.rol==='deposito'?'Transf. enviadas':'Vendido período')+"</div>"+
+              "<div style='font-size:.9rem;font-weight:700;color:var(--green)'>"+(v.rol==='deposito'?mis.length+' op.':fmt(tvPeriodo))+"</div>"+
+              (v.rol!=='deposito'&&tvSemana!==tvPeriodo?"<div style='font-size:.6rem;color:var(--tx3)'>sem: "+fmt(tvSemana)+"</div>":"")+
             "</div>"+
             "<div style='padding:.5rem .7rem;border-right:1px solid var(--bd);text-align:center'>"+
               "<div style='font-size:.6rem;color:var(--tx3);text-transform:uppercase'>"+(v.rol==='deposito'?'Aprobadas':'Gastos')+"</div>"+
@@ -8397,16 +8388,18 @@ function loadVendedores(){
             "</div>"+
             "<div style='padding:.5rem .7rem;text-align:center'>"+
               "<div style='font-size:.6rem;color:var(--tx3);text-transform:uppercase'>"+(v.rol==='deposito'?'Cobradas':'Rendido')+"</div>"+
-              "<div style='font-size:.9rem;font-weight:700;color:var(--acc)'>"+(v.rol==='deposito'?fmt(mComCobr):fmt(tvRendSemana))+"</div>"+
+              "<div style='font-size:.9rem;font-weight:700;color:var(--acc)'>"+(v.rol==='deposito'?fmt(mComCobr):fmt(tvRendido))+"</div>"+
               (v.rol!=='deposito'&&rendPend.length?"<div style='font-size:.6rem;color:var(--yel)'>"+rendPend.length+" pend.</div>":"")+
             "</div>"+
           "</div>"+
           // Saldo
-          "<div style='padding:.5rem 1rem;border-bottom:1px solid var(--bd);display:flex;justify-content:space-between;align-items:center'>"+
-            "<div>"+
-              "<div style='font-size:.65rem;color:var(--tx3)'>Saldo anterior semana: <span style='color:var(--tx2)'>"+fmt(saldoAnterior)+"</span></div>"+
-              "<div style='font-size:.7rem;font-weight:700'>Saldo actual encima: <span style='color:"+(saldoActual>0?"var(--yel)":saldoActual<0?"var(--red)":"var(--tx2)")+"'>"+fmt(saldoActual)+"</span></div>"+
-              "<div style='font-size:.55rem;color:var(--tx3);margin-top:.2rem'>v/sem:"+fmt(tvSemana)+" v/ant:"+fmt(tvAntes)+" rend:"+fmt(tvRendSemana)+" r/ant:"+fmt(trAntes)+" g:"+fmt(tGastos)+"</div>"+
+          "<div style='padding:.5rem 1rem;border-bottom:1px solid var(--bd)'>"+
+            "<div style='display:flex;justify-content:space-between;align-items:center'>"+
+              "<div>"+
+                (taArrastrado>0?"<div style='font-size:.65rem;color:var(--tx3)'>Arrastrado período anterior: <span style='color:var(--acc)'>"+fmt(taArrastrado)+"</span></div>":"")+
+                "<div style='font-size:.75rem;font-weight:700'>Saldo encima: <span style='color:"+(saldoActual>0?"var(--yel)":saldoActual===0?"var(--tx2)":"var(--red)")+"'>"+fmt(Math.max(0,saldoActual))+"</span></div>"+
+                "<div style='font-size:.55rem;color:var(--tx3);margin-top:.1rem'>vend:"+fmt(tvPeriodo)+(taArrastrado>0?" arrastrado:"+fmt(taArrastrado):"")+" rend:"+fmt(tvRendido)+" g:"+fmt(tGastos)+"</div>"+
+              "</div>"+
             "</div>"+
           "</div>"+
           // Pending items
