@@ -1,0 +1,131 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>Test Periodos Belle</title>
+<style>
+body { font-family: monospace; padding: 20px; background: #1a1a1a; color: #eee; }
+.ok { color: #4ade80; }
+.err { color: #f87171; }
+.warn { color: #fbbf24; }
+pre { background: #2a2a2a; padding: 10px; border-radius: 6px; overflow-x:auto; font-size: 12px; }
+button { background: #c4965a; color: white; border: none; padding: 8px 16px; border-radius: 6px; cursor: pointer; margin: 4px; }
+</style>
+</head>
+<body>
+<h2>🔍 Test Diagnóstico — Pestaña Períodos</h2>
+<p>Abrí esta página en el mismo browser donde usás Belle admin.</p>
+<button onclick="runTests()">▶ Ejecutar Tests</button>
+<button onclick="testDirecto()">▶ Test Directo (carga belle.html)</button>
+<div id="output"></div>
+
+<script>
+const log = (msg, cls='') => {
+  const d = document.getElementById('output');
+  d.innerHTML += `<div class="${cls}">${msg}</div>`;
+};
+
+async function runTests() {
+  document.getElementById('output').innerHTML = '';
+  log('<h3>Cargando belle.html para analizar...</h3>');
+  
+  try {
+    const resp = await fetch('/belle.html');
+    const html = await resp.text();
+    log(`✓ belle.html cargado: ${html.length.toLocaleString()} bytes`, 'ok');
+    
+    const js = html.slice(html.indexOf('//<![CDATA[')+11, html.indexOf('//]]>'));
+    log(`✓ JS extraído: ${js.length.toLocaleString()} chars`, 'ok');
+    
+    // Test 1: backupEmail declarada?
+    const hasBackupEmail = /var periodoActual[^;]*backupEmail[^;]*;/.test(js);
+    log(hasBackupEmail ? '✓ backupEmail declarada globalmente' : '✗ backupEmail NO está declarada — este es el bug!', hasBackupEmail ? 'ok' : 'err');
+    
+    // Test 2: renderPeriodosPage existe?
+    const hasRPP = js.includes('function renderPeriodosPage(');
+    log(hasRPP ? '✓ renderPeriodosPage existe' : '✗ renderPeriodosPage NO encontrada', hasRPP ? 'ok' : 'err');
+    
+    // Test 3: Intentar ejecutar renderPeriodosPage
+    if (hasRPP) {
+      try {
+        // Extraer la función
+        const idx = js.indexOf('function renderPeriodosPage(');
+        let d=0, j=idx, end=idx;
+        while(j<js.length){if(js[j]==='{')d++;else if(js[j]==='}'){d--;if(!d){end=j+1;break;}}j++;}
+        const fnStr = js.slice(idx, end);
+        
+        // Setup mínimo
+        const cont = { _h: '', get innerHTML(){return this._h;}, set innerHTML(v){this._h=v;} };
+        const mockDoc = { getElementById: ()=>({innerHTML:'',style:{},value:'',textContent:''}) };
+        
+        // Eval con contexto mínimo
+        const testFn = new Function('document', '_periodoConfig', '_periodosData', 'periodoActual', 'backupEmail', 'renderPeriodoCard', 'loadResumenPeriodoActual', 'fmt',
+          fnStr + '\nreturn renderPeriodosPage;'
+        );
+        
+        const fn = testFn(
+          mockDoc,
+          {tipo:'semanal',diaCierre:0,autoClose:false,autoCloseHora:'23:59'},
+          [],
+          'general',
+          'test@gmail.com',
+          ()=>'<div>card</div>',
+          ()=>{},
+          n=>'$'+n
+        );
+        
+        fn(cont);
+        
+        if (cont._h.length > 100) {
+          log(`✓ renderPeriodosPage ejecuta OK (${cont._h.length} chars HTML)`, 'ok');
+          log(`✓ Tiene perTipo: ${cont._h.includes('perTipo')}`, 'ok');
+          log(`✓ Sin spinner: ${!cont._h.includes('Cargando...')}`, 'ok');
+        } else {
+          log('✗ renderPeriodosPage produjo HTML muy corto: ' + cont._h.slice(0,100), 'err');
+        }
+      } catch(e) {
+        log('✗ ERROR en renderPeriodosPage: ' + e.message, 'err');
+        log('<pre>' + e.stack + '</pre>');
+      }
+    }
+    
+    // Test 4: Ver declaración global exacta
+    const varMatch = js.match(/var periodoActual[^;]+;/);
+    if (varMatch) {
+      log('Declaración global: <pre>' + varMatch[0] + '</pre>');
+    }
+    
+    // Test 5: Ver el HTML actual de periodosContainer en la página
+    const cont = document.getElementById('periodosContainer');
+    if (cont) {
+      log(`✓ periodosContainer encontrado en la página. Contenido actual: ${cont.innerHTML.length} chars`, 'ok');
+      log('Contenido: <pre>' + cont.innerHTML.slice(0,300).replace(/</g,'&lt;') + '</pre>');
+    } else {
+      log('ℹ periodosContainer no encontrado (normal, estamos en test_periodos.html)', 'warn');
+    }
+    
+  } catch(e) {
+    log('✗ Error cargando belle.html: ' + e.message, 'err');
+  }
+}
+
+async function testDirecto() {
+  log('<h3>Verificando versión en servidor...</h3>');
+  const resp = await fetch('/belle.html', {cache: 'no-store'});
+  const html = await resp.text();
+  const js = html.slice(html.indexOf('//<![CDATA[')+11, html.indexOf('//]]>'));
+  
+  const varDecl = js.match(/var periodoActual[^;]+;/)?.[0] || 'NO ENCONTRADA';
+  log('Versión en servidor:');
+  log('<pre>' + varDecl + '</pre>');
+  
+  const hasBackup = varDecl.includes('backupEmail');
+  log(hasBackup ? '✓ backupEmail presente — el archivo correcto está en el servidor' : '✗ backupEmail ausente — el servidor tiene el archivo VIEJO', hasBackup ? 'ok' : 'err');
+  
+  if (!hasBackup) {
+    log('<br><strong class="err">EL PROBLEMA: Subiste el archivo nuevo al servidor pero sigue el archivo viejo.</strong><br>Intentá hacer hard refresh (Ctrl+Shift+R) o subir el archivo de nuevo.', 'err');
+  }
+}
+</script>
+</body>
+</html>
