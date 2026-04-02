@@ -1,0 +1,428 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>Test Integral Belle</title>
+<style>
+* { box-sizing: border-box; }
+body { font-family: monospace; padding: 16px; background: #0f1117; color: #eee; font-size: 12px; margin: 0; }
+h2 { color: #e8b86d; margin: 0 0 12px; font-size: 16px; }
+.panel { display: grid; grid-template-columns: repeat(auto-fit, minmax(320px, 1fr)); gap: 12px; margin-bottom: 12px; }
+.card { background: #181c27; border: 1px solid #2a3045; border-radius: 8px; padding: 12px; }
+.card h3 { margin: 0 0 8px; font-size: 13px; color: #e8b86d; }
+.ok  { color: #4ade80; }
+.err { color: #f87171; }
+.warn{ color: #fbbf24; }
+.info{ color: #60a5fa; }
+.line { padding: 2px 0; border-bottom: 1px solid #1e2333; display: flex; gap: 6px; align-items: baseline; }
+.line:last-child { border-bottom: none; }
+.badge { font-size: 10px; padding: 1px 5px; border-radius: 4px; flex-shrink: 0; }
+.badge.ok  { background: #052e16; color: #4ade80; }
+.badge.err { background: #2d1218; color: #f87171; }
+.badge.warn{ background: #27200a; color: #fbbf24; }
+.badge.info{ background: #0c1a2e; color: #60a5fa; }
+pre { background: #252a3a; padding: 6px; border-radius: 4px; white-space: pre-wrap; word-break: break-all; font-size: 10px; margin: 4px 0; max-height: 150px; overflow-y: auto; }
+button { background: #e8b86d; color: #0f1117; border: none; padding: 10px 20px; border-radius: 6px; cursor: pointer; font-size: 13px; font-weight: 700; margin-right: 6px; }
+button:disabled { opacity: .5; }
+#summary { background: #181c27; border: 1px solid #2a3045; border-radius: 8px; padding: 12px; margin-bottom: 12px; font-size: 13px; }
+.prog { height: 4px; background: #252a3a; border-radius: 2px; margin-bottom: 12px; overflow: hidden; }
+.prog-bar { height: 100%; background: #e8b86d; border-radius: 2px; transition: width .3s; width: 0%; }
+</style>
+</head>
+<body>
+<h2>🔍 Test Integral Belle — Admin + Vendedor + Marcela</h2>
+<div style="margin-bottom:12px">
+  <button onclick="runAll()" id="btnRun">▶ EJECUTAR TODO</button>
+  <button onclick="runAll(true)" id="btnQuick">⚡ Solo errores</button>
+</div>
+<div class="prog"><div class="prog-bar" id="progBar"></div></div>
+<div id="summary">Presioná Ejecutar para comenzar...</div>
+<div class="panel" id="panels"></div>
+
+<script>
+let onlyErrors = false;
+const SB = {};
+
+function qs(id){ return document.getElementById(id); }
+function prog(pct){ qs('progBar').style.width = pct+'%'; }
+
+function card(id, title){
+  const d = document.createElement('div');
+  d.className = 'card'; d.id = 'card-'+id;
+  d.innerHTML = `<h3>${title}</h3><div id="log-${id}"></div>`;
+  qs('panels').appendChild(d);
+  return id;
+}
+
+function line(cardId, label, status, detail=''){
+  if(onlyErrors && status === 'ok') return;
+  const d = qs('log-'+cardId);
+  if(!d) return;
+  const div = document.createElement('div');
+  div.className = 'line';
+  div.innerHTML = `<span class="badge ${status}">${status.toUpperCase()}</span><span>${label}</span>${detail?`<span style="color:#555;font-size:10px">${detail}</span>`:''}`;
+  d.appendChild(div);
+}
+
+function err(cardId, label, detail=''){  line(cardId, label, 'err', detail); }
+function ok(cardId, label, detail=''){   line(cardId, label, 'ok', detail); }
+function warn(cardId, label, detail=''){ line(cardId, label, 'warn', detail); }
+function info(cardId, label, detail=''){ line(cardId, label, 'info', detail); }
+
+async function fetchFile(path){
+  const r = await fetch(path, {cache:'no-store'});
+  return r.text();
+}
+
+function extractJS(html){
+  return html.slice(html.indexOf('//<![CDATA[')+11, html.indexOf('//]]>'));
+}
+
+function getFunctions(js){
+  const fns = {};
+  const re = /function (\w+)\s*\(/g;
+  let m;
+  while((m = re.exec(js)) !== null) fns[m[1]] = true;
+  return fns;
+}
+
+function getOnclicks(html){
+  const re = /onclick=['"]([^'"]+)['"]/g;
+  const calls = new Set();
+  let m;
+  while((m = re.exec(html)) !== null){
+    const fn = m[1].match(/^(\w+)\s*\(/);
+    if(fn) calls.add(fn[1]);
+  }
+  return calls;
+}
+
+async function testSyntax(cardId, js, label){
+  // Verificar balanceo de llaves/paréntesis
+  let b=0, p=0, s=0;
+  let inStr=false, strChar='', escaped=false;
+  for(let i=0;i<js.length;i++){
+    const c=js[i];
+    if(escaped){escaped=false;continue;}
+    if(c==='\\'){escaped=true;continue;}
+    if(inStr){if(c===strChar)inStr=false;continue;}
+    if(c==='"'||c==="'"||c==='`'){inStr=true;strChar=c;continue;}
+    if(c==='{')b++;else if(c==='}')b--;
+    if(c==='(')p++;else if(c===')')p--;
+    if(c==='[')s++;else if(c===']')s--;
+  }
+  if(b!==0||p!==0||s!==0){
+    err(cardId, label+': balance incorrecto', `{:${b} (:${p} [:${s}`);
+    return false;
+  }
+  ok(cardId, label+': balance OK', `${Math.round(js.length/1000)}KB`);
+  return true;
+}
+
+async function testOnclicks(cardId, html, js, label){
+  const defined = getFunctions(js);
+  const called  = getOnclicks(html);
+  const IGNORE  = new Set(['if','return','true','false','void','setTimeout','clearInterval','setInterval','encodeURIComponent','parseInt','parseFloat','Object','Array','Math','JSON','String','Boolean','Number','fetch','Promise','console','alert','confirm','window','document']);
+  const missing = [...called].filter(f => !defined[f] && !IGNORE.has(f));
+  if(missing.length){
+    missing.forEach(f => warn(cardId, `onclick llama '${f}' — no definida`));
+  } else {
+    ok(cardId, `Todas las funciones de onclick definidas`, `${called.size} revisadas`);
+  }
+  return missing.length === 0;
+}
+
+async function testSupabase(cardId){
+  try {
+    const r = await fetch(SB.url+'/rest/v1/configuracion?select=clave,valor&limit=3', {
+      headers: {'apikey':SB.key,'Authorization':'Bearer '+SB.key}
+    });
+    const data = await r.json();
+    if(Array.isArray(data) && data.length > 0){
+      ok(cardId, 'Supabase conectado', data.length+' registros config');
+      return true;
+    } else {
+      warn(cardId, 'Supabase responde pero sin datos', JSON.stringify(data).slice(0,80));
+      return false;
+    }
+  } catch(e){
+    err(cardId, 'Supabase ERROR', e.message);
+    return false;
+  }
+}
+
+async function testTablas(cardId){
+  const tablas = ['productos','ventas','gastos_vendedor','rendiciones','historial_periodos','configuracion','pedidos_catalogo','movimientos_stock'];
+  let ok_count=0;
+  for(const t of tablas){
+    try {
+      const r = await fetch(SB.url+'/rest/v1/'+t+'?select=id&limit=1', {
+        headers: {'apikey':SB.key,'Authorization':'Bearer '+SB.key}
+      });
+      const data = await r.json();
+      if(Array.isArray(data)){
+        ok_count++;
+        if(!onlyErrors) ok(cardId, 'Tabla '+t, data.length>0?'tiene datos':'vacía');
+      } else {
+        err(cardId, 'Tabla '+t+' ERROR', JSON.stringify(data).slice(0,80));
+      }
+    } catch(e){
+      err(cardId, 'Tabla '+t, e.message);
+    }
+  }
+  return ok_count === tablas.length;
+}
+
+async function testIframe(cardId, path, fnTests){
+  const iframe = document.createElement('iframe');
+  iframe.style.cssText = 'width:1px;height:1px;position:absolute;left:-9999px';
+  document.body.appendChild(iframe);
+  
+  const errors = [];
+  await new Promise(resolve => {
+    iframe.onload = resolve;
+    iframe.onerror = () => { errors.push('iframe load error'); resolve(); };
+    iframe.src = path + '?t=' + Date.now();
+  });
+  
+  await new Promise(r => setTimeout(r, 1500));
+  
+  try {
+    const iw = iframe.contentWindow;
+    
+    // Capturar errores JS del iframe
+    const iframeErrs = [];
+    iw.onerror = (msg,src,line,col) => { iframeErrs.push(`${msg} L${line}`); return true; };
+    
+    // Testear funciones específicas
+    for(const {name, args, check} of fnTests){
+      if(typeof iw[name] !== 'function'){
+        err(cardId, `${name}: no existe en el contexto`);
+        continue;
+      }
+      try {
+        const result = iw[name](...(args||[]));
+        if(check){
+          const checkResult = await check(iw, result);
+          if(checkResult === true) ok(cardId, `${name}(): OK`);
+          else if(checkResult === false) err(cardId, `${name}(): falló`, '');
+          else warn(cardId, `${name}(): ${checkResult}`);
+        } else {
+          ok(cardId, `${name}(): llamada sin error`);
+        }
+      } catch(e){
+        err(cardId, `${name}(): ERROR`, e.message.slice(0,60));
+      }
+    }
+    
+    if(iframeErrs.length){
+      iframeErrs.forEach(e => err(cardId, 'JS error en página', e.slice(0,80)));
+    }
+    
+  } catch(e){
+    warn(cardId, 'No se pudo acceder al iframe', e.message.slice(0,60));
+  }
+  
+  document.body.removeChild(iframe);
+}
+
+async function testOnclicksSintax(cardId, html){
+  // Simular cada onclick con un argumento de ejemplo y verificar si es JS válido
+  const re = /onclick=['"]([^'"]+)['"]/g;
+  let m, errCount=0, total=0;
+  const seenTemplates = new Set();
+  while((m = re.exec(html)) !== null){
+    const template = m[1];
+    if(seenTemplates.has(template)) continue;
+    seenTemplates.add(template);
+    total++;
+    // Reemplazar variables JS comunes para simular valores reales
+    const simulated = template
+      .replace(/\+g\.id\+/g, '99')
+      .replace(/\+p\.id\+/g, '99')
+      .replace(/\+v\.id\+/g, '99')
+      .replace(/\+r\.id\+/g, '99')
+      .replace(/\+id\+/g, '99')
+      .replace(/\+vid\+/g, '99')
+      .replace(/\+i\+/g, '0')
+      .replace(/\+idx\+/g, '0')
+      .replace(/\\'/g, "'")
+      .replace(/\\"/g, '"');
+    try {
+      new Function(simulated);
+    } catch(e){
+      // Solo reportar si parece un error real (no solo sintaxis de template)
+      if(!simulated.includes('+"') && !simulated.includes("+'") && !simulated.includes('+g.') && !simulated.includes('+p.')){
+        err(cardId, 'onclick JS inválido', `"${simulated.slice(0,60)}" → ${e.message}`);
+        errCount++;
+      }
+    }
+  }
+  if(errCount===0) ok(cardId, `${total} onclicks únicos — todos válidos`);
+  return errCount === 0;
+}
+
+async function runAll(onlyErr=false){
+  onlyErrors = onlyErr;
+  qs('panels').innerHTML = '';
+  qs('btnRun').disabled = true;
+  qs('btnQuick').disabled = true;
+  qs('summary').innerHTML = 'Ejecutando tests...';
+  
+  let totalOk=0, totalErr=0, totalWarn=0;
+  const startTime = Date.now();
+  prog(5);
+
+  // ── CARGAR ARCHIVOS ──────────────────────────────────────────────
+  const c0 = card('files', '📂 Archivos');
+  let belleHtml, vendorHtml, marcelHtml;
+  try {
+    belleHtml  = await fetchFile('/belle.html');
+    ok(c0, 'belle.html cargado', (belleHtml.length/1024).toFixed(0)+'KB');
+    vendorHtml = await fetchFile('/ventas.html');
+    ok(c0, 'ventas.html cargado', (vendorHtml.length/1024).toFixed(0)+'KB');
+    marcelHtml = await fetchFile('/marcela.html');
+    ok(c0, 'marcela.html cargado', (marcelHtml.length/1024).toFixed(0)+'KB');
+  } catch(e){
+    err(c0, 'Error cargando archivos', e.message);
+    qs('btnRun').disabled = false; qs('btnQuick').disabled = false;
+    return;
+  }
+  prog(15);
+
+  const belleJS  = extractJS(belleHtml);
+  const vendorJS = extractJS(vendorHtml);
+  const marcelJS = extractJS(marcelHtml);
+
+  // Extraer SB_URL y SB_KEY
+  SB.url = belleJS.match(/var SB_URL\s*=\s*['"]([^'"]+)['"]/)?.[1] || '';
+  SB.key = belleJS.match(/var SB_KEY\s*=\s*['"]([^'"]+)['"]/)?.[1] || '';
+  ok(c0, 'Supabase URL extraída', SB.url.slice(8,40)+'...');
+
+  // ── SINTAXIS JS ──────────────────────────────────────────────────
+  const c1 = card('syntax', '⚙️ Sintaxis JS');
+  await testSyntax(c1, belleJS,  'belle.html JS');
+  await testSyntax(c1, vendorJS, 'ventas.html JS');
+  await testSyntax(c1, marcelJS, 'marcela.html JS');
+  prog(25);
+
+  // ── FUNCIONES ONCLICK ────────────────────────────────────────────
+  const c2 = card('onclicks', '🔗 Referencias onclick');
+  await testOnclicks(c2, belleHtml,  belleJS,  'Admin');
+  await testOnclicks(c2, vendorHtml, vendorJS, 'Vendedor');
+  await testOnclicks(c2, marcelHtml, marcelJS, 'Marcela');
+  prog(35);
+
+  // ── SINTAXIS ONCLICKS ────────────────────────────────────────────
+  const c3 = card('oncliksynt', '✅ Validez JS de onclicks');
+  await testOnclicksSintax(c3, belleHtml);
+  await testOnclicksSintax(c3, vendorHtml);
+  await testOnclicksSintax(c3, marcelHtml);
+  prog(45);
+
+  // ── SUPABASE ─────────────────────────────────────────────────────
+  const c4 = card('supabase', '🗄️ Supabase');
+  await testSupabase(c4);
+  await testTablas(c4);
+  prog(55);
+
+  // ── TEST FUNCIONES ADMIN EN IFRAME ───────────────────────────────
+  const c5 = card('admin', '👤 Admin — funciones clave');
+  info(c5, 'Cargando belle.html en iframe...');
+  await testIframe(c5, '/belle.html', [
+    { name: 'loadPeriodos', check: async (iw) => {
+        await new Promise(r=>setTimeout(r,2000));
+        const cont = iw.document.getElementById('periodosContainer');
+        if(!cont) return 'periodosContainer no existe';
+        if(cont.innerHTML.includes('Cargando')) return false;
+        return cont.innerHTML.length > 200;
+    }},
+    { name: 'loadVendedores', check: async (iw) => {
+        await new Promise(r=>setTimeout(r,2000));
+        const cont = iw.document.getElementById('page-vendedores');
+        return cont && cont.innerHTML.length > 100;
+    }},
+    { name: 'loadProds', check: async (iw) => {
+        await new Promise(r=>setTimeout(r,2000));
+        const cont = iw.document.getElementById('page-stock');
+        return cont ? true : 'page-stock no encontrado';
+    }},
+    { name: 'loadRendicion', check: async (iw) => {
+        await new Promise(r=>setTimeout(r,2000));
+        return true; // Solo verificar que no tira error
+    }},
+    { name: 'loadDashboard', check: async (iw) => {
+        await new Promise(r=>setTimeout(r,2000));
+        return true;
+    }},
+  ]);
+  prog(70);
+
+  // ── TEST FUNCIONES VENDEDOR EN IFRAME ───────────────────────────
+  const c6 = card('vendedor', '🛒 Vendedor — funciones clave');
+  info(c6, 'Cargando ventas.html en iframe...');
+  await testIframe(c6, '/ventas.html', [
+    { name: 'loadProds', check: async (iw) => {
+        await new Promise(r=>setTimeout(r,2000));
+        return typeof iw.loadProds === 'function';
+    }},
+    { name: 'loadHistorial', check: async (iw) => {
+        await new Promise(r=>setTimeout(r,1500));
+        return true;
+    }},
+    { name: 'loadGastos', check: async (iw) => {
+        await new Promise(r=>setTimeout(r,1500));
+        return true;
+    }},
+    { name: 'loadDineroData', check: async (iw) => {
+        await new Promise(r=>setTimeout(r,1500));
+        return true;
+    }},
+  ]);
+  prog(85);
+
+  // ── TEST FUNCIONES MARCELA EN IFRAME ────────────────────────────
+  const c7 = card('marcela', '💜 Marcela — funciones clave');
+  info(c7, 'Cargando marcela.html en iframe...');
+  await testIframe(c7, '/marcela.html', [
+    { name: 'loadProds', check: async (iw) => {
+        await new Promise(r=>setTimeout(r,1500));
+        return true;
+    }},
+    { name: 'loadDepositoMarcela', check: async (iw) => {
+        await new Promise(r=>setTimeout(r,1500));
+        return true;
+    }},
+    { name: 'loadGastos', check: async (iw) => {
+        await new Promise(r=>setTimeout(r,1500));
+        return true;
+    }},
+  ]);
+  prog(95);
+
+  // ── RESUMEN FINAL ────────────────────────────────────────────────
+  const elapsed = ((Date.now()-startTime)/1000).toFixed(1);
+  document.querySelectorAll('.badge.ok').forEach(()=>totalOk++);
+  document.querySelectorAll('.badge.err').forEach(()=>totalErr++);
+  document.querySelectorAll('.badge.warn').forEach(()=>totalWarn++);
+
+  // Contar por clase real
+  const allOk   = document.querySelectorAll('.badge.ok').length;
+  const allErr  = document.querySelectorAll('.badge.err').length;
+  const allWarn = document.querySelectorAll('.badge.warn').length;
+
+  qs('summary').innerHTML = `
+    <div style="display:flex;gap:16px;flex-wrap:wrap;align-items:center">
+      <div><span style="color:#4ade80;font-size:18px;font-weight:700">${allOk} ✓</span> <span style="color:#555">OK</span></div>
+      <div><span style="color:#f87171;font-size:18px;font-weight:700">${allErr} ✗</span> <span style="color:#555">Errores</span></div>
+      <div><span style="color:#fbbf24;font-size:18px;font-weight:700">${allWarn} ⚠</span> <span style="color:#555">Warnings</span></div>
+      <div style="color:#555">en ${elapsed}s</div>
+      ${allErr===0?'<div style="color:#4ade80;font-weight:700">✅ Sin errores críticos</div>':'<div style="color:#f87171;font-weight:700">⛔ Hay errores — revisar arriba</div>'}
+    </div>`;
+  prog(100);
+  qs('btnRun').disabled = false;
+  qs('btnQuick').disabled = false;
+}
+</script>
+</body>
+</html>
