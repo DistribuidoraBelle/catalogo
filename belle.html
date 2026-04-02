@@ -14122,7 +14122,7 @@ function loadResumenPeriodoActual(){
 function renderPeriodoCard(p){
   var fecha=p.fecha_cierre?new Date(p.fecha_cierre).toLocaleDateString('es-AR',{day:'2-digit',month:'2-digit',year:'2-digit',timeZone:'America/Argentina/Buenos_Aires'}):'-';
   var desde=p.fecha_inicio?new Date(p.fecha_inicio).toLocaleDateString('es-AR',{day:'2-digit',month:'2-digit',timeZone:'America/Argentina/Buenos_Aires'}):'-';
-  var tv=p.total_ventas||0,tg=p.total_gastos||0,sa=p.saldo_arrastrado||0;
+  var tv=p.total_ventas||0,tg=p.total_gastos||0,sa=p.saldo_pendiente||0;
   return '<div style="background:var(--sur3);border-radius:8px;overflow:hidden;border:1px solid var(--bd);margin-bottom:.4rem">'
     +'<div style="padding:.6rem .85rem;cursor:pointer;display:flex;align-items:center;justify-content:space-between;gap:.5rem;flex-wrap:wrap" onclick="togglePeriodoDetalle(\'pd-'+p.id+'\')">'
       +'<div style="display:flex;align-items:center;gap:.6rem">'
@@ -14190,7 +14190,9 @@ function loadPeriodoDetalle(el,p){
       var tr=vd.r.reduce(function(s,x){return s+(x.monto||0);},0);
       var tc=vd.c.reduce(function(s,x){return s+(x.monto||0);},0);
       var saldo=tv-tg-tr;
-      var sa=p['saldo_arrastrado_'+vid]||0;
+      var _rv=p.resumen_vendedores?JSON.parse(p.resumen_vendedores):{};
+      var _rvNames={1:'david',2:'facu',3:'marcela'};
+      var sa=(_rv[_rvNames[vid]]||{}).saldo||0;
       h+='<div style="background:var(--sur2);border-radius:6px;padding:.5rem .65rem;border:1px solid var(--bd)">';
         h+='<div style="font-size:.73rem;font-weight:700;color:var(--acc);margin-bottom:.28rem">'+VENDS[vid]+'</div>';
         h+='<div style="display:grid;grid-template-columns:1fr 1fr;gap:.1rem .3rem;font-size:.69rem">';
@@ -14469,33 +14471,31 @@ async function adminEjecutarCierrePeriodo() {
   toast('Cerrando periodo... aguarda', 'twarn');
   var fechaCierre = new Date().toISOString().split('T')[0];
 
-  // PASO 1: Calcular saldos por vendedor
-  // Traemos TODO lo activo (mismo criterio que el panel y preview)
-  Promise.all([
-    apiGet('ventas',          'select=vendedor_id,total,id&estado=eq.confirmada'),
-    apiGet('gastos_vendedor', 'select=vendedor_id,monto,id,aprobado,estado_comision&periodo_cerrado=eq.false'),
-    apiGet('rendiciones',     'select=vendedor_id,monto,id,tipo&estado=eq.aprobada')
-  ]).then(function(all) {
+  try {
+    // PASO 1: Traer todos los datos activos
+    toast('Paso 1/7: Calculando saldos...', 'twarn');
+    var all = await Promise.all([
+      apiGet('ventas',          'select=vendedor_id,total,id&estado=eq.confirmada'),
+      apiGet('gastos_vendedor', 'select=vendedor_id,monto,id,aprobado,estado_comision&periodo_cerrado=eq.false'),
+      apiGet('rendiciones',     'select=vendedor_id,monto,id,tipo&estado=eq.aprobada')
+    ]);
     var todasVentas  = all[0]||[];
     var todosGastos  = all[1]||[];
     var todasRendics = all[2]||[];
 
-    return vends.map(function(v) {
-      var ventas  = todasVentas.filter(function(x){return x.vendedor_id===v.id;});
-      var gastos  = todosGastos.filter(function(x){return x.vendedor_id===v.id&&x.aprobado;});
-      var rendics = todasRendics.filter(function(x){return x.vendedor_id===v.id&&x.tipo!=='saldo_arrastrado';});
+    var resultados = vends.map(function(v) {
+      var ventas     = todasVentas.filter(function(x){return x.vendedor_id===v.id;});
+      var gastos     = todosGastos.filter(function(x){return x.vendedor_id===v.id&&x.aprobado;});
+      var rendics    = todasRendics.filter(function(x){return x.vendedor_id===v.id&&x.tipo!=='saldo_arrastrado';});
       var arrastrado = todasRendics.filter(function(x){return x.vendedor_id===v.id&&x.tipo==='saldo_arrastrado';});
-
-      // Gastos aprobados normales (se van a eliminar)
+      // Gastos que se borran (los aprobados normales, no comisiones pendientes)
       var gastosBorrar = gastos.filter(function(g){
         return g.estado_comision !== 'pendiente' && g.estado_comision !== 'confirmada';
       });
-
       var tv = ventas.reduce(function(s,x){return s+(x.total||0);},0);
       var tg = gastosBorrar.reduce(function(s,x){return s+(x.monto||0);},0);
       var tr = rendics.reduce(function(s,x){return s+(x.monto||0);},0);
       var ta = arrastrado.reduce(function(s,x){return s+(x.monto||0);},0);
-
       return {
         id: v.id, n: v.n,
         tv: tv, tg: tg, tr: tr, ta: ta,
@@ -14506,59 +14506,48 @@ async function adminEjecutarCierrePeriodo() {
         arrastradoIds:   arrastrado.map(function(x){return x.id;})
       };
     });
-  })
 
-  // PASO 2: Guardar historial del periodo
-  .then(function(resultados) {
+    // PASO 2: Guardar historial
+    toast('Paso 2/7: Guardando historial...', 'twarn');
     var hData = {
-      periodo:          periodoActual,
-      fecha_cierre:     fechaCierre,
-      total_ventas:     resultados.reduce(function(s,r){return s+r.tv;}, 0),
-      total_gastos:     resultados.reduce(function(s,r){return s+r.tg;}, 0),
-      total_rendido:    resultados.reduce(function(s,r){return s+r.tr;}, 0),
-      saldo_arrastrado: resultados.reduce(function(s,r){return s+Math.max(0,r.saldo);}, 0)
+      periodo:         periodoActual,
+      fecha_cierre:    new Date().toISOString(),
+      total_ventas:    resultados.reduce(function(s,r){return s+r.tv;},0),
+      total_gastos:    resultados.reduce(function(s,r){return s+r.tg;},0),
+      total_rendido:   resultados.reduce(function(s,r){return s+r.tr;},0),
+      saldo_pendiente: resultados.reduce(function(s,r){return s+Math.max(0,r.saldo);},0),
+      created_by:      'admin',
+      resumen_vendedores: JSON.stringify(resultados.reduce(function(o,r){
+        o[r.n.toLowerCase()]={tv:r.tv,tg:r.tg,tr:r.tr,saldo:r.saldo};return o;},{}))
     };
-    resultados.forEach(function(r){ hData['saldo_arrastrado_'+r.id] = Math.max(0, r.saldo); });
-    return apiPost('historial_periodos', hData).then(function(){ return resultados; });
-  })
+    await apiPost('historial_periodos', hData);
 
-  // PASO 3: Archivar ventas confirmadas
-  .then(function(resultados) {
-    var ps = [];
-    resultados.forEach(function(r) {
-      r.ventasIds.forEach(function(id) {
-        ps.push(apiPatch('ventas', {estado:'archivada_periodo', periodo:periodoActual}, 'id=eq.'+id));
+    // PASO 3: Archivar ventas confirmadas
+    toast('Paso 3/7: Archivando ventas...', 'twarn');
+    var ps3 = [];
+    resultados.forEach(function(r){
+      r.ventasIds.forEach(function(id){
+        ps3.push(apiPatch('ventas', {estado:'archivada_periodo', periodo:periodoActual}, 'id=eq.'+id));
       });
     });
-    return Promise.all(ps).then(function(){ return resultados; });
-  })
+    await Promise.all(ps3);
 
-  // PASO 4: ELIMINAR gastos aprobados + ELIMINAR todas las rendiciones activas
-  .then(function(resultados) {
-    var ps = [];
-    resultados.forEach(function(r) {
-      // Gastos aprobados normales → BORRAR
-      r.gastosBorrarIds.forEach(function(id) {
-        ps.push(apiDelete('gastos_vendedor', 'id=eq.'+id));
-      });
-      // Rendiciones activas (no arrastradas) → BORRAR
-      r.rendicsIds.forEach(function(id) {
-        ps.push(apiDelete('rendiciones', 'id=eq.'+id));
-      });
-      // Rendiciones arrastradas del periodo anterior → BORRAR (se reemplazan en PASO 5)
-      r.arrastradoIds.forEach(function(id) {
-        ps.push(apiDelete('rendiciones', 'id=eq.'+id));
-      });
+    // PASO 4: Eliminar gastos aprobados y todas las rendiciones activas
+    toast('Paso 4/7: Limpiando gastos y rendiciones...', 'twarn');
+    var ps4 = [];
+    resultados.forEach(function(r){
+      r.gastosBorrarIds.forEach(function(id){ ps4.push(apiDelete('gastos_vendedor','id=eq.'+id)); });
+      r.rendicsIds.forEach(function(id){      ps4.push(apiDelete('rendiciones',     'id=eq.'+id)); });
+      r.arrastradoIds.forEach(function(id){   ps4.push(apiDelete('rendiciones',     'id=eq.'+id)); });
     });
-    return Promise.all(ps).then(function(){ return resultados; });
-  })
+    await Promise.all(ps4);
 
-  // PASO 5: Arrastrar saldo al nuevo periodo (como rendición positiva visible)
-  .then(function(resultados) {
-    var ps = [];
-    resultados.forEach(function(r) {
+    // PASO 5: Crear saldo arrastrado en nuevo periodo (positivo, visible para el vendedor)
+    toast('Paso 5/7: Arrastrando saldo...', 'twarn');
+    var ps5 = [];
+    resultados.forEach(function(r){
       if (r.saldo > 0) {
-        ps.push(apiPost('rendiciones', {
+        ps5.push(apiPost('rendiciones', {
           vendedor_id:  r.id,
           monto:        Math.round(r.saldo),
           concepto:     'Saldo periodo anterior ('+periodoActual+')',
@@ -14570,41 +14559,34 @@ async function adminEjecutarCierrePeriodo() {
         }));
       }
     });
-    return Promise.all(ps).then(function(){ return resultados; });
-  })
+    await Promise.all(ps5);
 
-  // PASO 6: Reset vendido_david en productos → 0
-  .then(function(resultados) {
-    return apiGet('productos', 'select=id&vendido_david=gt.0&limit=2000').then(function(prods) {
-      var ps = (prods||[]).map(function(p) {
-        return apiPatch('productos', {vendido_david: 0}, 'id=eq.'+p.id);
-      });
-      return Promise.all(ps).then(function(){ return resultados; });
+    // PASO 6: Reset vendido_david en productos
+    toast('Paso 6/7: Reseteando contadores de stock...', 'twarn');
+    var prodsVendidos = await apiGet('productos','select=id&vendido_david=gt.0&limit=2000');
+    var ps6 = (prodsVendidos||[]).map(function(p){
+      return apiPatch('productos',{vendido_david:0},'id=eq.'+p.id);
     });
-  })
+    await Promise.all(ps6);
 
-  // PASO 7: Actualizar periodo actual en config
-  .then(function() {
-    return apiPatch('configuracion', {valor: nuevoPer}, 'clave=eq.periodo_actual').then(function() {
-      periodoActual = nuevoPer;
-      var el = document.getElementById('periodoLabel');
-      if (el) el.textContent = nuevoPer;
-    });
-  })
+    // PASO 7: Actualizar periodo en config
+    toast('Paso 7/7: Actualizando periodo...', 'twarn');
+    await apiPatch('configuracion', {valor: nuevoPer}, 'clave=eq.periodo_actual');
+    periodoActual = nuevoPer;
+    var elPer = document.getElementById('periodoLabel');
+    if (elPer) elPer.textContent = nuevoPer;
 
-  // PASO 8: Recargar todo
-  .then(function() {
-    toast('Periodo cerrado. Nuevo periodo: '+nuevoPer, 'tok');
+    // Listo
+    toast('Periodo cerrado exitosamente. Nuevo periodo: '+nuevoPer, 'tok');
     _mc('moAdminCierrePeriodo');
     loadPeriodos();
     loadVendedores();
     if (typeof loadHistorialDavid === 'function') loadHistorialDavid();
-  })
 
-  .catch(function(e) {
-    toast('Error cerrando periodo: '+(e.message||e), 'terr');
+  } catch(e) {
+    toast('ERROR en cierre de periodo: '+(e.message||e), 'terr');
     console.error('Cierre periodo error:', e);
-  });
+  }
 }
 
 
