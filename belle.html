@@ -14470,35 +14470,43 @@ async function adminEjecutarCierrePeriodo() {
   var fechaCierre = new Date().toISOString().split('T')[0];
 
   // PASO 1: Calcular saldos por vendedor
-  Promise.all(vends.map(function(v) {
-    return Promise.all([
-      apiGet('ventas',          'select=total,id&vendedor_id=eq.'+v.id+'&estado=eq.confirmada'),
-      apiGet('gastos_vendedor', 'select=monto,id,concepto,estado_comision,aprobado&vendedor_id=eq.'+v.id),
-      apiGet('rendiciones',     'select=monto,id&vendedor_id=eq.'+v.id+'&estado=eq.aprobada&tipo=neq.saldo_arrastrado')
-    ]).then(function(r) {
-      var ventas  = Array.isArray(r[0]) ? r[0] : [];
-      var gastos  = Array.isArray(r[1]) ? r[1] : [];
-      var rendics = Array.isArray(r[2]) ? r[2] : [];
+  // Traemos TODO lo activo (mismo criterio que el panel y preview)
+  Promise.all([
+    apiGet('ventas',          'select=vendedor_id,total,id&estado=eq.confirmada'),
+    apiGet('gastos_vendedor', 'select=vendedor_id,monto,id,aprobado,estado_comision&periodo_cerrado=eq.false'),
+    apiGet('rendiciones',     'select=vendedor_id,monto,id,tipo&estado=eq.aprobada')
+  ]).then(function(all) {
+    var todasVentas  = all[0]||[];
+    var todosGastos  = all[1]||[];
+    var todasRendics = all[2]||[];
 
-      // Separar comisiones Marcela cobradas de gastos regulares
-      var gastos = gastos.filter(function(g){return g.aprobado;}); // only approved
-      var gastosCerrar  = gastos.filter(function(g){ return g.estado_comision !== 'pendiente' && g.estado_comision !== 'confirmada'; });
-      var gastosQuedan  = gastos.filter(function(g){ return g.estado_comision === 'pendiente' || g.estado_comision === 'confirmada'; });
+    return vends.map(function(v) {
+      var ventas  = todasVentas.filter(function(x){return x.vendedor_id===v.id;});
+      var gastos  = todosGastos.filter(function(x){return x.vendedor_id===v.id&&x.aprobado;});
+      var rendics = todasRendics.filter(function(x){return x.vendedor_id===v.id&&x.tipo!=='saldo_arrastrado';});
+      var arrastrado = todasRendics.filter(function(x){return x.vendedor_id===v.id&&x.tipo==='saldo_arrastrado';});
 
-      var tv = ventas.reduce( function(s,x){return s+(x.total||0);},  0);
-      var tg = gastosCerrar.reduce(function(s,x){return s+(x.monto||0);}, 0);
-      var tr = rendics.reduce(function(s,x){return s+(x.monto||0);},  0);
+      // Gastos aprobados normales (se van a eliminar)
+      var gastosBorrar = gastos.filter(function(g){
+        return g.estado_comision !== 'pendiente' && g.estado_comision !== 'confirmada';
+      });
+
+      var tv = ventas.reduce(function(s,x){return s+(x.total||0);},0);
+      var tg = gastosBorrar.reduce(function(s,x){return s+(x.monto||0);},0);
+      var tr = rendics.reduce(function(s,x){return s+(x.monto||0);},0);
+      var ta = arrastrado.reduce(function(s,x){return s+(x.monto||0);},0);
 
       return {
         id: v.id, n: v.n,
-        tv: tv, tg: tg, tr: tr,
-        saldo: tv - tg - tr,
-        ventasIds:      ventas.map(function(x){return x.id;}),
-        gastosCerrarIds:gastosCerrar.map(function(x){return x.id;}),
-        rendicsIds:     rendics.map(function(x){return x.id;})
+        tv: tv, tg: tg, tr: tr, ta: ta,
+        saldo: tv - tg - tr + ta,
+        ventasIds:       ventas.map(function(x){return x.id;}),
+        gastosBorrarIds: gastosBorrar.map(function(x){return x.id;}),
+        rendicsIds:      rendics.map(function(x){return x.id;}),
+        arrastradoIds:   arrastrado.map(function(x){return x.id;})
       };
     });
-  }))
+  })
 
   // PASO 2: Guardar historial del periodo
   .then(function(resultados) {
@@ -14511,11 +14519,10 @@ async function adminEjecutarCierrePeriodo() {
       saldo_arrastrado: resultados.reduce(function(s,r){return s+Math.max(0,r.saldo);}, 0)
     };
     resultados.forEach(function(r){ hData['saldo_arrastrado_'+r.id] = Math.max(0, r.saldo); });
-
     return apiPost('historial_periodos', hData).then(function(){ return resultados; });
   })
 
-  // PASO 3: Archivar ventas confirmadas del periodo
+  // PASO 3: Archivar ventas confirmadas
   .then(function(resultados) {
     var ps = [];
     resultados.forEach(function(r) {
@@ -14526,23 +14533,27 @@ async function adminEjecutarCierrePeriodo() {
     return Promise.all(ps).then(function(){ return resultados; });
   })
 
-  // PASO 4: Cerrar gastos aprobados (marcar periodo_cerrado) y archivar rendiciones
+  // PASO 4: ELIMINAR gastos aprobados + ELIMINAR todas las rendiciones activas
   .then(function(resultados) {
     var ps = [];
     resultados.forEach(function(r) {
-      // Gastos: marcar periodo_cerrado
-      r.gastosCerrarIds.forEach(function(id) {
-        ps.push(apiPatch('gastos_vendedor', {periodo_cerrado: periodoActual}, 'id=eq.'+id));
+      // Gastos aprobados normales → BORRAR
+      r.gastosBorrarIds.forEach(function(id) {
+        ps.push(apiDelete('gastos_vendedor', 'id=eq.'+id));
       });
-      // Rendiciones aprobadas: archivar
+      // Rendiciones activas (no arrastradas) → BORRAR
       r.rendicsIds.forEach(function(id) {
-        ps.push(apiPatch('rendiciones', {estado:'archivada', periodo:periodoActual}, 'id=eq.'+id));
+        ps.push(apiDelete('rendiciones', 'id=eq.'+id));
+      });
+      // Rendiciones arrastradas del periodo anterior → BORRAR (se reemplazan en PASO 5)
+      r.arrastradoIds.forEach(function(id) {
+        ps.push(apiDelete('rendiciones', 'id=eq.'+id));
       });
     });
     return Promise.all(ps).then(function(){ return resultados; });
   })
 
-  // PASO 5: Arrastrar saldo positivo al nuevo periodo
+  // PASO 5: Arrastrar saldo al nuevo periodo (como rendición positiva visible)
   .then(function(resultados) {
     var ps = [];
     resultados.forEach(function(r) {
@@ -14550,7 +14561,7 @@ async function adminEjecutarCierrePeriodo() {
         ps.push(apiPost('rendiciones', {
           vendedor_id:  r.id,
           monto:        Math.round(r.saldo),
-          concepto:     'Saldo arrastrado del periodo '+periodoActual,
+          concepto:     'Saldo periodo anterior ('+periodoActual+')',
           tipo:         'saldo_arrastrado',
           estado:       'aprobada',
           periodo:      nuevoPer,
@@ -14562,7 +14573,17 @@ async function adminEjecutarCierrePeriodo() {
     return Promise.all(ps).then(function(){ return resultados; });
   })
 
-  // PASO 6: Actualizar periodo actual en config
+  // PASO 6: Reset vendido_david en productos → 0
+  .then(function(resultados) {
+    return apiGet('productos', 'select=id&vendido_david=gt.0&limit=2000').then(function(prods) {
+      var ps = (prods||[]).map(function(p) {
+        return apiPatch('productos', {vendido_david: 0}, 'id=eq.'+p.id);
+      });
+      return Promise.all(ps).then(function(){ return resultados; });
+    });
+  })
+
+  // PASO 7: Actualizar periodo actual en config
   .then(function() {
     return apiPatch('configuracion', {valor: nuevoPer}, 'clave=eq.periodo_actual').then(function() {
       periodoActual = nuevoPer;
@@ -14571,13 +14592,12 @@ async function adminEjecutarCierrePeriodo() {
     });
   })
 
-  // PASO 7: Recargar todo
+  // PASO 8: Recargar todo
   .then(function() {
     toast('Periodo cerrado. Nuevo periodo: '+nuevoPer, 'tok');
     _mc('moAdminCierrePeriodo');
     loadPeriodos();
     loadVendedores();
-    // Reload David's historial data in memory
     if (typeof loadHistorialDavid === 'function') loadHistorialDavid();
   })
 
