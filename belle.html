@@ -12077,8 +12077,16 @@ function adminLoadComisionesPanel(){
   cont.innerHTML="<div class='loading'><div class='spin'></div>Cargando...</div>";
   apiGet('gastos_vendedor','select=*&vendedor_id=eq.3&order=created_at.desc&limit=200').then(function(data){
     if(!Array.isArray(data)) data=[];
+    // Usar aprobado + periodo_cerrado (sistema real) en lugar de estado_comision
     var byE={pendiente:[],confirmada:[],cobrada:[],rechazada:[]};
-    data.forEach(function(g){ var e=g.estado_comision||'pendiente'; if(byE[e]) byE[e].push(g); });
+    data.forEach(function(g){
+      var e;
+      if(g.concepto&&g.concepto.indexOf('[CANCELADA]')>=0){ e='rechazada'; }
+      else if(g.periodo_cerrado&&g.periodo_cerrado!=='false'){ e='cobrada'; }
+      else if(g.aprobado){ e='confirmada'; }
+      else { e='pendiente'; }
+      byE[e].push(g);
+    });
     var tPend=byE.pendiente.reduce(function(s,g){return s+(g.monto||0);},0);
     var tConf=byE.confirmada.reduce(function(s,g){return s+(g.monto||0);},0);
     var tCob=byE.cobrada.reduce(function(s,g){return s+(g.monto||0);},0);
@@ -12131,15 +12139,20 @@ function adminLoadComisionesPanel(){
 }
 function adminConfirmarComision(id){
   if(!confirm('¿Confirmar esta comisión?')) return;
-  apiPatch('gastos_vendedor',{estado_comision:'confirmada'},'id=eq.'+id).then(function(){toast('Comisión confirmada','tok');adminLoadComisionesPanel();});
+  apiPatch('gastos_vendedor',{aprobado:true},'id=eq.'+id).then(function(){toast('Comisión confirmada','tok');adminLoadComisionesPanel();});
 }
 function adminRechazarComision(id){
   var mot=prompt('Motivo del rechazo:'); if(mot===null) return;
-  apiPatch('gastos_vendedor',{estado_comision:'rechazada',motivo_rechazo:mot||'Sin motivo'},'id=eq.'+id).then(function(){toast('Rechazada','twarn');adminLoadComisionesPanel();});
+  // Obtener el concepto actual para agregar [CANCELADA]
+  apiGet('gastos_vendedor','select=id,concepto&id=eq.'+id).then(function(data){
+    var g=Array.isArray(data)&&data[0]?data[0]:{};
+    var nuevoConcepto=(g.concepto||'')+(g.concepto&&g.concepto.indexOf('[CANCELADA]')<0?' [CANCELADA]':'');
+    return apiPatch('gastos_vendedor',{aprobado:false,concepto:nuevoConcepto},'id=eq.'+id);
+  }).then(function(){toast('Rechazada','twarn');adminLoadComisionesPanel();});
 }
 function adminMarcarCobrada(id){
   if(!confirm('¿Marcar como cobrada? Confirma que el dinero fue entregado a Marcela.')) return;
-  apiPatch('gastos_vendedor',{estado_comision:'cobrada',aprobado:true},'id=eq.'+id).then(function(){toast('💰 Marcada como cobrada','tok');adminLoadComisionesPanel();loadVendedores();});
+  apiPatch('gastos_vendedor',{aprobado:true,periodo_cerrado:periodoActual||'cobrado'},'id=eq.'+id).then(function(){toast('💰 Marcada como cobrada','tok');adminLoadComisionesPanel();loadVendedores();});
 }
 
 
@@ -14059,7 +14072,7 @@ function loadResumenPeriodoActual(){
       var gastos=todosGastos.filter(function(x){return x.vendedor_id===v.id&&x.aprobado;});
       var rendics=todasRendics.filter(function(x){return x.vendedor_id===v.id&&x.tipo!=='saldo_arrastrado';});
       var arrastrado=todasRendics.filter(function(x){return x.vendedor_id===v.id&&x.tipo==='saldo_arrastrado';});
-      var comis=v.id===3?todosGastos.filter(function(x){return x.vendedor_id===3&&(x.estado_comision==='pendiente'||x.estado_comision==='confirmada');}):[];
+      var comis=v.id===3?todosGastos.filter(function(x){return x.vendedor_id===3&&x.aprobado&&(!x.periodo_cerrado||x.periodo_cerrado==='false');}):[];
       var tv=ventas.reduce(function(s,x){return s+(x.total||0);},0);
       var tg=gastos.reduce(function(s,x){return s+(x.monto||0);},0);
       var tr=rendics.reduce(function(s,x){return s+(x.monto||0);},0);
@@ -14165,7 +14178,7 @@ function loadPeriodoDetalle(el,p){
     apiGet('ventas','select=vendedor_id,producto_nombre,cantidad,total,estado,nro_orden,created_at&periodo=eq.'+per+'&order=created_at.desc&limit=500'),
     apiGet('gastos_vendedor','select=*&periodo_cerrado=eq.'+per+'&order=created_at.desc'),
     apiGet('rendiciones','select=*&periodo=eq.'+per+'&order=created_at.desc'),
-    apiGet('gastos_vendedor','select=monto,concepto,estado_comision,created_at&vendedor_id=eq.3&periodo_cerrado=eq.'+per+'&estado_comision=neq.null')
+    apiGet('gastos_vendedor','select=monto,concepto,aprobado,created_at&vendedor_id=eq.3&periodo_cerrado=eq.'+per)
   ]).then(function(res){
     var ventas=res[0]||[],gastos=res[1]||[],rendics=res[2]||[],comis=res[3]||[];
     var VENDS={1:'David',2:'Facu',3:'Marcela'};
@@ -15415,7 +15428,7 @@ async function diagFixComisionesFaltantes(){
     var esDecan=(v.segmento||'').includes('decan');
     var comUnit=esDecan?comDecan:comPerfume;
     var totalCom=comUnit*(v.cantidad||1);
-    return apiPost('gastos_vendedor',{vendedor_id:1,concepto:'Comision Marcela \u2014 '+(v.nro_orden||v.id)+' ('+(v.cantidad||1)+'u x $'+comUnit.toLocaleString('es-AR')+')',monto:totalCom,periodo:periodoActual||'general',aprobado:true,periodo_cerrado:false,estado_comision:'pendiente'});
+    return apiPost('gastos_vendedor',{vendedor_id:1,concepto:'Comision Marcela \u2014 '+(v.nro_orden||v.id)+' ('+(v.cantidad||1)+'u x $'+comUnit.toLocaleString('es-AR')+')',monto:totalCom,periodo:periodoActual||'general',aprobado:true,periodo_cerrado:false});
   });
   await Promise.all(ps);
   toast(faltantes.length+' comisiones registradas \u2713','tok');
