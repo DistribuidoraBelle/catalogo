@@ -1,0 +1,142 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>Detalle Warnings</title>
+<style>
+body{font-family:monospace;padding:20px;background:#0f1117;color:#eee;font-size:13px}
+h2{color:#e8b86d}h3{color:#fbbf24;margin-top:20px}
+table{width:100%;border-collapse:collapse;font-size:12px;margin-top:8px}
+th{background:#1e2333;padding:6px 8px;text-align:left;color:#e8b86d;font-size:11px}
+td{padding:5px 8px;border-bottom:1px solid #1e2333}
+.ok{color:#4ade80}.warn{color:#fbbf24}.err{color:#f87171}
+button{background:#e8b86d;color:#0f1117;border:none;padding:8px 16px;border-radius:6px;cursor:pointer;font-weight:700;margin:4px}
+pre{background:#1e2333;padding:10px;border-radius:6px;white-space:pre-wrap;word-break:break-all;font-size:11px}
+</style>
+</head>
+<body>
+<h2>🔍 Detalle de Warnings</h2>
+<button onclick="run()">▶ Analizar</button>
+<div id="out"></div>
+<script>
+const O=document.getElementById('out');
+const log=m=>{O.innerHTML+=m;};
+
+async function run(){
+  O.innerHTML='';
+  const html=await fetch('/belle.html',{cache:'no-store'}).then(r=>r.text());
+  const js=html.slice(html.indexOf('//<![CDATA[')+11,html.indexOf('//]]>'));
+  const SB_URL=js.match(/var SB_URL\s*=\s*['"]([^'"]+)['"]/)?.[1];
+  const SB_KEY=js.match(/var SB_KEY\s*=\s*['"]([^'"]+)['"]/)?.[1];
+  const H={'apikey':SB_KEY,'Authorization':'Bearer '+SB_KEY};
+  const get=(t,q)=>fetch(SB_URL+'/rest/v1/'+t+'?'+q,{headers:H}).then(r=>r.json());
+
+  // ── 1. PRODUCTO SIN PRECIO X1 ─────────────────────────────────
+  log('<h3>1️⃣ Producto activo sin precio x1</h3>');
+  const sinPrecio=await get('productos','select=id,nombre,empresa,stock_actual,precio_min_ars,precio_may_ars,precio_med_ars,cat_catalogo&activo=eq.true&precio_min_ars=eq.0');
+  if(!sinPrecio.length){log('<p class="ok">✓ No hay productos sin precio x1</p>');}
+  else {
+    log('<table><tr><th>ID</th><th>Empresa</th><th>Nombre</th><th>Stock</th><th>x10</th><th>x3</th><th>x1</th><th>Cat</th></tr>');
+    sinPrecio.forEach(p=>{
+      log(`<tr>
+        <td>${p.id}</td>
+        <td>${p.empresa||'-'}</td>
+        <td><b>${p.nombre}</b></td>
+        <td class="${p.stock_actual>0?'ok':'warn'}">${p.stock_actual||0}</td>
+        <td>${p.precio_may_ars||0}</td>
+        <td>${p.precio_med_ars||0}</td>
+        <td class="err"><b>$0</b></td>
+        <td>${p.cat_catalogo||'-'}</td>
+      </tr>`);
+    });
+    log('</table>');
+    log('<p class="warn">→ Acción: ir a Stock y Precios, buscar este producto y cargar el precio x1.</p>');
+  }
+
+  // ── 2. PRODUCTOS VENDIDOS SIN STOCK ──────────────────────────
+  log('<h3>2️⃣ Productos con ventas confirmadas pero sin stock</h3>');
+  const ventas=await get('ventas','select=producto_id,producto_nombre,count&estado=eq.confirmada&producto_id=not.is.null');
+  // Traer todos los productos con stock 0
+  const sinStock=await get('productos','select=id,nombre,empresa,stock_actual,en_viaje,reserva&activo=eq.true&stock_actual=lte.0');
+  const sinStockIds=new Set(sinStock.map(p=>p.id));
+  // Traer ventas confirmadas y cruzar
+  const ventasConf=await get('ventas','select=producto_id,producto_nombre,cantidad,total,vendedor_id,created_at&estado=eq.confirmada&producto_id=not.is.null&limit=500');
+  const ventasPorProd={};
+  ventasConf.forEach(v=>{
+    if(!ventasPorProd[v.producto_id]) ventasPorProd[v.producto_id]={nombre:v.producto_nombre,cant:0,total:0};
+    ventasPorProd[v.producto_id].cant+=(v.cantidad||1);
+    ventasPorProd[v.producto_id].total+=(v.total||0);
+  });
+  const problemas=sinStock.filter(p=>ventasPorProd[p.id]);
+  if(!problemas.length){log('<p class="ok">✓ Todos los productos vendidos tienen stock disponible</p>');}
+  else {
+    log('<p>Estos productos tienen ventas confirmadas activas pero stock en 0 o negativo:</p>');
+    log('<table><tr><th>Nombre</th><th>Empresa</th><th>Stock</th><th>En viaje</th><th>Ventas activas</th><th>Explicación</th></tr>');
+    problemas.forEach(p=>{
+      const v=ventasPorProd[p.id];
+      const enViaje=p.en_viaje||0;
+      const explicacion=enViaje>0?'✈ Tiene stock en camino — se va a reponer':'⚠ Sin stock ni reposición visible';
+      log(`<tr>
+        <td><b>${p.nombre}</b></td>
+        <td>${p.empresa||'-'}</td>
+        <td class="${p.stock_actual<0?'err':'warn'}">${p.stock_actual||0}</td>
+        <td class="${enViaje>0?'ok':'err'}">${enViaje}</td>
+        <td>${v.cant} unid.</td>
+        <td class="${enViaje>0?'ok':'warn'}">${explicacion}</td>
+      </tr>`);
+    });
+    log('</table>');
+    log('<p class="warn">→ Los que tienen "en viaje" no son problema, están llegando. Los que no tienen nada en viaje son los que hay que revisar.</p>');
+  }
+
+  // ── 3. DISCREPANCIA STOCK VS MOVIMIENTOS ─────────────────────
+  log('<h3>3️⃣ Discrepancia stock vs movimientos registrados</h3>');
+  const prods=await get('productos','select=id,nombre,empresa,stock_actual&activo=eq.true&limit=200');
+  log('<p>Analizando movimientos de cada producto... (puede tardar unos segundos)</p>');
+  const discrepancias=[];
+  for(const p of prods.slice(0,50)){
+    const movs=await get('movimientos_stock','select=tipo,cantidad&producto_id=eq.'+p.id+'&limit=1000');
+    if(!movs.length) continue;
+    let calc=0;
+    movs.forEach(m=>{
+      const t=m.tipo||'';
+      const q=m.cantidad||0;
+      if(t==='entrada'||t==='ajuste_positivo'||t==='devolucion'||t==='recepcion') calc+=q;
+      else if(t==='salida'||t==='ajuste_negativo'||t==='venta'||t==='reserva') calc-=q;
+    });
+    const diff=Math.abs(calc-(p.stock_actual||0));
+    if(diff>2){
+      discrepancias.push({...p,calc,diff,movs:movs.length});
+    }
+  }
+  if(!discrepancias.length){
+    log('<p class="ok">✓ Sin discrepancias encontradas en la muestra analizada</p>');
+  } else {
+    log('<p>Productos donde la suma de movimientos no coincide con el stock actual:</p>');
+    log('<table><tr><th>Nombre</th><th>Empresa</th><th>Stock actual</th><th>Calculado desde movs</th><th>Diferencia</th><th>Cant. movs</th><th>Qué significa</th></tr>');
+    discrepancias.forEach(p=>{
+      const diff=p.stock_actual-p.calc;
+      const exp=diff>0?'Hay más stock del que justifican los movimientos (puede ser un ajuste manual sin registrar)':'Hay menos stock del que justifican los movimientos (puede ser una venta o pérdida sin registrar)';
+      log(`<tr>
+        <td><b>${p.nombre}</b></td>
+        <td>${p.empresa||'-'}</td>
+        <td class="warn">${p.stock_actual}</td>
+        <td class="warn">${p.calc}</td>
+        <td class="err"><b>${diff>0?'+':''}${diff}</b></td>
+        <td>${p.movs}</td>
+        <td style="font-size:11px;color:#94a3b8">${exp}</td>
+      </tr>`);
+    });
+    log('</table>');
+    log('<p class="warn">→ Esto no rompe nada, pero indica que en algún momento se ajustó el stock manualmente sin registrar el motivo. Si el stock actual es el correcto, simplemente registrar un movimiento de ajuste para que quede documentado.</p>');
+  }
+  
+  // Mostrar tipos de movimientos disponibles
+  log('<h3>📋 Tipos de movimientos en tu base</h3>');
+  const tiposMovs=await get('movimientos_stock','select=tipo&limit=500');
+  const tipos=[...new Set(tiposMovs.map(m=>m.tipo))];
+  log('<pre>'+tipos.join('\n')+'</pre>');
+}
+</script>
+</body>
+</html>
