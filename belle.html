@@ -685,6 +685,7 @@ td{padding:.35rem .5rem;font-size:.78rem;color:var(--tx2);vertical-align:middle;
     <div class="loading"><div class="spin"></div>Cargando...</div>
   </div>
   <div id="adminComisionesMarcelaPanel"></div>
+  <div id="adminStatsVentasPanel"></div>
 </div>
 
     <!-- DEPOSITO MARCELA (panel Marcela) -->
@@ -8423,6 +8424,7 @@ function loadVendedores(){
     cont.innerHTML=html;
     // Panel comisiones Marcela separado
     try{adminLoadComisionesPanel();}catch(e){console.warn("comisiones panel:",e);}
+    try{adminLoadStatsVentas();}catch(e){console.warn("stats ventas:",e);}
   }).catch(function(e){
     console.error("loadVendedores error:",e);
     if(cont)cont.innerHTML="<div style='padding:1rem;color:var(--red)'>Error: "+( e&&e.message?e.message:JSON.stringify(e))+"</div>";
@@ -12109,6 +12111,114 @@ function gwGuardarPeriodo() {
 
 
 // ═══ COMISIONES MARCELA — ADMIN ════════════════════════════════════
+
+// ── PANEL ESTADÍSTICAS DE VENTAS (admin) ──────────────────────────
+var _asvFiltro={vendedor:'todos',tipo:'todas'};
+
+function adminLoadStatsVentas(){
+  var cont=document.getElementById('adminStatsVentasPanel');
+  if(!cont) return;
+  cont.innerHTML="<div class='loading'><div class='spin'></div>Cargando estadísticas...</div>";
+  Promise.all([
+    apiGet('ventas','select=vendedor_id,total,cantidad,origen,nro_orden,created_at,estado,producto_nombre&estado=eq.confirmada&order=created_at.desc&limit=2000'),
+    apiGet('ventas_transferidas','select=asignada_a,creada_por,total,estado,items,nro_orden,periodo,created_at&order=created_at.desc&limit=500')
+  ]).then(function(res){
+    var todasVentas=res[0]||[];
+    var todasTransf=res[1]||[];
+    window._asvVentas=todasVentas;
+    window._asvTransf=todasTransf;
+    renderAdminStatsVentas();
+  }).catch(function(e){
+    cont.innerHTML="<div class='empty'>Error: "+e.message+"</div>";
+  });
+}
+
+function renderAdminStatsVentas(){
+  var cont=document.getElementById('adminStatsVentasPanel');
+  if(!cont) return;
+  var ventas=window._asvVentas||[];
+  var transf=window._asvTransf||[];
+  var vFiltro=_asvFiltro.vendedor;
+  var tFiltro=_asvFiltro.tipo;
+  var VNOMS={1:'David',2:'Facu'};
+
+  // Filtrar por vendedor
+  var vFilt=ventas.filter(function(v){
+    if(vFiltro==='todos') return true;
+    return v.vendedor_id===parseInt(vFiltro);
+  });
+
+  // Tipos de venta
+  var vPropias=vFilt.filter(function(v){return !v.origen||v.origen==='catalogo'||v.origen==='vendedor';});
+  var vWeb=vFilt.filter(function(v){return v.origen==='web'||v.origen==='deposito';});
+  var vTransfConf=vFilt.filter(function(v){return v.origen==='transferida';});
+  var vMostrar=tFiltro==='propias'?vPropias:tFiltro==='web'?vWeb:tFiltro==='transferidas'?vTransfConf:vFilt;
+
+  // Transferidas enviadas por vendedor
+  var tEnv=transf.filter(function(t){
+    if(t.estado==='cancelada') return false;
+    if(vFiltro==='todos') return true;
+    var nom=VNOMS[parseInt(vFiltro)]||'';
+    return t.creada_por&&t.creada_por.toLowerCase()===nom.toLowerCase();
+  });
+
+  var montoTotal=vMostrar.reduce(function(s,v){return s+(v.total||0);},0);
+  var pedMap={};
+  vMostrar.forEach(function(v){
+    var k=v.nro_orden||('s_'+v.id);
+    if(!pedMap[k])pedMap[k]={total:0,items:0};
+    pedMap[k].total+=(v.total||0); pedMap[k].items++;
+  });
+  var pedidosCount=Object.keys(pedMap).length;
+  var montoTransfEnv=tEnv.reduce(function(s,t){return s+(t.total||0);},0);
+  var tEnvConf=tEnv.filter(function(t){return t.estado==='confirmada';});
+  var tEnvPend=tEnv.filter(function(t){return t.estado==='pendiente';});
+
+  var html="<div class='tbl-wrap' style='padding:0;overflow:hidden;margin-top:.8rem'>";
+  // Header
+  html+="<div style='background:linear-gradient(135deg,#1e293b,#0f172a);padding:.7rem 1rem;border-bottom:1px solid var(--bd);display:flex;align-items:center;justify-content:space-between'>";
+  html+="<div style='font-size:.88rem;font-weight:700;color:var(--acc)'>📊 Estadísticas de Ventas</div>";
+  html+="<button onclick='adminLoadStatsVentas()' style='background:transparent;border:1px solid var(--bd);color:var(--tx3);border-radius:5px;padding:.2rem .5rem;cursor:pointer;font-size:.68rem'>↻</button>";
+  html+="</div>";
+
+  // Filtros vendedor — usar dataset para evitar problemas de comillas
+  html+="<div style='display:flex;gap:.35rem;padding:.55rem .8rem;border-bottom:1px solid var(--bd);flex-wrap:wrap;align-items:center'>";
+  [{v:'todos',l:'Todos'},{v:'1',l:'David'},{v:'2',l:'Facu'}].forEach(function(item){
+    var act=vFiltro===item.v;
+    html+="<button data-vf='"+item.v+"' onclick='_asvFiltro.vendedor=this.dataset.vf;renderAdminStatsVentas()' style='padding:.28rem .7rem;font-size:.72rem;border-radius:5px;cursor:pointer;border:1px solid "+(act?'var(--acc)':'var(--bd)')+";background:"+(act?'var(--acc)':'transparent')+";color:"+(act?'#000':'var(--tx3)')+"'>"+item.l+"</button>";
+  });
+  html+="<span style='color:var(--bd);margin:0 .2rem'>|</span>";
+  [{v:'todas',l:'Todas'},{v:'propias',l:'Propias'},{v:'web',l:'Web'},{v:'transferidas',l:'Recibidas'}].forEach(function(item){
+    var act=tFiltro===item.v;
+    html+="<button data-tf='"+item.v+"' onclick='_asvFiltro.tipo=this.dataset.tf;renderAdminStatsVentas()' style='padding:.28rem .7rem;font-size:.72rem;border-radius:5px;cursor:pointer;border:1px solid "+(act?'var(--blue)':'var(--bd)')+";background:"+(act?'rgba(91,141,238,.15)':'transparent')+";color:"+(act?'var(--blue)':'var(--tx3)')+"'>"+item.l+"</button>";
+  });
+  html+="</div>";
+
+  // Stats cards
+  html+="<div style='display:grid;grid-template-columns:repeat(auto-fit,minmax(120px,1fr));gap:.4rem;padding:.55rem .8rem;border-bottom:1px solid var(--bd)'>";
+  html+="<div style='background:var(--sur2);border-radius:7px;padding:.5rem .65rem;text-align:center;border-top:3px solid var(--green)'><div style='font-size:.57rem;color:var(--tx3);text-transform:uppercase'>Monto total</div><div style='font-size:.92rem;font-weight:700;color:var(--green)'>"+fmt(montoTotal)+"</div></div>";
+  html+="<div style='background:var(--sur2);border-radius:7px;padding:.5rem .65rem;text-align:center;border-top:3px solid var(--cyan)'><div style='font-size:.57rem;color:var(--tx3);text-transform:uppercase'>Pedidos</div><div style='font-size:.92rem;font-weight:700;color:var(--cyan)'>"+pedidosCount+"</div><div style='font-size:.6rem;color:var(--tx3)'>"+vMostrar.length+" líneas</div></div>";
+  html+="<div style='background:var(--sur2);border-radius:7px;padding:.5rem .65rem;text-align:center;border-top:3px solid var(--acc)'><div style='font-size:.57rem;color:var(--tx3);text-transform:uppercase'>Ticket prom.</div><div style='font-size:.92rem;font-weight:700;color:var(--acc)'>"+fmt(pedidosCount>0?Math.round(montoTotal/pedidosCount):0)+"</div></div>";
+  html+="<div style='background:var(--sur2);border-radius:7px;padding:.5rem .65rem;text-align:center;border-top:3px solid var(--blue)'><div style='font-size:.57rem;color:var(--tx3);text-transform:uppercase'>Transf. enviadas</div><div style='font-size:.92rem;font-weight:700;color:var(--blue)'>"+fmt(montoTransfEnv)+"</div><div style='font-size:.6rem;color:var(--tx3)'>"+tEnv.length+" op &bull; "+tEnvConf.length+" cobr. &bull; "+tEnvPend.length+" pend.</div></div>";
+  html+="</div>";
+
+  // Top pedidos
+  var pedArr=Object.keys(pedMap).map(function(k){return {orden:k,total:pedMap[k].total,items:pedMap[k].items};}).sort(function(a,b){return b.total-a.total;}).slice(0,15);
+  if(pedArr.length){
+    html+="<div style='font-size:.65rem;color:var(--tx3);padding:.4rem .8rem .15rem;font-weight:600;text-transform:uppercase'>Top pedidos</div>";
+    html+="<div style='overflow-y:auto;max-height:200px'><table style='width:100%;border-collapse:collapse;font-size:.69rem'><thead style='position:sticky;top:0;background:var(--sur3)'><tr style='color:var(--tx3);border-bottom:1px solid var(--bd)'><th style='padding:.22rem .5rem;text-align:left;font-weight:500'>Orden</th><th style='font-weight:500;text-align:right'>Total</th><th style='font-weight:500;text-align:right'>Items</th></tr></thead><tbody>";
+    pedArr.forEach(function(p){
+      html+="<tr style='border-bottom:1px solid var(--sur2)'><td style='padding:.2rem .5rem;color:var(--tx)'>"+p.orden.slice(-10)+"</td><td style='color:var(--green);font-weight:600;text-align:right'>"+fmt(p.total)+"</td><td style='color:var(--tx3);text-align:right'>"+p.items+"</td></tr>";
+    });
+    html+="</tbody></table></div>";
+  } else {
+    html+="<div class='empty' style='padding:.6rem'>Sin ventas para el filtro seleccionado</div>";
+  }
+  html+="</div>";
+  cont.innerHTML=html;
+}
+
+
 function adminLoadComisionesPanel(){
   var cont=document.getElementById('adminComisionesMarcelaPanel');
   if(!cont) return;
