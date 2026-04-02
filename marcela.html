@@ -1021,12 +1021,9 @@ function chgQty(id,delta){
       cart[id]={id:id,nombre:p.nombre,qty:nq,seg:seg,price:price,isDecan:false,
         descuento:(ic&&ic.descuento)||0,descMotivo:(ic&&ic.descMotivo)||""};
     }
-    repriceCart();
     updateCartBar();
   } else if(nq===0&&cart[id]&&!cart[id].isDecan){
-    delete cart[id];
-    repriceCart();
-    updateCartBar();
+    delete cart[id];updateCartBar();
   }
   // Update lighting
   if(p){
@@ -1055,32 +1052,6 @@ function addToCart(id){
   var seg=getBestSeg(totalUnits,r);var price=r[seg]||r.pi;
   cart[id]={id:id,nombre:p.nombre,qty:st.qty,seg:seg,price:price,isDecan:false};
   updateCartBar();toast("Agregado: "+fmt(price)+" x "+st.qty,"tok");renderCat();
-}
-
-
-function repriceCart(){
-  var totalUnits=getCartTotalUnits();
-  Object.keys(cart).forEach(function(key){
-    var item=cart[key];
-    if(item.isDecan||item.isCombo||item.precioManual||item.price===0) return;
-    var p=prods.find(function(x){return x.id===item.id;});
-    if(!p) return;
-    var r=calcP(p);
-    if(p.precio_pestana>0) return;
-    var seg=getBestSeg(totalUnits,r);
-    cart[key].seg=seg; cart[key].price=r[seg]||r.pi;
-  });
-  Object.keys(cart).forEach(function(key){
-    var item=cart[key];
-    if(item.isDecan||item.isCombo) return;
-    var p=prods.find(function(x){return x.id===item.id;});
-    if(!p) return;
-    var r=calcP(p);
-    var best=item.qty>0?getBestSeg(getCartTotalUnits(),r):"none";
-    ["pm","pe","pi"].forEach(function(s){var el=document.getElementById("seg-"+p.id+"-"+s);if(el)el.classList.toggle("lit",s===best);});
-    var card=document.getElementById("pc-"+p.id);
-    if(card){var pt=card.querySelector(".price-tag");var pn=best==="pm"?"Precio x10":best==="pe"?"Precio x3":best==="pi"?"Precio unitario":"";if(pt)pt.textContent=item.qty>0?pn:"";}
-  });
 }
 
 function updateCartBar(){
@@ -1124,15 +1095,15 @@ function renderDrawer(){
       } else {
         var seg=getBestSeg(totalUnits,r);
         var precioSeg=r[seg]||r.pi;
-                var precioEnCart=item.price||0;
-        if(item.precioManual||item.price===0||(precioEnCart>0&&Math.abs(precioEnCart-precioSeg)>1)){
+        var precioEnCart=item.price||0;
+        if(precioEnCart>0&&Math.abs(precioEnCart-precioSeg)>1){
           priceUsed=precioEnCart;
           var segLabels={pm:"x10 Mayor",pe:"x3 Medio",pi:"x1 Menor"};
           var matchSeg=Object.keys(r).find(function(k){return Math.abs(r[k]-precioEnCart)<1;});
           segLabel=matchSeg?segLabels[matchSeg]||"Especial":"Especial";
         } else {
           priceUsed=precioSeg;
-          if(cart[item.id]&&!cart[item.id].precioManual&&cart[item.id].price!==0)cart[item.id].price=precioSeg;
+          if(cart[item.id])cart[item.id].price=precioSeg;
           var sl={pm:"x10 Mayor",pe:"x3 Medio",pi:"x1 Menor"};
           segLabel=sl[seg]||"x1";
         }
@@ -1250,11 +1221,10 @@ function renderDrawer(){
       var inp=db.querySelector(".pm-custom-inp[data-pmid='"+t.dataset.pmid+"']");
       if(!inp||!inp.value)return;
       var precio=parseInt(inp.value);
-      if(isNaN(precio)||precio<0)return;
+      if(precio<=0||isNaN(precio))return;
       if(!cart[key])return;
       cart[key].price=precio;cart[key].precioManual=true;
       cart[key]._showPM=true;
-      if(precio===0){cart[key].seg='bonificado';}
       updateCartBar();return;
     }
     // Toggle discount
@@ -1294,7 +1264,7 @@ function setPrecioManualInput(itemId){
   var inp=document.getElementById("pmi-"+itemId);
   if(!inp||!inp.value)return;
   var precio=parseInt(inp.value);
-  if(isNaN(precio)||precio<0){toast("Precio invalido","twarn");return;}
+  if(precio<=0||isNaN(precio)){toast("Precio invalido","twarn");return;}
   setPrecioManual(itemId,precio);
   toast("Precio actualizado: $"+precio.toLocaleString("es-AR",{timeZone:"America/Argentina/Buenos_Aires"}),"tok");
 }
@@ -1402,10 +1372,10 @@ function confirmarConReserva(descontarReserva){
 function executeVenta(items,reservaDecs){
   var allItems=Object.values(cart);
   var promises=[];
+  var nroOrden=genOrden(); // FIX: definir nroOrden
 
   allItems.forEach(function(item){
     if(item.isCombo){
-      // ── COMBO: register venta + reduce stock of each component ──
       var sub=(item.price*item.qty)-(item.descuento||0);
       promises.push(apiPost("ventas",{
         vendedor_id:VENDEDOR_ID,producto_id:null,
@@ -1415,23 +1385,20 @@ function executeVenta(items,reservaDecs){
         origen:"vendedor",descuento:item.descuento||0,
         descuento_motivo:item.descMotivo||""
       }));
-      // Reduce stock for each component x qty of combo sold
       (item.comboItems||[]).forEach(function(ci){
         var prodId=ci.producto_id;
         var cantComp=(ci.cantidad||1)*item.qty;
         var p=prods.find(function(x){return x.id===prodId;});
         if(p){
-          var ns=Math.max(0,(p.stock_actual||0)-cantComp);
+          var _sa=p.stock_actual||0;
+          var ns=Math.max(0,_sa-cantComp);
           p.stock_actual=ns;
           p.vendido_david=(p.vendido_david||0)+cantComp;
-          promises.push(apiPatch("productos",{
-            stock_actual:ns,
-            vendido_david:p.vendido_david
-          },"id=eq."+prodId));
+          promises.push(apiPatch("productos",{stock_actual:ns,vendido_david:p.vendido_david},"id=eq."+prodId));
+          promises.push(apiPost("movimientos_stock",{producto_id:prodId,producto_nombre:p.nombre,tipo:"venta",cantidad:cantComp,stock_antes:_sa,stock_despues:ns,motivo:"Venta combo Marcela "+nroOrden,created_at:new Date().toISOString()}).catch(function(){}));
         }
       });
     } else {
-      // ── NORMAL PRODUCT ──
       var sub=(item.price*item.qty)-(item.descuento||0);
       promises.push(apiPost("ventas",{
         vendedor_id:VENDEDOR_ID,nro_orden:nroOrden,
@@ -1446,14 +1413,12 @@ function executeVenta(items,reservaDecs){
       if(!item.isDecan){
         var p=prods.find(function(x){return x.id===item.id;});
         if(p){
-          var ns=Math.max(0,(p.stock_actual||0)-item.qty);
+          var _sa=p.stock_actual||0;
+          var ns=Math.max(0,_sa-item.qty);
           var nuevoReserva=p.reserva||0;
-          if(reservaDecs[item.id]){nuevoReserva=Math.max(0,nuevoReserva-item.qty);}
-          promises.push(apiPatch("productos",{
-            stock_actual:ns,
-            vendido_david:(p.vendido_david||0)+item.qty,
-            reserva:nuevoReserva
-          },"id=eq."+item.id));
+          if(reservaDecs&&reservaDecs[item.id]){nuevoReserva=Math.max(0,nuevoReserva-item.qty);}
+          promises.push(apiPatch("productos",{stock_actual:ns,vendido_david:(p.vendido_david||0)+item.qty,reserva:nuevoReserva},"id=eq."+item.id));
+          promises.push(apiPost("movimientos_stock",{producto_id:item.id,producto_nombre:item.nombre,tipo:"venta",cantidad:item.qty,stock_antes:_sa,stock_despues:ns,motivo:"Venta Marcela "+nroOrden,created_at:new Date().toISOString()}).catch(function(){}));
           p.stock_actual=ns;p.reserva=nuevoReserva;
         }
       }
@@ -1591,10 +1556,12 @@ function cancelarPedidoWeb(pedId,btn){
       if(!pid||it.isDecan)return;
       var p=prods.find(function(x){return x.id===pid;});
       if(p){
-        var nuevoStock=(p.stock_actual||0)+(it.qty||1);
+        var _sa=p.stock_actual||0;
+        var nuevoStock=_sa+(it.qty||1);
         var nuevaReserva=Math.max(0,(p.reserva||0)-(it.qty||1));
         p.stock_actual=nuevoStock;p.reserva=nuevaReserva;
         promises.push(apiPatch("productos",{stock_actual:nuevoStock,reserva:nuevaReserva},"id=eq."+pid));
+        promises.push(apiPost("movimientos_stock",{producto_id:pid,producto_nombre:it.nombre||("Prod #"+pid),tipo:"devolucion",cantidad:it.qty||1,stock_antes:_sa,stock_despues:nuevoStock,motivo:"Cancelación pedido web #"+pedId,created_at:new Date().toISOString()}).catch(function(){}));
       }
     });
     Promise.all(promises).then(function(){toast("Pedido cancelado - stock devuelto","twarn");loadPedidosWeb();renderCat();}).catch(function(){if(btn)btn.disabled=false;});
@@ -2114,7 +2081,7 @@ function loadDeposito(){
     "</div></div>"+
     "<div style='font-size:.75rem;color:var(--tx2);margin-bottom:.7rem'>Indica cuantos productos estan en el Deposito Marcela. Podes modificar sin aprobacion.</div>"+
     "<div id='depList'><div class='loading'><div class='spin'></div>Cargando...</div></div>";
-  apiGet("productos","select=id,nombre,empresa,stock_actual,deposito_m&stock_actual=gt.0&order=empresa,nombre&limit=2000").then(function(data){
+  apiGet("productos","select=id,nombre,empresa,stock_actual,deposito_m&stock_actual=gt.0&order=empresa,nombre&limit=500").then(function(data){
     if(!Array.isArray(data)){document.getElementById("depList").innerHTML="<div class='empty'>Sin productos</div>";return;}
     window._depProds=data;renderDepList(data);
   });
@@ -2627,9 +2594,9 @@ function getPresupuestoData(){
     var precio,segLabel;
     if(item.isDecan){
       precio=item.price||r.decan;segLabel="Decan 5ml";
-    } else if(item.precioManual||item.price===0){
+    } else if(item.precioManual){
       precio=item.price;
-      segLabel=item.price===0?"Bonificado":"Precio especial"+(item.descMotivo?" ("+item.descMotivo+")":"");
+      segLabel="Precio especial"+(item.descMotivo?" ("+item.descMotivo+")":"");
     } else {
       var _puG=p?p.precio_pestana||0:0;
       if(_puG>0){
@@ -3574,11 +3541,13 @@ function confirmarDevolucion(){
   if(volverAlStock&&v.producto_id){
     var p=prods.find(function(x){return x.id===v.producto_id;});
     if(p){
-      var ns=(p.stock_actual||0)+_devCant;
+      var _sa4=p.stock_actual||0;
+      var ns=_sa4+_devCant;
       var vd=Math.max(0,(p.vendido_david||0)-_devCant);
       p.stock_actual=ns;
       p.vendido_david=vd;
       promises.push(apiPatch("productos",{stock_actual:ns,vendido_david:vd},"id=eq."+v.producto_id));
+      promises.push(apiPost("movimientos_stock",{producto_id:v.producto_id,producto_nombre:v.producto_nombre,tipo:"devolucion",cantidad:_devCant,stock_antes:_sa4,stock_despues:ns,motivo:"Devolución Marcela. Motivo: "+motivo+(obs?" — "+obs:""),created_at:new Date().toISOString()}).catch(function(){}));
     }
   }
 
