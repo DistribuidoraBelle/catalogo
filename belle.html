@@ -2276,8 +2276,8 @@ function loadDashboard(){
     apiGet("rendiciones","select=*&estado=eq.pendiente&tipo=neq.reclamo&order=created_at.desc"),
     // [2] Gastos pendientes
     apiGet("gastos_vendedor","select=*&aprobado=eq.false&concepto=not.ilike.Comision%20Marcela*&order=created_at.desc"),
-    // [3] Rendiciones aprobadas (saldo)
-    apiGet("rendiciones","select=vendedor_id,monto,estado&estado=eq.aprobada"),
+    // [3] Rendiciones aprobadas (saldo) — solo activas, no archivadas
+    apiGet("rendiciones","select=vendedor_id,monto,tipo&estado=eq.aprobada"),
     // [4] Gastos aprobados
     apiGet("gastos_vendedor","select=vendedor_id,monto,aprobado&periodo_cerrado=eq.false"),
     // [5] Pedidos web HOY
@@ -2288,8 +2288,8 @@ function loadDashboard(){
     apiGet("productos","select=id,nombre,empresa,stock_actual,reserva,deposito_m,cat,cat_catalogo,costo_ind,costo_log,gan_usd_may,gan_usd_med,precio_ml,precio_may_ars,precio_med_ars,precio_min_ars&activo=is.true"),
     // [8] Pedidos proveedor en camino
     apiGet("pedidos_proveedor","select=id,nro_pedido,proveedor,estado,total_usd,nro_guia,fecha_estimada&estado=eq.pendiente&order=fecha_estimada.asc.nullslast"),
-    // [9] Todas las ventas (saldo historico)
-    apiGet("ventas","select=vendedor_id,total,estado&estado=in.(confirmada,dev_parcial,devuelta,completada,pagada)"),
+    // [9] Todas las ventas confirmadas del período actual
+    apiGet("ventas","select=vendedor_id,total&estado=eq.confirmada"),
     // [10] Ventas HOY propias
     apiGet("ventas","select=id,estado,created_at,origen&created_at=gte."+hoy+"T00:00:00"),
   ]).then(function(res){
@@ -2310,9 +2310,12 @@ function loadDashboard(){
     // ── DINERO ─────────────────────────────────────────────────────
     var tvSem=ventasSem.reduce(function(s,v){return s+(v.total||0);},0);
     var tvTotal=todasVentas.reduce(function(s,v){return s+(v.total||0);},0);
-    var trTotal=rendAprobadas.reduce(function(s,r){return s+(r.monto||0);},0);
+    // Rendiciones normales (lo que ya entregaron)
+    var trTotal=rendAprobadas.filter(function(r){return r.tipo!=='saldo_arrastrado';}).reduce(function(s,r){return s+(r.monto||0);},0);
+    // Saldo arrastrado del período anterior (plata que tienen encima del período viejo)
+    var taTotal=rendAprobadas.filter(function(r){return r.tipo==='saldo_arrastrado';}).reduce(function(s,r){return s+(r.monto||0);},0);
     var tgTotal=gastosAprobados.filter(function(g){return g.aprobado;}).reduce(function(s,g){return s+(g.monto||0);},0);
-    var saldoTotal=tvTotal-trTotal-tgTotal;
+    var saldoTotal=tvTotal-trTotal-tgTotal+taTotal;
     set("dDinVendSem", fmt(tvSem));
     set("dDinSaldoTotal", fmt(saldoTotal));
 
@@ -2325,7 +2328,8 @@ function loadDashboard(){
         var trV=rendAprobadas.filter(function(x){return x.vendedor_id===v.id;}).reduce(function(s,x){return s+(x.monto||0);},0);
         var tgV=gastosAprobados.filter(function(x){return x.vendedor_id===v.id&&x.aprobado;}).reduce(function(s,x){return s+(x.monto||0);},0);
         var tvSemV=ventasSem.filter(function(x){return x.vendedor_id===v.id;}).reduce(function(s,x){return s+(x.total||0);},0);
-        var saldoV=tvV-trV-tgV;
+        var taV=rendAprobadas.filter(function(x){return x.vendedor_id===v.id&&x.tipo==='saldo_arrastrado';}).reduce(function(s,x){return s+(x.monto||0);},0);
+        var saldoV=tvV-trV-tgV+taV;
         return "<div style='display:flex;justify-content:space-between;align-items:center;padding:.25rem 0;border-bottom:1px solid var(--bd);font-size:.72rem'>"+
           "<span style='color:var(--acc);font-weight:600'>"+v.nombre+"</span>"+
           "<span style='color:var(--green)'>Sem: "+fmt(tvSemV)+"</span>"+
@@ -14488,10 +14492,8 @@ async function adminEjecutarCierrePeriodo() {
       var gastos     = todosGastos.filter(function(x){return x.vendedor_id===v.id&&x.aprobado;});
       var rendics    = todasRendics.filter(function(x){return x.vendedor_id===v.id&&x.tipo!=='saldo_arrastrado';});
       var arrastrado = todasRendics.filter(function(x){return x.vendedor_id===v.id&&x.tipo==='saldo_arrastrado';});
-      // Gastos que se borran (los aprobados normales, no comisiones pendientes)
-      var gastosBorrar = gastos.filter(function(g){
-        return g.estado_comision !== 'pendiente' && g.estado_comision !== 'confirmada';
-      });
+      // Borrar TODOS los gastos aprobados al cerrar (incluye comisiones Marcela)
+      var gastosBorrar = gastos; // todos los aprobados
       var tv = ventas.reduce(function(s,x){return s+(x.total||0);},0);
       var tg = gastosBorrar.reduce(function(s,x){return s+(x.monto||0);},0);
       var tr = rendics.reduce(function(s,x){return s+(x.monto||0);},0);
