@@ -2450,17 +2450,29 @@ function guardarEditPed(){
     var tr=inp.closest("tr");
     var nombre=tr?tr.cells[0].textContent:"";
 
-    // Stock adjustment: if qty changed, adjust reserva and stock
+    // Stock adjustment según con_reserva del pedido/transferida
+    // con_reserva=true: stock ya está en 'reserva' → solo ajustar reserva
+    // con_reserva=false o pedido_web: stock está libre → ajustar stock_actual
+    var _conRes=window._editTransfConReserva||false;
     if(!isDecan&&prodId&&origQty!==newQty){
-      var diff=origQty-newQty; // positive = items removed, need to return to stock
+      var diff=origQty-newQty; // positivo = bajó cant → devolver al stock
       if(diff!==0){
         var p=prods.find(function(x){return x.id===prodId;});
         if(p){
-          var nuevoStock=(p.stock_actual||0)+diff;
-          var nuevaReserva=Math.max(0,(p.reserva||0)-diff);
-          p.stock_actual=nuevoStock;
-          p.reserva=nuevaReserva;
-          stockPromises.push(apiPatch("productos",{stock_actual:nuevoStock,reserva:nuevaReserva},"id=eq."+prodId));
+          var patchObj={};
+          if(_conRes){
+            // Stock en reserva: solo ajustar reserva
+            var nuevaReserva=Math.max(0,(p.reserva||0)-diff);
+            p.reserva=nuevaReserva;
+            patchObj.reserva=nuevaReserva;
+          } else {
+            // Stock libre o pedido web: ajustar stock_actual
+            var nuevoStock=Math.max(0,(p.stock_actual||0)+diff);
+            p.stock_actual=nuevoStock;
+            patchObj.stock_actual=nuevoStock;
+          }
+          if(Object.keys(patchObj).length)
+            stockPromises.push(apiPatch("productos",patchObj,"id=eq."+prodId));
         }
       }
     }
@@ -2478,19 +2490,39 @@ function guardarEditPed(){
 
   if(!newItems.length){toast("El pedido no puede quedar sin productos","twarn");return;}
 
-  var allPromises=stockPromises.concat([
-    (function(){
-      var desc=parseFloat((document.getElementById("editPedDescuento")||{}).value)||0;
-      var motDesc=(document.getElementById("editPedDescMotivo")||{}).value||"";
-      return apiPatch("pedidos_catalogo",{items:JSON.stringify(newItems),total:Math.max(0,total-desc),descuento:desc,notas_descuento:motDesc},"id=eq."+pedId);
-    })()
-  ]);
+  var desc=parseFloat((document.getElementById("editPedDescuento")||{}).value)||0;
+  var motDesc=(document.getElementById("editPedDescMotivo")||{}).value||"";
+  var totalFinal=Math.max(0,total-desc);
+
+  var savePromise;
+  if(pedId.indexOf("t_")===0){
+    // Es una transferida — guardar en ventas_transferidas
+    var transfId=parseInt(pedId.replace("t_",""));
+    savePromise=apiPatch("ventas_transferidas",{items:JSON.stringify(newItems),total:totalFinal},"id=eq."+transfId);
+  } else {
+    // Es un pedido web — guardar en pedidos_catalogo
+    savePromise=apiPatch("pedidos_catalogo",{items:JSON.stringify(newItems),total:totalFinal,descuento:desc,notas_descuento:motDesc},"id=eq."+pedId);
+  }
+
+  var allPromises=stockPromises.concat([savePromise]);
 
   Promise.all(allPromises).then(function(){
-    toast("Pedido actualizado - precios y stock corregidos","tok");
+    // Notificar productos que volvieron al stock
+    var devueltos=[];
+    document.querySelectorAll(".edit-qty-inp").forEach(function(inp){
+      var newQty=parseInt(inp.value)||0;
+      var origQty=parseInt(inp.closest("tr").dataset.origQty)||0;
+      var tr=inp.closest("tr");
+      var nombre=tr?tr.cells[0].textContent:"";
+      var diff=origQty-newQty;
+      if(diff>0&&nombre){devueltos.push(nombre.split("|")[0].trim()+" ("+diff+"u → stock)");}
+    });
+    var msg="Pedido actualizado";
+    if(devueltos.length) msg+="\n✅ Volvió al stock:\n"+devueltos.join("\n");
+    toast(msg,"tok");
     document.getElementById("moEditPed").classList.remove("open");
-    loadPedidosWeb();
-    renderCat(); // refresh catalog with updated stock
+    if(pedId.indexOf("t_")===0){loadTransferidas();}else{loadPedidosWeb();}
+    renderCat();
   }).catch(function(){toast("Error al guardar","terr");});
 }
 
@@ -2515,6 +2547,7 @@ function cancelarTransf(id,conReserva,btn){
             var nr=Math.max(0,(p.reserva||0)-(it.qty||1));
             p.stock_actual=ns;p.reserva=nr;
             promises.push(apiPatch("productos",{stock_actual:ns,reserva:nr},"id=eq."+pid));
+            promises.push(apiPost("movimientos_stock",{producto_id:pid,producto_nombre:it.nombre||"",tipo:"cancelacion_transferencia",cantidad:it.qty||1,stock_antes:ns-(it.qty||1),stock_despues:ns,motivo:"Transferencia cancelada - stock devuelto",usuario:VENDEDOR_NOMBRE||"vendedor",periodo:periodoActual}).catch(function(){}));
           }
         }
       });
@@ -2581,7 +2614,7 @@ function loadTransferidas(){
   Promise.all([
     apiGet("ventas_transferidas","select=*&asignada_a=eq."+VENDEDOR_ID+"&order=created_at.desc&limit=200"),
     apiGet("ventas","select=*&estado=eq.pendiente_aprobacion&origen=eq.deposito&order=created_at.desc"),
-    apiGet("ventas_transferidas","select=*&creada_por=eq."+VENDEDOR_NOMBRE+"&order=created_at.desc&limit=200")
+    apiGet("ventas_transferidas","select=*&creada_por=ilike."+encodeURIComponent(VENDEDOR_NOMBRE)+"&order=created_at.desc&limit=200")
   ]).then(function(res){
     var _allTransf=Array.isArray(res[0])?res[0]:[];
     var deposito=Array.isArray(res[1])?res[1]:[];
@@ -2626,17 +2659,17 @@ function loadTransferidas(){
       "<div style='display:grid;grid-template-columns:repeat(2,1fr);gap:.4rem;margin-bottom:.6rem'>"+
         "<div style='background:var(--sur2);border:1px solid var(--blue);border-radius:8px;padding:.55rem .7rem;text-align:center'>"+
           "<div style='font-size:.58rem;color:var(--tx3);text-transform:uppercase;letter-spacing:.04em'>Total enviado</div>"+
-          "<div style='font-size:1rem;font-weight:700;color:var(--blue)'>"+fmt(tTotal)+"</div>"+
+          "<div style='font-size:1rem;font-weight:700;color:var(--blue)'>"+"$"+Math.round(tTotal).toLocaleString("es-AR",{timeZone:"America/Argentina/Buenos_Aires"})+"</div>"+
           "<div style='font-size:.6rem;color:var(--tx3)'>"+_todas.length+" oper. &bull; "+totalUnidades+"u</div>"+
         "</div>"+
         "<div style='background:var(--sur2);border:1px solid var(--green);border-radius:8px;padding:.55rem .7rem;text-align:center'>"+
           "<div style='font-size:.58rem;color:var(--tx3);text-transform:uppercase;letter-spacing:.04em'>Cobrado por David</div>"+
-          "<div style='font-size:1rem;font-weight:700;color:var(--green)'>"+fmt(tConfTotal)+"</div>"+
+          "<div style='font-size:1rem;font-weight:700;color:var(--green)'>"+"$"+Math.round(tConfTotal).toLocaleString("es-AR",{timeZone:"America/Argentina/Buenos_Aires"})+"</div>"+
           "<div style='font-size:.6rem;color:var(--tx3)'>"+tConf.length+" confirmadas</div>"+
         "</div>"+
         "<div style='background:var(--sur2);border:1px solid var(--yel);border-radius:8px;padding:.55rem .7rem;text-align:center'>"+
           "<div style='font-size:.58rem;color:var(--tx3);text-transform:uppercase;letter-spacing:.04em'>Pendiente cobro</div>"+
-          "<div style='font-size:1rem;font-weight:700;color:var(--yel)'>"+fmt(tPendTotal)+"</div>"+
+          "<div style='font-size:1rem;font-weight:700;color:var(--yel)'>"+"$"+Math.round(tPendTotal).toLocaleString("es-AR",{timeZone:"America/Argentina/Buenos_Aires"})+"</div>"+
           "<div style='font-size:.6rem;color:var(--tx3)'>"+tPend.length+" pendientes</div>"+
         "</div>"+
         "<div style='background:var(--sur2);border:1px solid var(--bd);border-radius:8px;padding:.55rem .7rem;text-align:center'>"+
@@ -3031,7 +3064,7 @@ function loadHistorial(){
   var FACU_DESDE="2026-03-29T22:24:00"; // UTC = 19:24 ARG
   var fechaFiltro=VENDEDOR_ID===2?"&created_at=gte."+FACU_DESDE:"";
   Promise.all([
-    apiGet("ventas","select=*&vendedor_id=eq."+VENDEDOR_ID+"&estado=in.(confirmada,archivada_periodo)&order=created_at.desc"+fechaFiltro),
+    apiGet("ventas","select=*&vendedor_id=eq."+VENDEDOR_ID+"&estado=eq.confirmada&periodo=eq."+periodoActual+"&order=created_at.desc"+(VENDEDOR_ID===2?"&created_at=gte."+FACU_DESDE:"")),
     apiGet("rendiciones","select=*&vendedor_id=eq."+VENDEDOR_ID+"&tipo=neq.reclamo&estado=neq.archivada&order=created_at.desc"+(VENDEDOR_ID===2?"&created_at=gte."+FACU_DESDE:"")),
     apiGet("gastos_vendedor","select=*&vendedor_id=eq."+VENDEDOR_ID+"&periodo_cerrado=eq.false&order=created_at.desc"+(VENDEDOR_ID===2?"&created_at=gte."+FACU_DESDE:""))
   ]).then(function(res){
@@ -3372,7 +3405,7 @@ function _cargarPanelPagosMarcela(){
   // Query 1: gastos con vendedor_id=3 (Marcela actual)
   // Query 2: gastos con vendedor_id=1 (David) cuyo concepto tiene "Comision Marcela" — registros viejos
   Promise.all([
-    apiGet('gastos_vendedor','select=*&vendedor_id=eq.3&order=created_at.desc&limit=500'),
+    apiGet('gastos_vendedor','select=*&vendedor_id=eq.3&or=(periodo_cerrado.is.null,periodo_cerrado.eq.false)&order=created_at.desc&limit=500'),
     apiGet('gastos_vendedor','select=*&vendedor_id=eq.1&concepto=ilike.%25Comision%20Marcela%25&order=created_at.desc&limit=200')
   ]).then(function(res){
     var dataMarcela=Array.isArray(res[0])?res[0]:[];
