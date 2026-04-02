@@ -1905,10 +1905,11 @@ function loadPedidosWeb(){
   var _hace30=new Date(Date.now()-30*24*3600*1000).toISOString().split("T")[0];
   apiGet("pedidos_catalogo","select=*&order=created_at.desc&created_at=gte."+_hace30+"T00:00:00").then(function(data){
     if(!Array.isArray(data)||!data.length){pg.innerHTML="<div class='empty'>Sin pedidos del catalogo</div>";return;}
+    var _hace7=new Date(Date.now()-7*24*3600*1000).toISOString();
     var pend=data.filter(function(p){return !p.confirmado_cobro&&p.estado!=="cancelado"&&p.estado!=="entregado";});
     var entr=data.filter(function(p){return p.estado==="entregado"&&!p.confirmado_cobro;});
-    var cob=data.filter(function(p){return p.confirmado_cobro||p.estado==="cobrado";});
-    var canc=data.filter(function(p){return p.estado==="cancelado";});
+    var cob=data.filter(function(p){return (p.confirmado_cobro||p.estado==="cobrado")&&p.created_at>=_hace7;});
+    var canc=data.filter(function(p){return p.estado==="cancelado"&&p.created_at>=_hace7;});
     var html="<div class='sec-title'>Pendientes de cobro <span style='color:var(--red)'>"+(pend.length+entr.length)+"</span></div>";
     if(!pend.length&&!entr.length)html+="<div class='empty' style='padding:.8rem'>Sin pendientes</div>";
     if(entr.length){html+="<div style='font-size:.68rem;color:var(--cyan);font-weight:600;margin:.3rem 0 .2rem'>Entregados por Marcela — pendiente cobro</div>";entr.forEach(function(ped){html+=renderPedCard(ped,false);});}
@@ -2283,10 +2284,18 @@ function confirmarCobro(pedId,btn){
       if(!pid||it.isDecan)return;
       var p=prods.find(function(x){return x.id===pid;});
       if(p){
+        var stockAntes=p.stock_actual||0;
         var nuevaReserva=Math.max(0,(p.reserva||0)-(it.qty||1));
         var nuevoVendido=(p.vendido_david||0)+(it.qty||1);
         p.reserva=nuevaReserva;p.vendido_david=nuevoVendido;
         promises.push(apiPatch("productos",{reserva:nuevaReserva,vendido_david:nuevoVendido},"id=eq."+pid));
+        // Registrar movimiento stock (venta desde reserva)
+        promises.push(apiPost("movimientos_stock",{
+          producto_id:pid,producto_nombre:it.nombre,tipo:"venta",
+          cantidad:it.qty||1,stock_antes:stockAntes,stock_despues:stockAntes,
+          motivo:"Venta pedido web "+nroOrden+" (desde reserva)",
+          usuario:VENDEDOR_NOMBRE||"vendedor",periodo:periodoActual
+        }));
       }
       promises.push(apiPost("ventas",{vendedor_id:VENDEDOR_ID,producto_id:pid,producto_nombre:it.nombre,cantidad:it.qty||1,precio_unitario:it.precio||0,segmento:it.segmento||"x1",total:it.total||0,periodo:periodoActual,estado:"confirmada",origen:"catalogo",nro_orden:nroOrden,forma_cobro:"pendiente",descuento:0,descuento_motivo:""}));
     });
@@ -2837,10 +2846,17 @@ function confirmarTransf(id,btn){
       if(Array.isArray(items))items.forEach(function(it){
         var pid=it.producto_id;
         if(pid){var p=prods.find(function(x){return x.id===pid;});if(p){
+          var saConRes=p.stock_actual||0;
           var nr=Math.max(0,(p.reserva||0)-(it.qty||1));
           var nv=(p.vendido_david||0)+(it.qty||1);
           p.reserva=nr;p.vendido_david=nv;
           promises.push(apiPatch("productos",{reserva:nr,vendido_david:nv},"id=eq."+pid));
+          promises.push(apiPost("movimientos_stock",{
+            producto_id:pid,producto_nombre:it.nombre||("Prod #"+pid),tipo:"venta",
+            cantidad:it.qty||1,stock_antes:saConRes,stock_despues:saConRes,
+            motivo:"Transferencia confirmada "+(v.nro_orden||"")+" (desde reserva)",
+            usuario:VENDEDOR_NOMBRE||"David",periodo:periodoActual
+          }).catch(function(){}));
         }}
       });
     } else {
@@ -4053,10 +4069,17 @@ function confirmarReservarPed(){
     perfs.forEach(function(item){
       var p=prods.find(function(x){return x.id===item.id;});
       if(!p)return;
-      var nuevoStock=Math.max(0,(p.stock_actual||0)-item.qty);
+      var stockAntes=p.stock_actual||0;
+      var nuevoStock=Math.max(0,stockAntes-item.qty);
       var nuevaReserva=(p.reserva||0)+item.qty;
       p.stock_actual=nuevoStock;p.reserva=nuevaReserva;
       apiPatch("productos",{stock_actual:nuevoStock,reserva:nuevaReserva},"id=eq."+item.id);
+      apiPost("movimientos_stock",{
+        producto_id:item.id,producto_nombre:item.nombre,tipo:"reserva",
+        cantidad:item.qty,stock_antes:stockAntes,stock_despues:nuevoStock,
+        motivo:"Reserva pedido "+nroOrden,
+        usuario:VENDEDOR_NOMBRE||"vendedor",periodo:periodoActual
+      });
     });
     document.getElementById("moReservarPed").classList.remove("open");
     cart={};cstate={};decanState={};
