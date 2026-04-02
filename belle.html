@@ -13993,23 +13993,30 @@ function loadResumenPeriodoActual(){
     return;
   }
   var VENDS=[{id:1,n:'David'},{id:2,n:'Facu'},{id:3,n:'Marcela'}];
-  var per=encodeURIComponent(periodoActual);
   Promise.all(VENDS.map(function(v){
     return Promise.all([
-      apiGet('ventas','select=total,cantidad,nro_orden&vendedor_id=eq.'+v.id+'&estado=eq.confirmada&periodo=eq.'+per).catch(function(){return [];}),
-      apiGet('gastos_vendedor','select=monto,concepto,aprobado&vendedor_id=eq.'+v.id+'&periodo_cerrado=is.null').catch(function(){return [];}),
-      apiGet('rendiciones','select=monto,tipo&vendedor_id=eq.'+v.id+'&estado=eq.aprobada&periodo=eq.'+per).catch(function(){return [];}),
+      // Ventas confirmadas (no archivadas) — las del periodo actual
+      apiGet('ventas','select=total,cantidad&vendedor_id=eq.'+v.id+'&estado=eq.confirmada').catch(function(){return [];}),
+      // Gastos aprobados sin periodo cerrado — son los del periodo activo
+      apiGet('gastos_vendedor','select=monto,aprobado&vendedor_id=eq.'+v.id+'&periodo_cerrado=is.null').catch(function(){return [];}),
+      // Rendiciones aprobadas activas (no archivadas)
+      apiGet('rendiciones','select=monto,tipo&vendedor_id=eq.'+v.id+'&estado=eq.aprobada').catch(function(){return [];}),
+      // Comisiones Marcela pendientes
       v.id===3?apiGet('gastos_vendedor','select=monto&vendedor_id=eq.3&estado_comision=in.(pendiente,confirmada)').catch(function(){return [];}):Promise.resolve([])
     ]).then(function(r){
       var ventas=r[0]||[];
       var gastos=(r[1]||[]).filter(function(g){return g.aprobado;});
-      var rendics=r[2]||[];
+      var rendics=(r[2]||[]).filter(function(x){return x.tipo!=='saldo_arrastrado';});
+      var arrastrado=(r[2]||[]).filter(function(x){return x.tipo==='saldo_arrastrado';});
       var comis=r[3]||[];
       var tv=ventas.reduce(function(s,x){return s+(x.total||0);},0);
       var tg=gastos.reduce(function(s,x){return s+(x.monto||0);},0);
       var tc=comis.reduce(function(s,x){return s+(x.monto||0);},0);
       var tr=rendics.reduce(function(s,x){return s+(x.monto||0);},0);
-      return {id:v.id,n:v.n,tv:tv,tg:tg,tc:tc,tr:tr,saldo:tv-tg-tr,
+      var ta=arrastrado.reduce(function(s,x){return s+(x.monto||0);},0);
+      // Saldo = ventas - gastos - rendido - arrastrado que ya entregó
+      var saldo=tv-tg-tr+ta; // arrastrado suma porque ya lo tiene encima
+      return {id:v.id,n:v.n,tv:tv,tg:tg,tc:tc,tr:tr,ta:ta,saldo:saldo,
               nv:ventas.length,ng:gastos.length,nr:rendics.length};
     });
   })).then(function(res){
@@ -14019,11 +14026,11 @@ function loadResumenPeriodoActual(){
     var h='<div style="background:var(--sur2);border-radius:var(--r);border:1px solid var(--bd);padding:.9rem 1rem;margin-bottom:1rem">';
       h+='<div style="font-size:.8rem;font-weight:700;margin-bottom:.6rem;color:var(--tx2)">\ud83d\udcca Periodo activo: <span style="color:var(--acc)">'+periodoActual+'</span></div>';
       h+='<div style="display:grid;grid-template-columns:repeat(3,1fr);gap:.4rem;margin-bottom:.7rem">';
-        h+='<div style="background:var(--sur3);border-radius:7px;padding:.5rem .6rem;text-align:center"><div style="font-size:.58rem;color:var(--tx3);text-transform:uppercase">Ventas</div><div style="font-size:.95rem;font-weight:700;color:var(--green)">'+fmt(tV)+'</div></div>';
-        h+='<div style="background:var(--sur3);border-radius:7px;padding:.5rem .6rem;text-align:center"><div style="font-size:.58rem;color:var(--tx3);text-transform:uppercase">Gastos</div><div style="font-size:.95rem;font-weight:700;color:var(--red)">'+fmt(tG)+'</div></div>';
-        h+='<div style="background:var(--sur3);border-radius:7px;padding:.5rem .6rem;text-align:center"><div style="font-size:.58rem;color:var(--tx3);text-transform:uppercase">En mano</div><div style="font-size:.95rem;font-weight:700;color:var(--yel)">'+fmt(tS)+'</div></div>';
+        h+='<div style="background:var(--sur3);border-radius:7px;padding:.5rem .6rem;text-align:center"><div style="font-size:.58rem;color:var(--tx3);text-transform:uppercase;letter-spacing:.04em">Ventas</div><div style="font-size:.95rem;font-weight:700;color:var(--green)">'+fmt(tV)+'</div></div>';
+        h+='<div style="background:var(--sur3);border-radius:7px;padding:.5rem .6rem;text-align:center"><div style="font-size:.58rem;color:var(--tx3);text-transform:uppercase;letter-spacing:.04em">Gastos</div><div style="font-size:.95rem;font-weight:700;color:var(--red)">'+fmt(tG)+'</div></div>';
+        h+='<div style="background:var(--sur3);border-radius:7px;padding:.5rem .6rem;text-align:center"><div style="font-size:.58rem;color:var(--tx3);text-transform:uppercase;letter-spacing:.04em">En mano</div><div style="font-size:.95rem;font-weight:700;color:var(--yel)">'+fmt(tS)+'</div></div>';
       h+='</div>';
-      h+='<div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:.5rem">';
+      h+='<div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(210px,1fr));gap:.5rem">';
       res.forEach(function(r){
         var isMarcela=r.id===3;
         var sc=r.saldo>0?'var(--yel)':'var(--green)';
@@ -14032,6 +14039,7 @@ function loadResumenPeriodoActual(){
           h+='<div style="display:grid;grid-template-columns:1fr 1fr;gap:.12rem .3rem;font-size:.71rem">';
             h+='<span style="color:var(--tx3)">Ventas</span><span style="color:var(--green);font-weight:600">'+fmt(r.tv)+'</span>';
             h+='<span style="color:var(--tx3)">Gastos</span><span style="color:var(--red)">'+fmt(r.tg)+'</span>';
+            if(r.ta>0){h+='<span style="color:var(--tx3)">Arrastrado</span><span style="color:var(--acc)">'+fmt(r.ta)+'</span>';}
             if(isMarcela&&r.tc>0){h+='<span style="color:var(--tx3)">Comis. pend.</span><span style="color:var(--acc)">'+fmt(r.tc)+'</span>';}
             h+='<span style="color:var(--tx3)">Rendido</span><span style="color:var(--acc)">'+fmt(r.tr)+'</span>';
             h+='<span style="color:var(--tx3);font-weight:600">Saldo</span><span style="color:'+sc+';font-weight:700">'+fmt(Math.max(0,r.saldo))+'</span>';
@@ -14042,7 +14050,10 @@ function loadResumenPeriodoActual(){
       h+='</div>';
     h+='</div>';
     cont.innerHTML=h;
-  }).catch(function(){cont.innerHTML='<div class="empty">Error calculando resumen</div>';});
+  }).catch(function(e){
+    console.warn('resumen error:',e);
+    cont.innerHTML='<div class="empty">Error calculando resumen</div>';
+  });
 }
 
 function renderPeriodoCard(p){
