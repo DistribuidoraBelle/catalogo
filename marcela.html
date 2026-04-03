@@ -3755,48 +3755,43 @@ function marcTransferirCarrito(){
 
 function loadDepositoMarcela(){
   var pg=document.getElementById('pg-comisiones');
-  if(!pg) return;
+  if(!pg){console.error('pg-comisiones NO ENCONTRADO');return;}
   pg.innerHTML="<div class='loading'><div class='spin'></div>Cargando...</div>";
 
-  Promise.all([
-    apiGet('gastos_vendedor','select=*&vendedor_id=eq.3&order=created_at.desc&limit=500'),
-    apiGet('ventas_transferidas','select=*&creada_por=ilike.'+encodeURIComponent(VENDEDOR_NOMBRE)+'&estado=neq.cancelada&order=created_at.desc&limit=200')
-  ]).then(function(res){
-    var gastos=Array.isArray(res[0])?res[0]:[];
-    var transferidas=Array.isArray(res[1])?res[1]:[];
+  // Traer TODOS los gastos de Marcela (vendedor_id=3) sin ningún filtro adicional
+  apiGet('gastos_vendedor','select=*&vendedor_id=eq.3&order=created_at.desc&limit=500')
+  .then(function(gastos){
+    console.log('[Marcela comisiones] gastos recibidos:', gastos ? gastos.length : 'null', gastos);
+    if(!Array.isArray(gastos)) gastos=[];
 
-    // _pcActivo PRIMERO — se usa más abajo
-    function _pcActivo(g){return !g.periodo_cerrado||g.periodo_cerrado===false||g.periodo_cerrado==='false';}
-
-    // Auto-correct: si una transferencia está confirmada pero el gasto sigue aprobado=false
-    var confirmadasNros=transferidas
-      .filter(function(t){return t.estado==='confirmada'&&t.nro_orden;})
-      .map(function(t){return t.nro_orden;});
-    var toApprove=gastos.filter(function(g){
-      return !g.aprobado&&_pcActivo(g)&&g.concepto.indexOf('[CANCELADA]')<0&&
-        confirmadasNros.some(function(n){return g.concepto.indexOf(n)>=0;});
-    });
-    if(toApprove.length){
-      toApprove.forEach(function(g){
-        g.aprobado=true;
-        apiPatch('gastos_vendedor',{aprobado:true},'id=eq.'+g.id).catch(function(){});
-      });
+    // _pcActivo: periodo_cerrado es false (bool), "false" (string), o null/undefined = activo
+    function _pcActivo(g){
+      var pc=g.periodo_cerrado;
+      return !pc||pc===false||pc==='false'||pc===0||pc==='0';
     }
-    var pend=gastos.filter(function(g){return !g.aprobado&&_pcActivo(g)&&g.concepto.indexOf('[CANCELADA]')<0;});
-    var acept=gastos.filter(function(g){return g.aprobado&&_pcActivo(g);});
-    var canc=gastos.filter(function(g){return g.concepto.indexOf('[CANCELADA]')>=0;});
-    var cobr=gastos.filter(function(g){return !_pcActivo(g);});
+
+    // Clasificar
+    var pend=[];var acept=[];var cobr=[];var canc=[];
+    gastos.forEach(function(g){
+      if(g.concepto&&g.concepto.indexOf('[CANCELADA]')>=0){canc.push(g);return;}
+      if(!_pcActivo(g)){cobr.push(g);return;}
+      if(g.aprobado){acept.push(g);}
+      else{pend.push(g);}
+    });
+
+    console.log('[Marcela comisiones] pend:'+pend.length+' acept:'+acept.length+' cobr:'+cobr.length+' canc:'+canc.length);
 
     var totPend=pend.reduce(function(s,g){return s+(g.monto||0);},0);
     var totAcept=acept.reduce(function(s,g){return s+(g.monto||0);},0);
     var totCobr=cobr.reduce(function(s,g){return s+(g.monto||0);},0);
 
     function fmtG(g,color){
-      var fecha=new Date(g.created_at).toLocaleDateString('es-AR',{timeZone:"America/Argentina/Buenos_Aires"});
-      var con=g.concepto.replace('[CANCELADA]','').trim();
+      var fecha=new Date(g.created_at).toLocaleDateString('es-AR',{timeZone:'America/Argentina/Buenos_Aires'});
+      var con=(g.concepto||'').replace('[CANCELADA]','').trim();
+      var nro=g.nro_operacion?('<span style="font-size:.58rem;color:var(--tx3);margin-left:.4rem">'+g.nro_operacion+'</span>'):'';
       return "<div class='rend-card' style='padding:.5rem .8rem'>"+
         "<div style='display:flex;justify-content:space-between;align-items:center'>"+
-          "<div><div style='font-size:.72rem;color:var(--tx)'>"+con+"</div>"+
+          "<div><div style='font-size:.72rem;color:var(--tx)'>"+con+nro+"</div>"+
           "<div style='font-size:.62rem;color:var(--tx3)'>"+fecha+"</div></div>"+
           "<div style='font-size:.88rem;font-weight:700;color:"+color+"'>"+fmt(g.monto)+"</div>"+
         "</div></div>";
@@ -3808,70 +3803,54 @@ function loadDepositoMarcela(){
     html+="<div style='display:grid;grid-template-columns:repeat(3,1fr);gap:.5rem;margin-bottom:1rem'>";
     html+="<div class='tbl-wrap' style='padding:.6rem;text-align:center;border-top:3px solid var(--yel)'>"+
           "<div style='font-size:.62rem;color:var(--tx3)'>Pendientes</div>"+
-          "<div style='font-size:1rem;font-weight:700;color:var(--yel)'>"+fmt(totPend)+"</div></div>";
+          "<div style='font-size:1rem;font-weight:700;color:var(--yel)'>"+fmt(totPend)+"</div>"+
+          "<div style='font-size:.6rem;color:var(--tx3)'>"+pend.length+" registros</div></div>";
     html+="<div class='tbl-wrap' style='padding:.6rem;text-align:center;border-top:3px solid var(--green)'>"+
           "<div style='font-size:.62rem;color:var(--tx3)'>Aprobadas</div>"+
-          "<div style='font-size:1rem;font-weight:700;color:var(--green)'>"+fmt(totAcept)+"</div></div>";
+          "<div style='font-size:1rem;font-weight:700;color:var(--green)'>"+fmt(totAcept)+"</div>"+
+          "<div style='font-size:.6rem;color:var(--tx3)'>"+acept.length+" registros</div></div>";
     html+="<div class='tbl-wrap' style='padding:.6rem;text-align:center;border-top:3px solid var(--blue)'>"+
           "<div style='font-size:.62rem;color:var(--tx3)'>Cobradas</div>"+
-          "<div style='font-size:1rem;font-weight:700;color:var(--blue)'>"+fmt(totCobr)+"</div></div>";
+          "<div style='font-size:1rem;font-weight:700;color:var(--blue)'>"+fmt(totCobr)+"</div>"+
+          "<div style='font-size:.6rem;color:var(--tx3)'>"+cobr.length+" registros</div></div>";
     html+="</div>";
 
     // Pendientes
-    html+="<div class='sec-title' style='color:var(--yel)'>&#9203; Pendientes de aprobaci\u00f3n ("+pend.length+")</div>";
+    html+="<div class='sec-title' style='color:var(--yel)'>⏳ Pendientes de aprobación ("+pend.length+")</div>";
     html+=pend.length?pend.map(function(g){return fmtG(g,'var(--yel)');}).join(''):"<div class='empty'>Sin pendientes</div>";
 
     // Aprobadas
-    if(acept.length){
-      html+="<div class='sec-title' style='margin-top:1rem;color:var(--green)'>&#10003; Aprobadas ("+acept.length+")</div>";
-      html+=acept.map(function(g){return fmtG(g,'var(--green)');}).join('');
+    html+="<div class='sec-title' style='margin-top:1rem;color:var(--green)'>✅ Aprobadas ("+acept.length+")</div>";
+    html+=acept.length?acept.map(function(g){return fmtG(g,'var(--green)');}).join(''):"<div class='empty'>Sin aprobadas</div>";
+
+    // Cobradas (período cerrado)
+    if(cobr.length){
+      html+="<div class='sec-title' style='margin-top:1rem;color:var(--blue)'>💰 Cobradas — períodos anteriores ("+cobr.length+")</div>";
+      html+=cobr.map(function(g){return fmtG(g,'var(--blue)');}).join('');
     }
 
     // Canceladas
     if(canc.length){
-      html+="<div class='sec-title' style='margin-top:1rem;color:var(--red)'>&#10005; Canceladas ("+canc.length+")</div>";
+      html+="<div class='sec-title' style='margin-top:1rem;color:var(--red)'>✕ Canceladas ("+canc.length+")</div>";
       html+=canc.map(function(g){return fmtG(g,'var(--red)');}).join('');
     }
 
-    // Cobradas
-    if(cobr.length){
-      html+="<div class='sec-title' style='margin-top:1rem;color:var(--blue)'>&#128176; Cobradas \u2014 per\u00edodos anteriores ("+cobr.length+")</div>";
-      html+=cobr.map(function(g){return fmtG(g,'var(--blue)');}).join('');
-    }
-
-    // Mis transferencias enviadas a David
-    html+="<div class='sec-title' style='margin-top:1.2rem'>&#8594; Mis transferencias a David ("+transferidas.length+")</div>";
-    if(!transferidas.length){
-      html+="<div class='empty'>Sin transferencias registradas</div>";
-    } else {
-      html+=transferidas.map(function(t){
-        var items=[];try{items=typeof t.items==='string'?JSON.parse(t.items):t.items||[];}catch(e){}
-        var fecha=new Date(t.created_at).toLocaleString('es-AR',{day:'2-digit',month:'2-digit',year:'2-digit',hour:'2-digit',minute:'2-digit',timeZone:"America/Argentina/Buenos_Aires"});
-        var estColor=t.estado==='confirmada'?'var(--green)':t.estado==='cancelada'?'var(--red)':'var(--yel)';
-        var estLabel=t.estado==='confirmada'?'Cobrada por David':t.estado==='cancelada'?'Cancelada':'Pendiente de cobro';
-        return "<div class='rend-card' style='padding:.55rem .8rem'>"+
-          "<div style='font-size:.6rem;color:var(--tx3);margin-bottom:.2rem'>"+(t.nro_orden||'')+(t.con_reserva?" \u2022 Con reserva":"")+
-            (t.estado==='confirmada'?"<span style='color:var(--green);margin-left:.4rem'>&#10003; Comisi\u00f3n aprobada</span>":"")+
-          "</div>"+
-          "<div style='margin-bottom:.3rem'>"+
-            items.map(function(it){
-              return "<div style='display:flex;justify-content:space-between;font-size:.72rem'>"+
-                "<span>"+it.nombre+" x"+(it.qty||1)+(it.isDecan?' &#129514;':'')+"</span>"+
-                "<span>"+fmt(it.total||0)+"</span></div>";
-            }).join('')+
-          "</div>"+
-          "<div style='display:flex;justify-content:space-between;align-items:center'>"+
-            "<span style='font-size:.65rem;color:var(--tx3)'>"+fecha+"</span>"+
-            "<div style='display:flex;align-items:center;gap:.5rem'>"+
-              "<span style='font-size:.88rem;font-weight:700;color:var(--acc)'>"+fmt(t.total||0)+"</span>"+
-              "<span style='font-size:.62rem;padding:.12rem .4rem;border-radius:20px;color:"+estColor+";border:1px solid "+estColor+"'>"+estLabel+"</span>"+
-            "</div></div></div>";
-      }).join('');
+    if(!gastos.length){
+      html="<div class='empty' style='padding:2rem;text-align:center'>"+
+        "<div style='font-size:2rem;margin-bottom:.5rem'>📭</div>"+
+        "<div style='font-size:.82rem;color:var(--tx3)'>Sin comisiones registradas</div>"+
+        "<div style='font-size:.7rem;color:var(--tx3);margin-top:.3rem'>Las comisiones se generan automáticamente al transferir ventas</div>"+
+      "</div>";
     }
 
     pg.innerHTML=html;
   }).catch(function(e){
-    pg.innerHTML="<div class='empty'>Error cargando: "+e.message+"</div>";
+    console.error('[Marcela comisiones] ERROR:', e);
+    pg.innerHTML="<div class='empty' style='padding:1rem'>"+
+      "<div style='color:var(--red);font-weight:700;margin-bottom:.5rem'>Error al cargar comisiones</div>"+
+      "<div style='font-size:.72rem;color:var(--tx3)'>"+e.message+"</div>"+
+      "<button class='btn btn-g' onclick='loadDepositoMarcela()' style='margin-top:.7rem'>Reintentar</button>"+
+    "</div>";
   });
 }
 
