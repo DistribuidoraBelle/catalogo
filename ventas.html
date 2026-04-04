@@ -5115,111 +5115,174 @@ var _devVentaItems = [];    // items de esa venta
 function loadDevoluciones(){
   var pg=document.getElementById("pg-devoluciones");
   if(!pg)return;
-  pg.innerHTML="<div class='loading'><div class='spin'></div>Cargando historial...</div>";
-
-  apiGet("ventas","select=id,producto_nombre,cantidad,precio_unitario,total,segmento,created_at,estado,descuento&vendedor_id=eq."+VENDEDOR_ID+"&estado=eq.confirmada&order=created_at.desc&limit=100")
-  .then(function(data){
-    if(!Array.isArray(data)||!data.length){
-      pg.innerHTML="<div class='empty'>Sin ventas registradas para devolver.</div>";return;
-    }
-    _devVentas=data;
-    renderDevolucionesPage(pg);
+  pg.innerHTML="<div class='loading'><div class='spin'></div>Cargando...</div>";
+  // Cargar ventas confirmadas y historial de devoluciones enviadas
+  Promise.all([
+    apiGet("ventas","select=id,nro_orden,producto_nombre,cantidad,precio_unitario,total,created_at,estado&vendedor_id=eq."+VENDEDOR_ID+"&estado=in.(confirmada,dev_parcial)&order=created_at.desc&limit=200"),
+    apiGet("incidencias","select=*&vendedor_id=eq."+VENDEDOR_ID+"&tipo=eq.devolucion&order=created_at.desc&limit=100")
+  ]).then(function(res){
+    _devVentas=Array.isArray(res[0])?res[0]:[];
+    var historial=Array.isArray(res[1])?res[1]:[];
+    renderDevolucionesPage(pg, historial);
+  }).catch(function(e){
+    pg.innerHTML="<div class='empty'>Error: "+e.message+"</div>";
   });
 }
 
-function renderDevolucionesPage(pg){
-  pg.innerHTML=
-    "<div style='font-size:.8rem;color:var(--tx2);margin-bottom:1rem'>Registra una devolucion. Selecciona la venta original para devolver el monto correcto.</div>"+
+function renderDevolucionesPage(pg, historial){
+  var html=
+    "<div style='font-size:.8rem;color:var(--tx2);margin-bottom:1rem'>Registrá una devolución. El admin revisará y decidirá qué pasa con el stock y el monto.</div>"+
 
-    // STEP 1: Select venta
-    "<div class='tbl-wrap' style='padding:.9rem 1rem;margin-bottom:1rem'>"+
-      "<div style='font-size:.72rem;font-weight:700;color:var(--tx3);text-transform:uppercase;margin-bottom:.6rem'>1. Seleccionar venta original</div>"+
-      "<input id='devBuscar' oninput='filtrarDevVentas()' placeholder='Buscar producto...' style='width:100%;padding:.4rem .6rem;background:var(--sur3);border:1px solid var(--bd);border-radius:var(--rs);color:var(--tx);font-size:.78rem;margin-bottom:.6rem'>"+
+    // PASO 1: Seleccionar orden
+    "<div class='tbl-wrap' style='padding:.9rem 1rem;margin-bottom:.8rem'>"+
+      "<div style='font-size:.72rem;font-weight:700;color:var(--tx3);text-transform:uppercase;margin-bottom:.6rem'>1. Seleccionar venta</div>"+
+      "<input id='devBuscar' oninput='filtrarDevVentas()' placeholder='Buscar por producto o nro orden...' class='fi' style='width:100%;margin-bottom:.6rem'>"+
       "<div id='devVentasList' style='max-height:220px;overflow-y:auto'></div>"+
     "</div>"+
 
-    // STEP 2: Devolucion details (hidden until venta selected)
+    // PASO 2: Detalle de devolución (oculto hasta seleccionar)
     "<div id='devStep2' style='display:none'>"+
-      "<div class='tbl-wrap' style='padding:.9rem 1rem;margin-bottom:1rem'>"+
-        "<div style='font-size:.72rem;font-weight:700;color:var(--tx3);text-transform:uppercase;margin-bottom:.6rem'>2. Venta seleccionada</div>"+
-        "<div id='devVentaInfo'></div>"+
-      "</div>"+
-
-      "<div class='tbl-wrap' style='padding:.9rem 1rem;margin-bottom:1rem'>"+
-        "<div style='font-size:.72rem;font-weight:700;color:var(--tx3);text-transform:uppercase;margin-bottom:.6rem'>3. Motivo y destino del producto</div>"+
-
-        "<div style='display:flex;flex-direction:column;gap:.6rem;margin-bottom:.8rem'>"+
-          "<label style='display:flex;align-items:center;gap:.5rem;cursor:pointer;padding:.5rem .7rem;background:var(--sur3);border-radius:var(--rs);border:1px solid var(--bd)'>"+
-            "<input type='radio' name='devMotivo' value='ok' onchange='devMotivoChange()' checked style='accent-color:var(--green)'>"+
-            "<div>"+
-              "<div style='font-size:.8rem;font-weight:600;color:var(--green)'>Producto en buen estado</div>"+
-              "<div style='font-size:.68rem;color:var(--tx3)'>Se devuelve al stock. El dinero se reintegra al vendedor.</div>"+
-            "</div>"+
-          "</label>"+
-          "<label style='display:flex;align-items:center;gap:.5rem;cursor:pointer;padding:.5rem .7rem;background:var(--sur3);border-radius:var(--rs);border:1px solid var(--bd)'>"+
-            "<input type='radio' name='devMotivo' value='roto' onchange='devMotivoChange()' style='accent-color:var(--red)'>"+
-            "<div>"+
-              "<div style='font-size:.8rem;font-weight:600;color:var(--red)'>Producto roto / fallado</div>"+
-              "<div style='font-size:.68rem;color:var(--tx3)'>No vuelve al stock. El dinero igualmente se reintegra al vendedor.</div>"+
-            "</div>"+
-          "</label>"+
-        "</div>"+
-
-        "<div style='margin-bottom:.6rem'>"+
-          "<div style='font-size:.72rem;color:var(--tx3);margin-bottom:.3rem'>Cantidad a devolver</div>"+
+      "<div class='tbl-wrap' style='padding:.9rem 1rem;margin-bottom:.8rem'>"+
+        "<div style='font-size:.72rem;font-weight:700;color:var(--tx3);text-transform:uppercase;margin-bottom:.6rem'>2. Detalle de la devolución</div>"+
+        "<div id='devVentaInfo' style='background:var(--sur3);border-radius:var(--rs);padding:.6rem .8rem;margin-bottom:.7rem;font-size:.78rem'></div>"+
+        // Cantidad
+        "<div style='margin-bottom:.7rem'>"+
+          "<label style='font-size:.72rem;color:var(--tx3);display:block;margin-bottom:.3rem'>Cantidad a devolver:</label>"+
           "<div style='display:flex;align-items:center;gap:.5rem'>"+
-            "<button onclick='devCantChange(-1)' style='width:32px;height:32px;background:var(--sur3);border:1px solid var(--bd);border-radius:var(--rs);color:var(--tx);font-size:1rem;cursor:pointer'>-</button>"+
-            "<span id='devCantDisplay' style='font-size:1.1rem;font-weight:700;color:var(--tx);min-width:30px;text-align:center'>1</span>"+
-            "<button onclick='devCantChange(1)' style='width:32px;height:32px;background:var(--sur3);border:1px solid var(--bd);border-radius:var(--rs);color:var(--tx);font-size:1rem;cursor:pointer'>+</button>"+
-            "<span id='devCantMax' style='font-size:.7rem;color:var(--tx3)'></span>"+
+            "<button onclick='devCambiarCant(-1)' class='btn btn-g' style='font-size:.9rem;padding:.2rem .6rem'>−</button>"+
+            "<span id='devCantLabel' style='font-size:1rem;font-weight:700;min-width:30px;text-align:center'>1</span>"+
+            "<button onclick='devCambiarCant(1)' class='btn btn-g' style='font-size:.9rem;padding:.2rem .6rem'>+</button>"+
           "</div>"+
         "</div>"+
-
-        "<div style='padding:.6rem .8rem;background:var(--adim);border:1px solid var(--acc);border-radius:var(--rs);margin-bottom:.8rem'>"+
-          "<div style='font-size:.7rem;color:var(--tx3);margin-bottom:.2rem'>Monto a reintegrar al vendedor:</div>"+
-          "<div id='devMontoCalc' style='font-size:1.3rem;font-weight:700;color:var(--acc)'>$0</div>"+
-          "<div id='devMontoDesc' style='font-size:.68rem;color:var(--tx3)'></div>"+
+        // Motivo
+        "<div style='margin-bottom:.7rem'>"+
+          "<label style='font-size:.72rem;color:var(--tx3);display:block;margin-bottom:.4rem'>Motivo:</label>"+
+          "<div style='display:flex;flex-direction:column;gap:.3rem'>"+
+            "<label style='display:flex;align-items:center;gap:.5rem;font-size:.78rem'><input type='radio' name='devMotivo' value='buen_estado' checked> Producto en buen estado (cliente no quiso)</label>"+
+            "<label style='display:flex;align-items:center;gap:.5rem;font-size:.78rem'><input type='radio' name='devMotivo' value='roto'> Producto roto o defectuoso</label>"+
+            "<label style='display:flex;align-items:center;gap:.5rem;font-size:.78rem'><input type='radio' name='devMotivo' value='equivocado'> Producto equivocado</label>"+
+            "<label style='display:flex;align-items:center;gap:.5rem;font-size:.78rem'><input type='radio' name='devMotivo' value='otro'> Otro motivo</label>"+
+          "</div>"+
         "</div>"+
-
-        "<div style='margin-bottom:.6rem'>"+
-          "<div style='font-size:.72rem;color:var(--tx3);margin-bottom:.3rem'>Observacion (opcional)</div>"+
-          "<input id='devObs' placeholder='Ej: cliente reclamó perfume vencido...' style='width:100%;padding:.4rem .6rem;background:var(--sur3);border:1px solid var(--bd);border-radius:var(--rs);color:var(--tx);font-size:.78rem'>"+
+        // Observaciones
+        "<div style='margin-bottom:.9rem'>"+
+          "<label style='font-size:.72rem;color:var(--tx3);display:block;margin-bottom:.3rem'>Observaciones (opcional):</label>"+
+          "<textarea id='devObs' class='fi' rows='2' style='width:100%;resize:vertical' placeholder='Describí el problema...'></textarea>"+
         "</div>"+
+        // Info monto
+        "<div id='devMontoInfo' style='background:rgba(var(--acc-rgb),.08);border-radius:var(--rs);padding:.6rem .8rem;margin-bottom:.7rem;font-size:.78rem;border-left:3px solid var(--acc)'>"+
+          "💡 El monto exacto a reintegrar lo decide el administrador."+
+        "</div>"+
+        "<button onclick='enviarDevolucion()' class='btn btn-a' style='width:100%;font-weight:700'>📤 Enviar devolución al admin</button>"+
       "</div>"+
+    "</div>"+
 
-      "<button onclick='confirmarDevolucion()' style='width:100%;padding:.7rem;background:var(--acc);color:#1a1200;border:none;border-radius:var(--r);font-size:.9rem;font-weight:700;cursor:pointer'>"+
-        "&#10003; Confirmar devolucion"+
-      "</button>"+
-    "</div>";
+    // HISTORIAL
+    (historial&&historial.length?
+      "<div class='tbl-wrap' style='padding:.9rem 1rem;margin-top:.8rem'>"+
+        "<div style='font-size:.72rem;font-weight:700;color:var(--tx3);text-transform:uppercase;margin-bottom:.6rem'>Mis devoluciones enviadas</div>"+
+        historial.map(function(inc){
+          var estadoColor={pendiente:'var(--yel)',resuelto:'var(--green)',descartado:'var(--tx3)'}[inc.estado]||'var(--tx3)';
+          var estadoLabel={pendiente:'⏳ Pendiente revisión admin',resuelto:'✅ Resuelto',descartado:'❌ Descartado'}[inc.estado]||inc.estado;
+          var fecha=new Date(inc.created_at).toLocaleDateString('es-AR',{day:'2-digit',month:'2-digit',year:'2-digit',timeZone:'America/Argentina/Buenos_Aires'});
+          return "<div style='border-bottom:1px solid var(--bd);padding:.5rem 0;font-size:.75rem'>"+
+            "<div style='display:flex;justify-content:space-between;align-items:center'>"+
+              "<div>"+
+                "<b>"+inc.producto_nombre+"</b> &times;"+inc.cantidad+"u"+
+                "<span style='color:var(--tx3);font-size:.65rem;margin-left:.4rem'>&bull; "+fecha+"</span>"+
+              "</div>"+
+              "<span style='color:"+estadoColor+";font-size:.65rem;font-weight:600'>"+estadoLabel+"</span>"+
+            "</div>"+
+            "<div style='color:var(--tx3);font-size:.65rem'>Motivo: "+({buen_estado:'Buen estado',roto:'Roto/defectuoso',equivocado:'Equivocado',otro:'Otro'}[inc.motivo]||inc.motivo)+"</div>"+
+            (inc.decision_nota?"<div style='color:var(--acc);font-size:.65rem;margin-top:.2rem'>Admin: "+inc.decision_nota+"</div>":"")+
+            (inc.estado==='resuelto'?"<div style='color:var(--green);font-size:.65rem'>Reintegro: $"+(inc.decision_monto||0).toLocaleString('es-AR')+"</div>":"")+
+          "</div>";
+        }).join('')+
+      "</div>"
+    :"");
 
-  // Render ventas list
-  devRenderVentasList(_devVentas);
+  pg.innerHTML=html;
 
-  setTimeout(initSearchClears,100);
+  // Renderizar lista de ventas
+  filtrarDevVentas();
 }
 
-function devRenderVentasList(ventas){
-  var el=document.getElementById("devVentasList");
+var _devVentaSelId=null, _devCant=1, _devVentas=[], _devMaxCant=1;
+
+function filtrarDevVentas(){
+  var q=(document.getElementById('devBuscar')||{value:''}).value.toLowerCase();
+  var lista=_devVentas.filter(function(v){
+    return !q||(v.producto_nombre||'').toLowerCase().indexOf(q)>=0||(v.nro_orden||'').toLowerCase().indexOf(q)>=0;
+  });
+  var el=document.getElementById('devVentasList');
   if(!el)return;
-  if(!ventas.length){el.innerHTML="<div class='empty' style='padding:.5rem'>Sin resultados.</div>";return;}
-  el.innerHTML=ventas.slice(0,30).map(function(v){
-    var fecha=new Date(v.created_at).toLocaleDateString("es-AR",{day:"2-digit",month:"2-digit",year:"2-digit",timeZone:"America/Argentina/Buenos_Aires"});
-    var hora=new Date(v.created_at).toLocaleTimeString("es-AR",{hour:"2-digit",minute:"2-digit",timeZone:"America/Argentina/Buenos_Aires"});
-    var isSelected=_devVentaSelId===v.id;
-    return"<div onclick='seleccionarDevVenta("+v.id+")' style='cursor:pointer;padding:.4rem .6rem;border-radius:var(--rs);margin-bottom:.3rem;"+
-      "background:"+(isSelected?"var(--adim)":"var(--sur3)")+";border:1px solid "+(isSelected?"var(--acc)":"var(--bd)")+";"+
-      "display:flex;justify-content:space-between;align-items:center;gap:.4rem'>"+
-      "<div>"+
-        "<div style='font-size:.78rem;font-weight:600;color:var(--tx)'>"+v.producto_nombre+"</div>"+
-        "<div style='font-size:.65rem;color:var(--tx3)'>"+fecha+" "+hora+" &bull; "+v.cantidad+"u &bull; seg: "+v.segmento+"</div>"+
+  if(!lista.length){el.innerHTML="<div class='empty' style='font-size:.75rem'>Sin ventas encontradas</div>";return;}
+  el.innerHTML=lista.map(function(v){
+    var fecha=new Date(v.created_at).toLocaleDateString('es-AR',{day:'2-digit',month:'2-digit',timeZone:'America/Argentina/Buenos_Aires'});
+    var sel=v.id===_devVentaSelId;
+    return "<div onclick='devSeleccionarVenta("+v.id+")' style='padding:.45rem .7rem;border-radius:var(--rs);cursor:pointer;border:1px solid "+(sel?'var(--acc)':'var(--bd)')+";background:"+(sel?'rgba(var(--acc-rgb),.08)':'var(--sur3)')+";margin-bottom:.3rem;font-size:.75rem'>"+
+      "<div style='display:flex;justify-content:space-between'>"+
+        "<b style='color:var(--tx)'>"+v.producto_nombre+"</b>"+
+        "<span style='color:var(--green);font-weight:600'>$"+Number(v.total||0).toLocaleString('es-AR')+"</span>"+
       "</div>"+
-      "<div style='text-align:right;flex-shrink:0'>"+
-        "<div style='font-size:.85rem;font-weight:700;color:var(--acc)'>$"+Math.round(v.total).toLocaleString("es-AR",{timeZone:"America/Argentina/Buenos_Aires"})+"</div>"+
-        "<div style='font-size:.62rem;color:var(--tx3)'>x"+v.cantidad+" u$d "+parseFloat(v.precio_unitario||0).toFixed(2)+"</div>"+
-      "</div>"+
+      "<div style='color:var(--tx3);font-size:.65rem'>"+(v.nro_orden||'Orden #'+v.id)+" &bull; "+v.cantidad+"u &bull; "+fecha+"</div>"+
     "</div>";
-  }).join("");
+  }).join('');
 }
+
+function devSeleccionarVenta(id){
+  _devVentaSelId=id;
+  var v=_devVentas.find(function(x){return x.id===id;});
+  if(!v)return;
+  _devMaxCant=v.cantidad;
+  _devCant=1;
+  var step2=document.getElementById('devStep2');
+  if(step2)step2.style.display='block';
+  var info=document.getElementById('devVentaInfo');
+  if(info)info.innerHTML="<b>"+v.producto_nombre+"</b> &times;"+v.cantidad+"u &bull; $"+Number(v.total||0).toLocaleString('es-AR')+(v.nro_orden?" &bull; "+v.nro_orden:"");
+  var cantLabel=document.getElementById('devCantLabel');
+  if(cantLabel)cantLabel.textContent='1';
+  filtrarDevVentas(); // re-render para marcar seleccionada
+}
+
+function devCambiarCant(delta){
+  _devCant=Math.max(1,Math.min(_devMaxCant,_devCant+delta));
+  var cantLabel=document.getElementById('devCantLabel');
+  if(cantLabel)cantLabel.textContent=_devCant;
+}
+
+function enviarDevolucion(){
+  if(!_devVentaSelId){toast('Seleccioná una venta primero','twarn');return;}
+  var venta=_devVentas.find(function(x){return x.id===_devVentaSelId;});
+  if(!venta)return;
+  var motivoEl=document.querySelector("input[name='devMotivo']:checked");
+  var motivo=motivoEl?motivoEl.value:'otro';
+  var obs=(document.getElementById('devObs')||{}).value||'';
+  var ppu=venta.total/venta.cantidad;
+  var montoOrig=Math.round(ppu*_devCant);
+
+  if(!confirm('Enviar devolución al admin:\n• '+venta.producto_nombre+' ×'+_devCant+'u\n• Motivo: '+motivo+'\n• Monto original: $'+montoOrig.toLocaleString('es-AR')+'\n\nEl admin decidirá el reintegro y si vuelve al stock.'))return;
+
+  apiPost('incidencias',{
+    tipo:'devolucion',
+    estado:'pendiente',
+    vendedor_id:VENDEDOR_ID,
+    vendedor_nombre:VENDEDOR_NOMBRE||('Vendedor '+VENDEDOR_ID),
+    venta_id:venta.id,
+    producto_id:venta.producto_id||null,
+    producto_nombre:venta.producto_nombre,
+    cantidad:_devCant,
+    motivo:motivo,
+    observacion:obs,
+    monto_original:montoOrig,
+    periodo:periodoActual||''
+  }).then(function(){
+    toast('Devolución enviada al admin ✅','tok');
+    _devVentaSelId=null;_devCant=1;
+    loadDevoluciones();
+  }).catch(function(e){toast('Error: '+e.message,'terr');});
+}
+
 
 function filtrarDevVentas(){
   var q=(document.getElementById("devBuscar").value||"").toLowerCase();

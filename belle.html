@@ -833,6 +833,7 @@ td{padding:.35rem .5rem;font-size:.78rem;color:var(--tx2);vertical-align:middle;
         <button id="recTab-devoluciones" class="btn btn-g" onclick="recSetTab('devoluciones')" style="font-size:.72rem">↩️ Devoluciones</button>
         <button id="recTab-ventas" class="btn btn-g" onclick="recSetTab('ventas')" style="font-size:.72rem">🛍 Ventas</button>
         <button id="recTab-otros" class="btn btn-g" onclick="recSetTab('otros')" style="font-size:.72rem">📋 Otros</button>
+        <button id="recTab-historial" class="btn btn-g" onclick="recSetTab('historial')" style="font-size:.72rem">📁 Historial</button>
         <div style="margin-left:auto">
           <select class="fi" id="recFiltroEstado" style="font-size:.7rem;padding:.2rem .4rem" onchange="loadReclamos()">
             <option value="">Todos los estados</option>
@@ -882,6 +883,17 @@ td{padding:.35rem .5rem;font-size:.78rem;color:var(--tx2);vertical-align:middle;
       <div id="comisionesConfigGrid">
         <div class="loading"><div class="spin"></div>Cargando depósito...</div>
       </div>
+    </div>
+    <!-- INCIDENCIAS DE PRODUCTOS -->
+    <div class="page" id="page-incidencias" style="display:none">
+      <div id="incStats" style="display:grid;grid-template-columns:repeat(auto-fit,minmax(110px,1fr));gap:.5rem;margin-bottom:.8rem"></div>
+      <div style="display:flex;gap:.3rem;flex-wrap:wrap;margin-bottom:.7rem;border-bottom:1px solid var(--bd);padding-bottom:.5rem">
+        <button id="incTab-devoluciones" class="btn btn-a" onclick="incSetTab('devoluciones')" style="font-size:.72rem">↩️ Devoluciones</button>
+        <button id="incTab-faltantes" class="btn btn-g" onclick="incSetTab('faltantes')" style="font-size:.72rem">📦 Faltantes pedido</button>
+        <button id="incTab-fallados" class="btn btn-g" onclick="incSetTab('fallados')" style="font-size:.72rem">⚠️ Fallados/Rotos</button>
+        <button id="incTab-resueltos" class="btn btn-g" onclick="incSetTab('resueltos')" style="font-size:.72rem">✅ Historial</button>
+      </div>
+      <div id="incPanel"></div>
     </div>
     <!-- AYUDANTE DE COMPRAS -->
     <div class="page" id="page-compras-ia">
@@ -1185,6 +1197,29 @@ td{padding:.35rem .5rem;font-size:.78rem;color:var(--tx2);vertical-align:middle;
           <div style="display:flex;gap:.5rem">
             <button class="btn btn-g" onclick="cerrarModal('moFicha')" style="flex:1">Cancelar</button>
             <button class="btn btn-a" onclick="fichaGuardar()" style="flex:2;font-weight:600">💾 Guardar ficha</button>
+          </div>
+        </div>
+      </div>
+    </div>
+    <!-- MODAL STOCK ALERT — productos nuevos/faltantes en pedido -->
+    <div class="mo" id="moStockAlert">
+      <div class="md" style="max-width:560px">
+        <div class="mh">
+          <div class="mtt">✨ Productos Nuevos detectados</div>
+          <button class="btn btn-g" onclick="cerrarModal('moStockAlert')" style="padding:.2rem .5rem">✕</button>
+        </div>
+        <div class="mb">
+          <div id="stockAlertBody" style="margin-bottom:1rem"></div>
+          <div style="display:flex;gap:.6rem;flex-direction:column">
+            <button id="stockAlertWizBtn" class="btn btn-a" style="font-weight:600;font-size:.82rem">
+              ⚙️ Configurar ahora — crear producto y agregar al stock
+            </button>
+            <button id="stockAlertPendBtn" class="btn btn-g" style="font-size:.82rem">
+              📋 Dejar en Incidencias — agregar el resto al stock ahora
+            </button>
+            <button onclick="cerrarModal('moStockAlert')" class="btn btn-g" style="font-size:.78rem;color:var(--tx3)">
+              Cancelar
+            </button>
           </div>
         </div>
       </div>
@@ -5323,7 +5358,7 @@ function _doAgregarAlStock(pedidoId,items){
 
 
 
-function loadIncidencias(){loadPendientesCatalogo();}
+function loadIncidencias(){incLoad();}
 
 function loadPendientesCatalogo(){
   var pg=document.getElementById("pendientesCatalogoList");if(!pg)return;
@@ -10627,15 +10662,34 @@ function guardarControlPedido(){
 
   Object.keys(decisions).forEach(function(itemId){
     var d=decisions[itemId];
-    proms.push(apiPatch('pedidos_proveedor_items',{
-      cantidad_recibida: d.cantRecibida||0,
+    var cantPedida=((_controlItems||[]).find(function(it){return String(it.id)===String(itemId);})||{}).cantidad_pedida||0;
+    var cantRecibida=d.cantRecibida||0;
+    var noLlego=cantPedida>0&&cantRecibida===0;
+    var llegoParcial=cantPedida>0&&cantRecibida>0&&cantRecibida<cantPedida;
+    // Determinar estado_item correcto
+    var estadoItem;
+    if(noLlego){
+      // No llegó nada — va directo a faltante/incidencias
+      estadoItem='faltante';
+    } else if(d.catalogoAccion==='match'){
+      estadoItem=llegoParcial?'macheado':'macheado'; // parcial igual macheado, faltante se crea aparte
+    } else if(d.catalogoAccion==='nuevo'){
+      estadoItem='nuevo';
+    } else {
+      estadoItem='pendiente_catalogo';
+    }
+    var patch={
+      cantidad_recibida: cantRecibida,
       cantidad_fallada: d.cantFallada||0,
-      estado_item: d.catalogoAccion==='match'?'macheado':
-                   d.catalogoAccion==='nuevo'?'nuevo':
-                   d.catalogoAccion==='pendiente_catalogo'?'pendiente_catalogo':'pendiente_catalogo',
-      producto_id: d.prodId||null,
+      estado_item: estadoItem,
+      producto_id: noLlego?null:(d.prodId||null),
       observacion: d.obsFallada||''
-    },'id=eq.'+itemId));
+    };
+    // Si llegó parcialmente, guardar cuánto faltó en observacion
+    if(llegoParcial&&!patch.observacion){
+      patch.observacion='Llegaron '+cantRecibida+' de '+cantPedida+' pedidas';
+    }
+    proms.push(apiPatch('pedidos_proveedor_items',patch,'id=eq.'+itemId));
   });
 
   // Mark pedido as controlado
@@ -11758,16 +11812,18 @@ function loadReclamos(){
   if(!el)return;
   el.innerHTML="<div class='loading'><div class='spin'></div>Cargando...</div>";
   var filtroEstado=document.getElementById('recFiltroEstado');
-  var q='select=*&order=created_at.desc&limit=500';
-  if(filtroEstado&&filtroEstado.value)q+='&estado=eq.'+filtroEstado.value;
+  // Solo activos en tabs normales, historial lo carga aparte
+  var q='select=*&estado=in.(pendiente,en_revision)&order=created_at.desc&limit=500';
   Promise.all([
     apiGet('reclamos',q),
+    apiGet('reclamos','select=*&estado=in.(aceptado,rechazado,cancelado)&order=updated_at.desc&limit=200'),
     apiGet('pedidos_proveedor_items','select=id,pedido_id,nombre_proveedor,cantidad_pedida,cantidad_recibida,cantidad_fallada,producto_id,estado_item,precio_usd&estado_item=in.(faltante,fallado,pendiente_catalogo)&limit=500'),
     apiGet('pedidos_proveedor','select=id,nro_pedido,proveedor&order=created_at.desc&limit=200')
   ]).then(function(res){
     var reclamos=Array.isArray(res[0])?res[0]:[];
-    var itemsProblema=Array.isArray(res[1])?res[1]:[];
-    var pedidos=Array.isArray(res[2])?res[2]:[];
+    var recHistorial=Array.isArray(res[1])?res[1]:[];
+    var itemsProblema=Array.isArray(res[2])?res[2]:[];
+    var pedidos=Array.isArray(res[3])?res[3]:[];
     var pedMap={};pedidos.forEach(function(p){pedMap[p.id]=p;});
 
     // Stats globales
@@ -11783,7 +11839,7 @@ function loadReclamos(){
       mkStatCard('Reclamos rev.','acc',stats.en_revision,'');
 
     // Guardar datos globales para tabs
-    window._recData={reclamos:reclamos,faltantes:faltantesItems,fallados:falladosItems,pedMap:pedMap};
+    window._recData={reclamos:reclamos,recHistorial:recHistorial,faltantes:faltantesItems,fallados:falladosItems,pedMap:pedMap};
     recRenderTab();
   }).catch(function(e){
     el.innerHTML="<div class='empty'>Error: "+e.message+"</div>";
@@ -11793,7 +11849,7 @@ function loadReclamos(){
 var _recTab='faltantes';
 function recSetTab(tab){
   _recTab=tab;
-  ['faltantes','fallados','devoluciones','ventas','otros'].forEach(function(t){
+  ['faltantes','fallados','devoluciones','ventas','otros','historial'].forEach(function(t){
     var btn=document.getElementById('recTab-'+t);
     if(btn)btn.className=t===tab?'btn btn-a':'btn btn-g';
   });
@@ -11809,6 +11865,7 @@ function recRenderTab(){
   else if(_recTab==='fallados') recRenderFallados(el,d);
   else if(_recTab==='devoluciones') recRenderFiltrado(el,d.reclamos,'devolucion');
   else if(_recTab==='ventas') recRenderFiltrado(el,d.reclamos,'venta');
+  else if(_recTab==='historial')recRenderHistorialReclamos(el,d);
   else recRenderFiltrado(el,d.reclamos,'otros');
 }
 
@@ -16691,6 +16748,599 @@ function ppAgregarTodos(){
   });
   Promise.all(proms).then(function(){toast('Stock actualizado: '+lista.length+' productos ✅','tok');ppLoad();if(typeof _reloadStock==='function')_reloadStock();})
   .catch(function(e){toast('Error: '+e.message,'terr');});
+}
+
+
+//== PANEL INCIDENCIAS DE PRODUCTOS ==
+var _incTab='devoluciones';
+
+function incSetTab(tab){
+  _incTab=tab;
+  ['devoluciones','faltantes','fallados','resueltos'].forEach(function(t){
+    var btn=document.getElementById('incTab-'+t);
+    if(btn)btn.className=t===tab?'btn btn-a':'btn btn-g';
+  });
+  incRenderTab();
+}
+
+function incLoad(){
+  var panel=document.getElementById('incPanel');
+  if(!panel)return;
+  panel.innerHTML="<div class='loading'><div class='spin'></div>Cargando...</div>";
+  Promise.all([
+    apiGet('incidencias','select=*&estado=in.(pendiente,en_revision)&order=created_at.desc&limit=300'),
+    apiGet('pedidos_proveedor_items','select=id,pedido_id,nombre_proveedor,cantidad_pedida,cantidad_recibida,cantidad_fallada,producto_id,estado_item&estado_item=in.(faltante,fallado)&limit=300'),
+    apiGet('pedidos_proveedor','select=id,nro_pedido,proveedor&order=created_at.desc&limit=200'),
+    apiGet('incidencias','select=*&estado=in.(resuelto,descartado)&order=resuelto_at.desc&limit=100')
+  ]).then(function(res){
+    var inc=Array.isArray(res[0])?res[0]:[];
+    var items=Array.isArray(res[1])?res[1]:[];
+    var peds=Array.isArray(res[2])?res[2]:[];
+    var hist=Array.isArray(res[3])?res[3]:[];
+    var pedMap={};peds.forEach(function(p){pedMap[p.id]=p;});
+    var devs=inc.filter(function(i){return i.tipo==='devolucion';});
+    var falt=items.filter(function(i){return i.estado_item==='faltante';});
+    var fall=items.filter(function(i){return i.estado_item==='fallado';});
+    var sEl=document.getElementById('incStats');
+    if(sEl)sEl.innerHTML=
+      mkStatCard('Devoluciones','yel',devs.length,'pendientes')+
+      mkStatCard('Faltantes','cyan',falt.length,'de pedidos')+
+      mkStatCard('Fallados','red',fall.length,'con problemas')+
+      mkStatCard('Resueltos','green',hist.length,'total');
+    window._incData={devs:devs,falt:falt,fall:fall,hist:hist,pedMap:pedMap};
+    incRenderTab();
+  }).catch(function(e){
+    var p=document.getElementById('incPanel');
+    if(p)p.innerHTML="<div class='empty'>Error: "+e.message+"</div>";
+  });
+}
+
+function incRenderTab(){
+  var panel=document.getElementById('incPanel');
+  if(!panel)return;
+  var d=window._incData||{devs:[],falt:[],fall:[],hist:[],pedMap:{}};
+  if(_incTab==='devoluciones')incRenderDevoluciones(panel,d);
+  else if(_incTab==='faltantes')incRenderFaltantes(panel,d);
+  else if(_incTab==='fallados')incRenderFallados(panel,d);
+  else incRenderHistorial(panel,d);
+}
+
+// ====== DEVOLUCIONES ======
+function incRenderDevoluciones(panel,d){
+  if(!d.devs.length){panel.innerHTML="<div class='empty'>✅ Sin devoluciones pendientes</div>";return;}
+  panel.innerHTML=d.devs.map(function(inc){
+    var motivoLabel={buen_estado:'Buen estado',roto:'Roto/defectuoso',equivocado:'Equivocado',otro:'Otro'}[inc.motivo]||inc.motivo;
+    var catProd=(inc.producto_id&&typeof prods!=='undefined'&&prods)?prods.find(function(p){return p.id===inc.producto_id;}):null;
+    var stockActual=catProd?(catProd.stock_actual||0):0;
+    var fecha=new Date(inc.created_at).toLocaleDateString('es-AR',{day:'2-digit',month:'2-digit',year:'2-digit',timeZone:'America/Argentina/Buenos_Aires'});
+    return '<div class="tbl-wrap" style="margin-bottom:.8rem;padding:.9rem 1rem;border-left:3px solid var(--yel)" id="inc-card-'+inc.id+'">'+
+      '<div style="display:flex;justify-content:space-between;align-items:flex-start;gap:.5rem;flex-wrap:wrap;margin-bottom:.6rem">'+
+        '<div>'+
+          '<div style="font-size:.85rem;font-weight:700;color:var(--tx)">'+inc.producto_nombre+'</div>'+
+          '<div style="font-size:.65rem;color:var(--tx3);margin-top:.15rem">'+
+            inc.vendedor_nombre+' &bull; '+inc.cantidad+'u &bull; '+fecha+
+            ' &bull; Motivo: <b>'+motivoLabel+'</b>'+
+          '</div>'+
+          (inc.observacion?'<div style="font-size:.68rem;color:var(--tx2);font-style:italic;margin-top:.15rem">'+inc.observacion+'</div>':'')+
+        '</div>'+
+        '<div style="text-align:center;background:rgba(255,193,7,.1);border-radius:8px;padding:.4rem .8rem;flex-shrink:0">'+
+          '<div style="font-size:.58rem;color:var(--tx3)">Monto original</div>'+
+          '<div style="font-size:.95rem;font-weight:700;color:var(--yel)">$'+Number(inc.monto_original||0).toLocaleString('es-AR')+'</div>'+
+        '</div>'+
+      '</div>'+
+      // Info producto
+      (catProd?
+        '<div style="font-size:.68rem;background:var(--sur3);border-radius:6px;padding:.35rem .6rem;margin-bottom:.6rem">'+
+        '📦 Catálogo: <b>'+catProd.nombre+'</b> &bull; Stock actual: <b>'+stockActual+'u</b>'+
+        '</div>':
+        '<div style="font-size:.68rem;color:var(--yel);margin-bottom:.6rem">⚠️ Producto no vinculado al catálogo</div>'
+      )+
+      // Panel de decisión
+      '<div style="background:var(--sur2);border-radius:8px;padding:.7rem .9rem;border:1px solid var(--bd)">'+
+        '<div style="font-size:.65rem;font-weight:600;color:var(--tx3);text-transform:uppercase;margin-bottom:.5rem">Decisión admin:</div>'+
+        '<div style="display:flex;gap:.5rem;flex-wrap:wrap;align-items:center;margin-bottom:.5rem">'+
+          '<span style="font-size:.72rem;color:var(--tx2)">Reintegro:</span>'+
+          '<button onclick="incSetReintegro('+inc.id+','+inc.monto_original+',100)" class="btn btn-g" style="font-size:.65rem;padding:.15rem .4rem">100% ($'+Number(inc.monto_original||0).toLocaleString('es-AR')+')</button>'+
+          '<button onclick="incSetReintegro('+inc.id+','+inc.monto_original+',50)" class="btn btn-g" style="font-size:.65rem;padding:.15rem .4rem">50% ($'+Math.round((inc.monto_original||0)*0.5).toLocaleString('es-AR')+')</button>'+
+          '<button onclick="incSetReintegro('+inc.id+','+inc.monto_original+',0)" class="btn btn-g" style="font-size:.65rem;padding:.15rem .4rem">Sin reintegro</button>'+
+          '<button onclick="incReintegroCustom('+inc.id+','+inc.monto_original+')" class="btn btn-g" style="font-size:.65rem;padding:.15rem .4rem">Otro monto...</button>'+
+        '</div>'+
+        '<div style="display:flex;gap:.5rem;align-items:center;margin-bottom:.5rem">'+
+          '<span style="font-size:.72rem;color:var(--tx2)">Monto seleccionado:</span>'+
+          '<span id="inc-monto-'+inc.id+'" style="font-weight:700;color:var(--acc)">—</span>'+
+        '</div>'+
+        '<div style="display:flex;gap:.5rem;flex-wrap:wrap;margin-bottom:.5rem">'+
+          '<span style="font-size:.72rem;color:var(--tx2)">Stock:</span>'+
+          (catProd?
+            '<button onclick="incDecidirStock('+inc.id+',true,'+inc.producto_id+','+inc.cantidad+')" class="btn btn-g" style="font-size:.65rem;padding:.15rem .5rem;color:var(--green);border-color:var(--green)">✅ Agregar '+inc.cantidad+'u al stock</button>'+
+            '<button onclick="incDecidirStock('+inc.id+',false,null,0)" class="btn btn-g" style="font-size:.65rem;padding:.15rem .5rem;color:var(--red);border-color:var(--red)">❌ No agregar al stock</button>':
+            '<span style="font-size:.65rem;color:var(--tx3)">Vinculá el producto primero</span>'
+          )+
+        '</div>'+
+        '<textarea id="inc-nota-'+inc.id+'" class="fi" placeholder="Nota para el vendedor..." style="width:100%;margin-bottom:.5rem;font-size:.75rem;resize:vertical" rows="2"></textarea>'+
+        '<button onclick="incResolverDevolucion('+inc.id+','+inc.vendedor_id+')" class="btn btn-a" style="font-weight:700;font-size:.75rem">✅ Resolver y notificar vendedor</button>'+
+      '</div>'+
+    '</div>';
+  }).join('');
+}
+
+var _incDecisiones={}; // {incId: {monto, agregarStock}}
+
+function incSetReintegro(incId, montoOrig, pct){
+  var monto=Math.round(montoOrig*pct/100);
+  if(!_incDecisiones[incId])_incDecisiones[incId]={};
+  _incDecisiones[incId].monto=monto;
+  var el=document.getElementById('inc-monto-'+incId);
+  if(el)el.textContent='$'+monto.toLocaleString('es-AR');
+}
+
+function incReintegroCustom(incId, montoOrig){
+  var m=parseInt(prompt('Monto a reintegrar (original: $'+montoOrig.toLocaleString('es-AR')+'):',montoOrig));
+  if(isNaN(m)||m<0)return;
+  if(!_incDecisiones[incId])_incDecisiones[incId]={};
+  _incDecisiones[incId].monto=m;
+  var el=document.getElementById('inc-monto-'+incId);
+  if(el)el.textContent='$'+m.toLocaleString('es-AR');
+}
+
+function incDecidirStock(incId, agregar, prodId, cant){
+  if(!_incDecisiones[incId])_incDecisiones[incId]={};
+  _incDecisiones[incId].agregarStock=agregar;
+  _incDecisiones[incId].prodId=prodId;
+  _incDecisiones[incId].cant=cant;
+  toast(agregar?'Se agregará al stock ✅':'No se agrega al stock','tok');
+}
+
+function incResolverDevolucion(incId, vendedorId){
+  var dec=_incDecisiones[incId];
+  if(!dec||dec.monto===undefined){toast('Definí el monto de reintegro primero','twarn');return;}
+  if(dec.agregarStock===undefined){toast('Decidí qué pasa con el stock primero','twarn');return;}
+  var nota=(document.getElementById('inc-nota-'+incId)||{}).value||'';
+  if(!confirm('Resolver devolución:\n• Reintegro: $'+dec.monto.toLocaleString('es-AR')+'\n• Stock: '+(dec.agregarStock?'Se agrega al stock':'No se agrega')+'\n\n¿Confirmar?'))return;
+
+  var proms=[];
+  // 1. Resolver incidencia
+  proms.push(apiPatch('incidencias',{
+    estado:'resuelto',
+    decision_stock:dec.agregarStock?'agregar':'no_agregar',
+    decision_monto:dec.monto,
+    decision_nota:nota,
+    resuelto_por:'Admin',
+    resuelto_at:new Date().toISOString()
+  },'id=eq.'+incId));
+
+  // 2. Si hay reintegro → crear rendición negativa (descuenta del saldo del vendedor)
+  if(dec.monto>0){
+    proms.push(apiPost('rendiciones',{
+      vendedor_id:vendedorId,
+      monto:-dec.monto,
+      tipo:'devolucion_cliente',
+      estado:'aprobada',
+      concepto:'Reintegro devolución — incidencia #'+incId,
+      periodo:periodoActual||''
+    }));
+  }
+
+  // 3. Si agrega stock
+  if(dec.agregarStock&&dec.prodId&&dec.cant>0){
+    var p=typeof prods!=='undefined'&&prods?prods.find(function(x){return x.id===dec.prodId;}):null;
+    var stockAntes=p?p.stock_actual||0:0;
+    var nuevoStock=stockAntes+dec.cant;
+    if(p)p.stock_actual=nuevoStock;
+    proms.push(apiPatch('productos',{stock_actual:nuevoStock},'id=eq.'+dec.prodId));
+    proms.push(apiPost('movimientos_stock',{
+      producto_id:dec.prodId,
+      tipo:'devolucion_cliente',
+      cantidad:dec.cant,
+      stock_antes:stockAntes,
+      stock_despues:nuevoStock,
+      motivo:'Devolución aprobada — incidencia #'+incId,
+      usuario:'Admin',
+      periodo:periodoActual||''
+    }));
+  }
+
+  Promise.all(proms).then(function(){
+    toast('Devolucion resuelta ✅','tok');
+    delete _incDecisiones[incId];
+    incLoad();
+    if(typeof loadVendedores==='function')loadVendedores();
+  }).catch(function(e){toast('Error: '+e.message,'terr');});
+}
+
+// ====== FALTANTES DE PEDIDO ======
+function incRenderFaltantes(panel,d){
+  if(!d.falt.length){panel.innerHTML="<div class='empty'>✅ Sin faltantes de pedidos</div>";return;}
+  panel.innerHTML=d.falt.map(function(it){
+    var ped=d.pedMap[it.pedido_id];
+    var cantPedida=it.cantidad_pedida||0;
+    var cantRecibida=it.cantidad_recibida||0;
+    var cantFalt=Math.max(0,cantPedida-cantRecibida);
+    var catProd=(it.producto_id&&typeof prods!=='undefined'&&prods)?prods.find(function(p){return p.id===it.producto_id;}):null;
+    var stockActual=catProd?(catProd.stock_actual||0):0;
+    var enViaje=catProd?(catProd.en_viaje||0):0;
+    var progPct=cantPedida>0?Math.round(cantRecibida/cantPedida*100):0;
+    var progColor=progPct===0?'var(--red)':progPct<100?'var(--yel)':'var(--green)';
+
+    return '<div class="tbl-wrap" style="margin-bottom:.8rem;border-left:3px solid var(--cyan);overflow:hidden">'+
+
+      // HEADER siempre visible
+      '<div style="padding:.9rem 1rem;cursor:pointer" onclick="incToggleFalt(\'falt-'+it.id+'\',this)">'+
+        '<div style="display:flex;justify-content:space-between;align-items:flex-start;gap:.5rem;flex-wrap:wrap">'+
+          '<div style="flex:1">'+
+            '<div style="font-size:.85rem;font-weight:700;color:var(--tx)">'+it.nombre_proveedor+'</div>'+
+            '<div style="font-size:.65rem;color:var(--tx3);margin-top:.2rem">'+
+              (ped?'📦 '+ped.nro_pedido+' — '+ped.proveedor:'Pedido #'+it.pedido_id)+
+              (it.observacion?' &bull; <i>'+it.observacion+'</i>':'')+
+            '</div>'+
+            // Barra de progreso
+            '<div style="margin-top:.5rem;background:var(--sur3);border-radius:4px;height:6px;width:100%;max-width:300px">'+
+              '<div style="height:6px;border-radius:4px;background:'+progColor+';width:'+progPct+'%;transition:width .3s"></div>'+
+            '</div>'+
+            '<div style="font-size:.6rem;color:var(--tx3);margin-top:.2rem">'+
+              cantRecibida+'u recibidas de '+cantPedida+'u pedidas ('+progPct+'%)'+
+              (catProd?' &bull; Stock: '+stockActual+'u &bull; En viaje: '+enViaje+'u':'')+
+            '</div>'+
+          '</div>'+
+          '<div style="display:flex;flex-direction:column;align-items:center;gap:.2rem;flex-shrink:0">'+
+            '<div style="text-align:center;background:rgba(0,188,212,.1);border-radius:8px;padding:.4rem .8rem">'+
+              '<div style="font-size:.58rem;color:var(--tx3)">Faltante</div>'+
+              '<div style="font-size:1.2rem;font-weight:700;color:var(--cyan)">'+cantFalt+'u</div>'+
+            '</div>'+
+            '<div style="font-size:.6rem;color:var(--tx3)">▼ ver opciones</div>'+
+          '</div>'+
+        '</div>'+
+        (catProd?
+          '<div style="font-size:.65rem;color:var(--green);margin-top:.3rem">✅ Catálogo: '+catProd.nombre+'</div>':
+          '<div style="font-size:.65rem;color:var(--yel);margin-top:.3rem">⚠️ Sin vincular al catálogo</div>')+
+      '</div>'+
+
+      // PANEL EXPANDIBLE con todas las opciones
+      '<div id="falt-'+it.id+'" style="display:none;border-top:1px solid var(--bd);padding:.9rem 1rem;background:var(--sur2)">'+
+
+        // INFO DETALLADA
+        '<div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(100px,1fr));gap:.5rem;margin-bottom:.8rem">'+
+          '<div class="tbl-wrap" style="padding:.45rem;text-align:center;border-top:3px solid var(--bd)">'+
+            '<div style="font-size:.58rem;color:var(--tx3)">Pedido</div>'+
+            '<div style="font-size:.95rem;font-weight:700">'+cantPedida+'u</div>'+
+          '</div>'+
+          '<div class="tbl-wrap" style="padding:.45rem;text-align:center;border-top:3px solid var(--green)">'+
+            '<div style="font-size:.58rem;color:var(--tx3)">Recibido</div>'+
+            '<div style="font-size:.95rem;font-weight:700;color:var(--green)">'+cantRecibida+'u</div>'+
+          '</div>'+
+          '<div class="tbl-wrap" style="padding:.45rem;text-align:center;border-top:3px solid var(--cyan)">'+
+            '<div style="font-size:.58rem;color:var(--tx3)">Faltante</div>'+
+            '<div style="font-size:.95rem;font-weight:700;color:var(--cyan)">'+cantFalt+'u</div>'+
+          '</div>'+
+          (catProd?
+            '<div class="tbl-wrap" style="padding:.45rem;text-align:center;border-top:3px solid var(--acc)">'+
+              '<div style="font-size:.58rem;color:var(--tx3)">Stock actual</div>'+
+              '<div style="font-size:.95rem;font-weight:700;color:var(--acc)">'+stockActual+'u</div>'+
+            '</div>':'')+
+        '</div>'+
+
+        // ACCION: llegó todo
+        (catProd&&cantFalt>0?
+          '<div style="background:rgba(99,187,106,.06);border:1px solid rgba(99,187,106,.2);border-radius:8px;padding:.7rem .9rem;margin-bottom:.6rem">'+
+            '<div style="font-size:.68rem;font-weight:600;color:var(--green);margin-bottom:.4rem">📥 Llegó todo lo que faltaba ('+cantFalt+'u)</div>'+
+            '<div style="display:flex;gap:.4rem;flex-wrap:wrap;align-items:center">'+
+              '<input type="number" id="falt-cant-'+it.id+'" value="'+cantFalt+'" min="1" max="'+cantFalt+'" '+
+                'style="width:70px;padding:.3rem;background:var(--sur3);border:1px solid var(--bd);border-radius:4px;color:var(--tx);font-size:.9rem;text-align:center">'+
+              '<span style="font-size:.7rem;color:var(--tx3)">unidades</span>'+
+              '<button onclick="incAgregarFaltanteConCant('+it.id+','+catProd.id+','+cantFalt+',\''+catProd.nombre.replace(/'/g,'')+'\',\''+it.nombre_proveedor.replace(/'/g,'')+'\')" '+
+                'class="btn btn-a" style="font-size:.72rem;background:var(--green);color:#000;font-weight:600">'+
+                '✅ Agregar al stock'+
+              '</button>'+
+            '</div>'+
+          '</div>':'')+
+
+        // ACCION: llegó parcialmente  
+        (catProd&&cantFalt>0?
+          '<div style="background:rgba(255,193,7,.05);border:1px solid rgba(255,193,7,.2);border-radius:8px;padding:.7rem .9rem;margin-bottom:.6rem">'+
+            '<div style="font-size:.68rem;font-weight:600;color:var(--yel);margin-bottom:.4rem">📦 Llegó una parte</div>'+
+            '<div style="display:flex;gap:.4rem;flex-wrap:wrap;align-items:center">'+
+              '<input type="number" id="falt-parc-'+it.id+'" value="1" min="1" max="'+cantFalt+'" '+
+                'style="width:70px;padding:.3rem;background:var(--sur3);border:1px solid var(--bd);border-radius:4px;color:var(--tx);font-size:.9rem;text-align:center">'+
+              '<span style="font-size:.7rem;color:var(--tx3)">de '+cantFalt+'u faltantes</span>'+
+              '<button onclick="incAgregarParcialConCant('+it.id+','+catProd.id+','+cantFalt+',\''+catProd.nombre.replace(/'/g,'')+'\')" '+
+                'class="btn btn-g" style="font-size:.72rem;color:var(--yel);border-color:var(--yel)">'+
+                '📥 Agregar parcial y mantener faltante'+
+              '</button>'+
+            '</div>'+
+          '</div>':'')+
+
+        // ACCION: vincular catálogo si no tiene
+        (!catProd?
+          '<div style="background:rgba(255,193,7,.05);border:1px solid rgba(255,193,7,.2);border-radius:8px;padding:.7rem .9rem;margin-bottom:.6rem">'+
+            '<div style="font-size:.68rem;font-weight:600;color:var(--yel);margin-bottom:.4rem">🔗 Vincular al catálogo</div>'+
+            '<div style="display:flex;gap:.4rem;flex-wrap:wrap;align-items:center">'+
+              '<input type="text" id="falt-srch-'+it.id+'" placeholder="Buscar producto..." '+
+                'oninput="incBuscarProd(this,\'falt-res-'+it.id+'\')" '+
+                'class="fi" style="flex:1;min-width:180px;font-size:.75rem">'+
+            '</div>'+
+            '<div id="falt-res-'+it.id+'" style="margin-top:.4rem;max-height:120px;overflow-y:auto"></div>'+
+          '</div>':'')+
+
+        // ACCION: editar observacion
+        '<div style="margin-bottom:.6rem">'+
+          '<div style="font-size:.65rem;color:var(--tx3);margin-bottom:.25rem">📝 Observación / seguimiento:</div>'+
+          '<div style="display:flex;gap:.4rem">'+
+            '<input type="text" id="falt-obs-'+it.id+'" value="'+(it.observacion||'')+'" placeholder="Ej: el proveedor confirmó que llega la semana que viene..." '+
+              'class="fi" style="flex:1;font-size:.75rem">'+
+            '<button onclick="incGuardarObs('+it.id+',\'falt-obs-'+it.id+'\')" class="btn btn-g" style="font-size:.7rem;white-space:nowrap">💾 Guardar nota</button>'+
+          '</div>'+
+        '</div>'+
+
+        // ACCION: definitivamente no llega
+        '<div style="display:flex;gap:.35rem;flex-wrap:wrap;padding-top:.5rem;border-top:1px solid var(--bd)">'+
+          '<button onclick="incCrearReclamoProveedor('+it.id+',\''+it.nombre_proveedor.replace(/'/g,'')+'\')" class="btn btn-g" style="font-size:.7rem;color:var(--yel)">'+
+            '📋 Crear reclamo al proveedor'+
+          '</button>'+
+          '<button onclick="incMarcarNoLlega('+it.id+')" class="btn btn-g" style="font-size:.7rem;color:var(--red)">'+
+            '✗ Definitivamente no llegará — cerrar incidencia'+
+          '</button>'+
+        '</div>'+
+
+      '</div>'+ // fin panel expandible
+    '</div>';
+  }).join('');
+}
+
+function incToggleFalt(id, header){
+  var panel=document.getElementById(id);
+  if(!panel)return;
+  var visible=panel.style.display!=='none';
+  panel.style.display=visible?'none':'block';
+  var arr=header.querySelector('div[style*="ver opciones"]');
+  if(arr)arr.textContent=visible?'▼ ver opciones':'▲ cerrar';
+}
+
+function incAgregarFaltanteConCant(itemId,prodId,cantMax,prodNom,itemNom){
+  var input=document.getElementById('falt-cant-'+itemId);
+  var cant=input?parseInt(input.value)||cantMax:cantMax;
+  cant=Math.min(cant,cantMax);
+  if(!confirm('Agregar '+cant+'u de "'+prodNom+'" al stock?'))return;
+  var p=typeof prods!=='undefined'&&prods?prods.find(function(x){return x.id===prodId;}):null;
+  var sA=p?p.stock_actual||0:0;
+  var nS=sA+cant;
+  var nV=Math.max(0,(p?p.en_viaje||0:0)-cant);
+  if(p){p.stock_actual=nS;p.en_viaje=nV;}
+  var quedanFalt=cantMax-cant;
+  Promise.all([
+    apiPatch('productos',{stock_actual:nS,en_viaje:nV},'id=eq.'+prodId),
+    apiPatch('pedidos_proveedor_items',{
+      estado_item:quedanFalt>0?'faltante':'en_stock',
+      cantidad_recibida:cant
+    },'id=eq.'+itemId),
+    apiPost('movimientos_stock',{
+      producto_id:prodId,producto_nombre:prodNom,
+      tipo:'ingreso_faltante',cantidad:cant,
+      stock_antes:sA,stock_despues:nS,
+      motivo:'Llegó faltante de pedido: '+itemNom,
+      usuario:'admin',periodo:periodoActual||''
+    })
+  ]).then(function(){
+    toast(cant+'u de '+prodNom+' agregadas ✅'+(quedanFalt>0?' — quedan '+quedanFalt+'u pendientes':''),'tok');
+    incLoad();
+    if(typeof renderStock==='function')renderStock();
+  }).catch(function(e){toast('Error: '+e.message,'terr');});
+}
+
+function incAgregarParcialConCant(itemId,prodId,cantMax,prodNom){
+  var input=document.getElementById('falt-parc-'+itemId);
+  var cant=input?parseInt(input.value)||1:1;
+  cant=Math.max(1,Math.min(cant,cantMax));
+  if(!confirm('Agregar '+cant+'u al stock. Quedan '+(cantMax-cant)+'u todavía pendientes.'))return;
+  var p=typeof prods!=='undefined'&&prods?prods.find(function(x){return x.id===prodId;}):null;
+  var sA=p?p.stock_actual||0:0;
+  var nS=sA+cant;
+  var nV=Math.max(0,(p?p.en_viaje||0:0)-cant);
+  if(p){p.stock_actual=nS;p.en_viaje=nV;}
+  var quedan=cantMax-cant;
+  Promise.all([
+    apiPatch('productos',{stock_actual:nS,en_viaje:nV},'id=eq.'+prodId),
+    apiPatch('pedidos_proveedor_items',{
+      cantidad_recibida:cant,
+      estado_item:quedan>0?'faltante':'en_stock',
+      observacion:'Recibido parcial: '+cant+'u de '+cantMax+'u faltantes'
+    },'id=eq.'+itemId),
+    apiPost('movimientos_stock',{
+      producto_id:prodId,producto_nombre:prodNom,
+      tipo:'ingreso_faltante',cantidad:cant,
+      stock_antes:sA,stock_despues:nS,
+      motivo:'Recepción parcial de faltante ('+quedan+' todavía pendientes)',
+      usuario:'admin',periodo:periodoActual||''
+    })
+  ]).then(function(){
+    toast(cant+'u agregadas. Quedan '+quedan+'u pendientes ✅','tok');
+    incLoad();
+    if(typeof renderStock==='function')renderStock();
+  }).catch(function(e){toast('Error: '+e.message,'terr');});
+}
+
+function incBuscarProd(input,resId){
+  var q=input.value;
+  var el=document.getElementById(resId);
+  if(!el)return;
+  if(!q||q.length<2){el.innerHTML='';return;}
+  var ws=q.toLowerCase().split(' ').filter(Boolean);
+  var allProds=typeof prods!=='undefined'&&prods?prods:[];
+  var matches=allProds.filter(function(p){
+    var h=(p.nombre||'').toLowerCase();
+    return ws.every(function(w){return h.indexOf(w)>=0;});
+  }).slice(0,8);
+  if(!matches.length){el.innerHTML='<div style="font-size:.68rem;color:var(--tx3);padding:.3rem">Sin resultados</div>';return;}
+  el.innerHTML=matches.map(function(p){
+    return '<div style="display:flex;justify-content:space-between;align-items:center;padding:.3rem .5rem;border-bottom:1px solid var(--bd);font-size:.72rem">'+
+      '<span>'+p.nombre+'</span>'+
+      '<button onclick="incVincularFalt(this,'+p.id+',\''+p.nombre.replace(/'/g,'')+'\')" class="btn btn-g" style="font-size:.62rem;padding:.1rem .35rem">Vincular</button>'+
+    '</div>';
+  }).join('');
+}
+
+function incVincularFalt(btn,prodId,prodNom){
+  // Encontrar el itemId desde el panel padre
+  var card=btn.closest('.tbl-wrap');
+  if(!card)return;
+  var panelId=card.querySelector('[id^="falt-"]');
+  if(!panelId)return;
+  var itemId=parseInt(panelId.id.replace('falt-',''));
+  if(!itemId)return;
+  apiPatch('pedidos_proveedor_items',{producto_id:prodId},'id=eq.'+itemId)
+    .then(function(){toast('Vinculado a: '+prodNom+' ✅','tok');incLoad();})
+    .catch(function(e){toast('Error: '+e.message,'terr');});
+}
+
+function incGuardarObs(itemId,inputId){
+  var obs=(document.getElementById(inputId)||{}).value||'';
+  apiPatch('pedidos_proveedor_items',{observacion:obs},'id=eq.'+itemId)
+    .then(function(){toast('Nota guardada ✅','tok');})
+    .catch(function(e){toast('Error: '+e.message,'terr');});
+}
+
+function incCrearReclamoProveedor(itemId,nombre){
+  var desc=prompt('Descripción del reclamo al proveedor:','Faltante: '+nombre);
+  if(!desc)return;
+  apiPost('reclamos',{
+    vendedor_id:1,vendedor_nombre:'Admin',
+    tipo_objeto:'pedido_proveedor',objeto_id:itemId,
+    objeto_desc:nombre,categoria:'stock',
+    titulo:'Faltante — reclamo proveedor',
+    descripcion:desc,estado:'pendiente',prioridad:'alta',
+    periodo:periodoActual||''
+  }).then(function(){toast('Reclamo creado ✅','tok');})
+  .catch(function(e){toast('Error: '+e.message,'terr');});
+}
+
+
+function incAgregarFaltante(itemId,prodId,cant,prodNom,itemNom){
+  if(!confirm('Agregar '+cant+'u de "'+prodNom+'" al stock?'))return;
+  var p=typeof prods!=='undefined'&&prods?prods.find(function(x){return x.id===prodId;}):null;
+  var sA=p?p.stock_actual||0:0,nS=sA+cant;
+  if(p)p.stock_actual=nS;
+  Promise.all([
+    apiPatch('productos',{stock_actual:nS},'id=eq.'+prodId),
+    apiPatch('pedidos_proveedor_items',{estado_item:'en_stock',cantidad_recibida:cant},'id=eq.'+itemId),
+    apiPost('movimientos_stock',{producto_id:prodId,producto_nombre:prodNom,tipo:'ingreso_faltante',cantidad:cant,stock_antes:sA,stock_despues:nS,motivo:'Llegó faltante: '+itemNom,usuario:'admin',periodo:periodoActual||''})
+  ]).then(function(){toast(cant+'u agregadas ✅','tok');incLoad();}).catch(function(e){toast('Error: '+e.message,'terr');});
+}
+
+function incAgregarParcial(itemId,prodId,cantMax){
+  var cant=parseInt(prompt('¿Cuántas unidades llegaron? (máx '+cantMax+'):',cantMax));
+  if(!cant||isNaN(cant)||cant<=0||cant>cantMax)return;
+  if(!prodId){toast('Vinculá el producto primero','twarn');return;}
+  var p=typeof prods!=='undefined'&&prods?prods.find(function(x){return x.id===prodId;}):null;
+  var sA=p?p.stock_actual||0:0,nS=sA+cant;
+  if(p)p.stock_actual=nS;
+  var quedan=cantMax-cant;
+  Promise.all([
+    apiPatch('productos',{stock_actual:nS},'id=eq.'+prodId),
+    apiPatch('pedidos_proveedor_items',{cantidad_recibida:cant,estado_item:quedan>0?'faltante':'en_stock'},'id=eq.'+itemId),
+    apiPost('movimientos_stock',{producto_id:prodId,tipo:'ingreso_faltante',cantidad:cant,stock_antes:sA,stock_despues:nS,motivo:'Faltante parcial (quedan '+quedan+'u)',usuario:'admin',periodo:periodoActual||''})
+  ]).then(function(){toast(cant+'u agregadas. Quedan '+quedan+'u pendientes.','tok');incLoad();}).catch(function(e){toast('Error: '+e.message,'terr');});
+}
+
+function incMarcarNoLlega(itemId){
+  if(!confirm('Marcar como definitivamente no llegará. ¿Confirmar?'))return;
+  apiPatch('pedidos_proveedor_items',{estado_item:'cancelado'},'id=eq.'+itemId)
+    .then(function(){toast('Marcado como no llegará','tok');incLoad();}).catch(function(e){toast('Error: '+e.message,'terr');});
+}
+
+// ====== FALLADOS/ROTOS ======
+function incRenderFallados(panel,d){
+  if(!d.fall.length){panel.innerHTML="<div class='empty'>✅ Sin productos fallados</div>";return;}
+  panel.innerHTML=d.fall.map(function(it){
+    var ped=d.pedMap[it.pedido_id];
+    var catProd=(it.producto_id&&typeof prods!=='undefined'&&prods)?prods.find(function(p){return p.id===it.producto_id;}):null;
+    var cantFall=it.cantidad_fallada||0;
+    return '<div class="tbl-wrap" style="margin-bottom:.7rem;padding:.9rem 1rem;border-left:3px solid var(--red)">'+
+      '<div style="display:flex;justify-content:space-between;align-items:flex-start;flex-wrap:wrap;gap:.5rem;margin-bottom:.6rem">'+
+        '<div>'+
+          '<div style="font-size:.82rem;font-weight:700;color:var(--tx)">'+it.nombre_proveedor+'</div>'+
+          '<div style="font-size:.65rem;color:var(--tx3)">'+(ped?'📦 '+ped.nro_pedido:'')+
+            (catProd?' &bull; '+catProd.nombre+' (stock: '+catProd.stock_actual+'u)':'')+
+          '</div>'+
+        '</div>'+
+        '<div style="text-align:center;background:rgba(224,92,110,.1);border-radius:8px;padding:.4rem .8rem;flex-shrink:0">'+
+          '<div style="font-size:.58rem;color:var(--tx3)">Falladas</div>'+
+          '<div style="font-size:1.1rem;font-weight:700;color:var(--red)">'+cantFall+'u</div>'+
+        '</div>'+
+      '</div>'+
+      '<div style="display:flex;gap:.35rem;flex-wrap:wrap">'+
+        (catProd&&cantFall>0?'<button onclick="incDescontarFallado('+it.id+','+catProd.id+','+cantFall+',\''+catProd.nombre.replace(/'/g,'')+'\')" class="btn btn-g" style="font-size:.7rem;color:var(--red)">🗑 Descontar '+cantFall+'u del stock</button>':'')+
+        '<button onclick="incCrearReclamo(\'fallado\',\''+it.nombre_proveedor.replace(/'/g,'')+'\')" class="btn btn-g" style="font-size:.7rem;color:var(--yel)">📋 Crear reclamo proveedor</button>'+
+        '<button onclick="incMarcarResuelto('+it.id+')" class="btn btn-g" style="font-size:.7rem;color:var(--green)">✓ Resuelto</button>'+
+      '</div>'+
+    '</div>';
+  }).join('');
+}
+
+function incDescontarFallado(itemId,prodId,cant,prodNom){
+  if(!confirm('Descontar '+cant+'u falladas del stock de "'+prodNom+'"?'))return;
+  var p=typeof prods!=='undefined'&&prods?prods.find(function(x){return x.id===prodId;}):null;
+  var sA=p?p.stock_actual||0:0,nS=Math.max(0,sA-cant);
+  if(p)p.stock_actual=nS;
+  Promise.all([
+    apiPatch('productos',{stock_actual:nS},'id=eq.'+prodId),
+    apiPatch('pedidos_proveedor_items',{estado_item:'resuelto'},'id=eq.'+itemId),
+    apiPost('movimientos_stock',{producto_id:prodId,producto_nombre:prodNom,tipo:'baja_fallado',cantidad:-cant,stock_antes:sA,stock_despues:nS,motivo:'Baja por fallado en pedido',usuario:'admin',periodo:periodoActual||''})
+  ]).then(function(){toast(cant+'u descontadas ✅','tok');incLoad();}).catch(function(e){toast('Error: '+e.message,'terr');});
+}
+
+function incMarcarResuelto(itemId){
+  apiPatch('pedidos_proveedor_items',{estado_item:'resuelto'},'id=eq.'+itemId)
+    .then(function(){toast('Resuelto ✅','tok');incLoad();}).catch(function(e){toast('Error: '+e.message,'terr');});
+}
+
+function incCrearReclamo(tipo,desc){
+  var obs=prompt('Descripción del reclamo al proveedor:',desc);
+  if(!obs)return;
+  apiPost('reclamos',{vendedor_id:1,vendedor_nombre:'Admin',tipo_objeto:'pedido_proveedor',categoria:'stock',titulo:'Reclamo proveedor — '+tipo,descripcion:obs,estado:'pendiente',prioridad:'alta',periodo:periodoActual||''})
+    .then(function(){toast('Reclamo creado ✅','tok');}).catch(function(e){toast('Error: '+e.message,'terr');});
+}
+
+// ====== HISTORIAL ======
+function incRenderHistorial(panel,d){
+  if(!d.hist.length){panel.innerHTML="<div class='empty'>Sin incidencias resueltas</div>";return;}
+  panel.innerHTML=d.hist.map(function(inc){
+    var fecha=new Date(inc.resuelto_at||inc.created_at).toLocaleDateString('es-AR',{day:'2-digit',month:'2-digit',year:'2-digit',timeZone:'America/Argentina/Buenos_Aires'});
+    var tipoLabel={devolucion:'↩️ Devolución',faltante_pedido:'📦 Faltante',fallado:'⚠️ Fallado',vendedor:'👤 Vendedor'}[inc.tipo]||inc.tipo;
+    var estColor={resuelto:'var(--green)',descartado:'var(--tx3)'}[inc.estado]||'var(--tx3)';
+    return '<div style="display:flex;justify-content:space-between;align-items:center;padding:.5rem .7rem;border-bottom:1px solid var(--bd);font-size:.75rem">'+
+      '<div>'+
+        '<span style="color:var(--tx3);font-size:.65rem">'+tipoLabel+' &bull; </span>'+
+        '<b>'+inc.producto_nombre+'</b>'+' &times;'+inc.cantidad+'u'+
+        (inc.vendedor_nombre?' &bull; <span style="color:var(--tx3)">'+inc.vendedor_nombre+'</span>':'')+
+        (inc.decision_nota?'<div style="font-size:.62rem;color:var(--acc)">'+inc.decision_nota+'</div>':'')+
+      '</div>'+
+      '<div style="text-align:right;flex-shrink:0">'+
+        '<div style="color:'+estColor+';font-size:.65rem;font-weight:600">'+inc.estado+'</div>'+
+        '<div style="color:var(--tx3);font-size:.6rem">'+fecha+'</div>'+
+        (inc.decision_monto?'<div style="color:var(--green);font-size:.65rem">$'+Number(inc.decision_monto).toLocaleString('es-AR')+'</div>':'')+
+      '</div>'+
+    '</div>';
+  }).join('');
+}
+
+
+function recRenderHistorialReclamos(el,d){
+  var hist=(d.recHistorial||[]);
+  if(!hist.length){el.innerHTML="<div class='empty'>Sin reclamos cerrados</div>";return;}
+  var estMap={aceptado:"<span class='badge bg-green'>Aceptado ✓</span>",
+    rechazado:"<span class='badge bg-red'>Rechazado</span>",
+    cancelado:"<span class='badge' style='background:var(--bd)'>Cancelado</span>"};
+  el.innerHTML=hist.map(function(r){
+    var fecha=new Date(r.created_at).toLocaleDateString('es-AR',{day:'2-digit',month:'2-digit',year:'2-digit',timeZone:'America/Argentina/Buenos_Aires'});
+    return '<div style="display:flex;justify-content:space-between;align-items:flex-start;padding:.55rem .7rem;border-bottom:1px solid var(--bd);font-size:.75rem">'+
+      '<div>'+
+        '<b>'+r.titulo+'</b>'+
+        '<div style="font-size:.63rem;color:var(--tx3)">'+(r.vendedor_nombre||'')+' &bull; '+fecha+(r.objeto_desc?' &bull; '+r.objeto_desc:'')+
+        '</div>'+
+        (r.respuesta_admin?'<div style="font-size:.65rem;color:var(--acc)">Admin: '+r.respuesta_admin+'</div>':'')+
+      '</div>'+
+      '<div>'+estMap[r.estado]+'</div>'+
+    '</div>';
+  }).join('');
 }
 
 //]]>
