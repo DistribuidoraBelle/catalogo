@@ -251,7 +251,7 @@ td{padding:.35rem .5rem;font-size:.78rem;color:var(--tx2);vertical-align:middle;
     <!-- Marcela sidebar -->
     <div class="sb-item deposito-only" onclick="navTo('deposito-marcela',this)" style="display:none"><span>&#127968;</span><span>Mi Depósito</span></div>
     <div class="sb-item deposito-only" onclick="navTo('reservas',this)" style="display:none"><span>&#128205;</span><span>Reservas</span></div>
-    <div class="sb-item admin-only" onclick="navTo('pendientes-catalogo',this)"><span>&#9888;</span><span>Incidencias</span></div>
+    <div class="sb-item admin-only" onclick="navTo('incidencias',this)"><span>&#9888;</span><span>Incidencias</span></div>
     <div class="sb-item admin-only" onclick="navTo('estadisticas',this)"><span>&#128202;</span><span>Estadisticas</span></div>
     
     <div class="sb-sec admin-only">Sistema</div>
@@ -886,7 +886,15 @@ td{padding:.35rem .5rem;font-size:.78rem;color:var(--tx2);vertical-align:middle;
     </div>
     <!-- INCIDENCIAS DE PRODUCTOS -->
     <div class="page" id="page-incidencias" style="display:none">
-      <iframe id="incIframe" src="inc.html" style="width:100%;height:calc(100vh - 60px);border:none;border-radius:8px"></iframe>
+      <div id="incStats" style="display:grid;grid-template-columns:repeat(auto-fit,minmax(110px,1fr));gap:.5rem;margin-bottom:.8rem"></div>
+      <div style="display:flex;gap:.3rem;flex-wrap:wrap;margin-bottom:.7rem;border-bottom:1px solid var(--bd);padding-bottom:.5rem">
+        <button id="incTab-faltantes" class="btn btn-a" onclick="incSetTab('faltantes')" style="font-size:.72rem">📦 Faltantes pedido</button>
+        <button id="incTab-fallados" class="btn btn-g" onclick="incSetTab('fallados')" style="font-size:.72rem">⚠️ Fallados/Rotos</button>
+        <button id="incTab-devoluciones" class="btn btn-g" onclick="incSetTab('devoluciones')" style="font-size:.72rem">↩️ Devoluciones</button>
+        <button id="incTab-historial" class="btn btn-g" onclick="incSetTab('historial')" style="font-size:.72rem">✅ Historial</button>
+        <button onclick="incLoad()" class="btn btn-g" style="margin-left:auto;font-size:.72rem">🔄 Recargar</button>
+      </div>
+      <div id="incPanel"><div class="loading"><div class="spin"></div>Cargando...</div></div>
     </div>
     <!-- AYUDANTE DE COMPRAS -->
     <div class="page" id="page-compras-ia">
@@ -16747,207 +16755,317 @@ function ppAgregarTodos(){
 
 //== PANEL INCIDENCIAS DE PRODUCTOS ==
 var _incTab='faltantes';
+var _incData={falt:[],fall:[],devs:[],hist:[],pedMap:{}};
 
 function incSetTab(tab){
   _incTab=tab;
-  ['devoluciones','faltantes','fallados','resueltos'].forEach(function(t){
-    var btn=document.getElementById('incTab-'+t);
-    if(btn)btn.className=t===tab?'btn btn-a':'btn btn-g';
+  ['faltantes','fallados','devoluciones','historial'].forEach(function(t){
+    var b=document.getElementById('incTab-'+t);
+    if(b)b.className=t===tab?'btn btn-a':'btn btn-g';
   });
-  incRenderTab();
+  incRender();
 }
+
+function loadIncidencias(){incLoad();}
 
 function incLoad(){
   var panel=document.getElementById('incPanel');
   if(!panel)return;
   panel.innerHTML="<div class='loading'><div class='spin'></div>Cargando...</div>";
+  // Solo las queries que SÍ existen — sin tabla incidencias
   Promise.all([
-    apiGet('pedidos_proveedor_items','select=id,pedido_id,nombre_proveedor,cantidad_pedida,cantidad_recibida,cantidad_fallada,producto_id,estado_item,observacion&estado_item=in.(faltante,fallado)&limit=300'),
-    apiGet('pedidos_proveedor','select=id,nro_pedido,proveedor&order=created_at.desc&limit=200'),
-    apiGet('incidencias','select=*&order=created_at.desc&limit=300').catch(function(){return[];})
+    apiGet('pedidos_proveedor_items',
+      'select=id,pedido_id,nombre_proveedor,cantidad_pedida,cantidad_recibida,cantidad_fallada,producto_id,estado_item,observacion'+
+      '&estado_item=in.(faltante,fallado)&limit=500'),
+    apiGet('pedidos_proveedor','select=id,nro_pedido,proveedor&limit=500')
   ]).then(function(res){
     var items=Array.isArray(res[0])?res[0]:[];
     var peds=Array.isArray(res[1])?res[1]:[];
-    var incAll=Array.isArray(res[2])?res[2]:[];
     var pedMap={};peds.forEach(function(p){pedMap[p.id]=p;});
-    var falt=items.filter(function(i){return i.estado_item==='faltante';});
-    var fall=items.filter(function(i){return i.estado_item==='fallado';});
-    var devs=incAll.filter(function(i){return i.tipo==='devolucion'&&i.estado==='pendiente';});
-    var hist=incAll.filter(function(i){return i.estado==='resuelto'||i.estado==='descartado';});
+    _incData={
+      falt:items.filter(function(i){return i.estado_item==='faltante';}),
+      fall:items.filter(function(i){return i.estado_item==='fallado';}),
+      devs:[],hist:[],pedMap:pedMap
+    };
     var sEl=document.getElementById('incStats');
     if(sEl)sEl.innerHTML=
-      mkStatCard('Faltantes','cyan',falt.length,'de pedidos')+
-      mkStatCard('Fallados','red',fall.length,'con problemas')+
-      mkStatCard('Devoluciones','yel',devs.length,'pendientes')+
-      mkStatCard('Resueltos','green',hist.length,'total');
-    window._incData={devs:devs,falt:falt,fall:fall,hist:hist,pedMap:pedMap};
-    incRenderTab();
+      mkStatCard('Faltantes','cyan',_incData.falt.length,'de pedidos')+
+      mkStatCard('Fallados','red',_incData.fall.length,'con problemas')+
+      mkStatCard('Devoluciones','yel',_incData.devs.length,'pendientes')+
+      mkStatCard('Historial','green',0,'resueltos');
+    incRender();
   }).catch(function(e){
     var p=document.getElementById('incPanel');
-    if(p)p.innerHTML="<div class='empty'>Error cargando: "+e.message+"</div>";
+    if(p)p.innerHTML="<div class='empty' style='color:var(--red)'>Error: "+e.message+"</div>";
+    console.error('incLoad error:',e);
   });
 }
 
-function incRenderTab(){
+function incRender(){
   var panel=document.getElementById('incPanel');
   if(!panel)return;
-  var d=window._incData||{devs:[],falt:[],fall:[],hist:[],pedMap:{}};
-  if(_incTab==='devoluciones')incRenderDevoluciones(panel,d);
-  else if(_incTab==='faltantes')incRenderFaltantes(panel,d);
-  else if(_incTab==='fallados')incRenderFallados(panel,d);
-  else incRenderHistorial(panel,d);
+  if(_incTab==='faltantes')incRenderFalt(panel);
+  else if(_incTab==='fallados')incRenderFall(panel);
+  else if(_incTab==='devoluciones')incRenderDevs(panel);
+  else panel.innerHTML="<div class='empty'>Sin historial disponible aún.</div>";
 }
 
-function incRenderFaltantes(panel,d){
-  if(!d.falt.length){
+function incRenderFalt(panel){
+  if(!_incData.falt.length){
     panel.innerHTML="<div class='empty'>✅ Sin faltantes de pedidos</div>";
     return;
   }
-  panel.innerHTML=d.falt.map(function(it){
-    var ped=d.pedMap[it.pedido_id];
-    var cantPedida=it.cantidad_pedida||0;
-    var cantRecibida=it.cantidad_recibida||0;
-    var cantFalt=Math.max(0,cantPedida-cantRecibida);
-    var catProd=(it.producto_id&&typeof prods!=='undefined'&&prods)?prods.find(function(p){return p.id===it.producto_id;}):null;
-    var stockActual=catProd?(catProd.stock_actual||0):0;
-    var enViaje=catProd?(catProd.en_viaje||0):0;
+  panel.innerHTML=_incData.falt.map(function(it){
+    var ped=_incData.pedMap[it.pedido_id];
+    var cantFalt=Math.max(0,(it.cantidad_pedida||0)-(it.cantidad_recibida||0));
+    var prod=(it.producto_id&&typeof prods!=='undefined'&&prods)?prods.find(function(p){return p.id===it.producto_id;}):null;
+    var sA=prod?prod.stock_actual||0:0;
+    var nV=prod?prod.en_viaje||0:0;
     return '<div class="tbl-wrap" style="margin-bottom:.8rem;border-left:3px solid var(--cyan)">'+
+
       // HEADER
       '<div style="display:flex;justify-content:space-between;align-items:flex-start;gap:.5rem;flex-wrap:wrap;margin-bottom:.7rem">'+
         '<div>'+
-          '<div style="font-size:.85rem;font-weight:700;color:var(--tx)">'+it.nombre_proveedor+'</div>'+
-          '<div style="font-size:.65rem;color:var(--tx3)">'+(ped?ped.nro_pedido+' — '+ped.proveedor:'Pedido #'+it.pedido_id)+'</div>'+
-          (catProd?
-            '<div style="font-size:.65rem;color:var(--green);margin-top:.15rem">✅ '+catProd.nombre+' | Stock: '+stockActual+'u | En viaje: '+enViaje+'u</div>':
+          '<div style="font-size:.88rem;font-weight:700;color:var(--tx)">'+it.nombre_proveedor+'</div>'+
+          '<div style="font-size:.65rem;color:var(--tx3);margin-top:.15rem">'+
+            (ped?'📦 '+ped.nro_pedido+' — '+ped.proveedor:'Pedido #'+it.pedido_id)+
+          '</div>'+
+          (prod?
+            '<div style="font-size:.65rem;color:var(--green);margin-top:.15rem">✅ '+prod.nombre+' &bull; Stock: '+sA+'u &bull; En viaje: '+nV+'u</div>':
             '<div style="font-size:.65rem;color:var(--yel);margin-top:.15rem">⚠️ Sin vincular al catálogo</div>')+
         '</div>'+
         '<div style="text-align:center;background:rgba(0,188,212,.1);border-radius:8px;padding:.4rem .9rem;flex-shrink:0">'+
           '<div style="font-size:.58rem;color:var(--tx3)">Faltante</div>'+
-          '<div style="font-size:1.2rem;font-weight:700;color:var(--cyan)">'+cantFalt+'u</div>'+
+          '<div style="font-size:1.3rem;font-weight:700;color:var(--cyan)">'+cantFalt+'u</div>'+
         '</div>'+
       '</div>'+
-      // ACCION AGREGAR
-      (catProd&&cantFalt>0?
-        '<div style="margin-bottom:.6rem">'+
-          '<div style="font-size:.68rem;font-weight:600;color:var(--tx3);margin-bottom:.35rem">📥 ¿Cuántas llegaron?</div>'+
+
+      // ACCION STOCK
+      (prod&&cantFalt>0?
+        '<div style="background:var(--sur3);border-radius:6px;padding:.65rem .8rem;margin-bottom:.65rem">'+
+          '<div style="font-size:.68rem;font-weight:600;color:var(--tx3);margin-bottom:.45rem">📥 Llegaron unidades:</div>'+
           '<div style="display:flex;gap:.5rem;align-items:center;flex-wrap:wrap">'+
-            '<input type="number" id="inc-cant-'+it.id+'" value="'+cantFalt+'" min="1" max="'+cantFalt+'" '+
-              'style="width:80px;padding:.3rem;background:var(--sur3);border:1px solid var(--bd);border-radius:4px;color:var(--tx);font-size:.9rem;text-align:center">'+
-            '<span style="font-size:.7rem;color:var(--tx3)">de '+cantFalt+'u faltantes</span>'+
-            '<button onclick="incAgregarConCant('+it.id+','+catProd.id+','+cantFalt+',\''+catProd.nombre.replace(/'/g,'')+'\')'+
-              '" class="btn btn-a" style="font-size:.72rem;background:var(--green);color:#000;font-weight:600">✅ Agregar al stock</button>'+
+            '<button onclick="incCant(\'ic-'+it.id+'\','+cantFalt+',-1)" class="btn" style="padding:.2rem .55rem;font-size:1.1rem;line-height:1">−</button>'+
+            '<input type="number" id="ic-'+it.id+'" value="'+cantFalt+'" min="0" max="'+cantFalt+'" '+
+              'style="width:75px;padding:.3rem;background:var(--sur2);border:1px solid var(--bd);border-radius:4px;color:var(--tx);font-size:1rem;text-align:center">'+
+            '<button onclick="incCant(\'ic-'+it.id+'\','+cantFalt+',1)" class="btn" style="padding:.2rem .55rem;font-size:1.1rem;line-height:1">+</button>'+
+            '<span style="font-size:.7rem;color:var(--tx3)">de '+cantFalt+'u</span>'+
+            '<button onclick="incAgregar('+it.id+','+prod.id+','+cantFalt+',\''+prod.nombre.replace(/'/g,'')+'\')" '+
+              'class="btn" style="background:var(--green);color:#000;font-weight:700;font-size:.75rem;border-color:var(--green)">'+
+              '✅ Confirmar — agregar al stock'+
+            '</button>'+
           '</div>'+
-        '</div>':
-        (catProd?'':'<div style="font-size:.7rem;color:var(--yel);margin-bottom:.6rem">⚠️ Vinculá el producto al catálogo para poder agregar al stock</div>')+
-        ''
-      )+
+        '</div>'
+      :(!prod?
+        '<div style="font-size:.72rem;color:var(--yel);background:rgba(240,192,64,.08);border:1px solid rgba(240,192,64,.2);border-radius:6px;padding:.5rem .7rem;margin-bottom:.65rem">'+
+          '⚠️ Sin producto vinculado — no se puede agregar al stock hasta vincular al catálogo.'+
+        '</div>':'')+
+      '')+
+
       // NOTA
-      '<div style="margin-bottom:.6rem">'+
-        '<div style="font-size:.65rem;color:var(--tx3);margin-bottom:.25rem">📝 Nota de seguimiento:</div>'+
+      '<div style="margin-bottom:.65rem">'+
+        '<div style="font-size:.65rem;color:var(--tx3);margin-bottom:.28rem">📝 Nota de seguimiento:</div>'+
         '<div style="display:flex;gap:.4rem">'+
-          '<input type="text" id="inc-obs-'+it.id+'" value="'+(it.observacion||'')+'" '+
-            'placeholder="Ej: llega la semana que viene..." class="fi" style="font-size:.75rem">'+
-          '<button onclick="incGuardarObs('+it.id+',\'inc-obs-'+it.id+'\')" class="btn btn-g" style="font-size:.7rem;white-space:nowrap">💾 Guardar</button>'+
+          '<input type="text" id="io-'+it.id+'" value="'+(it.observacion||'')+'" '+
+            'placeholder="Ej: proveedor confirmó que llega el martes..." class="fi" style="flex:1;font-size:.75rem">'+
+          '<button onclick="incObs('+it.id+',\'io-'+it.id+'\')" class="btn btn-g" style="font-size:.72rem;white-space:nowrap">💾 Guardar nota</button>'+
         '</div>'+
       '</div>'+
+
       // CERRAR
-      '<button onclick="incMarcarNoLlega('+it.id+')" class="btn btn-g" style="font-size:.7rem;color:var(--red);border-color:var(--red)">✗ Definitivamente no llegará — cerrar</button>'+
+      '<button onclick="incNoLlega('+it.id+')" class="btn" style="font-size:.7rem;color:var(--red);border-color:var(--red)">'+
+        '✗ Definitivamente no llegará — cerrar incidencia'+
+      '</button>'+
+
     '</div>';
   }).join('');
 }
 
-function incAgregarConCant(itemId,prodId,cantMax,prodNom){
-  var input=document.getElementById('inc-cant-'+itemId);
-  var cant=input?Math.max(1,Math.min(parseInt(input.value)||cantMax,cantMax)):cantMax;
-  if(!confirm('Agregar '+cant+'u de "'+prodNom+'" al stock?'))return;
-  var p=typeof prods!=='undefined'&&prods?prods.find(function(x){return x.id===prodId;}):null;
-  var sA=p?p.stock_actual||0:0;
+function incCant(id,max,delta){
+  var el=document.getElementById(id);
+  if(!el)return;
+  var v=parseInt(el.value)||0;
+  el.value=Math.max(0,Math.min(max,v+delta));
+}
+
+function incAgregar(itemId,prodId,cantMax,prodNom){
+  var input=document.getElementById('ic-'+itemId);
+  var cant=input?parseInt(input.value):cantMax;
+  if(isNaN(cant)||cant<0){toast('Cantidad inválida','twarn');return;}
+  if(cant===0){toast('Ingresá una cantidad mayor a 0','twarn');return;}
+  if(!confirm('Agregar '+cant+'u de "'+prodNom+'" al stock'+(cant<cantMax?' (quedan '+(cantMax-cant)+'u pendientes)':'')+'?'))return;
+  var prod=(typeof prods!=='undefined'&&prods)?prods.find(function(p){return p.id===prodId;}):null;
+  var sA=prod?prod.stock_actual||0:0;
   var nS=sA+cant;
-  var nV=Math.max(0,(p?p.en_viaje||0:0)-cant);
-  if(p){p.stock_actual=nS;p.en_viaje=nV;}
+  var nV=Math.max(0,(prod?prod.en_viaje||0:0)-cant);
   var quedan=cantMax-cant;
+  if(prod){prod.stock_actual=nS;prod.en_viaje=nV;}
   Promise.all([
     apiPatch('productos',{stock_actual:nS,en_viaje:nV},'id=eq.'+prodId),
-    apiPatch('pedidos_proveedor_items',{
-      estado_item:quedan>0?'faltante':'en_stock',
-      cantidad_recibida:cant
-    },'id=eq.'+itemId),
+    apiPatch('pedidos_proveedor_items',{estado_item:quedan>0?'faltante':'en_stock',cantidad_recibida:cant},'id=eq.'+itemId),
     apiPost('movimientos_stock',{
-      producto_id:prodId,producto_nombre:prodNom,
-      tipo:'ingreso_faltante',cantidad:cant,
-      stock_antes:sA,stock_despues:nS,
-      motivo:'Llegó faltante de pedido',
+      producto_id:prodId,producto_nombre:prodNom,tipo:'ingreso_faltante',
+      cantidad:cant,stock_antes:sA,stock_despues:nS,
+      motivo:'Llegó faltante de pedido'+(quedan>0?' (parcial)':''),
       usuario:'admin',periodo:periodoActual||''
     })
   ]).then(function(){
-    toast(cant+'u de '+prodNom+' agregadas ✅'+(quedan>0?' — quedan '+quedan+'u pendientes':''),'tok');
+    toast('✅ '+cant+'u de '+prodNom+' agregadas al stock'+(quedan>0?' — quedan '+quedan+'u pendientes':''),'tok');
     incLoad();
     if(typeof renderStock==='function')renderStock();
-  }).catch(function(e){toast('Error: '+e.message,'terr');});
+  }).catch(function(e){toast('Error: '+e.message,'terr');console.error(e);});
 }
 
-function incGuardarObs(itemId,inputId){
+function incObs(itemId,inputId){
   var obs=(document.getElementById(inputId)||{}).value||'';
   apiPatch('pedidos_proveedor_items',{observacion:obs},'id=eq.'+itemId)
     .then(function(){toast('Nota guardada ✅','tok');})
     .catch(function(e){toast('Error: '+e.message,'terr');});
 }
 
-function incMarcarNoLlega(itemId){
-  if(!confirm('Marcar como definitivamente no llegará. ¿Confirmar?'))return;
+function incNoLlega(itemId){
+  if(!confirm('Cerrar esta incidencia — el producto definitivamente no llegará.\n¿Confirmar?'))return;
   apiPatch('pedidos_proveedor_items',{estado_item:'cancelado'},'id=eq.'+itemId)
-    .then(function(){toast('Cerrado','tok');incLoad();})
+    .then(function(){toast('Incidencia cerrada','tok');incLoad();})
     .catch(function(e){toast('Error: '+e.message,'terr');});
 }
 
-function incRenderFallados(panel,d){
-  if(!d.fall.length){panel.innerHTML="<div class='empty'>✅ Sin fallados</div>";return;}
-  panel.innerHTML=d.fall.map(function(it){
-    var ped=d.pedMap[it.pedido_id];
-    var catProd=(it.producto_id&&typeof prods!=='undefined'&&prods)?prods.find(function(p){return p.id===it.producto_id;}):null;
+function incRenderDevs(panel){
+  apiGet('incidencias','select=*&tipo=eq.devolucion&estado=eq.pendiente&order=created_at.desc&limit=100')
+  .then(function(devs){
+    if(!devs||!devs.length){
+      panel.innerHTML="<div class='empty'>✅ Sin devoluciones pendientes</div>";
+      return;
+    }
+    panel.innerHTML=devs.map(function(inc){
+      var motivoLabel={buen_estado:'Buen estado',roto:'Roto/defectuoso',equivocado:'Equivocado',otro:'Otro'}[inc.motivo]||inc.motivo||'—';
+      var fecha=new Date(inc.created_at).toLocaleDateString('es-AR',{day:'2-digit',month:'2-digit',year:'2-digit',timeZone:'America/Argentina/Buenos_Aires'});
+      var prod=(inc.producto_id&&typeof prods!=='undefined'&&prods)?prods.find(function(p){return p.id===inc.producto_id;}):null;
+      var stockActual=prod?prod.stock_actual||0:0;
+      return '<div class="tbl-wrap" style="margin-bottom:.8rem;border-left:3px solid var(--yel)">'+
+        '<div style="display:flex;justify-content:space-between;align-items:flex-start;gap:.5rem;flex-wrap:wrap;margin-bottom:.6rem">'+
+          '<div>'+
+            '<div style="font-size:.88rem;font-weight:700;color:var(--tx)">'+inc.producto_nombre+'</div>'+
+            '<div style="font-size:.65rem;color:var(--tx3)">'+inc.vendedor_nombre+' &bull; '+inc.cantidad+'u &bull; '+fecha+' &bull; Motivo: <b>'+motivoLabel+'</b></div>'+
+            (inc.observacion?'<div style="font-size:.68rem;color:var(--tx2);font-style:italic">'+inc.observacion+'</div>':'')+
+            (prod?'<div style="font-size:.65rem;color:var(--green);margin-top:.1rem">📦 Stock actual: '+stockActual+'u</div>':'')+
+          '</div>'+
+          '<div style="text-align:center;background:rgba(240,192,64,.1);border-radius:8px;padding:.4rem .9rem;flex-shrink:0">'+
+            '<div style="font-size:.58rem;color:var(--tx3)">Monto orig.</div>'+
+            '<div style="font-size:1.1rem;font-weight:700;color:var(--yel)">$'+Number(inc.monto_original||0).toLocaleString('es-AR')+'</div>'+
+          '</div>'+
+        '</div>'+
+        // Decisión stock
+        '<div style="background:var(--sur3);border-radius:6px;padding:.65rem .8rem;margin-bottom:.6rem">'+
+          '<div style="font-size:.68rem;font-weight:600;color:var(--tx3);margin-bottom:.4rem">📦 ¿Vuelve al stock?</div>'+
+          '<div style="display:flex;gap:.4rem;flex-wrap:wrap">'+
+            (prod?
+              '<button onclick="incDevStock('+inc.id+','+inc.producto_id+','+inc.cantidad+',true)" class="btn" style="font-size:.7rem;color:var(--green);border-color:var(--green)">✅ Sí — agregar '+inc.cantidad+'u al stock</button>'+
+              '<button onclick="incDevStock('+inc.id+','+inc.producto_id+','+inc.cantidad+',false)" class="btn" style="font-size:.7rem;color:var(--red);border-color:var(--red)">❌ No agregar al stock</button>':
+              '<span style="font-size:.7rem;color:var(--tx3)">Producto no vinculado</span>')+
+          '</div>'+
+        '</div>'+
+        // Decisión monto
+        '<div style="background:var(--sur3);border-radius:6px;padding:.65rem .8rem;margin-bottom:.6rem">'+
+          '<div style="font-size:.68rem;font-weight:600;color:var(--tx3);margin-bottom:.4rem">💰 Reintegro al vendedor</div>'+
+          '<div style="display:flex;gap:.4rem;flex-wrap:wrap;align-items:center">'+
+            '<button onclick="incDevMonto(\'idm-'+inc.id+'\','+inc.monto_original+',100)" class="btn" style="font-size:.68rem">100% ($'+Number(inc.monto_original||0).toLocaleString('es-AR')+')</button>'+
+            '<button onclick="incDevMonto(\'idm-'+inc.id+'\','+inc.monto_original+',50)" class="btn" style="font-size:.68rem">50% ($'+Math.round((inc.monto_original||0)*0.5).toLocaleString('es-AR')+')</button>'+
+            '<button onclick="incDevMonto(\'idm-'+inc.id+'\','+inc.monto_original+',0)" class="btn" style="font-size:.68rem">Sin reintegro</button>'+
+            '<input type="number" id="idm-'+inc.id+'" placeholder="Monto..." value="'+Math.round(inc.monto_original||0)+'" class="fi" style="width:110px;font-size:.78rem">'+
+          '</div>'+
+        '</div>'+
+        // Nota y resolver
+        '<div style="display:flex;gap:.4rem;margin-bottom:.5rem">'+
+          '<input type="text" id="idn-'+inc.id+'" placeholder="Nota para el vendedor..." class="fi" style="flex:1;font-size:.75rem">'+
+        '</div>'+
+        '<button onclick="incResolverDev('+inc.id+','+inc.vendedor_id+')" class="btn" style="font-weight:700;font-size:.75rem;background:var(--acc);color:#000;border-color:var(--acc)">✅ Resolver y notificar</button>'+
+      '</div>';
+    }).join('');
+  }).catch(function(e){
+    panel.innerHTML="<div class='empty' style='color:var(--red)'>Error: "+e.message+"</div>";
+  });
+}
+
+var _incDevDecisiones={};
+
+function incDevStock(incId,prodId,cant,agregar){
+  if(!_incDevDecisiones[incId])_incDevDecisiones[incId]={};
+  _incDevDecisiones[incId].agregar=agregar;
+  _incDevDecisiones[incId].prodId=prodId;
+  _incDevDecisiones[incId].cant=cant;
+  toast(agregar?'Se agregará '+cant+'u al stock ✅':'No se agrega al stock','tok');
+}
+
+function incDevMonto(inputId,montoOrig,pct){
+  var el=document.getElementById(inputId);
+  if(el)el.value=Math.round(montoOrig*pct/100);
+}
+
+function incResolverDev(incId,vendedorId){
+  var dec=_incDevDecisiones[incId]||{};
+  var montoEl=document.getElementById('idm-'+incId);
+  var monto=montoEl?parseInt(montoEl.value)||0:0;
+  var nota=(document.getElementById('idn-'+incId)||{}).value||'';
+  if(dec.agregar===undefined){toast('Decidí primero qué pasa con el stock','twarn');return;}
+  if(!confirm('Resolver devolución:\n• Stock: '+(dec.agregar?'Agregar '+dec.cant+'u':'No agregar')+'\n• Reintegro: $'+monto.toLocaleString('es-AR')+'\n¿Confirmar?'))return;
+  var proms=[
+    apiPatch('incidencias',{estado:'resuelto',decision_stock:dec.agregar?'agregar':'no_agregar',decision_monto:monto,decision_nota:nota,resuelto_por:'Admin',resuelto_at:new Date().toISOString()},'id=eq.'+incId)
+  ];
+  if(dec.agregar&&dec.prodId&&dec.cant>0){
+    var p=typeof prods!=='undefined'&&prods?prods.find(function(x){return x.id===dec.prodId;}):null;
+    var sA=p?p.stock_actual||0:0,nS=sA+dec.cant;
+    if(p)p.stock_actual=nS;
+    proms.push(apiPatch('productos',{stock_actual:nS},'id=eq.'+dec.prodId));
+    proms.push(apiPost('movimientos_stock',{producto_id:dec.prodId,tipo:'devolucion_cliente',cantidad:dec.cant,stock_antes:sA,stock_despues:nS,motivo:'Devolución aprobada admin',usuario:'Admin',periodo:periodoActual||''}));
+  }
+  if(monto>0){
+    proms.push(apiPost('rendiciones',{vendedor_id:vendedorId,monto:-monto,tipo:'devolucion_cliente',estado:'aprobada',concepto:'Reintegro devolución — incidencia #'+incId,periodo:periodoActual||''}));
+  }
+  Promise.all(proms).then(function(){
+    toast('Devolución resuelta ✅','tok');
+    delete _incDevDecisiones[incId];
+    incLoad();
+  }).catch(function(e){toast('Error: '+e.message,'terr');});
+}
+
+
+function incRenderFall(panel){
+  if(!_incData.fall.length){panel.innerHTML="<div class='empty'>✅ Sin fallados</div>";return;}
+  panel.innerHTML=_incData.fall.map(function(it){
+    var ped=_incData.pedMap[it.pedido_id];
+    var prod=(it.producto_id&&typeof prods!=='undefined'&&prods)?prods.find(function(p){return p.id===it.producto_id;}):null;
     var cantFall=it.cantidad_fallada||0;
     return '<div class="tbl-wrap" style="margin-bottom:.7rem;border-left:3px solid var(--red)">'+
-      '<div style="font-size:.82rem;font-weight:700;color:var(--tx)">'+it.nombre_proveedor+'</div>'+
-      '<div style="font-size:.65rem;color:var(--tx3)">'+(ped?ped.nro_pedido:'')+' &bull; '+cantFall+'u falladas'+(catProd?' &bull; '+catProd.nombre:'')+'</div>'+
-      '<div style="display:flex;gap:.35rem;flex-wrap:wrap;margin-top:.6rem">'+
-        (catProd&&cantFall>0?'<button onclick="incDescontarFallado('+it.id+','+catProd.id+','+cantFall+',\''+catProd.nombre.replace(/'/g,'')+'\')" class="btn btn-g" style="color:var(--red);border-color:var(--red);font-size:.7rem">🗑 Descontar '+cantFall+'u del stock</button>':'')+
-        '<button onclick="incMarcarResuelto('+it.id+')" class="btn btn-g" style="color:var(--green);font-size:.7rem">✓ Resuelto</button>'+
+      '<div style="font-size:.88rem;font-weight:700;color:var(--tx)">'+it.nombre_proveedor+'</div>'+
+      '<div style="font-size:.65rem;color:var(--tx3)">'+(ped?'📦 '+ped.nro_pedido+' — '+ped.proveedor:'')+(prod?' &bull; '+prod.nombre:'')+'</div>'+
+      '<div style="font-size:.75rem;color:var(--red);margin:.4rem 0;font-weight:600">'+cantFall+'u falladas / rotas</div>'+
+      '<div style="display:flex;gap:.4rem;flex-wrap:wrap">'+
+        (prod&&cantFall>0?'<button onclick="incDescontarFall('+it.id+','+prod.id+','+cantFall+',\''+prod.nombre.replace(/'/g,'')+'\')" class="btn" style="font-size:.7rem;color:var(--red);border-color:var(--red)">🗑 Descontar '+cantFall+'u del stock</button>':'')+
+        '<button onclick="incResolverFall('+it.id+')" class="btn" style="font-size:.7rem;color:var(--green);border-color:var(--green)">✓ Marcar resuelto</button>'+
       '</div>'+
     '</div>';
   }).join('');
 }
 
-function incDescontarFallado(itemId,prodId,cant,prodNom){
-  if(!confirm('Descontar '+cant+'u falladas de "'+prodNom+'"?'))return;
-  var p=typeof prods!=='undefined'&&prods?prods.find(function(x){return x.id===prodId;}):null;
-  var sA=p?p.stock_actual||0:0;
+function incDescontarFall(itemId,prodId,cant,prodNom){
+  if(!confirm('Descontar '+cant+'u de "'+prodNom+'" del stock?'))return;
+  var prod=(typeof prods!=='undefined'&&prods)?prods.find(function(p){return p.id===prodId;}):null;
+  var sA=prod?prod.stock_actual||0:0;
   var nS=Math.max(0,sA-cant);
-  if(p)p.stock_actual=nS;
+  if(prod)prod.stock_actual=nS;
   Promise.all([
     apiPatch('productos',{stock_actual:nS},'id=eq.'+prodId),
     apiPatch('pedidos_proveedor_items',{estado_item:'resuelto'},'id=eq.'+itemId),
     apiPost('movimientos_stock',{producto_id:prodId,producto_nombre:prodNom,tipo:'baja_fallado',cantidad:-cant,stock_antes:sA,stock_despues:nS,motivo:'Baja por fallado en pedido',usuario:'admin',periodo:periodoActual||''})
-  ]).then(function(){toast(cant+'u descontadas ✅','tok');incLoad();}).catch(function(e){toast('Error: '+e.message,'terr');});
+  ]).then(function(){toast('✅ '+cant+'u descontadas','tok');incLoad();})
+  .catch(function(e){toast('Error: '+e.message,'terr');});
 }
 
-function incMarcarResuelto(itemId){
+function incResolverFall(itemId){
   apiPatch('pedidos_proveedor_items',{estado_item:'resuelto'},'id=eq.'+itemId)
-    .then(function(){toast('Resuelto ✅','tok');incLoad();}).catch(function(e){toast('Error: '+e.message,'terr');});
-}
-
-function incRenderDevoluciones(panel,d){
-  if(!d.devs.length){panel.innerHTML="<div class='empty'>✅ Sin devoluciones pendientes</div>";return;}
-  panel.innerHTML='<div style="font-size:.75rem;color:var(--tx3)">'+d.devs.length+' devoluciones pendientes. Ejecutá el SQL de incidencias para activar este panel.</div>';
-}
-
-function incRenderHistorial(panel,d){
-  if(!d.hist.length){panel.innerHTML="<div class='empty'>Sin historial</div>";return;}
-  panel.innerHTML=d.hist.map(function(inc){
-    var fecha=new Date(inc.resuelto_at||inc.created_at).toLocaleDateString('es-AR',{timeZone:'America/Argentina/Buenos_Aires'});
-    return '<div style="padding:.5rem .7rem;border-bottom:1px solid var(--bd);font-size:.75rem">'+
-      '<b>'+inc.producto_nombre+'</b> &times;'+inc.cantidad+'u &bull; <span style="color:var(--tx3)">'+fecha+'</span>'+
-    '</div>';
-  }).join('');
+    .then(function(){toast('✅ Resuelto','tok');incLoad();})
+    .catch(function(e){toast('Error: '+e.message,'terr');});
 }
 
 
