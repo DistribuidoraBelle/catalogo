@@ -1,0 +1,240 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Incidencias</title>
+<style>
+:root{--bg:#0f0f1a;--sur:#1a1a2e;--sur2:#22223a;--sur3:#2a2a45;--tx:#e8e8f0;--tx2:#b0b0c8;--tx3:#7070a0;--bd:#2a2a4a;--acc:#c4965a;--green:#3db87a;--red:#e05c6e;--yel:#f0c040;--cyan:#00bcd4;--blue:#4d9fff;--r:8px;--rs:6px}
+*{box-sizing:border-box;margin:0;padding:0}
+body{background:var(--bg);color:var(--tx);font-family:'Jost',system-ui,sans-serif;padding:1rem}
+.tbl-wrap{background:var(--sur2);border-radius:var(--r);border:1px solid var(--bd);padding:.9rem 1rem;margin-bottom:.8rem}
+.btn{padding:.28rem .65rem;border-radius:var(--rs);cursor:pointer;border:1px solid var(--bd);background:transparent;color:var(--tx2);font-size:.75rem;font-family:inherit;transition:all .15s}
+.btn:hover{border-color:var(--acc);color:var(--acc)}
+.btn-a{background:var(--acc);color:#000;border-color:var(--acc);font-weight:600}
+.btn-a:hover{background:#b8853e}
+.fi{padding:.35rem .6rem;background:var(--sur3);border:1px solid var(--bd);border-radius:var(--rs);color:var(--tx);font-size:.78rem;font-family:inherit}
+.fi:focus{outline:none;border-color:var(--acc)}
+.badge{font-size:.62rem;padding:.1rem .4rem;border-radius:10px;font-weight:600}
+.tabs{display:flex;gap:.3rem;margin-bottom:.8rem;border-bottom:1px solid var(--bd);padding-bottom:.5rem;flex-wrap:wrap}
+.tab{padding:.28rem .7rem;border-radius:var(--rs);cursor:pointer;border:1px solid var(--bd);background:transparent;color:var(--tx3);font-size:.72rem;font-family:inherit}
+.tab.active{background:var(--acc);color:#000;border-color:var(--acc);font-weight:600}
+.stats{display:grid;grid-template-columns:repeat(auto-fit,minmax(100px,1fr));gap:.5rem;margin-bottom:.8rem}
+.stat{background:var(--sur2);border:1px solid var(--bd);border-radius:var(--r);padding:.5rem .7rem;text-align:center}
+.stat-val{font-size:1.1rem;font-weight:700}
+.stat-lbl{font-size:.58rem;color:var(--tx3);text-transform:uppercase;letter-spacing:.06em}
+.empty{text-align:center;padding:2rem;color:var(--tx3);font-size:.85rem}
+.toast{position:fixed;bottom:1rem;right:1rem;background:var(--sur2);border:1px solid var(--green);color:var(--green);padding:.6rem 1rem;border-radius:var(--r);font-size:.78rem;z-index:999;animation:fadeIn .2s}
+@keyframes fadeIn{from{opacity:0;transform:translateY(10px)}to{opacity:1;transform:translateY(0)}}
+</style>
+</head>
+<body>
+<div class="stats" id="stats"></div>
+<div class="tabs" id="tabs">
+  <button class="tab active" onclick="setTab('faltantes',this)">📦 Faltantes</button>
+  <button class="tab" onclick="setTab('fallados',this)">⚠️ Fallados</button>
+  <button class="tab" onclick="setTab('devoluciones',this)">↩️ Devoluciones</button>
+  <button class="tab" onclick="setTab('historial',this)">✅ Historial</button>
+</div>
+<div id="panel"><div class="empty">Cargando...</div></div>
+
+<script>
+var SB="https://syylbuvjuekkanxynpps.supabase.co";
+var KEY="eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InN5eWxidXZqdWVra2FueHlucHBzIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzM1MTkwNjQsImV4cCI6MjA4OTA5NTA2NH0.59CUCsLcwVkR-f6KSbQ3RUmZl7-FK8haNW6kw_AkeJA";
+var _tab='faltantes', _data={falt:[],fall:[],devs:[],hist:[],pedMap:{}}, _prods=[];
+
+function api(t,q,method,body){
+  return fetch(SB+"/rest/v1/"+t+(q?"?"+q:""),{
+    method:method||'GET',
+    headers:{"apikey":KEY,"Authorization":"Bearer "+KEY,"Content-Type":"application/json","Prefer":"return=minimal"},
+    body:body?JSON.stringify(body):undefined
+  }).then(function(r){return r.ok&&method!=='PATCH'&&method!=='DELETE'?r.json():r;});
+}
+
+function toast(msg,type){
+  var el=document.createElement('div');
+  el.className='toast';
+  el.style.borderColor=type==='err'?'var(--red)':'var(--green)';
+  el.style.color=type==='err'?'var(--red)':'var(--green)';
+  el.textContent=msg;
+  document.body.appendChild(el);
+  setTimeout(function(){el.remove();},3000);
+}
+
+function setTab(tab,btn){
+  _tab=tab;
+  document.querySelectorAll('.tab').forEach(function(b){b.className='tab';});
+  if(btn)btn.className='tab active';
+  render();
+}
+
+function load(){
+  document.getElementById('panel').innerHTML='<div class="empty">Cargando...</div>';
+  Promise.all([
+    api('pedidos_proveedor_items','select=id,pedido_id,nombre_proveedor,cantidad_pedida,cantidad_recibida,cantidad_fallada,producto_id,estado_item,observacion&estado_item=in.(faltante,fallado)&limit=500'),
+    api('pedidos_proveedor','select=id,nro_pedido,proveedor&limit=500'),
+    api('productos','select=id,nombre,stock_actual,en_viaje&activo=is.true&limit=2000'),
+    api('incidencias','select=*&order=created_at.desc&limit=300').catch(function(){return[];})
+  ]).then(function(res){
+    var items=Array.isArray(res[0])?res[0]:[];
+    var peds=Array.isArray(res[1])?res[1]:[];
+    _prods=Array.isArray(res[2])?res[2]:[];
+    var incAll=Array.isArray(res[3])?res[3]:[];
+    var pedMap={};peds.forEach(function(p){pedMap[p.id]=p;});
+    _data={
+      falt:items.filter(function(i){return i.estado_item==='faltante';}),
+      fall:items.filter(function(i){return i.estado_item==='fallado';}),
+      devs:incAll.filter(function(i){return i.tipo==='devolucion'&&i.estado==='pendiente';}),
+      hist:incAll.filter(function(i){return i.estado==='resuelto'||i.estado==='descartado';}),
+      pedMap:pedMap
+    };
+    // Stats
+    var s=document.getElementById('stats');
+    if(s)s.innerHTML=
+      '<div class="stat"><div class="stat-val" style="color:var(--cyan)">'+_data.falt.length+'</div><div class="stat-lbl">Faltantes</div></div>'+
+      '<div class="stat"><div class="stat-val" style="color:var(--red)">'+_data.fall.length+'</div><div class="stat-lbl">Fallados</div></div>'+
+      '<div class="stat"><div class="stat-val" style="color:var(--yel)">'+_data.devs.length+'</div><div class="stat-lbl">Devoluciones</div></div>'+
+      '<div class="stat"><div class="stat-val" style="color:var(--green)">'+_data.hist.length+'</div><div class="stat-lbl">Resueltos</div></div>';
+    render();
+  }).catch(function(e){
+    document.getElementById('panel').innerHTML='<div class="empty">Error: '+e.message+'</div>';
+  });
+}
+
+function render(){
+  var panel=document.getElementById('panel');
+  if(_tab==='faltantes')renderFalt(panel);
+  else if(_tab==='fallados')renderFall(panel);
+  else if(_tab==='devoluciones')renderDevs(panel);
+  else renderHist(panel);
+}
+
+function renderFalt(panel){
+  if(!_data.falt.length){panel.innerHTML='<div class="empty">✅ Sin faltantes</div>';return;}
+  panel.innerHTML=_data.falt.map(function(it){
+    var ped=_data.pedMap[it.pedido_id];
+    var cantFalt=Math.max(0,(it.cantidad_pedida||0)-(it.cantidad_recibida||0));
+    var prod=_prods.find(function(p){return p.id===it.producto_id;});
+    return '<div class="tbl-wrap" style="border-left:3px solid var(--cyan)">'+
+      '<div style="display:flex;justify-content:space-between;align-items:flex-start;gap:.5rem;margin-bottom:.7rem">'+
+        '<div>'+
+          '<div style="font-size:.85rem;font-weight:700">'+it.nombre_proveedor+'</div>'+
+          '<div style="font-size:.65rem;color:var(--tx3)">'+(ped?ped.nro_pedido+' — '+ped.proveedor:'Pedido #'+it.pedido_id)+'</div>'+
+          (prod?'<div style="font-size:.65rem;color:var(--green)">✅ '+prod.nombre+' | Stock: '+prod.stock_actual+'u | En viaje: '+(prod.en_viaje||0)+'u</div>':
+               '<div style="font-size:.65rem;color:var(--yel)">⚠️ Sin vincular al catálogo</div>')+
+        '</div>'+
+        '<div style="text-align:center;background:rgba(0,188,212,.12);border-radius:8px;padding:.4rem .9rem;flex-shrink:0">'+
+          '<div style="font-size:.58rem;color:var(--tx3)">Faltante</div>'+
+          '<div style="font-size:1.3rem;font-weight:700;color:var(--cyan)">'+cantFalt+'u</div>'+
+        '</div>'+
+      '</div>'+
+      (prod&&cantFalt>0?
+        '<div style="margin-bottom:.6rem">'+
+          '<div style="font-size:.68rem;font-weight:600;color:var(--tx3);margin-bottom:.35rem">📥 ¿Cuántas llegaron?</div>'+
+          '<div style="display:flex;gap:.5rem;align-items:center;flex-wrap:wrap">'+
+            '<input type="number" id="cant-'+it.id+'" value="'+cantFalt+'" min="1" max="'+cantFalt+'" class="fi" style="width:80px;text-align:center;font-size:.9rem">'+
+            '<span style="font-size:.7rem;color:var(--tx3)">de '+cantFalt+'u faltantes</span>'+
+            '<button class="btn btn-a" onclick="agregarFalt('+it.id+','+prod.id+','+cantFalt+',\''+prod.nombre.replace(/'/g,'')+'\')" style="background:var(--green)">✅ Agregar al stock</button>'+
+          '</div>'+
+        '</div>':'<div style="margin-bottom:.6rem;font-size:.7rem;color:var(--yel)">⚠️ Vinculá al catálogo para agregar al stock</div>')+
+      '<div style="margin-bottom:.6rem">'+
+        '<div style="font-size:.65rem;color:var(--tx3);margin-bottom:.25rem">📝 Nota:</div>'+
+        '<div style="display:flex;gap:.4rem">'+
+          '<input type="text" id="obs-'+it.id+'" value="'+(it.observacion||'')+'" placeholder="Ej: llega la semana que viene..." class="fi" style="flex:1">'+
+          '<button class="btn" onclick="guardarObs('+it.id+',\'obs-'+it.id+'\')" style="white-space:nowrap">💾 Guardar</button>'+
+        '</div>'+
+      '</div>'+
+      '<button class="btn" onclick="noLlega('+it.id+')" style="color:var(--red);border-color:var(--red);font-size:.7rem">✗ Definitivamente no llegará — cerrar</button>'+
+    '</div>';
+  }).join('');
+}
+
+function agregarFalt(itemId,prodId,cantMax,prodNom){
+  var input=document.getElementById('cant-'+itemId);
+  var cant=input?Math.max(1,Math.min(parseInt(input.value)||cantMax,cantMax)):cantMax;
+  if(cant<=0){toast('La cantidad debe ser mayor a 0','err');return;}
+  if(!confirm('Agregar '+cant+'u de "'+prodNom+'" al stock?'))return;
+  var prod=_prods.find(function(p){return p.id===prodId;});
+  var sA=prod?prod.stock_actual||0:0;
+  var nS=sA+cant;
+  var nV=Math.max(0,(prod?prod.en_viaje||0:0)-cant);
+  var quedan=cantMax-cant;
+  if(prod){prod.stock_actual=nS;prod.en_viaje=nV;}
+  Promise.all([
+    api('productos','id=eq.'+prodId,'PATCH',{stock_actual:nS,en_viaje:nV}),
+    api('pedidos_proveedor_items','id=eq.'+itemId,'PATCH',{estado_item:quedan>0?'faltante':'en_stock',cantidad_recibida:cant}),
+    api('movimientos_stock','','POST',{producto_id:prodId,producto_nombre:prodNom,tipo:'ingreso_faltante',cantidad:cant,stock_antes:sA,stock_despues:nS,motivo:'Llegó faltante de pedido',usuario:'admin'})
+  ]).then(function(){
+    toast(cant+'u agregadas ✅'+(quedan>0?' — quedan '+quedan+'u pendientes':''));
+    load();
+  }).catch(function(e){toast('Error: '+e.message,'err');});
+}
+
+function guardarObs(itemId,inputId){
+  var obs=document.getElementById(inputId).value;
+  api('pedidos_proveedor_items','id=eq.'+itemId,'PATCH',{observacion:obs})
+    .then(function(){toast('Nota guardada ✅');})
+    .catch(function(e){toast('Error: '+e.message,'err');});
+}
+
+function noLlega(itemId){
+  if(!confirm('Marcar como definitivamente no llegará. ¿Confirmar?'))return;
+  api('pedidos_proveedor_items','id=eq.'+itemId,'PATCH',{estado_item:'cancelado'})
+    .then(function(){toast('Cerrado');load();})
+    .catch(function(e){toast('Error: '+e.message,'err');});
+}
+
+function renderFall(panel){
+  if(!_data.fall.length){panel.innerHTML='<div class="empty">✅ Sin fallados</div>';return;}
+  panel.innerHTML=_data.fall.map(function(it){
+    var ped=_data.pedMap[it.pedido_id];
+    var prod=_prods.find(function(p){return p.id===it.producto_id;});
+    var cantFall=it.cantidad_fallada||0;
+    return '<div class="tbl-wrap" style="border-left:3px solid var(--red)">'+
+      '<div style="font-size:.82rem;font-weight:700">'+it.nombre_proveedor+'</div>'+
+      '<div style="font-size:.65rem;color:var(--tx3)">'+(ped?ped.nro_pedido:'')+(prod?' &bull; '+prod.nombre:'')+'</div>'+
+      '<div style="font-size:.68rem;color:var(--red);margin:.3rem 0">'+cantFall+'u falladas/rotas</div>'+
+      '<div style="display:flex;gap:.4rem;flex-wrap:wrap;margin-top:.5rem">'+
+        (prod&&cantFall>0?'<button class="btn" onclick="descontarFall('+it.id+','+prod.id+','+cantFall+',\''+prod.nombre.replace(/'/g,'')+'\')" style="color:var(--red);border-color:var(--red);font-size:.7rem">🗑 Descontar '+cantFall+'u del stock</button>':'')+
+        '<button class="btn" onclick="resolverFall('+it.id+')" style="color:var(--green);font-size:.7rem">✓ Resuelto</button>'+
+      '</div>'+
+    '</div>';
+  }).join('');
+}
+
+function descontarFall(itemId,prodId,cant,prodNom){
+  if(!confirm('Descontar '+cant+'u de "'+prodNom+'" del stock?'))return;
+  var prod=_prods.find(function(p){return p.id===prodId;});
+  var sA=prod?prod.stock_actual||0:0;
+  var nS=Math.max(0,sA-cant);
+  if(prod)prod.stock_actual=nS;
+  Promise.all([
+    api('productos','id=eq.'+prodId,'PATCH',{stock_actual:nS}),
+    api('pedidos_proveedor_items','id=eq.'+itemId,'PATCH',{estado_item:'resuelto'}),
+    api('movimientos_stock','','POST',{producto_id:prodId,producto_nombre:prodNom,tipo:'baja_fallado',cantidad:-cant,stock_antes:sA,stock_despues:nS,motivo:'Baja por producto fallado',usuario:'admin'})
+  ]).then(function(){toast(cant+'u descontadas ✅');load();}).catch(function(e){toast('Error: '+e.message,'err');});
+}
+
+function resolverFall(itemId){
+  api('pedidos_proveedor_items','id=eq.'+itemId,'PATCH',{estado_item:'resuelto'})
+    .then(function(){toast('Resuelto ✅');load();}).catch(function(e){toast('Error: '+e.message,'err');});
+}
+
+function renderDevs(panel){
+  panel.innerHTML='<div class="empty">Para devoluciones, ejecutá el SQL de la tabla incidencias primero.</div>';
+}
+
+function renderHist(panel){
+  if(!_data.hist.length){panel.innerHTML='<div class="empty">Sin historial</div>';return;}
+  panel.innerHTML=_data.hist.map(function(inc){
+    var fecha=new Date(inc.resuelto_at||inc.created_at).toLocaleDateString('es-AR',{timeZone:'America/Argentina/Buenos_Aires'});
+    return '<div style="padding:.5rem .7rem;border-bottom:1px solid var(--bd);font-size:.75rem">'+
+      '<b>'+inc.producto_nombre+'</b> &times;'+inc.cantidad+'u &bull; <span style="color:var(--tx3)">'+fecha+'</span>'+
+    '</div>';
+  }).join('');
+}
+
+load();
+</script>
+</body>
+</html>
