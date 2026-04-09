@@ -1368,7 +1368,16 @@ function notificarVendedoresNuevoPedido(nroOrden, items, total){
 }
 
 function sendWA(){
-  var items=Object.values(cart);if(!items.length)return;
+  // Evitar doble envío
+  if(window._sendingOrder){showToast('Pedido en proceso, esperá...');return;}
+  window._sendingOrder=true;
+  var waBtn=document.getElementById('waBtn');
+  if(waBtn){waBtn.disabled=true;waBtn.style.opacity='.5';}
+  var items=Object.values(cart);if(!items.length){
+    window._sendingOrder=false;
+    if(waBtn){waBtn.disabled=false;waBtn.style.opacity='';}
+    return;
+  }
   var minErrors=validarGruposMinimos(Object.values(cart),allProds);
   if(minErrors.length){showToast(minErrors[0]);return;}
   var perfs=items.filter(function(i){return !i.isDecan;});
@@ -1412,23 +1421,49 @@ function sendWA(){
   });
   msg+="Orden: "+nroOrden+"\nTotal: "+fmt(total)+"\n\nHola! Me gustar\u00eda confirmar este pedido. Soy cliente web.";
   // Build full items list including combos for the pedido record
+  // Construir fullPedidoItems directamente desde el carrito — fuente de verdad
   var allCartItems=Object.values(cart);
   var fullPedidoItems=[];
   allCartItems.forEach(function(item){
     if(item.isCombo){
-      // Store combo as single line item
       fullPedidoItems.push({
         producto_id:null,combo_id:item.comboId,nombre:item.nombre,
         qty:item.qty,segmento:"combo",precio:item.precio,
         total:item.precio*item.qty,isDecan:false,isCombo:true
       });
+    } else if(item.isDecan){
+      // Decan: siempre como item independiente, nunca fusionar con perfume entero
+      fullPedidoItems.push({
+        producto_id:item.prodId,
+        nombre:item.nombre,
+        qty:item.qty,
+        segmento:"decan",
+        precio:item.precio,
+        total:item.precio*item.qty,
+        isDecan:true,
+        isCombo:false,
+        decanQty:item.decanQty||5
+      });
     } else {
-      var existing=pedidoItems.find(function(x){return x.producto_id===( item.isDecan?item.prodId:item.id);});
-      fullPedidoItems.push(existing||{producto_id:item.isDecan?item.prodId:item.id,nombre:item.nombre,qty:item.qty,segmento:item.isDecan?"decan":"x1",precio:item.precio,total:item.precio*item.qty,isDecan:item.isDecan||false,isCombo:false});
+      // Perfume normal o precio único — mapear segmento correctamente
+      var seg=item.seg==="pm"?"x10":item.seg==="pe"?"x3":item.seg==="pi"?"Precio unico":"x1";
+      fullPedidoItems.push({
+        producto_id:item.id,
+        nombre:item.nombre,
+        qty:item.qty,
+        segmento:seg,
+        precio:item.precio,
+        total:item.precio*item.qty,
+        isDecan:false,
+        isCombo:false
+      });
     }
   });
   // Guardar pedido con todos los items
   apiPost("pedidos_catalogo",{items:fullPedidoItems,total:total,estado:"pendiente",confirmado_cobro:false,nro_orden:nroOrden}).then(function(){
+    window._sendingOrder=false;
+    var waBtn=document.getElementById('waBtn');
+    if(waBtn){waBtn.disabled=false;waBtn.style.opacity='';}
     // Reservar stock: perfumes normales
     perfs.forEach(function(item){
       var p=allProds.find(function(x){return x.id===item.id;});
@@ -1458,7 +1493,12 @@ function sendWA(){
         }).catch(function(){});
       });
     });
-  }).catch(function(){});
+  }).catch(function(){
+    window._sendingOrder=false;
+    var waBtn=document.getElementById('waBtn');
+    if(waBtn){waBtn.disabled=false;waBtn.style.opacity='';}
+    showToast('Error al registrar pedido. Intentá de nuevo.');
+  });
   // Notificar a David y Facu — fuera del .then() para garantizar ejecucion
   notificarVendedoresNuevoPedido(nroOrden, pedidoItems, total);
   window.open("https://wa.me/"+waNumber+"?text="+encodeURIComponent(msg),"_blank");
