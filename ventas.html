@@ -1305,6 +1305,9 @@ function rmCart(id){delete cart[id];if(cstate[id])cstate[id].qty=0;updateCartBar
 var reservaCheckQueue=[];
 function confirmarVenta(){
   var items=Object.values(cart).filter(function(i){return !i.isDecan;});
+  // Si el carrito tiene solo decans, incluirlos como items principales
+  var soloDecans=items.length===0&&Object.values(cart).some(function(i){return i.isDecan;});
+  if(soloDecans)items=Object.values(cart).filter(function(i){return i.isDecan;});
   if(Object.values(cart).length===0){toast("Pedido vacio","twarn");return;}
   // Deshabilitar botón inmediatamente para evitar doble-click
   var _confBtn=document.getElementById("drawerConfirmBtn");
@@ -1439,7 +1442,8 @@ function executeVenta(items,reservaDecs){
   if(window._editandoPedidoId){
     var pedId=window._editandoPedidoId;
     var decans=Object.values(cart).filter(function(i){return i.isDecan;});
-    var allItems=items.concat(decans);
+    // Si solo hay decans (sin perfumes enteros), allItems = solo decans
+    var allItems=items.length>0?items.concat(decans):decans;
     var totalUnidadesF=items.filter(function(i){return !i.isDecan&&!i.isCombo;}).reduce(function(s,i){return s+i.qty;},0);
     // Respetar precios del carrito — si el precio difiere del calculado, es especial
     allItems.forEach(function(item){
@@ -1733,13 +1737,15 @@ function _gestionarPedido(tipo,id){
     items.forEach(function(it,i){
       var cobIdx=[];try{cobIdx=Array.isArray(rec.items_cobrados)?rec.items_cobrados:(rec.items_cobrados?JSON.parse(rec.items_cobrados):[]);}catch(ex){}
       var yaCobrado=cobIdx.indexOf(i)>=0;
-      var segBadge=it.segmento==='especial'?'<span style="font-size:.56rem;color:var(--red);background:rgba(220,60,60,.12);padding:.08rem .3rem;border-radius:3px;margin-right:.25rem">Especial</span>':
+      var esDecan=it.isDecan||it.segmento==='decan';
+      var segBadge=esDecan?'<span style="font-size:.56rem;color:var(--acc);background:rgba(196,150,90,.12);padding:.08rem .3rem;border-radius:3px;margin-right:.25rem">🧪 Decan</span>':
+        it.segmento==='especial'?'<span style="font-size:.56rem;color:var(--red);background:rgba(220,60,60,.12);padding:.08rem .3rem;border-radius:3px;margin-right:.25rem">Especial</span>':
         it.segmento==='pm'?'<span style="font-size:.56rem;color:var(--green);margin-right:.25rem">x10</span>':
         it.segmento==='pe'?'<span style="font-size:.56rem;color:var(--cyan);margin-right:.25rem">x3</span>':'';
       var precioU=it.precio||0;
       html+='<div style="display:flex;justify-content:space-between;align-items:center;padding:.35rem 0;border-bottom:1px solid var(--bd)">'+
         '<label style="display:flex;align-items:center;gap:.4rem;flex:1;cursor:'+(yaCobrado?'default':'pointer')+';font-size:.75rem;color:var(--tx)">'+
-          '<input type="checkbox" class="_mgCb" data-idx="'+i+'" data-qty="'+(it.qty||1)+'" data-precio="'+(it.precio||0)+'" data-total="'+(it.total||0)+'" data-nombre="'+(it.nombre||'').replace(/"/g,'')+'">'+
+          '<input type="checkbox" class="_mgCb" data-idx="'+i+'" data-qty="'+(it.qty||1)+'" data-precio="'+(it.precio||0)+'" data-total="'+(it.total||0)+'" data-nombre="'+(it.nombre||'').replace(/"/g,'')+('" data-isdecan="'+(esDecan?'1':'0')+'"')+'>'+
           '<span style="flex:1">'+segBadge+'<b>'+it.nombre+'</b> <span style="color:var(--tx3);font-size:.68rem">x'+(it.qty||1)+(precioU?' — '+fmt(precioU)+'/u':'')+'</span></span>'+
         '</label>'+
         '<div style="display:flex;align-items:center;gap:.4rem;flex-shrink:0">'+
@@ -1890,8 +1896,9 @@ function _mgConfirmarCobro(){
 
   seleccionados.forEach(function(s){
     var it=items[s.idx];if(!it)return;
+    var esDecanItem=it.isDecan||it.segmento==='decan';
     var pid=it.producto_id;
-    if(pid&&!it.isDecan){
+    if(pid&&!esDecanItem){
       var p=prods.find(function(x){return x.id===pid;});
       if(p){
         var nuevoVendido=(p.vendido_david||0)+s.qty;
@@ -1902,11 +1909,12 @@ function _mgConfirmarCobro(){
     }
     proms.push(apiPost('ventas',{
       vendedor_id:VENDEDOR_ID,
-      producto_id:it.producto_id||null,
+      // Decans: producto_id null para evitar que se toque el stock al eliminar
+      producto_id:esDecanItem?null:(it.producto_id||null),
       producto_nombre:it.nombre,
       cantidad:s.qty,
       precio_unitario:it.precio||0,
-      segmento:it.segmento||'x1',
+      segmento:esDecanItem?'decan':(it.segmento||'x1'),
       total:s.total,
       periodo:periodo,
       estado:'confirmada',
@@ -1917,7 +1925,7 @@ function _mgConfirmarCobro(){
       descuento_motivo:it.descuento_motivo||''
     }));
     // Registrar movimiento de stock
-    if(it.producto_id&&!it.isDecan){
+    if(it.producto_id&&!esDecanItem){
       var pMov=prods.find(function(x){return x.id===it.producto_id;});
       var stk=pMov?pMov.stock_actual:null;
       try{proms.push(apiPost('movimientos_stock',{
@@ -2111,7 +2119,7 @@ function cancelarPedidoWeb(pedId,btn){
         var nuevaReserva=Math.max(0,(p.reserva||0)-qty);
         p.stock_actual=nuevoStock;p.reserva=nuevaReserva;
         promises.push(apiPatch("productos",{stock_actual:nuevoStock,reserva:nuevaReserva},"id=eq."+pid));
-        promises.push(apiPost("movimientos_stock",{producto_id:pid,producto_nombre:it.nombre||("Prod #"+pid),tipo:"devolucion",cantidad:qty,stock_antes:_sa,stock_despues:nuevoStock,motivo:"Cancelación pedido web #"+pedId,created_at:new Date().toISOString()}).catch(function(){}));
+        promises.push(apiPost("movimientos_stock",{producto_id:pid,producto_nombre:it.nombre||("Prod #"+pid),tipo:"devolucion",cantidad:qty,stock_antes:_sa,stock_despues:nuevoStock,motivo:"Cancelación pedido web #"+pedId,usuario:VENDEDOR_NOMBRE,created_at:new Date().toISOString()}).catch(function(){}));
       }
     });
     Promise.all(promises).then(function(){toast("Pedido cancelado - stock devuelto","twarn");loadPedidosWeb();renderCat();}).catch(function(){if(btn)btn.disabled=false;});
@@ -2793,7 +2801,7 @@ function confirmarTransf(id,btn){
           var nv=(p.vendido_david||0)+(it.qty||1);
           p.stock_actual=ns;p.vendido_david=nv;
           promises.push(apiPatch("productos",{stock_actual:ns,vendido_david:nv},"id=eq."+pid));
-          promises.push(apiPost("movimientos_stock",{producto_id:pid,producto_nombre:it.nombre||("Prod #"+pid),tipo:"venta",cantidad:it.qty||1,stock_antes:_sa,stock_despues:ns,motivo:"Transferencia confirmada "+(v.nro_orden||""),created_at:new Date().toISOString()}).catch(function(){}));
+          promises.push(apiPost("movimientos_stock",{producto_id:pid,producto_nombre:it.nombre||("Prod #"+pid),tipo:"venta",cantidad:it.qty||1,stock_antes:_sa,stock_despues:ns,motivo:"Transferencia confirmada "+(v.nro_orden||""),created_at:new Date().toISOString(),usuario:VENDEDOR_NOMBRE}).catch(function(){}));
         }}
       });
     }
@@ -3573,7 +3581,7 @@ function loadRendicion(){
     "<div class='fg'><label>Monto $</label><input class='fi' id='rMon' type='number' placeholder='0' oninput='calcEquiv()'></div>"+
     "<div class='fg'><label>Equivalente USD</label><input class='fi' id='rUSD' type='number' step='0.01'></div>"+
     "<div class='fg'><label>Cotizacion</label><input class='fi' id='rCot' type='number' value='"+cotizActual+"' oninput='calcEquiv()'></div>"+
-    "<div class='fg'><label>Fecha</label><input class='fi' id='rFec' type='date' value='"+new Date().toISOString().slice(0,10)+"'></div>"+
+    "<div class='fg'><label>Fecha</label><input class='fi' id='rFec' type='date' value='"+(function(){var d=new Date();d.setHours(d.getHours()-3);return d.toISOString().slice(0,10);})()+"'></div>"+
     "</div>"+
     "<div class='fg' style='margin-top:.5rem'><label>Observacion</label><input class='fi' id='rConc' type='text' placeholder='ej: Entrego efectivo viernes'></div>"+
     "<button class='btn btn-green' onclick='addRendicion()' style='margin-top:.65rem'>Generar orden de rendicion</button>"+
@@ -5434,13 +5442,13 @@ function confirmarDevolucion(){
   if(volverAlStock&&v.producto_id){
     var p=prods.find(function(x){return x.id===v.producto_id;});
     if(p){
-      var ns=(p.stock_actual||0)+_devCant;
+      var _sa=p.stock_actual||0;  // guardar ANTES de modificar
+      var ns=_sa+_devCant;
       var vd=Math.max(0,(p.vendido_david||0)-_devCant);
       p.stock_actual=ns;
       p.vendido_david=vd;
-      var _sa=p.stock_actual||0;
       promises.push(apiPatch("productos",{stock_actual:ns,vendido_david:vd},"id=eq."+v.producto_id));
-      promises.push(apiPost("movimientos_stock",{producto_id:v.producto_id,producto_nombre:v.producto_nombre,tipo:"devolucion",cantidad:_devCant,stock_antes:_sa,stock_despues:ns,motivo:"Devolución. Motivo: "+motivo+(obs?" — "+obs:""),created_at:new Date().toISOString()}).catch(function(){}));
+      promises.push(apiPost("movimientos_stock",{producto_id:v.producto_id,producto_nombre:v.producto_nombre,tipo:"devolucion",cantidad:_devCant,stock_antes:_sa,stock_despues:ns,motivo:"Devolución. Motivo: "+motivo+(obs?" — "+obs:""),created_at:new Date().toISOString(),usuario:VENDEDOR_NOMBRE}).catch(function(){}));
     }
   }
 
@@ -5958,7 +5966,7 @@ function loadDashboardVendedor(){
   var dash=document.createElement('div');
   dash.id='vendedor-dashboard';
   dash.style.cssText='padding:.7rem .9rem .2rem';
-  var hoy=new Date().toISOString().slice(0,10);
+  var hoy=(function(){var d=new Date();d.setHours(d.getHours()-3);return d.toISOString().slice(0,10);})();
   var mesInicio=hoy.slice(0,8)+'01';
   var mesFin=new Date(new Date(mesInicio).setMonth(new Date(mesInicio).getMonth()+1)).toISOString().slice(0,10);
   Promise.all([
