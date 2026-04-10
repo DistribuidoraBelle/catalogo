@@ -433,6 +433,8 @@ function patchStockFresco(prodId, delta, motivo){
       if(patch.vendido_david!==undefined)pm.vendido_david=patch.vendido_david;
     }
     return apiPatch('productos',patch,'id=eq.'+prodId);
+  }).catch(function(e){
+    console.error('patchStockFresco error:',e);
   });
 }
 
@@ -1944,10 +1946,7 @@ function _mgConfirmarCobro(){
     if(pid&&!esDecanItem){
       var p=prods.find(function(x){return x.id===pid;});
       if(p){
-        var nuevoVendido=(p.vendido_david||0)+s.qty;
-        var nuevoReserva=Math.max(0,(p.reserva||0)-s.qty);
-        p.vendido_david=nuevoVendido;p.reserva=nuevoReserva;
-        proms.push(apiPatch('productos',{vendido_david:nuevoVendido,reserva:nuevoReserva},'id=eq.'+pid));
+        proms.push(patchStockFresco(pid,{vendido_david:+s.qty,reserva:-s.qty},'Cobro parcial'));
       }
     }
     proms.push(apiPost('ventas',{
@@ -2024,15 +2023,9 @@ function confirmarTransfConForma(id,forma,seleccionados,rec){
       var p=prods.find(function(x){return x.id===pid;});
       if(p){
         if(rec.con_reserva){
-          var nr=Math.max(0,(p.reserva||0)-s.qty);
-          var nv=(p.vendido_david||0)+s.qty;
-          p.reserva=nr;p.vendido_david=nv;
-          proms.push(apiPatch('productos',{reserva:nr,vendido_david:nv},'id=eq.'+pid));
+          proms.push(patchStockFresco(pid,{reserva:-s.qty,vendido_david:+s.qty},'Transf con reserva'));
         } else {
-          var ns=Math.max(0,(p.stock_actual||0)-s.qty);
-          var nv2=(p.vendido_david||0)+s.qty;
-          p.stock_actual=ns;p.vendido_david=nv2;
-          proms.push(apiPatch('productos',{stock_actual:ns,vendido_david:nv2},'id=eq.'+pid));
+          proms.push(patchStockFresco(pid,{stock_actual:-s.qty,vendido_david:+s.qty},'Transf stock libre'));
         }
       }
     }
@@ -2279,20 +2272,12 @@ function guardarEditPed(){
       if(diff!==0){
         var p=prods.find(function(x){return x.id===prodId;});
         if(p){
-          var patchObj={};
+          // Usar patchStockFresco para evitar prods stale
           if(_conRes){
-            // Stock en reserva: solo ajustar reserva
-            var nuevaReserva=Math.max(0,(p.reserva||0)-diff);
-            p.reserva=nuevaReserva;
-            patchObj.reserva=nuevaReserva;
+            stockPromises.push(patchStockFresco(prodId,{reserva:-diff},'Editar pedido'));
           } else {
-            // Stock libre o pedido web: ajustar stock_actual
-            var nuevoStock=Math.max(0,(p.stock_actual||0)+diff);
-            p.stock_actual=nuevoStock;
-            patchObj.stock_actual=nuevoStock;
+            stockPromises.push(patchStockFresco(prodId,{stock_actual:+diff},'Editar pedido'));
           }
-          if(Object.keys(patchObj).length)
-            stockPromises.push(apiPatch("productos",patchObj,"id=eq."+prodId));
         }
       }
     }
@@ -4115,11 +4100,12 @@ function confirmarReservarPed(){
       var p=prods.find(function(x){return x.id===item.id;});
       if(!p)return;
       var stockAntes=p.stock_actual||0;
+      var nuevoStockCalc=Math.max(0,stockAntes-item.qty);
       // Usar BD fresca para reserva
       patchStockFresco(item.id,{stock_actual:-item.qty,reserva:+item.qty},'Reserva pedido');
       apiPost("movimientos_stock",{
         producto_id:item.id,producto_nombre:item.nombre,tipo:"reserva",
-        cantidad:item.qty,stock_antes:stockAntes,stock_despues:nuevoStock,
+        cantidad:item.qty,stock_antes:stockAntes,stock_despues:nuevoStockCalc,
         motivo:"Reserva pedido "+nroOrden,
         usuario:VENDEDOR_NOMBRE||"vendedor",periodo:periodoActual
       });
@@ -5467,11 +5453,14 @@ function confirmarDevolucion(){
   }));
 
   // 3. If product OK -> return to stock
-  if(volverAlStock&&v.producto_id&&v.segmento!=='decan'){
+  if(volverAlStock&&v.producto_id&&v.segmento!=='decan'&&v.segmento!=='combo'){
     var p=prods.find(function(x){return x.id===v.producto_id;});
     if(p){
-      promises.push(patchStockFresco(v.producto_id,{stock_actual:+_devCant,vendido_david:-_devCant},'Devolucion'));
-      promises.push(apiPost("movimientos_stock",{producto_id:v.producto_id,producto_nombre:v.producto_nombre,tipo:"devolucion",cantidad:_devCant,stock_antes:_sa,stock_despues:ns,motivo:"Devolución. Motivo: "+motivo+(obs?" — "+obs:""),created_at:new Date().toISOString(),usuario:VENDEDOR_NOMBRE}).catch(function(){}));
+      promises.push(patchStockFresco(v.producto_id,{stock_actual:+_devCant,vendido_david:-_devCant},'Devolucion')
+        .then(function(){
+          apiPost("movimientos_stock",{producto_id:v.producto_id,producto_nombre:v.producto_nombre,tipo:"devolucion",cantidad:_devCant,motivo:"Devolución. Motivo: "+motivo+(obs?" — "+obs:""),created_at:new Date().toISOString(),usuario:VENDEDOR_NOMBRE}).catch(function(){});
+        })
+      );
     }
   }
 

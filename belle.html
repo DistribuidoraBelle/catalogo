@@ -2234,6 +2234,8 @@ function patchStockFresco(prodId, delta, motivo){
       if(patch.vendido_david!==undefined)pm.vendido_david=patch.vendido_david;
     }
     return apiPatch('productos',patch,'id=eq.'+prodId);
+  }).catch(function(e){
+    console.error('patchStockFresco error:',e);
   });
 }
 
@@ -3235,7 +3237,11 @@ function adjStock(id,delta){
   p.stock_actual=nv;
   var el=document.getElementById("sa-"+id);
   if(el){var skb=nv===0?"<span class='sk-r'>0</span>":nv<=3?"<span class='sk-y'>"+nv+"</span>":"<span class='sk-g'>"+nv+"</span>";el.innerHTML=skb;}
-  apiPatch("productos",{stock_actual:nv,stock_orig:nv+(p.vendido_david||0)},"id=eq."+id).then(function(){
+  var _vd=p?(p.vendido_david||0):0;
+  apiGet('productos','select=id,vendido_david&id=eq.'+id).then(function(r){
+    var vd=(r&&r[0])?r[0].vendido_david:_vd;
+    return apiPatch("productos",{stock_actual:nv,stock_orig:nv+vd},"id=eq."+id);
+  }).then(function(){
     toast("Stock actualizado","tok");
     apiPost("movimientos_stock",{producto_id:id,producto_nombre:p.nombre,tipo:delta>0?"entrada":"salida",cantidad:Math.abs(delta),stock_antes:cur,stock_despues:nv,motivo:"Ajuste tabla",usuario:curUser||"admin",periodo:periodoActual});
   });
@@ -5531,43 +5537,45 @@ function _doAgregarAlStock(pedidoId,items){
       var p=prods.find(function(x){return x.id===it.producto_id;});
       var cantOk=Math.max((it.cantidad_recibida||it.cantidad_pedida||0)-(it.cantidad_fallada||0),0);
       if(cantOk<=0){processNext();return;}
-      var stockExistente=p?p.stock_actual||0:0;
-      var ns=stockExistente+cantOk;
-      var nv=Math.max(0,(p?p.en_viaje:0)-it.cantidad_pedida);
-      // Precio promedio ponderado: (stock_actual * costo_ind + cantOk * precio_compra) / nuevo_total
-      var costoActual=p?p.costo_ind||0:0;
       var precioCompra=it.precio_usd||0;
-      var nuevoCosto=costoActual;
-      if(precioCompra>0&&ns>0){
-        nuevoCosto=Math.round(((stockExistente*costoActual)+(cantOk*precioCompra))/ns*100)/100;
-      }
-      var patchProd={stock_actual:ns,en_viaje:nv};
-      if(nuevoCosto>0&&nuevoCosto!==costoActual) patchProd.costo_ind=nuevoCosto;
-      if(p){p.stock_actual=ns;p.en_viaje=nv;if(nuevoCosto>0)p.costo_ind=nuevoCosto;}
-      Promise.all([
-        apiPatch("productos",patchProd,"id=eq."+it.producto_id),
-        apiPatch("pedidos_proveedor_items",{estado_item:"en_stock"},"id=eq."+it.id),
-        apiPost("movimientos_stock",{
-          producto_id:it.producto_id,
-          producto_nombre:it.nombre_proveedor||it.nombre||(p?p.nombre:""),
-          tipo:"proveedor",
-          cantidad:cantOk,
-          stock_antes:stockExistente,
-          stock_despues:ns,
-          motivo:"Recepcion pedido proveedor — "+(it.codigo_proveedor||p&&p.nombre||""),
-          usuario:"sistema",
-          periodo:periodoActual||""
-        })
-      ]).then(function(){addedCount++;if(it.cantidad_fallada>0)crearIncidenciaFallada(it,it.cantidad_fallada);processNext();}).catch(function(){processNext();});
+      // Leer stock fresco de BD para evitar datos stale
+      apiGet("productos","select=id,stock_actual,en_viaje,costo_ind&id=eq."+it.producto_id).then(function(rows){
+        var r=rows&&rows[0];
+        var stockExistente=r?r.stock_actual||0:p?p.stock_actual||0:0;
+        var enViajeActual=r?r.en_viaje||0:p?p.en_viaje||0:0;
+        var costoActual=r?r.costo_ind||0:p?p.costo_ind||0:0;
+        var ns=stockExistente+cantOk;
+        var nv=Math.max(0,enViajeActual-it.cantidad_pedida);
+        var nuevoCosto=costoActual;
+        if(precioCompra>0&&ns>0){
+          nuevoCosto=Math.round(((stockExistente*costoActual)+(cantOk*precioCompra))/ns*100)/100;
+        }
+        var patchProd={stock_actual:ns,en_viaje:nv};
+        if(nuevoCosto>0&&nuevoCosto!==costoActual) patchProd.costo_ind=nuevoCosto;
+        if(p){p.stock_actual=ns;p.en_viaje=nv;if(nuevoCosto>0)p.costo_ind=nuevoCosto;}
+        return Promise.all([
+          apiPatch("productos",patchProd,"id=eq."+it.producto_id),
+          apiPatch("pedidos_proveedor_items",{estado_item:"en_stock"},"id=eq."+it.id),
+          apiPost("movimientos_stock",{
+            producto_id:it.producto_id,
+            producto_nombre:it.nombre_proveedor||it.nombre||(p?p.nombre:""),
+            tipo:"proveedor",
+            cantidad:cantOk,
+            stock_antes:stockExistente,
+            stock_despues:ns,
+            motivo:"Recepcion pedido proveedor — "+(it.codigo_proveedor||p&&p.nombre||""),
+            usuario:"sistema",
+            periodo:periodoActual||""
+          })
+        ]);
+      }).then(function(){addedCount++;if(it.cantidad_fallada>0)crearIncidenciaFallada(it,it.cantidad_fallada);processNext();}).catch(function(){processNext();});
     } else {
       // Faltante: item didn't arrive — discount en_viaje AND create incidencia
       var p2=prods.find(function(x){return x.id===it.producto_id;});
       var cantFalt=it.cantidad_pedida||0;
       var proms2=[];
-      if(p2){
-        var nv2=Math.max(0,(p2.en_viaje||0)-cantFalt);
-        p2.en_viaje=nv2;
-        proms2.push(apiPatch("productos",{en_viaje:nv2},"id=eq."+it.producto_id));
+      if(it.producto_id){
+        proms2.push(patchStockFresco(it.producto_id,{en_viaje:-cantFalt},"Faltante pedido proveedor"));
       }
       // Crear incidencia automática
       proms2.push(apiPost("reclamos",{
@@ -5806,7 +5814,7 @@ function incAgregarStockDirecto(itemId,prodId,cantRec,cantFal){
   Promise.all([
     patchStockFresco(prodId,{stock_actual:+cantOk,en_viaje:-(cantRec||0)},'Recepcion directa'),
     apiPatch("pedidos_proveedor_items",{estado_item:"recibido"},"id=eq."+itemId),
-    apiPost("movimientos_stock",{producto_id:prodId,producto_nombre:nombre,tipo:"entrada",cantidad:cantOk,stock_antes:_sa2,stock_despues:ns,motivo:"Recepcion directa pedido proveedor. En viaje: "+nv,created_at:new Date().toISOString()}).catch(function(){})
+    apiPost("movimientos_stock",{producto_id:prodId,producto_nombre:nombre,tipo:"entrada",cantidad:cantOk,motivo:"Recepcion directa pedido proveedor",created_at:new Date().toISOString(),usuario:"admin"}).catch(function(){})
   ]).then(function(){
     toast("Stock actualizado: +"+cantOk+" u de "+nombre,"tok");
     loadPendientesCatalogo();
@@ -9624,11 +9632,7 @@ function eprGuardar(){
   Object.keys(stockChanges).forEach(function(prodId){
     var delta=stockChanges[prodId];
     if(delta===0)return;
-    var p=prods.find(function(x){return x.id===parseInt(prodId);});
-    if(!p)return;
-    var ns=Math.max(0,(p.stock_actual||0)-delta);
-    p.stock_actual=ns;
-    promises.push(apiPatch("productos",{stock_actual:ns},"id=eq."+prodId));
+    promises.push(patchStockFresco(parseInt(prodId),{stock_actual:-delta},'Edit pedido reservado'));
   });
 
   // Update pedido

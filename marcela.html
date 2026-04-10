@@ -528,6 +528,8 @@ function patchStockFresco(prodId, delta, motivo){
       if(patch.vendido_david!==undefined)pm.vendido_david=patch.vendido_david;
     }
     return apiPatch('productos',patch,'id=eq.'+prodId);
+  }).catch(function(e){
+    console.error('patchStockFresco error:',e);
   });
 }
 
@@ -1362,6 +1364,9 @@ function confirmarVenta(){
   // Si el carrito tiene solo decans, incluirlos como items principales
   var soloDecans=items.length===0&&Object.values(cart).some(function(i){return i.isDecan;});
   if(soloDecans)items=Object.values(cart).filter(function(i){return i.isDecan;});
+  // Deshabilitar botón para evitar doble click
+  var _confBtn=document.getElementById("drawerConfirmBtn");
+  if(_confBtn){_confBtn.disabled=true;_confBtn.textContent="Procesando...";}
   if(!items.length&&Object.values(cart).length===0){toast("Pedido vacio","twarn");return;}
   // Check stock
   for(var i=0;i<items.length;i++){
@@ -1750,20 +1755,11 @@ function guardarEditPed(){
       if(diff!==0){
         var p=prods.find(function(x){return x.id===prodId;});
         if(p){
-          var patchObj={};
           if(_conRes){
-            // Stock en reserva: solo ajustar reserva
-            var nuevaReserva=Math.max(0,(p.reserva||0)-diff);
-            p.reserva=nuevaReserva;
-            patchObj.reserva=nuevaReserva;
+            stockPromises.push(patchStockFresco(prodId,{reserva:-diff},'Editar pedido'));
           } else {
-            // Stock libre o pedido web: ajustar stock_actual
-            var nuevoStock=Math.max(0,(p.stock_actual||0)+diff);
-            p.stock_actual=nuevoStock;
-            patchObj.stock_actual=nuevoStock;
+            stockPromises.push(patchStockFresco(prodId,{stock_actual:+diff},'Editar pedido'));
           }
-          if(Object.keys(patchObj).length)
-            stockPromises.push(apiPatch("productos",patchObj,"id=eq."+prodId));
         }
       }
     }
@@ -2220,7 +2216,7 @@ function loadDeposito(){
     "</div></div>"+
     "<div style='font-size:.75rem;color:var(--tx2);margin-bottom:.7rem'>Indica cuantos productos estan en el Deposito Marcela. Podes modificar sin aprobacion.</div>"+
     "<div id='depList'><div class='loading'><div class='spin'></div>Cargando...</div></div>";
-  apiGet("productos","select=id,nombre,empresa,stock_actual,deposito_m&stock_actual=gt.0&order=empresa,nombre&limit=500").then(function(data){
+  apiGet("productos","select=id,nombre,empresa,stock_actual,deposito_m&stock_actual=gt.0&order=empresa,nombre&limit=2000").then(function(data){
     if(!Array.isArray(data)){document.getElementById("depList").innerHTML="<div class='empty'>Sin productos</div>";return;}
     window._depProds=data;renderDepList(data);
   });
@@ -2709,10 +2705,11 @@ function confirmarReservarPed(){
       var p=prods.find(function(x){return x.id===item.id;});
       if(!p)return;
       var stockAntes=p.stock_actual||0;
+      var nuevoStockCalc=Math.max(0,stockAntes-item.qty);
       patchStockFresco(item.id,{stock_actual:-item.qty,reserva:+item.qty},'Reserva pedido');
       apiPost("movimientos_stock",{
         producto_id:item.id,producto_nombre:item.nombre,tipo:"reserva",
-        cantidad:item.qty,stock_antes:stockAntes,stock_despues:nuevoStock,
+        cantidad:item.qty,stock_antes:stockAntes,stock_despues:nuevoStockCalc,
         motivo:"Reserva pedido "+nroOrden,
         usuario:"Marcela",periodo:periodoActual
       });
@@ -3679,11 +3676,14 @@ function confirmarDevolucion(){
   }));
 
   // 3. If product OK -> return to stock
-  if(volverAlStock&&v.producto_id&&v.segmento!=='decan'){
+  if(volverAlStock&&v.producto_id&&v.segmento!=='decan'&&v.segmento!=='combo'){
     var p=prods.find(function(x){return x.id===v.producto_id;});
     if(p){
-      promises.push(patchStockFresco(v.producto_id,{stock_actual:+_devCant,vendido_david:-_devCant},'Devolucion'));
-      promises.push(apiPost("movimientos_stock",{producto_id:v.producto_id,producto_nombre:v.producto_nombre,tipo:"devolucion",cantidad:_devCant,stock_antes:_sa4,stock_despues:ns,motivo:"Devolución Marcela. Motivo: "+motivo+(obs?" — "+obs:""),created_at:new Date().toISOString(),usuario:VENDEDOR_NOMBRE}).catch(function(){}));
+      promises.push(patchStockFresco(v.producto_id,{stock_actual:+_devCant,vendido_david:-_devCant},'Devolucion')
+        .then(function(){
+          apiPost("movimientos_stock",{producto_id:v.producto_id,producto_nombre:v.producto_nombre,tipo:"devolucion",cantidad:_devCant,motivo:"Devolución Marcela. Motivo: "+motivo+(obs?" — "+obs:""),created_at:new Date().toISOString(),usuario:VENDEDOR_NOMBRE}).catch(function(){});
+        })
+      );
     }
   }
 
