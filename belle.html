@@ -2217,6 +2217,26 @@ function api(method,table,data,filters){
 function apiGet(t,f){return api("GET",t,null,f);}
 function apiPost(t,d){return api("POST",t,d);}
 function apiPatch(t,d,f){return api("PATCH",t,d,f);}
+function patchStockFresco(prodId, delta, motivo){
+  return apiGet('productos','select=id,stock_actual,reserva,en_viaje,vendido_david&id=eq.'+prodId)
+  .then(function(rows){
+    var r=rows&&rows[0];if(!r)return;
+    var patch={};
+    if(delta.stock_actual!==undefined)patch.stock_actual=Math.max(0,(r.stock_actual||0)+delta.stock_actual);
+    if(delta.reserva!==undefined)patch.reserva=Math.max(0,(r.reserva||0)+delta.reserva);
+    if(delta.en_viaje!==undefined)patch.en_viaje=Math.max(0,(r.en_viaje||0)+delta.en_viaje);
+    if(delta.vendido_david!==undefined)patch.vendido_david=Math.max(0,(r.vendido_david||0)+delta.vendido_david);
+    var pm=(typeof prods!=='undefined'?prods:[]).find(function(p){return p.id===prodId;});
+    if(pm){
+      if(patch.stock_actual!==undefined)pm.stock_actual=patch.stock_actual;
+      if(patch.reserva!==undefined)pm.reserva=patch.reserva;
+      if(patch.en_viaje!==undefined)pm.en_viaje=patch.en_viaje;
+      if(patch.vendido_david!==undefined)pm.vendido_david=patch.vendido_david;
+    }
+    return apiPatch('productos',patch,'id=eq.'+prodId);
+  });
+}
+
 function apiDelete(t,f){return api("DELETE",t,null,f);}
 function apiUpsert(t,d){
   var url=SB_URL+"/rest/v1/"+t;
@@ -3229,9 +3249,9 @@ function adjField(id,field,delta){
     // No permitir reservas negativas
     var nv=cur+delta;
     if(nv<0){toast("No existen reservas negativas","twarn");return;}
-    var stockDisp=p.stock_actual||0;
-    // Stock puede quedar negativo si las reservas superan el stock
-    var nuevoStock=stockDisp-delta;
+    // Usar BD fresca para evitar datos stale
+    patchStockFresco(id,{reserva:delta,stock_actual:-delta},'Ajuste reserva admin');
+    var nuevoStock=(p.stock_actual||0)-delta;
     p.reserva=nv;
     p.stock_actual=nuevoStock;
     // Actualizar DOM reserva
@@ -3252,7 +3272,7 @@ function adjField(id,field,delta){
       }
       saEl.innerHTML=skb;
     }
-    apiPatch("productos",{reserva:nv,stock_actual:nuevoStock},"id=eq."+id).then(function(){
+    Promise.resolve().then(function(){
       toast(delta>0?"Reserva agregada - stock descontado":"Reserva cancelada - stock devuelto","tok");
       apiPost("movimientos_stock",{producto_id:id,producto_nombre:p.nombre,tipo:"reserva",cantidad:1,stock_antes:stockDisp,stock_despues:nuevoStock,motivo:"Reserva"+(delta>0?" agregada":" cancelada"),usuario:curUser||"admin",periodo:periodoActual});
     });
@@ -5783,13 +5803,8 @@ function incAgregarStockDirecto(itemId,prodId,cantRec,cantFal){
   var p=prods.find(function(x){return x.id===prodId;});
   var nombre=p?p.nombre:"producto";
   if(!confirm("Agregar "+cantOk+" u de "+nombre+" al stock?"))return;
-  var ns=(p?p.stock_actual:0)+cantOk;
-  var nv=Math.max(0,(p?p.en_viaje:0)-(cantRec||0));
-  if(p){p.stock_actual=ns;p.en_viaje=nv;}
-  var _p2=prods.find(function(x){return x.id===prodId;});
-  var _sa2=_p2?((_p2.stock_actual||0)):0;
   Promise.all([
-    apiPatch("productos",{stock_actual:ns,en_viaje:nv},"id=eq."+prodId),
+    patchStockFresco(prodId,{stock_actual:+cantOk,en_viaje:-(cantRec||0)},'Recepcion directa'),
     apiPatch("pedidos_proveedor_items",{estado_item:"recibido"},"id=eq."+itemId),
     apiPost("movimientos_stock",{producto_id:prodId,producto_nombre:nombre,tipo:"entrada",cantidad:cantOk,stock_antes:_sa2,stock_despues:ns,motivo:"Recepcion directa pedido proveedor. En viaje: "+nv,created_at:new Date().toISOString()}).catch(function(){})
   ]).then(function(){
@@ -5812,12 +5827,8 @@ function pendienteAgregarStock(itemId,prodId,cantOk,cantFallada){
   var p=prods.find(function(x){return x.id===prodId;});
   if(!p){toast("Producto no encontrado","terr");return;}
   if(!confirm("Agregar "+cantOk+" u. de "+p.nombre+" al stock?"))return;
-  var ns=(p.stock_actual||0)+cantOk;
-  var nv=Math.max(0,(p.en_viaje||0)-cantOk-cantFallada);
-  p.stock_actual=ns;p.en_viaje=nv;
-  var _sa3=p.stock_actual||0;
   Promise.all([
-    apiPatch("productos",{stock_actual:ns,en_viaje:nv},"id=eq."+prodId),
+    patchStockFresco(prodId,{stock_actual:+cantOk,en_viaje:-(cantOk+cantFallada)},'Recepcion pendiente'),
     apiPatch("pedidos_proveedor_items",{estado_item:"recibido"},"id=eq."+itemId),
     apiPost("movimientos_stock",{producto_id:prodId,producto_nombre:p.nombre,tipo:"entrada",cantidad:cantOk,stock_antes:_sa3,stock_despues:ns,motivo:"Recepcion pendiente catalogo. En viaje: "+nv,created_at:new Date().toISOString()}).catch(function(){})
   ]).then(function(){
@@ -7990,9 +8001,7 @@ function cpEjecutarConfirmar(){
         es_nuevo:!matchedId,estado_item:"pendiente"
       }));
       if(matchedId){
-        var p=prods.find(function(x){return x.id===matchedId;});
-        if(p){var nv=(p.en_viaje||0)+item.qty;p.en_viaje=nv;
-          promises.push(apiPatch("productos",{en_viaje:nv},"id=eq."+matchedId));}
+        promises.push(patchStockFresco(matchedId,{en_viaje:+item.qty},'Confirmar pedido proveedor'));
       }
     });
     Promise.all(promises).then(function(){
@@ -8425,12 +8434,7 @@ function confirmarRecepcion(){
     },"id=eq."+r.item.id));
     if(matchedId&&r.recibido>0){
       var p=prods.find(function(x){return x.id===matchedId;});
-      var curStock=p?(p.stock_actual||0):0;
-      var curViaje=p?(p.en_viaje||0):0;
-      var nuevoStock=curStock+r.recibido;
-      var nuevoViaje=Math.max(0,curViaje-r.item.cantidad_pedida);
-      if(p){p.stock_actual=nuevoStock;p.en_viaje=nuevoViaje;}
-      promises.push(apiPatch("productos",{stock_actual:nuevoStock,en_viaje:nuevoViaje},"id=eq."+matchedId));
+      promises.push(patchStockFresco(matchedId,{stock_actual:+r.recibido,en_viaje:-(r.item.cantidad_pedida||0)},'Recepcion pedido'));
       promises.push(apiPost("movimientos_stock",{producto_id:matchedId,producto_nombre:(p?p.nombre:r.item.nombre_proveedor||("Prod #"+matchedId)),tipo:"entrada",cantidad:r.recibido,stock_antes:curStock,stock_despues:nuevoStock,motivo:"Recepcion pedido proveedor. Pedido: "+(_recepcionPedidoId||"?")+(r.item.faltante>0?" Faltante: "+r.item.faltante+"u":""),created_at:new Date().toISOString()}).catch(function(){}));
     } else if(!matchedId&&r.recibido>0){
       nuevos.push({item:r.item,recibido:r.recibido});
@@ -8728,8 +8732,7 @@ function cpGuardarMatchesExistente(){
       var p=prods.find(function(x){return x.id===matchedId;});
       // Only update en_viaje if it wasn't already set (producto_id was null before)
       if(p&&!item.catalogo_id){
-        var nv=(p.en_viaje||0)+item.qty;p.en_viaje=nv;
-        promises.push(apiPatch("productos",{en_viaje:nv},"id=eq."+matchedId));
+        promises.push(patchStockFresco(matchedId,{en_viaje:+item.qty},'Guardar matches'));
       }
     }
   });
@@ -12493,11 +12496,8 @@ function recRenderFiltrado(el,reclamos,tipo){
 function recAgregarFaltante(itemId,prodId,cant,prodNom,itemNom){
   if(!confirm('Agregar '+cant+'u de "'+prodNom+'" al stock?\nEstas unidades faltantes llegaron.'))return;
   var p=typeof prods!=='undefined'&&prods?prods.find(function(x){return x.id===prodId;}):null;
-  var stockAntes=p?p.stock_actual||0:0;
-  var nuevoStock=stockAntes+cant;
-  if(p){p.stock_actual=nuevoStock;}
   Promise.all([
-    apiPatch('productos',{stock_actual:nuevoStock},'id=eq.'+prodId),
+    patchStockFresco(prodId,{stock_actual:+cant},'Agregar faltante'),
     apiPatch('pedidos_proveedor_items',{estado_item:'en_stock',cantidad_recibida:cant},'id=eq.'+itemId),
     apiPost('movimientos_stock',{producto_id:prodId,producto_nombre:prodNom,tipo:'ingreso_faltante',cantidad:cant,stock_antes:stockAntes,stock_despues:nuevoStock,motivo:'Llegó faltante de pedido: '+itemNom,usuario:'admin',periodo:periodoActual||''})
   ]).then(function(){
@@ -12516,12 +12516,9 @@ function recAgregarParcialFaltante(itemId,prodId,cantMax){
     return;
   }
   var p=typeof prods!=='undefined'&&prods?prods.find(function(x){return x.id===prodId;}):null;
-  var stockAntes=p?p.stock_actual||0:0;
-  var nuevoStock=stockAntes+cant;
-  if(p)p.stock_actual=nuevoStock;
   var quedanFaltando=cantMax-cant;
   Promise.all([
-    apiPatch('productos',{stock_actual:nuevoStock},'id=eq.'+prodId),
+    patchStockFresco(prodId,{stock_actual:+cant},'Agregar parcial faltante'),
     apiPatch('pedidos_proveedor_items',{cantidad_recibida:cant,estado_item:quedanFaltando>0?'faltante':'en_stock'},'id=eq.'+itemId),
     apiPost('movimientos_stock',{producto_id:prodId,tipo:'ingreso_faltante',cantidad:cant,stock_antes:stockAntes,stock_despues:nuevoStock,motivo:'Llegó faltante parcial ('+quedanFaltando+' todavía faltan)',usuario:'admin',periodo:periodoActual||''})
   ]).then(function(){
@@ -12562,11 +12559,8 @@ function recMachearFaltante(itemId){
 function recDescontarFallado(itemId,prodId,cant,prodNom){
   if(!confirm('Descontar '+cant+'u falladas del stock de "'+prodNom+'"?'))return;
   var p=typeof prods!=='undefined'&&prods?prods.find(function(x){return x.id===prodId;}):null;
-  var stockAntes=p?p.stock_actual||0:0;
-  var nuevoStock=Math.max(0,stockAntes-cant);
-  if(p)p.stock_actual=nuevoStock;
   Promise.all([
-    apiPatch('productos',{stock_actual:nuevoStock},'id=eq.'+prodId),
+    patchStockFresco(prodId,{stock_actual:-cant},'Descontar fallados'),
     apiPatch('pedidos_proveedor_items',{estado_item:'resuelto'},'id=eq.'+itemId),
     apiPost('movimientos_stock',{producto_id:prodId,producto_nombre:prodNom,tipo:'baja_fallado',cantidad:-cant,stock_antes:stockAntes,stock_despues:nuevoStock,motivo:'Baja por fallado en pedido proveedor',usuario:'admin',periodo:periodoActual||''})
   ]).then(function(){
@@ -14712,11 +14706,16 @@ function adminSaveStock(){
   var vendido=parseInt((document.getElementById('aes-vendido')||{}).value)||0;
   var motivo=(document.getElementById('aes-motivo')||{}).value||'Ajuste admin';
   var p=prods.find(function(x){return x.id===id;});
-  var antes=p?p.stock_actual:0;
-  apiPatch('productos',{stock_actual:stock,en_viaje:viaje,reserva:reserva,deposito_m:dep,vendido_david:vendido,stock_orig:stock+vendido},'id=eq.'+id).then(function(){
-    apiPost('movimientos_stock',{producto_id:id,producto_nombre:p?p.nombre:'',tipo:'ajuste',cantidad:Math.abs(stock-antes),stock_antes:antes,stock_despues:stock,motivo:motivo,usuario:'admin',periodo:periodoActual});
-    if(p){p.stock_actual=stock;p.en_viaje=viaje;p.reserva=reserva;p.deposito_m=dep;p.vendido_david=vendido;}
-    toast('Stock actualizado','tok');_mc('moAdminEditStock');renderStockPage();
+  // Leer stock fresco para stock_antes correcto
+  apiGet('productos','select=id,stock_actual,nombre&id=eq.'+id).then(function(rows){
+    var rf=rows&&rows[0];
+    var antes=rf?rf.stock_actual:p?p.stock_actual:0;
+    var pNom=rf?rf.nombre:p?p.nombre:'';
+    return apiPatch('productos',{stock_actual:stock,en_viaje:viaje,reserva:reserva,deposito_m:dep,vendido_david:vendido,stock_orig:stock+vendido},'id=eq.'+id).then(function(){
+      apiPost('movimientos_stock',{producto_id:id,producto_nombre:pNom,tipo:'ajuste',cantidad:Math.abs(stock-antes),stock_antes:antes,stock_despues:stock,motivo:motivo,usuario:'admin',periodo:periodoActual});
+      if(p){p.stock_actual=stock;p.en_viaje=viaje;p.reserva=reserva;p.deposito_m=dep;p.vendido_david=vendido;}
+      toast('Stock actualizado','tok');_mc('moAdminEditStock');renderStockPage();
+    });
   }).catch(function(e){toast('Error: '+e.message,'terr');});
 }
 
@@ -17346,10 +17345,8 @@ function ppAgregarStock(btn){
   if(!p){toast('Producto no encontrado en catálogo. Cargá stock primero.','twarn');return;}
   var qty=parseInt(prompt('Unidades a agregar al stock (en pedidos: '+g.qtot+', en viaje cat.: '+(p.en_viaje||0)+'):',g.qtot)||0);
   if(!qty||qty<=0)return;
-  var nS=(p.stock_actual||0)+qty,nV=Math.max(0,(p.en_viaje||0)-qty);
-  p.stock_actual=nS;p.en_viaje=nV;
   Promise.all([
-    apiPatch('productos',{stock_actual:nS,en_viaje:nV},'id=eq.'+g.pid),
+    patchStockFresco(g.pid,{stock_actual:+qty,en_viaje:-qty},'Agregar stock pedido viaje'),
     apiPost('movimientos_stock',{producto_id:g.pid,producto_nombre:p.nombre,tipo:'ingreso_pedido',cantidad:qty,stock_antes:nS-qty,stock_despues:nS,motivo:'Ingreso panel productos en viaje',usuario:'admin',periodo:periodoActual})
   ]).then(function(){toast(qty+'u agregadas al stock ✅','tok');ppLoad();if(typeof _reloadStock==='function')_reloadStock();})
   .catch(function(e){toast('Error: '+e.message,'terr');});
@@ -17364,9 +17361,7 @@ function ppAgregarTodos(){
   lista.forEach(function(g){
     var p=allProds.find(function(x){return x.id===g.pid;});
     if(!p)return;
-    var nS=(p.stock_actual||0)+g.qtot,nV=Math.max(0,(p.en_viaje||0)-g.qtot);
-    p.stock_actual=nS;p.en_viaje=nV;
-    proms.push(apiPatch('productos',{stock_actual:nS,en_viaje:nV},'id=eq.'+g.pid));
+    proms.push(patchStockFresco(g.pid,{stock_actual:+g.qtot,en_viaje:-g.qtot},'Agregar todos al stock'));
     proms.push(apiPost('movimientos_stock',{producto_id:g.pid,producto_nombre:p.nombre,tipo:'ingreso_pedido',cantidad:g.qtot,stock_antes:nS-g.qtot,stock_despues:nS,motivo:'Ingreso masivo productos en viaje',usuario:'admin',periodo:periodoActual}));
   });
   Promise.all(proms).then(function(){toast('Stock actualizado: '+lista.length+' productos ✅','tok');ppLoad();if(typeof _reloadStock==='function')_reloadStock();})
@@ -17516,13 +17511,9 @@ function incAgregar(itemId,prodId,cantMax,prodNom){
   if(cant===0){toast('Ingresá una cantidad mayor a 0','twarn');return;}
   if(!confirm('Agregar '+cant+'u de "'+prodNom+'" al stock'+(cant<cantMax?' (quedan '+(cantMax-cant)+'u pendientes)':'')+'?'))return;
   var prod=(typeof prods!=='undefined'&&prods)?prods.find(function(p){return p.id===prodId;}):null;
-  var sA=prod?prod.stock_actual||0:0;
-  var nS=sA+cant;
-  var nV=Math.max(0,(prod?prod.en_viaje||0:0)-cant);
   var quedan=cantMax-cant;
-  if(prod){prod.stock_actual=nS;prod.en_viaje=nV;}
   Promise.all([
-    apiPatch('productos',{stock_actual:nS,en_viaje:nV},'id=eq.'+prodId),
+    patchStockFresco(prodId,{stock_actual:+cant,en_viaje:-cant},'Incidencia agregar stock'),
     apiPatch('pedidos_proveedor_items',{estado_item:quedan>0?'faltante':'en_stock',cantidad_recibida:cant},'id=eq.'+itemId),
     apiPost('movimientos_stock',{
       producto_id:prodId,producto_nombre:prodNom,tipo:'ingreso_faltante',
@@ -17635,9 +17626,7 @@ function incResolverDev(incId,vendedorId){
   ];
   if(dec.agregar&&dec.prodId&&dec.cant>0){
     var p=typeof prods!=='undefined'&&prods?prods.find(function(x){return x.id===dec.prodId;}):null;
-    var sA=p?p.stock_actual||0:0,nS=sA+dec.cant;
-    if(p)p.stock_actual=nS;
-    proms.push(apiPatch('productos',{stock_actual:nS},'id=eq.'+dec.prodId));
+    proms.push(patchStockFresco(dec.prodId,{stock_actual:+dec.cant},'Incidencia resolver devolucion'));
     proms.push(apiPost('movimientos_stock',{producto_id:dec.prodId,tipo:'devolucion_cliente',cantidad:dec.cant,stock_antes:sA,stock_despues:nS,motivo:'Devolución aprobada admin',usuario:'Admin',periodo:periodoActual||''}));
   }
   if(monto>0){
@@ -17672,11 +17661,8 @@ function incRenderFall(panel){
 function incDescontarFall(itemId,prodId,cant,prodNom){
   if(!confirm('Descontar '+cant+'u de "'+prodNom+'" del stock?'))return;
   var prod=(typeof prods!=='undefined'&&prods)?prods.find(function(p){return p.id===prodId;}):null;
-  var sA=prod?prod.stock_actual||0:0;
-  var nS=Math.max(0,sA-cant);
-  if(prod)prod.stock_actual=nS;
   Promise.all([
-    apiPatch('productos',{stock_actual:nS},'id=eq.'+prodId),
+    patchStockFresco(prodId,{stock_actual:-cant},'Incidencia descontar fallado'),
     apiPatch('pedidos_proveedor_items',{estado_item:'resuelto'},'id=eq.'+itemId),
     apiPost('movimientos_stock',{producto_id:prodId,producto_nombre:prodNom,tipo:'baja_fallado',cantidad:-cant,stock_antes:sA,stock_despues:nS,motivo:'Baja por fallado en pedido',usuario:'admin',periodo:periodoActual||''})
   ]).then(function(){toast('✅ '+cant+'u descontadas','tok');incLoad();})
