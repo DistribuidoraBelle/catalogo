@@ -1496,21 +1496,30 @@ function executeVenta(items,reservaDecs){
           }
         }
       });
-      // Descontar stock de items nuevos agregados
-      newItemsData.forEach(function(nit){
-        if(nit.isDecan||!nit.producto_id)return;
+      // Descontar stock de items nuevos agregados — usar BD fresca para evitar doble reserva
+      var pidsNuevos=newItemsData.filter(function(nit){
+        if(nit.isDecan||!nit.producto_id)return false;
         var origIt=origItems.find(function(o){return o.producto_id===nit.producto_id&&!o.isDecan;});
-        var origQty=origIt?origIt.qty:0;
-        var diff=nit.qty-origQty;
-        if(diff>0){
-          var p=prods.find(function(x){return x.id===nit.producto_id;});
-          if(p){
-            var ns=Math.max(0,(p.stock_actual||0)-diff);var nr=(p.reserva||0)+diff;
-            p.stock_actual=ns;p.reserva=nr;
-            stockProms.push(apiPatch("productos",{stock_actual:ns,reserva:nr},"id=eq."+nit.producto_id));
-          }
-        }
-      });
+        return (nit.qty-(origIt?origIt.qty:0))>0;
+      }).map(function(nit){return nit.producto_id;});
+      if(pidsNuevos.length){
+        stockProms.push(apiGet("productos","select=id,stock_actual,reserva&id=in.("+pidsNuevos.join(",")+")").then(function(frescos){
+          (frescos||[]).forEach(function(fp){
+            var nit=newItemsData.find(function(n){return n.producto_id===fp.id&&!n.isDecan;});
+            var origIt=origItems.find(function(o){return o.producto_id===fp.id&&!o.isDecan;});
+            if(!nit)return;
+            var origQty=origIt?origIt.qty:0;
+            var diff=nit.qty-origQty;
+            if(diff>0){
+              var ns=Math.max(0,(fp.stock_actual||0)-diff);
+              var nr=(fp.reserva||0)+diff;
+              var p=prods.find(function(x){return x.id===fp.id;});
+              if(p){p.stock_actual=ns;p.reserva=nr;}
+              return apiPatch("productos",{stock_actual:ns,reserva:nr},"id=eq."+fp.id);
+            }
+          });
+        }));
+      }
       stockProms.push(apiPatch("pedidos_catalogo",{items:JSON.stringify(newItemsData),total:Math.max(0,newTotal)},"id=eq."+pedId));
       return Promise.all(stockProms);
     }).then(function(){
