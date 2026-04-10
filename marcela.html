@@ -498,6 +498,40 @@ function api(method,table,data,filters){
 function apiGet(t,f){return api("GET",t,null,f);}
 function apiPost(t,d){return api("POST",t,d);}
 function apiPatch(t,d,f){return api("PATCH",t,d,f);}
+// ═══════════════════════════════════════════════════════════
+// patchStockFresco — modifica stock leyendo SIEMPRE de la BD
+// Evita race conditions y datos stale en prods en memoria
+// delta: objeto con los CAMBIOS a aplicar (positivo=suma, negativo=resta)
+//   {stock_actual: -1}  → resta 1 al stock actual
+//   {reserva: +1}       → suma 1 a reserva
+// ═══════════════════════════════════════════════════════════
+function patchStockFresco(prodId, delta, motivo){
+  return apiGet('productos','select=id,stock_actual,reserva,vendido_david&id=eq.'+prodId)
+  .then(function(rows){
+    var r=rows&&rows[0];
+    if(!r)return;
+    var patch={};
+    if(delta.stock_actual!==undefined){
+      patch.stock_actual=Math.max(0,(r.stock_actual||0)+delta.stock_actual);
+    }
+    if(delta.reserva!==undefined){
+      patch.reserva=Math.max(0,(r.reserva||0)+delta.reserva);
+    }
+    if(delta.vendido_david!==undefined){
+      patch.vendido_david=Math.max(0,(r.vendido_david||0)+delta.vendido_david);
+    }
+    // Sincronizar prods en memoria
+    var pm=prods.find(function(p){return p.id===prodId;});
+    if(pm){
+      if(patch.stock_actual!==undefined)pm.stock_actual=patch.stock_actual;
+      if(patch.reserva!==undefined)pm.reserva=patch.reserva;
+      if(patch.vendido_david!==undefined)pm.vendido_david=patch.vendido_david;
+    }
+    return apiPatch('productos',patch,'id=eq.'+prodId);
+  });
+}
+
+
 function apiDelete(t,f){return api("DELETE",t,null,f);}
 
 var VENDEDOR_ID=3,VENDEDOR_NOMBRE="Marcela";
@@ -1588,10 +1622,7 @@ function cancelarPedidoWeb(pedId,btn){
             var cantTotal=(ci.cantidad||1)*(it.qty||1);
             var p=prods.find(function(x){return x.id===ci.producto_id;});
             if(p){
-              var nuevoStock=(p.stock_actual||0)+cantTotal;
-              var nuevaReserva=Math.max(0,(p.reserva||0)-cantTotal);
-              p.stock_actual=nuevoStock;p.reserva=nuevaReserva;
-              promises.push(apiPatch("productos",{stock_actual:nuevoStock,reserva:nuevaReserva},"id=eq."+ci.producto_id));
+              promises.push(patchStockFresco(ci.producto_id,{stock_actual:+cantTotal,reserva:-cantTotal},'Cancelación combo'));
             }
           });
         }
@@ -1607,11 +1638,7 @@ function cancelarPedidoWeb(pedId,btn){
         var estadoPed=ped.estado;
         var debeDevolver=(estadoPed==="reservado"||estadoPed==="pendiente")&&tieneReserva;
         if(!debeDevolver)return;
-        var _sa=p.stock_actual||0;
-        var nuevoStock=_sa+qty;
-        var nuevaReserva=Math.max(0,(p.reserva||0)-qty);
-        p.stock_actual=nuevoStock;p.reserva=nuevaReserva;
-        promises.push(apiPatch("productos",{stock_actual:nuevoStock,reserva:nuevaReserva},"id=eq."+pid));
+        promises.push(patchStockFresco(pid,{stock_actual:+qty,reserva:-qty},'Cancelación pedido web'));
         promises.push(apiPost("movimientos_stock",{producto_id:pid,producto_nombre:it.nombre||("Prod #"+pid),tipo:"devolucion",cantidad:qty,stock_antes:_sa,stock_despues:nuevoStock,motivo:"Cancelación pedido web #"+pedId,usuario:VENDEDOR_NOMBRE,created_at:new Date().toISOString()}).catch(function(){}));
       }
     });
@@ -2684,10 +2711,7 @@ function confirmarReservarPed(){
       var p=prods.find(function(x){return x.id===item.id;});
       if(!p)return;
       var stockAntes=p.stock_actual||0;
-      var nuevoStock=Math.max(0,stockAntes-item.qty);
-      var nuevaReserva=(p.reserva||0)+item.qty;
-      p.stock_actual=nuevoStock;p.reserva=nuevaReserva;
-      apiPatch("productos",{stock_actual:nuevoStock,reserva:nuevaReserva},"id=eq."+item.id);
+      patchStockFresco(item.id,{stock_actual:-item.qty,reserva:+item.qty},'Reserva pedido');
       apiPost("movimientos_stock",{
         producto_id:item.id,producto_nombre:item.nombre,tipo:"reserva",
         cantidad:item.qty,stock_antes:stockAntes,stock_despues:nuevoStock,
