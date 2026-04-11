@@ -2249,11 +2249,26 @@ function patchStockFresco(prodId, delta, motivo){
       if(patch.en_viaje!==undefined)pm.en_viaje=patch.en_viaje;
       if(patch.vendido_david!==undefined)pm.vendido_david=patch.vendido_david;
     }
+    // Auto-detectar RE-INGRESO: stock pasa de 0 a positivo
+    if(delta.stock_actual>0&&(r.stock_actual||0)===0&&patch.stock_actual>0){
+      patch.reingreso_at=new Date().toISOString();
+      if(pm)pm.reingreso_at=patch.reingreso_at;
+    }
     return apiPatch('productos',patch,'id=eq.'+prodId);
   }).catch(function(e){
     console.error('patchStockFresco error:',e);
   });
 }
+
+function _checkReingreso(prodId, stockAntes, stockDespues){
+  // Si el stock pasa de 0 a positivo → marcar como re-ingreso
+  if((stockAntes||0)===0 && (stockDespues||0)>0){
+    apiPatch('productos',{reingreso_at:new Date().toISOString()},'id=eq.'+prodId);
+    var pm=prods.find(function(p){return p.id===prodId;});
+    if(pm)pm.reingreso_at=new Date().toISOString();
+  }
+}
+
 
 function apiDelete(t,f){return api("DELETE",t,null,f);}
 function apiUpsert(t,d){
@@ -5657,6 +5672,7 @@ function _doAgregarAlStock(pedidoId,items){
         var patchProd={stock_actual:ns,en_viaje:nv};
         if(nuevoCosto>0&&nuevoCosto!==costoActual) patchProd.costo_ind=nuevoCosto;
         if(p){p.stock_actual=ns;p.en_viaje=nv;if(nuevoCosto>0)p.costo_ind=nuevoCosto;}
+        _checkReingreso(it.producto_id,stockExistente,ns);
         return Promise.all([
           apiPatch("productos",patchProd,"id=eq."+it.producto_id),
           apiPatch("pedidos_proveedor_items",{estado_item:"en_stock"},"id=eq."+it.id),
@@ -11816,39 +11832,48 @@ function rechazarTransferenciaDeposito(ventaId){
 // ── AUTO-CATEGORIZACIÓN DE PRODUCTOS ─────────────────────────────
 // S: >= 24 unidades/mes | 1: >= 12 | 2: >= 6 | 3: >= 1 o 0
 function autoCategorizar(){
-  toast("Recalculando categorias por semana...","tok");
-  var now=new Date();
-  // Últimos 7 días corridos (independiente del periodo/semana)
-  var hace7=new Date(now); hace7.setDate(now.getDate()-7);
-  var semInicio=hace7.toISOString().slice(0,10);
-  var semFin=now.toISOString().slice(0,10);
+  toast("Recalculando categorias (histórico completo)...","tok");
 
-  apiGet("ventas",
-    "select=producto_id,cantidad&estado=eq.confirmada" +
-    "&created_at=gte."+semInicio+"T00:00:00" +
-    "&created_at=lte."+semFin+"T23:59:59&limit=5000"
-  ).then(function(ventas){
-    if(!Array.isArray(ventas)) ventas=[];
+  // Traer TODAS las ventas confirmadas históricas — en bloques de 5000
+  var allVentas=[];
+  function fetchVentas(offset){
+    apiGet("ventas",
+      "select=producto_id,cantidad&estado=eq.confirmada&limit=5000&offset="+offset
+    ).then(function(batch){
+      if(!Array.isArray(batch)||!batch.length){
+        procesarCategorias();
+        return;
+      }
+      allVentas=allVentas.concat(batch);
+      if(batch.length<5000){
+        procesarCategorias();
+      } else {
+        fetchVentas(offset+5000);
+      }
+    }).catch(function(e){
+      console.error("Auto-cat fetch error:",e);
+      toast("Error cargando ventas: "+e.message,"terr");
+    });
+  }
 
-    // Sumar cantidades por producto
+  function procesarCategorias(){
+    // Sumar cantidades históricas por producto
     var vpp={};
-    ventas.forEach(function(v){
+    allVentas.forEach(function(v){
       if(!v.producto_id) return;
       vpp[v.producto_id]=(vpp[v.producto_id]||0)+(v.cantidad||0);
     });
 
-    // Reglas: 4+ = S | 3 = 1 | 2 = 2 | 1 o 0 = 3
+    // Reglas históricas: >20=S | >10=1 | >5=2 | <=4=3
     var updates=[];
     (prods||[]).forEach(function(p){
       var vendido=vpp[p.id]||0;
-      var cat=vendido>=4?"S":vendido===3?"1":vendido===2?"2":"3";
+      var cat=vendido>20?"S":vendido>10?"1":vendido>5?"2":"3";
       updates.push({id:p.id,cat:cat,nombre:p.nombre,vendido:vendido});
       p.cat=cat;
     });
 
     if(!updates.length){toast("No hay productos cargados","twarn");return;}
-
-    
 
     // Update in batches of 10
     var i=0;
@@ -11856,7 +11881,7 @@ function autoCategorizar(){
     var doNext=function(){
       if(i>=updates.length){
         if(errors>0) toast("Auto-cat: "+errors+" errores. Ver consola","twarn");
-        else toast("Categorias actualizadas ("+semInicio+" al "+semFin+"): "+updates.length+" productos","tok");
+        else toast("Categorias actualizadas (histórico: "+allVentas.length+" ventas | "+updates.length+" productos)","tok");
         renderStockPage();
         return;
       }
@@ -11871,10 +11896,9 @@ function autoCategorizar(){
       Promise.all(proms).then(doNext);
     };
     doNext();
-  }).catch(function(e){
-    console.error("Auto-cat error:",e);
-    toast("Error en auto-cat: "+e.message,"terr");
-  });
+  }
+
+  fetchVentas(0);
 }
 
 
