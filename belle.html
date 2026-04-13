@@ -11662,18 +11662,7 @@ function vEnviarDinero(vendedorId, vendedorNombre){
     aprobado: true,
     periodo_cerrado: false
   }).then(function(){
-    // Si es Marcela (id=3), marcar sus comisiones aprobadas como cobradas
-    if(vendedorId===3){
-      return apiGet('gastos_vendedor','select=id,monto&vendedor_id=eq.3&aprobado=eq.true&periodo_cerrado=eq.false').then(function(gastos){
-        if(!Array.isArray(gastos)||!gastos.length) return;
-        // Marcar todas las aprobadas como cobradas
-        return Promise.all(gastos.map(function(g){
-          return apiPatch('gastos_vendedor',{periodo_cerrado:true},'id=eq.'+g.id);
-        }));
-      });
-    }
-  }).then(function(){
-    toast('Pago registrado a '+vendedorNombre+': '+fmt(monto)+(vendedorId===3?' — comisiones marcadas como cobradas':''),'tok');
+    toast('Pago registrado a '+vendedorNombre+': '+fmt(monto),'tok');
     loadVendedores();
   }).catch(function(e){toast('Error: '+e.message,'terr');});
 }
@@ -11926,40 +11915,57 @@ function marcTabSwitch(tab){
 }
 
 function marcLoadComisiones(){
-  apiGet("gastos_vendedor","select=*&concepto=like.Comision%20Marcela%25&order=created_at.desc&limit=100").then(function(data){
+  Promise.all([
+    apiGet("gastos_vendedor","select=*&vendedor_id=eq.3&order=created_at.desc&limit=500"),
+    apiGet("gastos_vendedor","select=*&vendedor_id=eq.1&concepto=ilike.Comision%20Marcela*&periodo_cerrado=eq.false&order=created_at.desc&limit=200")
+  ]).then(function(res){
     var stats=document.getElementById("marcela-stats");
     var list=document.getElementById("marcela-comisiones-list");
     if(!stats||!list) return;
-    if(!Array.isArray(data)) data=[];
+    var gastosMarcela=Array.isArray(res[0])?res[0]:[];
+    var gastosManuales=Array.isArray(res[1])?res[1]:[];
 
-    var total=data.reduce(function(s,g){return s+(g.monto||0);},0);
-    var estaSemana=data.filter(function(g){
-      var d=new Date(g.created_at);
-      var now=new Date();
-      var weekAgo=new Date(now-7*24*3600*1000);
-      return d>=weekAgo;
-    }).reduce(function(s,g){return s+(g.monto||0);},0);
+    function _esActivo(g){
+      var pc=g.periodo_cerrado;
+      return pc===null||pc===undefined||pc===false||pc==='false'||pc===0||pc==='0';
+    }
+    var comisiones=gastosMarcela.filter(function(g){return !g.concepto||g.concepto.indexOf('[CANCELADA]')<0;});
+    var pend=comisiones.filter(function(g){return !g.aprobado&&_esActivo(g);});
+    var acept=comisiones.filter(function(g){return g.aprobado&&_esActivo(g);});
+    var manuales=gastosManuales.map(function(g){return Object.assign({},g,{_manual:true});});
+    var aceptAll=acept.concat(manuales);
+
+    var totPend=pend.reduce(function(s,g){return s+(g.monto||0);},0);
+    var totAcept=aceptAll.reduce(function(s,g){return s+(g.monto||0);},0);
 
     stats.innerHTML=
-      "<div class='scard'><div class='scard-lbl'>Total acumulado</div><div class='scard-val sv-green'>"+fmt(total)+"</div></div>"+
-      "<div class='scard'><div class='scard-lbl'>Esta semana</div><div class='scard-val sv-amb'>"+fmt(estaSemana)+"</div></div>"+
-      "<div class='scard'><div class='scard-lbl'>Registros</div><div class='scard-val'>"+data.length+"</div></div>";
+      "<div class='scard'><div class='scard-lbl'>Pendientes</div><div class='scard-val sv-amb'>"+fmt(totPend)+"</div></div>"+
+      "<div class='scard'><div class='scard-lbl'>Aprobadas</div><div class='scard-val sv-green'>"+fmt(totAcept)+"</div></div>"+
+      "<div class='scard'><div class='scard-lbl'>Registros</div><div class='scard-val'>"+(pend.length+aceptAll.length)+"</div></div>";
 
-    if(!data.length){
-      list.innerHTML="<div class='empty'>Sin comisiones registradas a\u00fan.</div>";
-      return;
+    function fmtG(g,color,badge){
+      var fecha=new Date(g.created_at).toLocaleDateString("es-AR",{day:"2-digit",month:"2-digit",year:"2-digit",timeZone:"America/Argentina/Buenos_Aires"});
+      var con=(g.concepto||"").replace("[CANCELADA]","").trim();
+      return "<div class='rend-card' style='padding:.5rem .8rem'>"+
+        "<div style='display:flex;justify-content:space-between;align-items:center'>"+
+          "<div style='min-width:0;flex:1'>"+
+            "<div style='font-size:.72rem;color:var(--tx);overflow:hidden;text-overflow:ellipsis;white-space:nowrap'>"+con+"</div>"+
+            "<div style='font-size:.62rem;color:var(--tx3)'>"+fecha+" &bull; <span style='color:"+color+"'>"+badge+"</span></div>"+
+          "</div>"+
+          "<div style='font-size:.88rem;font-weight:700;color:"+color+";margin-left:.5rem'>"+fmt(g.monto)+"</div>"+
+        "</div></div>";
     }
-    list.innerHTML=
-      "<div class='tbl-wrap'><div class='tbl-scroll'><table style='width:100%'>"+
-        "<thead><tr><th>Fecha</th><th>Detalle</th><th style='text-align:right'>Comisi\u00f3n</th></tr></thead>"+
-        "<tbody>"+data.map(function(g){
-          return "<tr>"+
-            "<td style='font-size:.7rem;color:var(--tx3)'>"+new Date(g.created_at).toLocaleString("es-AR",{day:"2-digit",month:"2-digit",year:"2-digit",hour:"2-digit",minute:"2-digit",timeZone:"America/Argentina/Buenos_Aires"})+"</td>"+
-            "<td style='font-size:.75rem'>"+g.concepto.replace("Comision Marcela: ","")+"</td>"+
-            "<td style='text-align:right;font-weight:600;color:var(--green)'>"+fmt(g.monto)+"</td>"+
-          "</tr>";
-        }).join("")+
-        "</tbody></table></div></div>";
+
+    var html="";
+    html+="<div class='sec-title' style='color:var(--yel)'>⏳ Pendientes ("+pend.length+")</div>";
+    if(pend.length) html+=pend.map(function(g){return fmtG(g,"var(--yel)","Esperando cobro de David");}).join("");
+    else html+="<div class='empty'>Sin pendientes</div>";
+
+    html+="<div class='sec-title' style='margin-top:1rem;color:var(--green)'>✅ Aprobadas ("+aceptAll.length+")</div>";
+    if(aceptAll.length) html+=aceptAll.map(function(g){return fmtG(g,"var(--green)",g._manual?"Manual David":"David cobró");}).join("");
+    else html+="<div class='empty'>Sin aprobadas</div>";
+
+    list.innerHTML=html;
   }).catch(function(){
     var list=document.getElementById("marcela-comisiones-list");
     if(list) list.innerHTML="<div class='empty'>Error cargando comisiones.</div>";
@@ -13413,71 +13419,92 @@ function adminLoadComisionesPanel(){
   var cont=document.getElementById('adminComisionesMarcelaPanel');
   if(!cont) return;
   cont.innerHTML="<div class='loading'><div class='spin'></div>Cargando...</div>";
-  apiGet('gastos_vendedor','select=*&vendedor_id=eq.3&order=created_at.desc&limit=200').then(function(data){
-    if(!Array.isArray(data)) data=[];
-    var byE={pendiente:[],confirmada:[],cobrada:[],rechazada:[]};
-    // También traer registros de David con "Comision Marcela" para el total
-    // pero NO mostrarlos (son el espejo de los de Marcela)
-    data.forEach(function(g){
-      // Usar estado_comision si está seteado, sino inferir de campos
-      var e=g.estado_comision||'';
+
+  Promise.all([
+    apiGet('gastos_vendedor','select=*&vendedor_id=eq.3&order=created_at.desc&limit=200'),
+    apiGet('gastos_vendedor','select=*&vendedor_id=eq.1&concepto=ilike.Comision%20Marcela*&periodo_cerrado=eq.false&order=created_at.desc&limit=100')
+  ]).then(function(res){
+    var dataMarcela=Array.isArray(res[0])?res[0]:[];
+    var dataDavidManuales=Array.isArray(res[1])?res[1]:[];
+
+    function _esActivo(g){
       var pc=g.periodo_cerrado;
-      var cerrado=(pc===true||pc==='true'||pc===1||pc==='1');
-      var ap=g.aprobado;
-      var aprobado=(ap===true||ap==='true'||ap===1||ap==='1');
-      if(e==='rechazada') byE.rechazada.push(g);
-      else if(e==='cobrada'||cerrado) byE.cobrada.push(g);
-      else if(e==='confirmada'||aprobado) byE.confirmada.push(g);
-      else byE.pendiente.push(g);
+      return pc===null||pc===undefined||pc===false||pc==='false'||pc===0||pc==='0';
+    }
+
+    var pend=dataMarcela.filter(function(g){return !g.aprobado&&_esActivo(g);});
+    var aprobadas=dataMarcela.filter(function(g){return g.aprobado&&_esActivo(g);});
+    var manuales=dataDavidManuales.map(function(g){
+      return {concepto:g.concepto+' (manual)',monto:g.monto,created_at:g.created_at,_manual:true};
     });
-    var tPend=byE.pendiente.reduce(function(s,g){return s+(g.monto||0);},0);
-    var tConf=byE.confirmada.reduce(function(s,g){return s+(g.monto||0);},0);
-    var tCob=byE.cobrada.reduce(function(s,g){return s+(g.monto||0);},0);
-    var cols={pendiente:{l:'Pendiente',c:'var(--yel)',i:'⏳'},confirmada:{l:'Confirmada',c:'var(--cyan)',i:'✓'},cobrada:{l:'Cobrada',c:'var(--green)',i:'💰'},rechazada:{l:'Rechazada',c:'var(--red)',i:'✕'}};
+    var aceptAll=aprobadas.concat(manuales);
+
+    var tPend=pend.reduce(function(s,g){return s+(g.monto||0);},0);
+    var tAcept=aceptAll.reduce(function(s,g){return s+(g.monto||0);},0);
+
+    function fmtRow(g,color,accion){
+      var fecha=new Date(g.created_at).toLocaleDateString('es-AR',{timeZone:'America/Argentina/Buenos_Aires'});
+      return "<div style='display:flex;justify-content:space-between;align-items:center;padding:.28rem .35rem;background:var(--sur2);border-radius:5px;margin-bottom:.2rem;gap:.3rem;flex-wrap:wrap'>"+
+        "<div style='flex:1;min-width:100px'>"+
+          "<div style='font-size:.7rem;color:var(--tx)'>"+(g.concepto||'')+"</div>"+
+          "<div style='font-size:.6rem;color:var(--tx3)'>"+fecha+"</div>"+
+        "</div>"+
+        "<div style='display:flex;align-items:center;gap:.3rem'>"+
+          "<span style='font-size:.75rem;font-weight:700;color:"+color+"'>"+fmt(g.monto||0)+"</span>"+
+          (accion||'')+
+        "</div></div>";
+    }
+
     var html=
       "<div class='tbl-wrap' style='padding:0;overflow:hidden;margin-top:.8rem'>"+
         "<div style='background:linear-gradient(135deg,#1e293b,#0f172a);padding:.7rem 1rem;border-bottom:1px solid var(--bd);display:flex;align-items:center;justify-content:space-between'>"+
           "<div style='display:flex;align-items:center;gap:.6rem'>"+
             "<div style='width:34px;height:34px;border-radius:50%;background:linear-gradient(135deg,var(--acc),#ffcc70);display:flex;align-items:center;justify-content:center;font-size:.9rem'>🏠</div>"+
             "<div><div style='font-size:.88rem;font-weight:700;color:var(--acc)'>Comisiones Marcela</div>"+
-            "<div style='font-size:.62rem;color:var(--tx3)'>Gestión de pagos pendientes, confirmados y cobrados</div></div>"+
+            "<div style='font-size:.62rem;color:var(--tx3)'>Pendientes y aprobadas</div></div>"+
           "</div>"+
           "<button onclick='adminLoadComisionesPanel()' style='background:transparent;border:1px solid var(--bd);color:var(--tx3);border-radius:5px;padding:.2rem .5rem;cursor:pointer;font-size:.68rem'>↻</button>"+
         "</div>"+
-        "<div style='display:grid;grid-template-columns:repeat(3,1fr);border-bottom:1px solid var(--bd)'>"+
-          "<div style='padding:.5rem .7rem;border-right:1px solid var(--bd);text-align:center'><div style='font-size:.58rem;color:var(--yel);text-transform:uppercase;margin-bottom:.2rem'>⏳ Pendiente</div><div style='font-size:.88rem;font-weight:700;color:var(--yel)'>"+fmt(tPend)+"</div></div>"+
-          "<div style='padding:.5rem .7rem;border-right:1px solid var(--bd);text-align:center'><div style='font-size:.58rem;color:var(--cyan);text-transform:uppercase;margin-bottom:.2rem'>✓ Confirmada</div><div style='font-size:.88rem;font-weight:700;color:var(--cyan)'>"+fmt(tConf)+"</div></div>"+
-          "<div style='padding:.5rem .7rem;text-align:center'><div style='font-size:.58rem;color:var(--green);text-transform:uppercase;margin-bottom:.2rem'>💰 Cobrada</div><div style='font-size:.88rem;font-weight:700;color:var(--green)'>"+fmt(tCob)+"</div></div>"+
+        "<div style='display:grid;grid-template-columns:1fr 1fr;border-bottom:1px solid var(--bd)'>"+
+          "<div style='padding:.5rem .7rem;border-right:1px solid var(--bd);text-align:center'><div style='font-size:.58rem;color:var(--yel);text-transform:uppercase;margin-bottom:.2rem'>⏳ Pendientes</div><div style='font-size:.88rem;font-weight:700;color:var(--yel)'>"+fmt(tPend)+"</div><div style='font-size:.6rem;color:var(--tx3)'>"+pend.length+" registros</div></div>"+
+          "<div style='padding:.5rem .7rem;text-align:center'><div style='font-size:.58rem;color:var(--green);text-transform:uppercase;margin-bottom:.2rem'>✅ Aprobadas</div><div style='font-size:.88rem;font-weight:700;color:var(--green)'>"+fmt(tAcept)+"</div><div style='font-size:.6rem;color:var(--tx3)'>"+aceptAll.length+" registros</div></div>"+
         "</div>"+
-        "<div style='padding:.7rem .9rem'>"+
-        Object.keys(cols).map(function(est){
-          var items=byE[est]; if(!items.length) return '';
-          var col=cols[est];
-          var total=items.reduce(function(s,g){return s+(g.monto||0);},0);
-          return "<div style='margin-bottom:.7rem'>"+
-            "<div style='display:flex;justify-content:space-between;align-items:center;margin-bottom:.3rem;padding-bottom:.2rem;border-bottom:1px solid var(--bd)'>"+
-              "<div style='font-size:.65rem;font-weight:700;color:"+col.c+";text-transform:uppercase;letter-spacing:.05em'>"+col.i+" "+col.l+" ("+items.length+")</div>"+
-              "<div style='font-size:.7rem;font-weight:700;color:"+col.c+"'>"+fmt(total)+"</div>"+
-            "</div>"+
-            items.map(function(g){
-              var fecha=new Date(g.created_at).toLocaleDateString('es-AR',{timeZone:"America/Argentina/Buenos_Aires"});
-              var acc='';
-              if(est==='pendiente') acc="<button onclick='adminConfirmarComision("+g.id+")' style='font-size:.6rem;padding:.12rem .3rem;background:rgba(0,200,200,.1);border:1px solid var(--cyan);color:var(--cyan);border-radius:4px;cursor:pointer'>✓</button><button onclick='adminRechazarComision("+g.id+")' style='font-size:.6rem;padding:.12rem .3rem;background:rgba(255,80,80,.08);border:1px solid var(--red);color:var(--red);border-radius:4px;cursor:pointer;margin-left:.2rem'>✕</button>";
-              else if(est==='confirmada') acc="<button onclick='adminMarcarCobrada("+g.id+")' style='font-size:.6rem;padding:.12rem .35rem;background:rgba(0,200,100,.1);border:1px solid var(--green);color:var(--green);border-radius:4px;cursor:pointer'>💰 Cobrada</button>";
-              return "<div style='display:flex;justify-content:space-between;align-items:center;padding:.28rem .35rem;background:var(--sur2);border-radius:5px;margin-bottom:.2rem;gap:.3rem;flex-wrap:wrap'>"+
-                "<div style='flex:1;min-width:100px'><div style='font-size:.7rem;color:var(--tx)'>"+g.concepto+"</div>"+
-                "<div style='font-size:.6rem;color:var(--tx3)'>"+fecha+(g.registrado_por?' · '+g.registrado_por:'')+"</div>"+
-                (g.motivo_rechazo?"<div style='font-size:.6rem;color:var(--red)'>↳ "+g.motivo_rechazo+"</div>":'')+
-                "</div>"+
-                "<div style='display:flex;align-items:center;gap:.3rem'>"+
-                  "<span style='font-size:.75rem;font-weight:700;color:"+col.c+"'>"+fmt(g.monto||0)+"</span>"+acc+
-                "</div></div>";
-            }).join('')+
-          "</div>";
-        }).join('')+
-        "</div>"+
+        "<div style='padding:.7rem .9rem'>";
+
+    // Pendientes
+    html+="<div style='margin-bottom:.7rem'>"+
+      "<div style='display:flex;justify-content:space-between;align-items:center;margin-bottom:.3rem;padding-bottom:.2rem;border-bottom:1px solid var(--bd)'>"+
+        "<div style='font-size:.65rem;font-weight:700;color:var(--yel);text-transform:uppercase'>⏳ Pendientes ("+pend.length+")</div>"+
+        "<div style='font-size:.7rem;font-weight:700;color:var(--yel)'>"+fmt(tPend)+"</div>"+
       "</div>";
+    if(pend.length){
+      html+=pend.map(function(g){
+        return fmtRow(g,'var(--yel)',"");
+      }).join('');
+    } else {
+      html+="<div style='font-size:.72rem;color:var(--tx3);padding:.3rem'>Sin pendientes</div>";
+    }
+    html+="</div>";
+
+    // Aprobadas
+    html+="<div style='margin-bottom:.7rem'>"+
+      "<div style='display:flex;justify-content:space-between;align-items:center;margin-bottom:.3rem;padding-bottom:.2rem;border-bottom:1px solid var(--bd)'>"+
+        "<div style='font-size:.65rem;font-weight:700;color:var(--green);text-transform:uppercase'>✅ Aprobadas ("+aceptAll.length+")</div>"+
+        "<div style='font-size:.7rem;font-weight:700;color:var(--green)'>"+fmt(tAcept)+"</div>"+
+      "</div>";
+    if(aceptAll.length){
+      html+=aceptAll.map(function(g){
+        return fmtRow(g,'var(--green)',g._manual?"<span style='font-size:.58rem;color:var(--tx3)'>manual</span>":'');
+      }).join('');
+    } else {
+      html+="<div style='font-size:.72rem;color:var(--tx3);padding:.3rem'>Sin aprobadas</div>";
+    }
+    html+="</div>";
+
+    html+="</div></div>";
     cont.innerHTML=html;
+  }).catch(function(e){
+    cont.innerHTML="<div class='empty'>Error: "+e.message+"</div>";
   });
 }
 function adminConfirmarComision(id){
