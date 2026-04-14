@@ -660,7 +660,7 @@ function carGo(i){carIdx=i;carRender();}
 
 function loadProds(){
   // Load productos first (critical), then extras with fallback
-  apiGet("productos","select=id,genero,empresa,nombre,stock_actual,reserva,cat_catalogo,precio_may_ars,precio_med_ars,precio_min_ars,precio_ml,precio_pestana,imagen_url,notas,acordes,activo,etiqueta,descripcion,precio_decan,destacado,pestana_id,pestanas_extra,orden_destacado,panel_destacado_id,orden_en_panel&activo=is.true&order=empresa,nombre&limit=2000").then(function(data){
+  apiGet("productos","select=id,genero,empresa,nombre,stock_actual,reserva,cat_catalogo,precio_may_ars,precio_med_ars,precio_min_ars,precio_ml,precio_pestana,imagen_url,notas,acordes,activo,etiqueta,descripcion,precio_decan,destacado,pestana_id,pestanas_extra,orden_destacado,panel_destacado_id,orden_en_panel,costo_ind,costo_log,gan_usd_may,gan_usd_med,cotiz_hist&activo=is.true&order=empresa,nombre&limit=2000").then(function(data){
     allProds=Array.isArray(data)?data:[];
     buildTabs();
     fillBrands();
@@ -732,14 +732,16 @@ function calcP(p){
   // MULTIPLO.SUPERIOR al entero (igual que Google Sheet)
   var ct=ci>0?Math.ceil(ci+cl):0;
   var gm=p.gan_usd_may||0, ge=p.gan_usd_med||0;
+  // Usar cotización del producto si tiene, sino la del sistema
+  var cotiz=p.cotiz_hist&&p.cotiz_hist>0?p.cotiz_hist:cotizActual;
   // MULTIPLO.SUPERIOR a 100 ARS (igual que Google Sheet)
-  var pm=ct>0||gm>0?Math.ceil((ct+gm)*cotizActual/100)*100:(p.precio_may_ars||0);
-  var pe=ct>0||ge>0?Math.ceil((ct+gm+ge)*cotizActual/100)*100:(p.precio_med_ars||0);
+  var pm=ct>0||gm>0?Math.ceil((ct+gm)*cotiz/100)*100:(p.precio_may_ars||0);
+  var pe=ct>0||ge>0?Math.ceil((ct+gm+ge)*cotiz/100)*100:(p.precio_med_ars||0);
   // precio_min = MULTIPLO.SUPERIOR( (precio_ml + precio_med) / 2, 100 )
   var ml=p.precio_ml||0;
   var pi=ml>0?Math.ceil((ml+pe)/2/100)*100:(p.precio_min_ars||pe);
-  var rM=pm>0&&ct>0?((pm-ct*cotizActual)/pm*100):0;
-  var rE=pe>0&&ct>0?((pe-ct*cotizActual)/pe*100):0;
+  var rM=pm>0&&ct>0?((pm-ct*cotiz)/pm*100):0;
+  var rE=pe>0&&ct>0?((pe-ct*cotiz)/pe*100):0;
   var decan=p.precio_decan>0?p.precio_decan:(pi>0?(Math.ceil(pi*0.1/1000)*1000+3000):0);
   return{ct:ct,pm:pm,pe:pe,pi:pi,rM:rM,rE:rE,decan:decan};
 }
@@ -1285,7 +1287,22 @@ function applyFilters(){
   });
   // document.getElementById("rcount").textContent=filtered.length+" productos";
   renderCombosEnCatalogo();
-  if(curTab==="inicio"){var _lc=document.getElementById("listContainer");if(_lc)_lc.style.display="none";return;}
+  if(curTab==="inicio"){
+    var _q=document.getElementById("srch").value||"";
+    var _lc=document.getElementById("listContainer");
+    var _hEl=document.getElementById("homePage");
+    if(_q.trim()){
+      // Hay búsqueda activa — mostrar resultados y ocultar home
+      if(_hEl)_hEl.style.display="none";
+      if(_lc)_lc.style.display="";
+      renderList(sortedProds(filtered));
+    } else {
+      // Sin búsqueda — mostrar home
+      if(_lc)_lc.style.display="none";
+      if(_hEl)_hEl.style.display="block";
+    }
+    return;
+  }
   var _lc2=document.getElementById("listContainer");if(_lc2)_lc2.style.display="";
   renderList(sortedProds(filtered));
 }
@@ -1774,35 +1791,41 @@ function sendWA(){
     window._sendingOrder=false;
     var waBtn=document.getElementById('waBtn');
     if(waBtn){waBtn.disabled=false;waBtn.style.opacity='';}
-    // Reservar stock: perfumes normales
-    perfs.forEach(function(item){
-      var p=allProds.find(function(x){return x.id===item.id;});
-      if(!p||!item.id)return;
-      var nuevoStock=Math.max(0,(p.stock_actual||0)-item.qty);
-      var nuevaReserva=(p.reserva||0)+item.qty;
-      p.stock_actual=nuevoStock; p.reserva=nuevaReserva;
-      fetch(SB_URL+"/rest/v1/productos?id=eq."+item.id,{
-        method:"PATCH",
-        headers:{"Content-Type":"application/json","apikey":SB_KEY,"Authorization":"Bearer "+SB_KEY,"Prefer":"return=minimal"},
-        body:JSON.stringify({stock_actual:nuevoStock,reserva:nuevaReserva})
-      }).catch(function(){});
-    });
-    // Reservar stock: productos dentro de combos
+    // Reservar stock desde BD fresca — evita errores por caché desactualizado
+    var todosIds=[];
+    perfs.forEach(function(item){if(item.id)todosIds.push({id:item.id,qty:item.qty});});
     allCartItems.filter(function(i){return i.isCombo;}).forEach(function(item){
       (item.comboItems||[]).forEach(function(ci){
-        var p=allProds.find(function(x){return x.id===ci.producto_id;});
-        if(!p)return;
-        var cantTotal=ci.cantidad*item.qty;
-        var nuevoStock=Math.max(0,(p.stock_actual||0)-cantTotal);
-        var nuevaReserva=(p.reserva||0)+cantTotal;
-        p.stock_actual=nuevoStock; p.reserva=nuevaReserva;
-        fetch(SB_URL+"/rest/v1/productos?id=eq."+ci.producto_id,{
-          method:"PATCH",
-          headers:{"Content-Type":"application/json","apikey":SB_KEY,"Authorization":"Bearer "+SB_KEY,"Prefer":"return=minimal"},
-          body:JSON.stringify({stock_actual:nuevoStock,reserva:nuevaReserva})
-        }).catch(function(){});
+        todosIds.push({id:ci.producto_id,qty:ci.cantidad*(item.qty||1)});
       });
     });
+    if(todosIds.length){
+      var ids=todosIds.map(function(x){return x.id;}).filter(function(v,i,a){return a.indexOf(v)===i;});
+      fetch(SB_URL+"/rest/v1/productos?id=in.("+ids.join(",")+")"+"&select=id,stock_actual,reserva",{
+        headers:{"apikey":SB_KEY,"Authorization":"Bearer "+SB_KEY}
+      }).then(function(r){return r.json();}).then(function(frescos){
+        frescos=Array.isArray(frescos)?frescos:[];
+        // Sumar cantidades por producto
+        var qtxProd={};
+        todosIds.forEach(function(x){
+          qtxProd[x.id]=(qtxProd[x.id]||0)+x.qty;
+        });
+        frescos.forEach(function(fp){
+          var qty=qtxProd[fp.id]||0;
+          if(!qty)return;
+          var ns=Math.max(0,(fp.stock_actual||0)-qty);
+          var nr=(fp.reserva||0)+qty;
+          // Actualizar caché local
+          var p=allProds.find(function(x){return x.id===fp.id;});
+          if(p){p.stock_actual=ns;p.reserva=nr;}
+          fetch(SB_URL+"/rest/v1/productos?id=eq."+fp.id,{
+            method:"PATCH",
+            headers:{"Content-Type":"application/json","apikey":SB_KEY,"Authorization":"Bearer "+SB_KEY,"Prefer":"return=minimal"},
+            body:JSON.stringify({stock_actual:ns,reserva:nr})
+          }).catch(function(){});
+        });
+      }).catch(function(){});
+    }
   }).catch(function(){
     window._sendingOrder=false;
     var waBtn=document.getElementById('waBtn');
