@@ -2451,9 +2451,23 @@ function cancelarTransf(id,conReserva,btn){
         if(pid){
           var p=prods.find(function(x){return x.id===pid;});
           if(p){
-            var ns=(p.stock_actual||0)+(it.qty||1);
-            promises.push(patchStockFresco(pid,{stock_actual:+(it.qty||1),reserva:-(it.qty||1)},'Cancelar transf'));
-            promises.push(apiPost("movimientos_stock",{producto_id:pid,producto_nombre:it.nombre||"",tipo:"cancelacion_transferencia",cantidad:it.qty||1,stock_antes:ns-(it.qty||1),stock_despues:ns,motivo:"Transferencia cancelada - stock devuelto",usuario:VENDEDOR_NOMBRE||"vendedor",periodo:periodoActual}).catch(function(){}));
+            // Leer BD fresca para verificar reserva real antes de devolver
+            promises.push(
+              apiGet("productos","select=id,stock_actual,reserva&id=eq."+pid).then(function(rows){
+                var fp=rows&&rows[0];
+                if(!fp)return;
+                var reservaReal=fp.reserva||0;
+                if(reservaReal<=0)return; // sin reserva, no devolver
+                var devQty=Math.min(it.qty||1, reservaReal);
+                return patchStockFresco(pid,{stock_actual:+devQty,reserva:-devQty},"Cancelar transf")
+                  .then(function(){
+                    return apiPost("movimientos_stock",{producto_id:pid,
+                      producto_nombre:it.nombre||"",tipo:"cancelacion_transferencia",
+                      cantidad:devQty,motivo:"Transferencia cancelada - stock devuelto",
+                      usuario:VENDEDOR_NOMBRE||"vendedor",periodo:periodoActual}).catch(function(){});
+                  });
+              })
+            );
           }
         }
       });
@@ -2823,7 +2837,13 @@ function renderEnviadaCard(v){
 function renderTransfCard(v,done){
   var items=[];try{items=typeof v.items==="string"?JSON.parse(v.items):v.items;}catch(e){}
   var fecha=new Date(v.created_at).toLocaleString("es-AR",{day:"2-digit",month:"2-digit",year:"2-digit",hour:"2-digit",minute:"2-digit",timeZone:"America/Argentina/Buenos_Aires"});
-  var reservaTag=v.con_reserva?"<span class='badge bg-cyan' style='margin-left:.3rem'>Con reserva de stock</span>":"";
+  // Badge de reserva: azul si confirmada, naranja si no ejecutada, nada si sin reserva
+  var reservaEjecutada=v.con_reserva&&v.reserva_ejecutada!==false;
+  var reservaTag=!v.con_reserva?"":
+    (reservaEjecutada
+      ?"<span class='badge bg-cyan' style='margin-left:.3rem'>✅ Con reserva de stock</span>"
+      :"<span style='margin-left:.3rem;font-size:.62rem;background:#e8a020;color:#fff;border-radius:4px;padding:.15rem .4rem;font-weight:600'>⚠️ Sin reserva de stock</span>"
+    );
   var cancelado=v.estado==="cancelada";
   var html="<div class='ped-card"+(done||cancelado?"":(" nuevo"))+"'>";
   html+="<div class='ped-header'>";
@@ -3989,19 +4009,22 @@ function confirmarReservarPed(){
     vendedor_id:VENDEDOR_ID,
     notas:"Cliente: "+cliente+(tel?" | Tel: "+tel:"")+(nota?" | "+nota:"")+(entregaStr?" | Entrega: "+entregaStr:"")
   }).then(function(){
-    // Reserve stock for each product
+    // Reservar en SECUENCIA para evitar que requests simultáneos se pisen
+    var reservaChain=Promise.resolve();
     perfs.forEach(function(item){
-      var p=prods.find(function(x){return x.id===item.id;});
-      if(!p)return;
-      var stockAntes=p.stock_actual||0;
-      var nuevoStockCalc=Math.max(0,stockAntes-item.qty);
-      // Usar BD fresca para reserva
-      patchStockFresco(item.id,{stock_actual:-item.qty,reserva:+item.qty},'Reserva pedido');
-      apiPost("movimientos_stock",{
-        producto_id:item.id,producto_nombre:item.nombre,tipo:"reserva",
-        cantidad:item.qty,stock_antes:stockAntes,stock_despues:nuevoStockCalc,
-        motivo:"Reserva pedido "+nroOrden,
-        usuario:VENDEDOR_NOMBRE||"vendedor",periodo:periodoActual
+      reservaChain=reservaChain.then(function(){
+        var p=prods.find(function(x){return x.id===item.id;});
+        var stockAntes=p?p.stock_actual||0:0;
+        var nuevoStockCalc=Math.max(0,stockAntes-item.qty);
+        return patchStockFresco(item.id,{stock_actual:-item.qty,reserva:+item.qty},'Reserva pedido')
+          .then(function(){
+            return apiPost("movimientos_stock",{
+              producto_id:item.id,producto_nombre:item.nombre,tipo:"reserva",
+              cantidad:item.qty,stock_antes:stockAntes,stock_despues:nuevoStockCalc,
+              motivo:"Reserva pedido "+nroOrden,
+              usuario:VENDEDOR_NOMBRE||"vendedor",periodo:periodoActual
+            });
+          });
       });
     });
     document.getElementById("moReservarPed").classList.remove("open");
@@ -5437,10 +5460,10 @@ function openTransferModal(){
   document.getElementById("transferUserList").innerHTML=
     "<div style='background:var(--cdim);border:1px solid var(--cyan);border-radius:var(--r);padding:.6rem .8rem;margin-bottom:.7rem'>"+
       "<label style='display:flex;align-items:center;gap:.5rem;cursor:pointer;font-size:.82rem;color:var(--tx)'>"+
-        "<input type='checkbox' id='transferConReserva' style='width:16px;height:16px'>"+
+        "<input type='checkbox' id='transferConReserva' checked style='width:18px;height:18px'>"+
         "<div>"+
-          "<div style='font-weight:500;color:var(--cyan)'>Transferir CON reserva de stock</div>"+
-          "<div style='font-size:.68rem;color:var(--tx3);margin-top:.1rem'>El stock se descuenta ahora. El receptor solo confirma el cobro.</div>"+
+          "<div style='font-weight:600;color:var(--cyan)'>✅ Reservar stock automáticamente</div>"+
+          "<div style='font-size:.68rem;color:var(--tx3);margin-top:.1rem'>Recomendado. El stock queda reservado para este cliente.</div>"+
         "</div>"+
       "</label>"+
     "</div>"+
@@ -5488,19 +5511,29 @@ function ejecutarTransfer(targetId,targetNombre){
   var conReserva=document.getElementById("transferConReserva")&&document.getElementById("transferConReserva").checked;
   // If con_reserva: discount stock now
   var stockPromises=[];
+  var reservaEjecutadaOk=false;
   if(conReserva){
-    // Descuenta stock_actual provisoriamente — se confirma o revierte al confirmar/cancelar
-    perfs.forEach(function(item){
-      var p=prods.find(function(x){return x.id===item.id;});
-      if(p){
-        var ns=Math.max(0,(p.stock_actual||0)-item.qty);
-        stockPromises.push(patchStockFresco(item.id,{stock_actual:-item.qty},'Ejecutar transfer'));
-      }
+    // Reservar desde BD fresca — evita errores de caché
+    perfs.filter(function(i){return !i.isDecan;}).forEach(function(item){
+      if(!item.id)return;
+      stockPromises.push(
+        apiGet("productos","select=id,stock_actual,reserva&id=eq."+item.id).then(function(rows){
+          var fp=rows&&rows[0];
+          if(!fp){toast("Error: no se encontró el producto","terr");return;}
+          if((fp.stock_actual||0)<=0){toast("Sin stock para: "+item.nombre,"twarn");return;}
+          return patchStockFresco(item.id,{stock_actual:-item.qty,reserva:+item.qty},"Reserva transfer")
+            .then(function(r){
+              if(r!==null)reservaEjecutadaOk=true;
+              else toast("Error reservando: "+item.nombre,"terr");
+            });
+        }).catch(function(e){toast("Error de red: "+item.nombre,"terr");})
+      );
     });
   }
   Promise.all(stockPromises).then(function(){
     return apiPost("ventas_transferidas",{
       creada_por:VENDEDOR_NOMBRE,asignada_a:targetId,
+      reserva_ejecutada:conReserva&&reservaEjecutadaOk,
       items:JSON.stringify(itemsData),total:total,estado:"pendiente",
       periodo:periodoActual,nro_orden:nroOrden,con_reserva:conReserva,
       notas:"De "+VENDEDOR_NOMBRE+" para "+targetNombre+(conReserva?" [CON RESERVA]":"")
