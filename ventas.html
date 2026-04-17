@@ -1490,7 +1490,12 @@ function executeVenta(items,reservaDecs){
       var p=prods.find(function(x){return x.id===item.id;});if(!p)return;
       if(item.precioManual||item.price===0){item.seg=item.price===0?"bonificado":"especial";item.total=(item.price*item.qty)-(item.descuento||0);return;}
       var _pu=p.precio_pestana||0;
-      if(_pu>0){item.price=_pu;item.seg="pi";item.total=(_pu*item.qty)-(item.descuento||0);return;}
+      // Solo aplicar precio_pestana si el item no tiene precio especial ya asignado
+      if(_pu>0&&item.seg!=="especial"){
+        // Verificar si el precio actual difiere del pestana — si difiere, es especial
+        if(Math.abs(item.price-_pu)>1){item.seg="especial";item.total=(item.price*item.qty)-(item.descuento||0);return;}
+        item.price=_pu;item.seg="pi";item.total=(_pu*item.qty)-(item.descuento||0);return;
+      }
       var r=calcP(p);
       var segFinal=getBestSeg(totalUnidadesF,r);
       var precioCalc=r[segFinal]||r.pi;
@@ -1523,6 +1528,7 @@ function executeVenta(items,reservaDecs){
       origItems.forEach(function(o){if(!o.isDecan&&o.producto_id&&todosIds.indexOf(o.producto_id)<0)todosIds.push(o.producto_id);});
       newItemsData.forEach(function(n){if(!n.isDecan&&n.producto_id&&todosIds.indexOf(n.producto_id)<0)todosIds.push(n.producto_id);});
       var stockProms=[];
+      // Ajustar stock productos individuales
       if(todosIds.length){
         stockProms.push(apiGet("productos","select=id,stock_actual,reserva&id=in.("+todosIds.join(",")+")")
           .then(function(frescos){
@@ -1544,6 +1550,40 @@ function executeVenta(items,reservaDecs){
           })
         );
       }
+      // Ajustar stock de combos nuevos (los que no estaban en el pedido original)
+      var combosOrig=origItems.filter(function(o){return o.isCombo&&o.combo_id;}).map(function(o){return o.combo_id;});
+      var combosNuevos=newItemsData.filter(function(n){return n.isCombo&&n.combo_id&&combosOrig.indexOf(n.combo_id)<0;});
+      var combosEliminados=origItems.filter(function(o){return o.isCombo&&o.combo_id&&newItemsData.findIndex(function(n){return n.isCombo&&n.combo_id===o.combo_id;})<0;});
+      combosNuevos.forEach(function(combo){
+        stockProms.push(
+          apiGet("combo_items","select=*&combo_id=eq."+combo.combo_id).then(function(ci){
+            if(!Array.isArray(ci))return;
+            var chain=Promise.resolve();
+            ci.forEach(function(it){
+              var cant=(it.cantidad||1)*(combo.qty||1);
+              chain=chain.then(function(){
+                return patchStockFresco(it.producto_id,{stock_actual:-cant,reserva:+cant},"Editar pedido - combo nuevo");
+              });
+            });
+            return chain;
+          })
+        );
+      });
+      combosEliminados.forEach(function(combo){
+        stockProms.push(
+          apiGet("combo_items","select=*&combo_id=eq."+combo.combo_id).then(function(ci){
+            if(!Array.isArray(ci))return;
+            var chain=Promise.resolve();
+            ci.forEach(function(it){
+              var cant=(it.cantidad||1)*(combo.qty||1);
+              chain=chain.then(function(){
+                return patchStockFresco(it.producto_id,{stock_actual:+cant,reserva:-cant},"Editar pedido - combo eliminado");
+              });
+            });
+            return chain;
+          })
+        );
+      });
       stockProms.push(apiPatch("pedidos_catalogo",{items:JSON.stringify(newItemsData),total:Math.max(0,newTotal)},"id=eq."+pedId));
       return Promise.all(stockProms);
     }).then(function(){
@@ -2393,6 +2433,35 @@ function guardarEditPed(){
       producto_id:prodId||null,
       segmento:inp.closest("tr").querySelector("td:nth-child(4)")?inp.closest("tr").querySelector("td:nth-child(4)").textContent:"x1",
       isDecan:isDecan
+    });
+  });
+
+  // Reservar combos nuevos agregados en la edición
+  document.querySelectorAll(".edit-combo-row").forEach(function(row){
+    var comboId=parseInt(row.dataset.comboId)||0;
+    var qty=parseInt(row.dataset.qty)||1;
+    var nombre=row.dataset.nombre||"";
+    var precio=parseFloat(row.dataset.precio)||0;
+    var isNew=row.dataset.isNew==="1";
+    if(comboId&&isNew){
+      // Buscar combo_items en BD y reservar cada producto
+      stockPromises.push(
+        apiGet("combo_items","select=*&combo_id=eq."+comboId).then(function(ci){
+          if(!Array.isArray(ci))return;
+          var chain=Promise.resolve();
+          ci.forEach(function(it){
+            var cant=(it.cantidad||1)*qty;
+            chain=chain.then(function(){
+              return patchStockFresco(it.producto_id,{stock_actual:-cant,reserva:+cant},"Editar pedido - combo");
+            });
+          });
+          return chain;
+        })
+      );
+    }
+    newItems.push({
+      nombre:nombre,qty:qty,precio:precio,total:precio*qty,
+      producto_id:null,segmento:"combo",isCombo:true,combo_id:comboId
     });
   });
 
