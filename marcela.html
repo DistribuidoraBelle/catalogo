@@ -1464,19 +1464,20 @@ function executeVenta(items,reservaDecs){
         origen:"vendedor",descuento:item.descuento||0,
         descuento_motivo:item.descMotivo||""
       }));
-      (item.comboItems||[]).forEach(function(ci){
-        var prodId=ci.producto_id;
-        var cantComp=(ci.cantidad||1)*item.qty;
-        var p=prods.find(function(x){return x.id===prodId;});
-        if(p){
-          var _sa=p.stock_actual||0;
-          var ns=Math.max(0,_sa-cantComp);
-          p.stock_actual=ns;
-          p.vendido_david=(p.vendido_david||0)+cantComp;
-          promises.push(apiPatch("productos",{stock_actual:ns,vendido_david:p.vendido_david},"id=eq."+prodId));
-          promises.push(apiPost("movimientos_stock",{producto_id:prodId,producto_nombre:p.nombre,tipo:"venta",cantidad:cantComp,stock_antes:_sa,stock_despues:ns,motivo:"Venta combo Marcela "+nroOrden,created_at:new Date().toISOString(),usuario:VENDEDOR_NOMBRE}).catch(function(){}));
-        }
-      });
+      // Reduce stock y reserva de componentes — BD fresca
+      var _ciSrc=item.comboItems||[];
+      var _cid=item.comboId||item.combo_id||0;
+      function _doComboM(ciList){
+        ciList.forEach(function(ci){
+          var cantComp=(ci.cantidad||1)*item.qty;
+          promises.push(patchStockFresco(ci.producto_id,{stock_actual:-cantComp,reserva:-cantComp,vendido_david:+cantComp},"Venta combo"));
+        });
+      }
+      if(_ciSrc.length){_doComboM(_ciSrc);}
+      else if(_cid){promises.push(apiGet("combos","select=combo_items(producto_id,cantidad)&id=eq."+_cid).then(function(res){
+        var combo=res&&res[0];if(combo)_doComboM(combo.combo_items||[]);
+      }));}
+      
     } else {
       var sub=(item.price*item.qty)-(item.descuento||0);
       promises.push(apiPost("ventas",{
@@ -2596,6 +2597,51 @@ function cancelarPedReservado(pedId,btn){
     }).catch(function(){if(btn)btn.disabled=false;});
   });
 }
+function confirmarCancelPed(){
+  var mo=document.getElementById("moCancelPed");
+  var pedId=mo._pedId; var btn=mo._btn;
+  var motivo=document.getElementById("cancelPedMotivo").value.trim();
+  var stockEl=document.querySelector("input[name='cancelStock']:checked");
+  var devolverStock=!stockEl||stockEl.value==="devolver";
+  if(!motivo){toast("Ingresa el motivo","twarn");return;}
+  if(btn)btn.disabled=true;
+  mo.classList.remove("open");
+  apiGet("pedidos_catalogo","select=*&id=eq."+pedId).then(function(data){
+    if(!Array.isArray(data)||!data.length)return;
+    var ped=data[0];var items=[];
+    try{items=typeof ped.items==="string"?JSON.parse(ped.items):ped.items||[];}catch(ex){}
+    var promises=[
+      apiPatch("pedidos_catalogo",{estado:"cancelado",notas:(ped.notas||"")+" | CANCELADO: "+motivo},"id=eq."+pedId)
+    ];
+    if(devolverStock){
+      items.forEach(function(it){
+        if(it.isCombo){
+          var cid=it.combo_id||0;
+          if(cid)promises.push(apiGet("combos","select=combo_items(producto_id,cantidad)&id=eq."+cid).then(function(res){
+            var combo=res&&res[0];if(!combo)return;
+            (combo.combo_items||[]).forEach(function(ci){
+              var cantTotal=(ci.cantidad||1)*(it.qty||1);
+              promises.push(patchStockFresco(ci.producto_id,{stock_actual:+cantTotal,reserva:-cantTotal},"Cancelar combo Marcela"));
+            });
+          }));
+          return;
+        }
+        if(!it.producto_id||it.isDecan||it.segmento==='decan')return;
+        promises.push(patchStockFresco(it.producto_id,{stock_actual:+(it.qty||1),reserva:-(it.qty||1)},'Cancelar pedido Marcela'));
+      });
+    } else {
+      items.forEach(function(it){
+        if(!it.producto_id||it.isDecan||it.segmento==='decan')return;
+        promises.push(patchStockFresco(it.producto_id,{reserva:-(it.qty||1)},'Cancelar pedido Marcela sin stock'));
+      });
+    }
+    Promise.all(promises).then(function(){
+      toast(devolverStock?"Cancelado - stock devuelto":"Cancelado - sin devolución","twarn");
+      loadPedidosWeb();renderCat();
+    }).catch(function(){if(btn)btn.disabled=false;});
+  });
+}
+
 
 
 
