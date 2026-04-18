@@ -5728,7 +5728,8 @@ function _doAgregarAlStock(pedidoId,items){
         var enViajeActual=r?r.en_viaje||0:p?p.en_viaje||0:0;
         var costoActual=r?r.costo_ind||0:p?p.costo_ind||0:0;
         var ns=stockExistente+cantOk;
-        var nv=Math.max(0,enViajeActual-it.cantidad_pedida);
+        // Restar de en_viaje solo los recibidos, NO el total pedido
+        var nv=Math.max(0,enViajeActual-cantOk);
         var nuevoCosto=costoActual;
         if(precioCompra>0&&ns>0){
           nuevoCosto=Math.round(((stockExistente*costoActual)+(cantOk*precioCompra))/ns*100)/100;
@@ -5737,9 +5738,11 @@ function _doAgregarAlStock(pedidoId,items){
         if(nuevoCosto>0&&nuevoCosto!==costoActual) patchProd.costo_ind=nuevoCosto;
         if(p){p.stock_actual=ns;p.en_viaje=nv;if(nuevoCosto>0)p.costo_ind=nuevoCosto;}
         _checkReingreso(it.producto_id,stockExistente,ns);
-        return Promise.all([
+        // Detectar faltantes parciales — llegaron menos de lo pedido
+        var cantFaltParcial=Math.max(0,(it.cantidad_pedida||0)-cantOk-(it.cantidad_fallada||0));
+        var proms3=[
           apiPatch("productos",patchProd,"id=eq."+it.producto_id),
-          apiPatch("pedidos_proveedor_items",{estado_item:"en_stock"},"id=eq."+it.id),
+          apiPatch("pedidos_proveedor_items",{estado_item:cantFaltParcial>0?"parcial":"en_stock"},"id=eq."+it.id),
           apiPost("movimientos_stock",{
             producto_id:it.producto_id,
             producto_nombre:it.nombre_proveedor||it.nombre||(p?p.nombre:""),
@@ -5751,7 +5754,23 @@ function _doAgregarAlStock(pedidoId,items){
             usuario:"sistema",
             periodo:periodoActual||""
           })
-        ]);
+        ];
+        // Si llegaron menos de lo pedido, crear reclamo por los faltantes
+        if(cantFaltParcial>0){
+          proms3.push(apiPost("reclamos",{
+            vendedor_id:1,vendedor_nombre:"Admin",
+            tipo_objeto:"pedido_proveedor",objeto_id:pedidoId,
+            objeto_desc:it.nombre_proveedor||(p?p.nombre:"Producto"),
+            categoria:"stock",
+            titulo:"Faltante parcial en pedido proveedor",
+            descripcion:"Parcial: "+(it.nombre_proveedor||(p?p.nombre:""))+
+              " — llegaron "+cantOk+" de "+(it.cantidad_pedida||0)+"u pedidas. Faltan "+cantFaltParcial+"u. Pedido #"+pedidoId+
+              (it.observacion?" ("+it.observacion+")":""),
+            estado:"pendiente",prioridad:"alta",
+            monto_reclamado:0,periodo:periodoActual||""
+          }));
+        }
+        return Promise.all(proms3);
       }).then(function(){addedCount++;if(it.cantidad_fallada>0)crearIncidenciaFallada(it,it.cantidad_fallada);processNext();}).catch(function(){processNext();});
     } else {
       // Faltante: item didn't arrive — discount en_viaje AND create incidencia
@@ -13098,12 +13117,75 @@ function recCrearReclamo(itemId,tipo){
 function cambiarEstadoReclamo(id, estado){
   var patch={estado:estado,updated_at:new Date().toISOString()};
   if(estado==='aceptado'||estado==='rechazado') patch.resuelto_at=new Date().toISOString();
+  
+  // Si se acepta un reclamo de stock/faltante, preguntar si agregar a stock
+  if(estado==='aceptado'){
+    apiGet('reclamos','select=*&id=eq.'+id).then(function(data){
+      var rec=data&&data[0];
+      if(!rec){apiPatch('reclamos',patch,'id=eq.'+id).then(function(){toast('Reclamo → Aceptado','tok');loadReclamos();});return;}
+      
+      apiPatch('reclamos',patch,'id=eq.'+id).then(function(){
+        toast('Reclamo aceptado ✅','tok');
+        
+        // Si el reclamo tiene producto asociado y es de stock, ofrecer agregar a stock
+        if(rec.categoria==='stock'&&rec.objeto_id){
+          // Buscar el item del pedido para obtener producto_id
+          apiGet('pedidos_proveedor_items','select=*&id=eq.'+rec.objeto_id).then(function(items){
+            var item=items&&items[0];
+            var prodId=item&&item.producto_id;
+            if(!prodId){
+              // Intentar con objeto_id directo como producto_id
+              loadReclamos();return;
+            }
+            var cantStr=prompt('¿Cuántas unidades agregar al stock por este reclamo?','1');
+            var cant=parseInt(cantStr)||0;
+            if(cant<=0){loadReclamos();return;}
+            
+            var p=prods.find(function(x){return x.id===prodId;});
+            apiGet('productos','select=id,stock_actual,en_viaje&id=eq.'+prodId).then(function(rows){
+              var r=rows&&rows[0];
+              var stockEx=r?r.stock_actual||0:p?p.stock_actual||0:0;
+              var ns=stockEx+cant;
+              var nv=Math.max(0,(r?r.en_viaje||0:p?p.en_viaje||0:0)-cant);
+              if(p){p.stock_actual=ns;p.en_viaje=nv;}
+              return Promise.all([
+                apiPatch('productos',{stock_actual:ns,en_viaje:nv},'id=eq.'+prodId),
+                apiPost('movimientos_stock',{
+                  producto_id:prodId,
+                  producto_nombre:p?p.nombre:(rec.objeto_desc||''),
+                  tipo:'proveedor',
+                  cantidad:cant,
+                  stock_antes:stockEx,
+                  stock_despues:ns,
+                  motivo:'Stock agregado por reclamo aceptado — '+rec.titulo,
+                  usuario:'admin',
+                  periodo:periodoActual||''
+                }),
+                apiPatch('reclamos',{descripcion:(rec.descripcion||'')+' | Stock agregado: '+cant+'u'},'id=eq.'+id)
+              ]);
+            }).then(function(){
+              toast(cant+'u agregadas al stock ✅','tok');
+              loadReclamos();
+              apiGet('productos','select=*&activo=is.true&order=empresa,nombre&limit=2000').then(function(d){
+                if(Array.isArray(d))prods=d;
+              });
+            }).catch(function(e){toast('Error agregando stock: '+(e&&e.message?e.message:''),'terr');loadReclamos();});
+          }).catch(function(){loadReclamos();});
+        } else {
+          loadReclamos();
+        }
+      });
+    });
+    return;
+  }
+  
   apiPatch('reclamos',patch,'id=eq.'+id).then(function(){
     var labels={en_revision:'En revisión',aceptado:'Aceptado',rechazado:'Rechazado',cancelado:'Cancelado'};
-    toast('Reclamo → '+labels[estado],'tok');
+    toast('Reclamo → '+(labels[estado]||estado),'tok');
     loadReclamos();
   });
 }
+
 
 function cambiarPrioridadReclamo(id, prioridad){
   apiPatch('reclamos',{prioridad:prioridad,updated_at:new Date().toISOString()},'id=eq.'+id).then(function(){
