@@ -12995,8 +12995,9 @@ function recRenderFaltantes(el,d){
       '<div style="display:flex;gap:.35rem;flex-wrap:wrap;margin-top:.7rem">'+
         (catProd?
           '<button class="btn btn-a" onclick="recAgregarFaltante('+it.id+','+catProd.id+','+cantFalt+',\''+catProd.nombre.replace(/'/g,'')+'\',\''+it.nombre_proveedor.replace(/'/g,'')+'\')" style="font-size:.7rem;background:var(--green);color:#000;font-weight:600">📥 Llegó — Agregar '+cantFalt+'u al stock</button>':
-          '<button class="btn btn-g" onclick="recMachearFaltante('+it.id+')" style="font-size:.7rem;color:var(--cyan)">🔗 Vincular al catálogo primero</button>'
+          '<button class="btn btn-g" onclick="recMachearFaltante('+it.id+')" style="font-size:.7rem;color:var(--cyan)">🔗 Vincular al catálogo</button>'
         )+
+        (catProd?'<button class="btn btn-g" onclick="recMachearFaltante('+it.id+')" style="font-size:.7rem;color:var(--cyan)">✏️ Cambiar vínculo</button>':'')+
         '<button class="btn btn-g" onclick="recAgregarParcialFaltante('+it.id+','+(catProd?catProd.id:'null')+','+cantFalt+')" style="font-size:.7rem">📥 Llegó parcialmente</button>'+
         '<button class="btn btn-red" onclick="recMarcarFaltanteDefinitivo('+it.id+')" style="font-size:.7rem">✗ Definitivamente no llega</button>'+
       '</div>'+
@@ -13122,22 +13123,29 @@ function recMarcarFaltanteDefinitivo(itemId){
 }
 
 function recMachearFaltante(itemId){
-  // Abrir búsqueda de producto del catálogo
-  var q=prompt('Buscá el producto en el catálogo:');
-  if(!q)return;
-  var ws=q.toLowerCase().split(' ').filter(Boolean);
   var allProds=typeof prods!=='undefined'&&prods?prods:[];
+  var busq=prompt('Buscá el producto en el catálogo (escribí parte del nombre):');
+  if(busq===null)return;
+  busq=busq.trim();
+  if(!busq){toast('Ingresá un término de búsqueda','twarn');return;}
+  var ws=busq.toLowerCase().split(' ').filter(Boolean);
   var matches=allProds.filter(function(p){
     var h=(p.nombre||'').toLowerCase();
     return ws.every(function(w){return h.indexOf(w)>=0;});
-  }).slice(0,5);
-  if(!matches.length){toast('Sin resultados para "'+q+'"','twarn');return;}
-  var opciones=matches.map(function(p,i){return (i+1)+'. '+p.nombre;}).join('\n');
-  var sel=parseInt(prompt('Elegí el número:\n'+opciones));
-  if(!sel||!matches[sel-1])return;
+  }).slice(0,8);
+  if(!matches.length){toast('Sin resultados para "'+busq+'" — probá con menos palabras','twarn');return;}
+  var opciones=matches.map(function(p,i){
+    return (i+1)+'. '+p.nombre+(p.stock_actual!==undefined?' (stock: '+p.stock_actual+'u)':'');
+  }).join('\n');
+  var sel=parseInt(prompt('Resultados — elegí el número:\n\n'+opciones));
+  if(!sel||isNaN(sel)||!matches[sel-1])return;
   var prod=matches[sel-1];
+  if(!confirm('Vincular "'+prod.nombre+'" a este item?'))return;
   apiPatch('pedidos_proveedor_items',{producto_id:prod.id},'id=eq.'+itemId)
-    .then(function(){toast('Vinculado a: '+prod.nombre+' ✅','tok');loadReclamos();})
+    .then(function(){
+      toast('✅ Vinculado a: '+prod.nombre,'tok');
+      loadReclamos();
+    })
     .catch(function(e){toast('Error: '+e.message,'terr');});
 }
 
@@ -18226,20 +18234,22 @@ function incLoad(){
   Promise.all([
     apiGet('pedidos_proveedor_items',
       'select=id,pedido_id,nombre_proveedor,cantidad_pedida,cantidad_recibida,cantidad_fallada,producto_id,estado_item,observacion'+
-      '&estado_item=in.(faltante,fallado)&limit=500'),
+      '&estado_item=in.(faltante,fallado,pendiente_catalogo)&limit=500'),
     apiGet('pedidos_proveedor','select=id,nro_pedido,proveedor&limit=500')
   ]).then(function(res){
     var items=Array.isArray(res[0])?res[0]:[];
     var peds=Array.isArray(res[1])?res[1]:[];
     var pedMap={};peds.forEach(function(p){pedMap[p.id]=p;});
     _incData={
-      falt:items.filter(function(i){return i.estado_item==='faltante';}),
+      falt:items.filter(function(i){return i.estado_item==='faltante'||i.estado_item==='pendiente_catalogo';}),
       fall:items.filter(function(i){return i.estado_item==='fallado';}),
       devs:[],hist:[],pedMap:pedMap
     };
+    var pendCat=items.filter(function(i){return i.estado_item==='pendiente_catalogo';});
     var sEl=document.getElementById('incStats');
     if(sEl)sEl.innerHTML=
-      mkStatCard('Faltantes','cyan',_incData.falt.length,'de pedidos')+
+      mkStatCard('Faltantes','cyan',_incData.falt.length-pendCat.length,'de pedidos')+
+      (pendCat.length?mkStatCard('Pend. catálogo','yel',pendCat.length,'sin vincular'):'')+
       mkStatCard('Fallados','red',_incData.fall.length,'con problemas')+
       mkStatCard('Devoluciones','yel',_incData.devs.length,'pendientes')+
       mkStatCard('Historial','green',0,'resueltos');
@@ -18267,16 +18277,21 @@ function incRenderFalt(panel){
   }
   panel.innerHTML=_incData.falt.map(function(it){
     var ped=_incData.pedMap[it.pedido_id];
+    var esPendCat=it.estado_item==='pendiente_catalogo';
     var cantFalt=Math.max(0,(it.cantidad_pedida||0)-(it.cantidad_recibida||0));
     var prod=(it.producto_id&&typeof prods!=='undefined'&&prods)?prods.find(function(p){return p.id===it.producto_id;}):null;
     var sA=prod?prod.stock_actual||0:0;
     var nV=prod?prod.en_viaje||0:0;
-    return '<div class="tbl-wrap" style="margin-bottom:.8rem;border-left:3px solid var(--cyan)">'+
+    var borderColor=esPendCat?'var(--yel)':'var(--cyan)';
+    return '<div class="tbl-wrap" style="margin-bottom:.8rem;border-left:3px solid '+borderColor+'">'+
 
       // HEADER
       '<div style="display:flex;justify-content:space-between;align-items:flex-start;gap:.5rem;flex-wrap:wrap;margin-bottom:.7rem">'+
         '<div>'+
-          '<div style="font-size:.88rem;font-weight:700;color:var(--tx)">'+it.nombre_proveedor+'</div>'+
+          '<div style="display:flex;align-items:center;gap:.4rem">'+
+            '<div style="font-size:.88rem;font-weight:700;color:var(--tx)">'+it.nombre_proveedor+'</div>'+
+            (esPendCat?'<span style="font-size:.55rem;font-weight:700;background:rgba(240,192,64,.15);color:var(--yel);border:1px solid var(--yel);border-radius:3px;padding:.05rem .3rem">PEND. CATÁLOGO</span>':'')+
+          '</div>'+
           '<div style="font-size:.65rem;color:var(--tx3);margin-top:.15rem">'+
             (ped?'📦 '+ped.nro_pedido+' — '+ped.proveedor:'Pedido #'+it.pedido_id)+
           '</div>'+
@@ -18284,9 +18299,9 @@ function incRenderFalt(panel){
             '<div style="font-size:.65rem;color:var(--green);margin-top:.15rem">✅ '+prod.nombre+' &bull; Stock: '+sA+'u &bull; En viaje: '+nV+'u</div>':
             '<div style="font-size:.65rem;color:var(--yel);margin-top:.15rem">⚠️ Sin vincular al catálogo</div>')+
         '</div>'+
-        '<div style="text-align:center;background:rgba(0,188,212,.1);border-radius:8px;padding:.4rem .9rem;flex-shrink:0">'+
-          '<div style="font-size:.58rem;color:var(--tx3)">Faltante</div>'+
-          '<div style="font-size:1.3rem;font-weight:700;color:var(--cyan)">'+cantFalt+'u</div>'+
+        '<div style="text-align:center;background:'+(esPendCat?'rgba(240,192,64,.1)':'rgba(0,188,212,.1)')+';border-radius:8px;padding:.4rem .9rem;flex-shrink:0">'+
+          '<div style="font-size:.58rem;color:var(--tx3)">'+(esPendCat?'Pend. cat.':'Faltante')+'</div>'+
+          '<div style="font-size:1.3rem;font-weight:700;color:'+(esPendCat?'var(--yel)':'var(--cyan)')+'">'+cantFalt+'u</div>'+
         '</div>'+
       '</div>'+
 
@@ -18322,10 +18337,17 @@ function incRenderFalt(panel){
         '</div>'+
       '</div>'+
 
-      // CERRAR
-      '<button onclick="incNoLlega('+it.id+')" class="btn" style="font-size:.7rem;color:var(--red);border-color:var(--red)">'+
-        '✗ Definitivamente no llegará — cerrar incidencia'+
-      '</button>'+
+      // VINCULAR / CAMBIAR VÍNCULO
+      '<div style="display:flex;gap:.35rem;flex-wrap:wrap;margin-bottom:.5rem">'+
+        (prod?
+          '<button onclick="incMachear('+it.id+')" class="btn btn-g" style="font-size:.7rem;color:var(--cyan)">✏️ Cambiar vínculo al catálogo</button>':
+          '<button onclick="incMachear('+it.id+')" class="btn btn-g" style="font-size:.7rem;color:var(--cyan);font-weight:600">🔗 Vincular al catálogo</button>'
+        )+
+        (esPendCat&&prod?
+          '<button onclick="incAgregarStockDirecto('+it.id+','+prod.id+','+(cantFalt||it.cantidad_pedida||1)+',0)" class="btn" style="font-size:.7rem;background:var(--green);color:#000;font-weight:700">📥 Agregar al stock ahora</button>':
+          '')+
+        '<button onclick="incNoLlega('+it.id+')" class="btn" style="font-size:.7rem;color:var(--red);border-color:var(--red)">✗ No llegará — cerrar</button>'+
+      '</div>'+
 
     '</div>';
   }).join('');
