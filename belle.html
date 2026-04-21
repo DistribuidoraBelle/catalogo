@@ -229,8 +229,8 @@ td{padding:.35rem .5rem;font-size:.78rem;color:var(--tx2);vertical-align:middle;
   <div class="llogo">Distribuidora <span style="color:var(--acc)">Belle</span></div>
   <div class="lsub">Sistema de Gestion</div>
   <input type="text" id="lUser" placeholder="Usuario" autocomplete="off">
-  <input type="password" id="lPass" placeholder="Contrasena" onkeydown="if(event.key==='Enter')if(typeof doLogin!=='undefined')doLogin()">
-  <button class="lbtn" onclick="if(typeof doLogin!=='undefined')doLogin()">Ingresar</button>
+  <input type="password" id="lPass" placeholder="Contrasena" onkeydown="if(event.key==='Enter')doLogin()">
+  <button class="lbtn" onclick="doLogin()">Ingresar</button>
   <div class="lerr" id="lErr">Usuario o contrasena incorrectos</div>
 </div>
 </div>
@@ -2257,9 +2257,18 @@ function api(method,table,data,filters){
   return fetch(url,{method:method,headers:h,body:data?JSON.stringify(data):undefined})
     .then(function(r){
       if(r.status===204)return null;
-      return r.json();
+      return r.json().then(function(body){
+        if(r.status>=400){
+          console.error("API HTTP "+r.status,method,table,body);
+          throw new Error((body&&body.message)||('HTTP '+r.status+' en '+table));
+        }
+        return body;
+      });
     })
-    .catch(function(e){console.error("API err",method,table,e);return null;});
+    .catch(function(e){
+      if(e&&e.message&&e.message.indexOf('HTTP ')===0)throw e; // re-throw HTTP errors
+      console.error("API err",method,table,e);return null;
+    });
 }
 function apiGet(t,f){return api("GET",t,null,f);}
 function apiPost(t,d){return api("POST",t,d);}
@@ -4928,9 +4937,11 @@ function renderMovimientos(){
 
   var colores={venta:"var(--green)",reserva:"var(--cyan)",devolucion:"var(--yel)",
     cancelacion:"var(--red)",proveedor:"var(--acc)",ajuste:"var(--tx3)",
-    salida:"var(--red)",entrada:"var(--green)"};
+    salida:"var(--red)",entrada:"var(--green)",
+    ingreso_faltante:"var(--green)",baja_fallado:"var(--red)"};
   var iconos={venta:"💰",reserva:"🔒",devolucion:"↩️",cancelacion:"❌",
-    proveedor:"📦",ajuste:"⚙️",salida:"📤",entrada:"📥"};
+    proveedor:"📦",ajuste:"⚙️",salida:"📤",entrada:"📥",
+    ingreso_faltante:"📥",baja_fallado:"⚠️"};
 
   cont.innerHTML="";
 
@@ -12908,7 +12919,7 @@ function loadReclamos(){
     apiGet('reclamos','select=*&estado=in.(aceptado,rechazado,cancelado)&order=updated_at.desc&limit=200'),
     apiGet('pedidos_proveedor_items','select=id,pedido_id,nombre_proveedor,cantidad_pedida,cantidad_recibida,cantidad_fallada,producto_id,estado_item,precio_usd&estado_item=in.(faltante,fallado,pendiente_catalogo,parcial)&limit=500'),
     apiGet('pedidos_proveedor','select=id,nro_pedido,proveedor&order=created_at.desc&limit=200'),
-    apiGet('pedidos_proveedor_items','select=id,pedido_id,nombre_proveedor,cantidad_pedida,cantidad_recibida,estado_item,updated_at&estado_item=in.(en_stock,cancelado,resuelto)&order=updated_at.desc&limit=200')
+    apiGet('pedidos_proveedor_items','select=id,pedido_id,nombre_proveedor,cantidad_pedida,cantidad_recibida,estado_item,created_at&estado_item=in.(en_stock,cancelado,resuelto)&order=created_at.desc&limit=200').catch(function(){return[];})
   ]).then(function(res){
     var reclamos=Array.isArray(res[0])?res[0]:[];
     var recHistorial=Array.isArray(res[1])?res[1]:[];
@@ -13096,7 +13107,8 @@ function recAgregarFaltante(itemId,prodId,cant,prodNom,itemNom){
   Promise.all([
     patchStockFresco(prodId,{stock_actual:+cant,en_viaje:-cant},'Agregar faltante'),
     apiPatch('pedidos_proveedor_items',{estado_item:'en_stock',cantidad_recibida:cant},'id=eq.'+itemId),
-    apiPost('movimientos_stock',{producto_id:prodId,producto_nombre:prodNom,tipo:'ingreso_faltante',cantidad:cant,stock_antes:stockAntes,stock_despues:nuevoStock,motivo:'Llegó faltante de pedido: '+(itemNom||prodNom),usuario:'admin',periodo:periodoActual||''}).catch(function(){})
+    apiPost('movimientos_stock',{producto_id:prodId,producto_nombre:prodNom,tipo:'ingreso_faltante',cantidad:cant,stock_antes:stockAntes,stock_despues:nuevoStock,motivo:'Llegó faltante de pedido: '+(itemNom||prodNom),usuario:'admin',periodo:periodoActual||''}).catch(function(e){console.error('mov error:',e);}),
+    apiPost('reclamos',{vendedor_id:1,vendedor_nombre:'Admin',tipo_objeto:'pedido_proveedor',objeto_id:itemId,objeto_desc:prodNom,categoria:'stock',titulo:'Faltante resuelto — llegó al stock',descripcion:(cant+'u de '+(itemNom||prodNom)+' agregadas al stock'),estado:'aceptado',prioridad:'normal',periodo:periodoActual||''}).catch(function(){})
   ]).then(function(){
     toast(cant+'u de '+prodNom+' agregadas al stock ✅','tok');
     loadReclamos();
@@ -13119,13 +13131,13 @@ function recAgregarParcialFaltante(itemId,prodId,cantMax){
   Promise.all([
     patchStockFresco(prodId,{stock_actual:+cant,en_viaje:-cant},'Agregar parcial faltante'),
     apiPatch('pedidos_proveedor_items',{cantidad_recibida:cant,estado_item:quedanFaltando>0?'faltante':'en_stock'},'id=eq.'+itemId),
-    apiPost('movimientos_stock',{producto_id:prodId,tipo:'ingreso_faltante',cantidad:cant,stock_antes:stockAntes,stock_despues:nuevoStock,motivo:'Llegó faltante parcial ('+quedanFaltando+' todavía faltan)',usuario:'admin',periodo:periodoActual||''}).catch(function(){})
+    apiPost('movimientos_stock',{producto_id:prodId,tipo:'ingreso_faltante',cantidad:cant,stock_antes:stockAntes,stock_despues:nuevoStock,motivo:'Llegó faltante parcial ('+quedanFaltando+' todavía faltan)',usuario:'admin',periodo:periodoActual||''}).catch(function(e){console.error('mov error:',e);}),
+    apiPost('reclamos',{vendedor_id:1,vendedor_nombre:'Admin',tipo_objeto:'pedido_proveedor',objeto_id:itemId,objeto_desc:prodNom||'Producto',categoria:'stock',titulo:'Faltante parcial resuelto',descripcion:(cant+'u agregadas. Quedan '+quedanFaltando+'u pendientes.'),estado:'aceptado',prioridad:'normal',periodo:periodoActual||''}).catch(function(){})
   ]).then(function(){
     toast(cant+'u agregadas. Quedan '+quedanFaltando+'u pendientes.','tok');
     loadReclamos();
     if(typeof renderStock==='function')renderStock();
   }).catch(function(e){toast('Error: '+e.message,'terr');});
-}
 }
 
 function recMarcarFaltanteDefinitivo(itemId){
@@ -13138,6 +13150,7 @@ function recMarcarFaltanteDefinitivo(itemId){
     if(it&&it.producto_id&&cantRestante>0){
       ops.push(patchStockFresco(it.producto_id,{en_viaje:-cantRestante},'Faltante definitivo — no llega'));
     }
+    ops.push(apiPost('reclamos',{vendedor_id:1,vendedor_nombre:'Admin',tipo_objeto:'pedido_proveedor',objeto_id:itemId,objeto_desc:(it&&it.nombre_proveedor)||'Producto',categoria:'stock',titulo:'Faltante — definitivamente no llega',descripcion:'Item marcado como definitivamente no llegará. '+(cantRestante>0?cantRestante+'u descontadas de en viaje.':''),estado:'cancelado',prioridad:'normal',periodo:periodoActual||''}).catch(function(){}));
     return Promise.all(ops);
   }).then(function(){toast('Marcado como no llegará — en viaje actualizado','tok');loadReclamos();})
     .catch(function(e){toast('Error: '+e.message,'terr');});
@@ -18574,70 +18587,32 @@ function moverPestana(id,delta){
 
 
 function recRenderHistorialReclamos(el,d){
-  var hist=(d.recHistorial||[]);
-  var resueltos=(d.itemsResueltos||[]);
-  var pedMap=d.pedMap||{};
-
-  if(!hist.length&&!resueltos.length){
+  var hist=(d.recHistorial||[]).filter(function(r){return r.tipo_objeto==='pedido_proveedor'||r.categoria==='stock';});
+  if(!hist.length){
     el.innerHTML="<div class='empty'>Sin reclamos cerrados aún</div>";
     return;
   }
-
-  var h='';
-
-  // Items de pedidos resueltos (faltantes que llegaron, cancelados, etc.)
-  if(resueltos.length){
-    h+='<div style="font-size:.72rem;font-weight:600;color:var(--tx3);margin-bottom:.5rem">'+resueltos.length+' item(s) de pedidos resueltos</div>';
-    h+=resueltos.map(function(it){
-      var ped=pedMap[it.pedido_id];
-      var fecha=it.updated_at?new Date(it.updated_at).toLocaleDateString('es-AR',{day:'2-digit',month:'2-digit',year:'2-digit',timeZone:'America/Argentina/Buenos_Aires'}):'—';
-      var estadoLabel={en_stock:'✅ Agregado al stock',cancelado:'✗ No llegó',resuelto:'✅ Resuelto'}[it.estado_item]||it.estado_item;
-      var estadoColor={en_stock:'var(--green)',cancelado:'var(--red)',resuelto:'var(--green)'}[it.estado_item]||'var(--tx3)';
-      var cantRec=it.cantidad_recibida||0;
-      return '<div class="tbl-wrap" style="margin-bottom:.4rem;padding:.6rem .9rem;border-left:3px solid '+estadoColor+';opacity:.85">'+
-        '<div style="display:flex;justify-content:space-between;align-items:flex-start;gap:.4rem;flex-wrap:wrap">'+
-          '<div>'+
-            '<div style="font-size:.78rem;font-weight:600;color:var(--tx)">'+it.nombre_proveedor+'</div>'+
-            '<div style="font-size:.63rem;color:var(--tx3);margin-top:.1rem">'+
-              (ped?'📦 '+ped.nro_pedido+' — '+ped.proveedor:'Pedido #'+it.pedido_id)+
-              ' &bull; '+fecha+
-              (cantRec?' &bull; Recibido: '+cantRec+'u':'')+
-            '</div>'+
+  var estMap={
+    aceptado:"<span class='badge' style='background:var(--green);color:#000'>✅ Resuelto</span>",
+    rechazado:"<span class='badge bg-red'>Rechazado</span>",
+    cancelado:"<span class='badge' style='background:var(--bd)'>No llegó</span>"
+  };
+  el.innerHTML=hist.map(function(r){
+    var fecha=new Date(r.created_at).toLocaleDateString('es-AR',{day:'2-digit',month:'2-digit',year:'2-digit',timeZone:'America/Argentina/Buenos_Aires'});
+    var bord=r.estado==='aceptado'?'var(--green)':r.estado==='cancelado'?'var(--bd)':'var(--red)';
+    return '<div class="tbl-wrap" style="margin-bottom:.5rem;padding:.65rem .9rem;border-left:3px solid '+bord+';opacity:.85">'+
+      '<div style="display:flex;justify-content:space-between;align-items:flex-start;gap:.4rem;flex-wrap:wrap">'+
+        '<div>'+
+          '<div style="font-size:.78rem;font-weight:600;color:var(--tx)">'+r.titulo+'</div>'+
+          '<div style="font-size:.63rem;color:var(--tx3);margin-top:.1rem">'+
+            (r.objeto_desc||'')+' &bull; '+fecha+
           '</div>'+
-          '<span style="font-size:.68rem;font-weight:600;color:'+estadoColor+'">'+estadoLabel+'</span>'+
+          (r.descripcion?'<div style="font-size:.68rem;color:var(--tx2);margin-top:.2rem">'+r.descripcion+'</div>':'')+
         '</div>'+
-      '</div>';
-    }).join('');
-  }
-
-  // Reclamos formales cerrados
-  if(hist.length){
-    h+='<div style="font-size:.72rem;font-weight:600;color:var(--tx3);margin:'+(resueltos.length?'.8rem':0)+' 0 .5rem">'+hist.length+' reclamo(s) cerrados</div>';
-    var estMap={
-      aceptado:"<span class='badge bg-green'>Aceptado ✓</span>",
-      rechazado:"<span class='badge bg-red'>Rechazado</span>",
-      cancelado:"<span class='badge' style='background:var(--bd)'>Cancelado</span>"
-    };
-    h+=hist.map(function(r){
-      var fecha=new Date(r.created_at).toLocaleDateString('es-AR',{day:'2-digit',month:'2-digit',year:'2-digit',timeZone:'America/Argentina/Buenos_Aires'});
-      var bord=r.estado==='aceptado'?'var(--green)':'var(--red)';
-      return '<div class="tbl-wrap" style="margin-bottom:.5rem;padding:.65rem .9rem;border-left:3px solid '+bord+';opacity:.85">'+
-        '<div style="display:flex;justify-content:space-between;align-items:flex-start;gap:.4rem;flex-wrap:wrap">'+
-          '<div>'+
-            '<div style="font-size:.78rem;font-weight:600;color:var(--tx)">'+r.titulo+'</div>'+
-            '<div style="font-size:.63rem;color:var(--tx3);margin-top:.1rem">'+
-              (r.vendedor_nombre||'')+' &bull; '+fecha+
-              (r.objeto_desc?' &bull; '+r.objeto_desc:'')+
-            '</div>'+
-            (r.respuesta_admin?'<div style="font-size:.68rem;color:var(--acc);margin-top:.2rem">Admin: '+r.respuesta_admin+'</div>':'')+
-          '</div>'+
-          estMap[r.estado]+
-        '</div>'+
-      '</div>';
-    }).join('');
-  }
-
-  el.innerHTML=h;
+        (estMap[r.estado]||'')+
+      '</div>'+
+    '</div>';
+  }).join('');
 }
 
 
