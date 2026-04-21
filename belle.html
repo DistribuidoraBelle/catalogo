@@ -12907,12 +12907,14 @@ function loadReclamos(){
     apiGet('reclamos',q),
     apiGet('reclamos','select=*&estado=in.(aceptado,rechazado,cancelado)&order=updated_at.desc&limit=200'),
     apiGet('pedidos_proveedor_items','select=id,pedido_id,nombre_proveedor,cantidad_pedida,cantidad_recibida,cantidad_fallada,producto_id,estado_item,precio_usd&estado_item=in.(faltante,fallado,pendiente_catalogo,parcial)&limit=500'),
-    apiGet('pedidos_proveedor','select=id,nro_pedido,proveedor&order=created_at.desc&limit=200')
+    apiGet('pedidos_proveedor','select=id,nro_pedido,proveedor&order=created_at.desc&limit=200'),
+    apiGet('pedidos_proveedor_items','select=id,pedido_id,nombre_proveedor,cantidad_pedida,cantidad_recibida,estado_item,updated_at&estado_item=in.(en_stock,cancelado,resuelto)&order=updated_at.desc&limit=200')
   ]).then(function(res){
     var reclamos=Array.isArray(res[0])?res[0]:[];
     var recHistorial=Array.isArray(res[1])?res[1]:[];
     var itemsProblema=Array.isArray(res[2])?res[2]:[];
     var pedidos=Array.isArray(res[3])?res[3]:[];
+    var itemsResueltos=Array.isArray(res[4])?res[4]:[];
     var pedMap={};pedidos.forEach(function(p){pedMap[p.id]=p;});
 
     // Stats globales — excluir reclamos automáticos de pedido_proveedor (ya se muestran arriba como items)
@@ -12935,7 +12937,7 @@ function loadReclamos(){
       mkStatCard('Reclamos rev.','acc',stats.en_revision,'');
 
     // Guardar datos globales para tabs
-    window._recData={reclamos:reclamos,recHistorial:recHistorial,faltantes:faltantesItems,fallados:falladosItems,pedMap:pedMap};
+    window._recData={reclamos:reclamos,recHistorial:recHistorial,faltantes:faltantesItems,fallados:falladosItems,pedMap:pedMap,itemsResueltos:itemsResueltos};
     recRenderTab();
   }).catch(function(e){
     el.innerHTML="<div class='empty'>Error: "+e.message+"</div>";
@@ -13089,10 +13091,12 @@ function recRenderFiltrado(el,reclamos,tipo){
 function recAgregarFaltante(itemId,prodId,cant,prodNom,itemNom){
   if(!confirm('Agregar '+cant+'u de "'+prodNom+'" al stock?\nEstas unidades faltantes llegaron.'))return;
   var p=typeof prods!=='undefined'&&prods?prods.find(function(x){return x.id===prodId;}):null;
+  var stockAntes=p?p.stock_actual||0:0;
+  var nuevoStock=stockAntes+cant;
   Promise.all([
     patchStockFresco(prodId,{stock_actual:+cant,en_viaje:-cant},'Agregar faltante'),
     apiPatch('pedidos_proveedor_items',{estado_item:'en_stock',cantidad_recibida:cant},'id=eq.'+itemId),
-    apiPost('movimientos_stock',{producto_id:prodId,producto_nombre:prodNom,tipo:'ingreso_faltante',cantidad:cant,stock_antes:stockAntes,stock_despues:nuevoStock,motivo:'Llegó faltante de pedido: '+itemNom,usuario:'admin',periodo:periodoActual||''})
+    apiPost('movimientos_stock',{producto_id:prodId,producto_nombre:prodNom,tipo:'ingreso_faltante',cantidad:cant,stock_antes:stockAntes,stock_despues:nuevoStock,motivo:'Llegó faltante de pedido: '+(itemNom||prodNom),usuario:'admin',periodo:periodoActual||''}).catch(function(){})
   ]).then(function(){
     toast(cant+'u de '+prodNom+' agregadas al stock ✅','tok');
     loadReclamos();
@@ -13109,16 +13113,19 @@ function recAgregarParcialFaltante(itemId,prodId,cantMax){
     return;
   }
   var p=typeof prods!=='undefined'&&prods?prods.find(function(x){return x.id===prodId;}):null;
+  var stockAntes=p?p.stock_actual||0:0;
+  var nuevoStock=stockAntes+cant;
   var quedanFaltando=cantMax-cant;
   Promise.all([
     patchStockFresco(prodId,{stock_actual:+cant,en_viaje:-cant},'Agregar parcial faltante'),
     apiPatch('pedidos_proveedor_items',{cantidad_recibida:cant,estado_item:quedanFaltando>0?'faltante':'en_stock'},'id=eq.'+itemId),
-    apiPost('movimientos_stock',{producto_id:prodId,tipo:'ingreso_faltante',cantidad:cant,stock_antes:stockAntes,stock_despues:nuevoStock,motivo:'Llegó faltante parcial ('+quedanFaltando+' todavía faltan)',usuario:'admin',periodo:periodoActual||''})
+    apiPost('movimientos_stock',{producto_id:prodId,tipo:'ingreso_faltante',cantidad:cant,stock_antes:stockAntes,stock_despues:nuevoStock,motivo:'Llegó faltante parcial ('+quedanFaltando+' todavía faltan)',usuario:'admin',periodo:periodoActual||''}).catch(function(){})
   ]).then(function(){
     toast(cant+'u agregadas. Quedan '+quedanFaltando+'u pendientes.','tok');
     loadReclamos();
     if(typeof renderStock==='function')renderStock();
   }).catch(function(e){toast('Error: '+e.message,'terr');});
+}
 }
 
 function recMarcarFaltanteDefinitivo(itemId){
@@ -13167,10 +13174,12 @@ function recMachearFaltante(itemId){
 function recDescontarFallado(itemId,prodId,cant,prodNom){
   if(!confirm('Descontar '+cant+'u falladas del stock de "'+prodNom+'"?'))return;
   var p=typeof prods!=='undefined'&&prods?prods.find(function(x){return x.id===prodId;}):null;
+  var stockAntes=p?p.stock_actual||0:0;
+  var nuevoStock=Math.max(0,stockAntes-cant);
   Promise.all([
     patchStockFresco(prodId,{stock_actual:-cant},'Descontar fallados'),
     apiPatch('pedidos_proveedor_items',{estado_item:'resuelto'},'id=eq.'+itemId),
-    apiPost('movimientos_stock',{producto_id:prodId,producto_nombre:prodNom,tipo:'baja_fallado',cantidad:-cant,stock_antes:stockAntes,stock_despues:nuevoStock,motivo:'Baja por fallado en pedido proveedor',usuario:'admin',periodo:periodoActual||''})
+    apiPost('movimientos_stock',{producto_id:prodId,producto_nombre:prodNom,tipo:'baja_fallado',cantidad:-cant,stock_antes:stockAntes,stock_despues:nuevoStock,motivo:'Baja por fallado en pedido proveedor',usuario:'admin',periodo:periodoActual||''}).catch(function(){})
   ]).then(function(){
     toast(cant+'u descontadas del stock','tok');
     loadReclamos();
@@ -18566,32 +18575,69 @@ function moverPestana(id,delta){
 
 function recRenderHistorialReclamos(el,d){
   var hist=(d.recHistorial||[]);
-  if(!hist.length){
+  var resueltos=(d.itemsResueltos||[]);
+  var pedMap=d.pedMap||{};
+
+  if(!hist.length&&!resueltos.length){
     el.innerHTML="<div class='empty'>Sin reclamos cerrados aún</div>";
     return;
   }
-  var estMap={
-    aceptado:"<span class='badge bg-green'>Aceptado ✓</span>",
-    rechazado:"<span class='badge bg-red'>Rechazado</span>",
-    cancelado:"<span class='badge' style='background:var(--bd)'>Cancelado</span>"
-  };
-  el.innerHTML=hist.map(function(r){
-    var fecha=new Date(r.created_at).toLocaleDateString('es-AR',{day:'2-digit',month:'2-digit',year:'2-digit',timeZone:'America/Argentina/Buenos_Aires'});
-    var bord=r.estado==='aceptado'?'var(--green)':'var(--red)';
-    return '<div class="tbl-wrap" style="margin-bottom:.5rem;padding:.65rem .9rem;border-left:3px solid '+bord+';opacity:.85">'+
-      '<div style="display:flex;justify-content:space-between;align-items:flex-start;gap:.4rem;flex-wrap:wrap">'+
-        '<div>'+
-          '<div style="font-size:.78rem;font-weight:600;color:var(--tx)">'+r.titulo+'</div>'+
-          '<div style="font-size:.63rem;color:var(--tx3);margin-top:.1rem">'+
-            (r.vendedor_nombre||'')+' &bull; '+fecha+
-            (r.objeto_desc?' &bull; '+r.objeto_desc:'')+
+
+  var h='';
+
+  // Items de pedidos resueltos (faltantes que llegaron, cancelados, etc.)
+  if(resueltos.length){
+    h+='<div style="font-size:.72rem;font-weight:600;color:var(--tx3);margin-bottom:.5rem">'+resueltos.length+' item(s) de pedidos resueltos</div>';
+    h+=resueltos.map(function(it){
+      var ped=pedMap[it.pedido_id];
+      var fecha=it.updated_at?new Date(it.updated_at).toLocaleDateString('es-AR',{day:'2-digit',month:'2-digit',year:'2-digit',timeZone:'America/Argentina/Buenos_Aires'}):'—';
+      var estadoLabel={en_stock:'✅ Agregado al stock',cancelado:'✗ No llegó',resuelto:'✅ Resuelto'}[it.estado_item]||it.estado_item;
+      var estadoColor={en_stock:'var(--green)',cancelado:'var(--red)',resuelto:'var(--green)'}[it.estado_item]||'var(--tx3)';
+      var cantRec=it.cantidad_recibida||0;
+      return '<div class="tbl-wrap" style="margin-bottom:.4rem;padding:.6rem .9rem;border-left:3px solid '+estadoColor+';opacity:.85">'+
+        '<div style="display:flex;justify-content:space-between;align-items:flex-start;gap:.4rem;flex-wrap:wrap">'+
+          '<div>'+
+            '<div style="font-size:.78rem;font-weight:600;color:var(--tx)">'+it.nombre_proveedor+'</div>'+
+            '<div style="font-size:.63rem;color:var(--tx3);margin-top:.1rem">'+
+              (ped?'📦 '+ped.nro_pedido+' — '+ped.proveedor:'Pedido #'+it.pedido_id)+
+              ' &bull; '+fecha+
+              (cantRec?' &bull; Recibido: '+cantRec+'u':'')+
+            '</div>'+
           '</div>'+
-          (r.respuesta_admin?'<div style="font-size:.68rem;color:var(--acc);margin-top:.2rem">Admin: '+r.respuesta_admin+'</div>':'')+
+          '<span style="font-size:.68rem;font-weight:600;color:'+estadoColor+'">'+estadoLabel+'</span>'+
         '</div>'+
-        estMap[r.estado]+
-      '</div>'+
-    '</div>';
-  }).join('');
+      '</div>';
+    }).join('');
+  }
+
+  // Reclamos formales cerrados
+  if(hist.length){
+    h+='<div style="font-size:.72rem;font-weight:600;color:var(--tx3);margin:'+(resueltos.length?'.8rem':0)+' 0 .5rem">'+hist.length+' reclamo(s) cerrados</div>';
+    var estMap={
+      aceptado:"<span class='badge bg-green'>Aceptado ✓</span>",
+      rechazado:"<span class='badge bg-red'>Rechazado</span>",
+      cancelado:"<span class='badge' style='background:var(--bd)'>Cancelado</span>"
+    };
+    h+=hist.map(function(r){
+      var fecha=new Date(r.created_at).toLocaleDateString('es-AR',{day:'2-digit',month:'2-digit',year:'2-digit',timeZone:'America/Argentina/Buenos_Aires'});
+      var bord=r.estado==='aceptado'?'var(--green)':'var(--red)';
+      return '<div class="tbl-wrap" style="margin-bottom:.5rem;padding:.65rem .9rem;border-left:3px solid '+bord+';opacity:.85">'+
+        '<div style="display:flex;justify-content:space-between;align-items:flex-start;gap:.4rem;flex-wrap:wrap">'+
+          '<div>'+
+            '<div style="font-size:.78rem;font-weight:600;color:var(--tx)">'+r.titulo+'</div>'+
+            '<div style="font-size:.63rem;color:var(--tx3);margin-top:.1rem">'+
+              (r.vendedor_nombre||'')+' &bull; '+fecha+
+              (r.objeto_desc?' &bull; '+r.objeto_desc:'')+
+            '</div>'+
+            (r.respuesta_admin?'<div style="font-size:.68rem;color:var(--acc);margin-top:.2rem">Admin: '+r.respuesta_admin+'</div>':'')+
+          '</div>'+
+          estMap[r.estado]+
+        '</div>'+
+      '</div>';
+    }).join('');
+  }
+
+  el.innerHTML=h;
 }
 
 
