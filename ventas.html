@@ -2217,23 +2217,32 @@ function confirmarCobro(pedId,btn){
     var nroOrden=ped.nro_orden||("WEB-"+pedId);
     var promises=[apiPatch("pedidos_catalogo",{confirmado_cobro:true,confirmado_at:new Date().toISOString(),estado:"cobrado"},"id=eq."+pedId)];
     if(Array.isArray(items))items.forEach(function(it){
+      // Registrar venta del item (combo o producto)
+      promises.push(apiPost("ventas",{vendedor_id:VENDEDOR_ID,producto_id:it.producto_id||null,producto_nombre:it.nombre,cantidad:it.qty||1,precio_unitario:it.precio||0,segmento:it.segmento||"x1",total:it.total||0,periodo:periodoActual,estado:"confirmada",origen:"catalogo",nro_orden:nroOrden,forma_cobro:"pendiente",descuento:0,descuento_motivo:""}));
+
+      if(it.isCombo&&it.combo_id){
+        // Combo: liberar reserva de cada producto desde BD — nunca cache
+        promises.push(
+          apiGet("combo_items","select=producto_id,cantidad&combo_id=eq."+it.combo_id).then(function(ci){
+            if(!Array.isArray(ci))return;
+            return Promise.all(ci.filter(function(cit){return cit.producto_id;}).map(function(cit){
+              var cant=(cit.cantidad||1)*(it.qty||1);
+              return patchStockFresco(cit.producto_id,{reserva:-cant,vendido_david:+cant},'Confirmar cobro combo web');
+            }));
+          })
+        );
+        return;
+      }
+
       var pid=it.producto_id;
       if(!pid||it.isDecan)return;
-      var p=prods.find(function(x){return x.id===pid;});
-      if(p){
-        var stockAntes=p.stock_actual||0;
-        var nuevaReserva=Math.max(0,(p.reserva||0)-(it.qty||1));
-        var nuevoVendido=(p.vendido_david||0)+(it.qty||1);
-        promises.push(patchStockFresco(pid,{reserva:-(it.qty||1),vendido_david:+(it.qty||1)},'Confirmar cobro pedido'));
-        // Registrar movimiento stock (venta desde reserva)
-        promises.push(apiPost("movimientos_stock",{
-          producto_id:pid,producto_nombre:it.nombre,tipo:"venta",
-          cantidad:it.qty||1,stock_antes:stockAntes,stock_despues:stockAntes,
-          motivo:"Venta pedido web "+nroOrden+" (desde reserva)",
-          usuario:VENDEDOR_NOMBRE||"vendedor",periodo:periodoActual
-        }));
-      }
-      promises.push(apiPost("ventas",{vendedor_id:VENDEDOR_ID,producto_id:pid,producto_nombre:it.nombre,cantidad:it.qty||1,precio_unitario:it.precio||0,segmento:it.segmento||"x1",total:it.total||0,periodo:periodoActual,estado:"confirmada",origen:"catalogo",nro_orden:nroOrden,forma_cobro:"pendiente",descuento:0,descuento_motivo:""}));
+      promises.push(patchStockFresco(pid,{reserva:-(it.qty||1),vendido_david:+(it.qty||1)},'Confirmar cobro pedido'));
+      promises.push(apiPost("movimientos_stock",{
+        producto_id:pid,producto_nombre:it.nombre,tipo:"venta",
+        cantidad:it.qty||1,
+        motivo:"Venta pedido web "+nroOrden+" (desde reserva)",
+        usuario:VENDEDOR_NOMBRE||"vendedor",periodo:periodoActual
+      }).catch(function(){}));
     });
     Promise.all(promises).then(function(){toast("Cobro confirmado!","tok");loadPedidosWeb();loadDineroData();renderCat();}).catch(function(){if(btn)btn.disabled=false;toast("Error al confirmar","terr");});
   });
