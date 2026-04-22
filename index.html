@@ -1829,47 +1829,41 @@ function sendWA(){
     window._sendingOrder=false;
     var waBtn=document.getElementById('waBtn');
     if(waBtn){waBtn.disabled=false;waBtn.style.opacity='';}
-    // Reservar stock desde BD fresca — evita errores por caché desactualizado
+    // Reservar stock — usar patchStockFresco para cada producto (lee BD fresca, nunca cache)
     var todosIds=[];
-    perfs.forEach(function(item){if(item.id&&!item.isCombo&&typeof item.id==='number')todosIds.push({id:item.id,qty:item.qty});});
-    allCartItems.filter(function(i){return i.isCombo;}).forEach(function(item){
-      // Buscar los items del combo desde combosPublicos usando comboId
-      var comboRef=combosPublicos.find(function(c){return c.id===item.comboId;});
-      if(comboRef&&comboRef.combo_items&&comboRef.combo_items.length){
-        comboRef.combo_items.forEach(function(ci){
-          if(ci.producto_id&&!ci.es_decan){
-            todosIds.push({id:ci.producto_id,qty:(ci.cantidad||1)*(item.qty||1)});
-          }
-        });
+    allCartItems.forEach(function(item){
+      if(item.isDecan)return; // decans no afectan stock
+      if(item.isCombo){
+        // Combo: buscar productos desde combosPublicos
+        var comboRef=combosPublicos.find(function(c){return c.id===item.comboId;});
+        if(comboRef&&comboRef.combo_items){
+          comboRef.combo_items.forEach(function(ci){
+            if(ci.producto_id&&!ci.es_decan){
+              todosIds.push({id:ci.producto_id,qty:(ci.cantidad||1)*(item.qty||1)});
+            }
+          });
+        }
+      } else {
+        // Producto normal — id siempre es número
+        if(item.id&&typeof item.id==='number'){
+          todosIds.push({id:item.id,qty:item.qty||1});
+        }
       }
     });
-    if(todosIds.length){
-      var ids=todosIds.map(function(x){return x.id;}).filter(function(v,i,a){return a.indexOf(v)===i;});
-      fetch(SB_URL+"/rest/v1/productos?id=in.("+ids.join(",")+")"+"&select=id,stock_actual,reserva",{
-        headers:{"apikey":SB_KEY,"Authorization":"Bearer "+SB_KEY}
-      }).then(function(r){return r.json();}).then(function(frescos){
-        frescos=Array.isArray(frescos)?frescos:[];
-        // Sumar cantidades por producto
-        var qtxProd={};
-        todosIds.forEach(function(x){
-          qtxProd[x.id]=(qtxProd[x.id]||0)+x.qty;
-        });
-        frescos.forEach(function(fp){
-          var qty=qtxProd[fp.id]||0;
-          if(!qty)return;
+    // Agrupar cantidades por producto (por si el mismo producto aparece en combo y suelto)
+    var qtxProd={};
+    todosIds.forEach(function(x){qtxProd[x.id]=(qtxProd[x.id]||0)+x.qty;});
+    // patchStockFresco por cada producto — atómico, lee BD fresca cada vez
+    Object.keys(qtxProd).forEach(function(pid){
+      var qty=qtxProd[pid];
+      api("GET","productos",null,"select=id,stock_actual,reserva&id=eq."+pid)
+        .then(function(rows){
+          var fp=rows&&rows[0];if(!fp)return;
           var ns=Math.max(0,(fp.stock_actual||0)-qty);
           var nr=(fp.reserva||0)+qty;
-          // Actualizar caché local
-          var p=allProds.find(function(x){return x.id===fp.id;});
-          if(p){p.stock_actual=ns;p.reserva=nr;}
-          fetch(SB_URL+"/rest/v1/productos?id=eq."+fp.id,{
-            method:"PATCH",
-            headers:{"Content-Type":"application/json","apikey":SB_KEY,"Authorization":"Bearer "+SB_KEY,"Prefer":"return=minimal"},
-            body:JSON.stringify({stock_actual:ns,reserva:nr})
-          }).catch(function(){});
-        });
-      }).catch(function(){});
-    }
+          return api("PATCH","productos",{stock_actual:ns,reserva:nr},"id=eq."+pid);
+        }).catch(function(){});
+    });
   }).catch(function(){
     window._sendingOrder=false;
     var waBtn=document.getElementById('waBtn');
