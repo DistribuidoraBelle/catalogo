@@ -451,6 +451,9 @@ var prods=[],cart={},cstate={},decanState={};
 var catData=[];
 var _dCtrlPedidoId=null,_dCtrlItems=[],_dCtrlDecisions={};
 var hideSS=false,periodoActual="",cotizActual=1520;
+var _periodoDesde="2000-01-01T00:00:00"; // fecha desde la que contar el periodo actual
+function _getPeriodoDesde(){return _periodoDesde;}
+function _setPeriodoDesde(fecha){_periodoDesde=fecha||"2000-01-01T00:00:00";}
 var dineroData={vendido:0,gastos:0,entregado:0,saldo:0};
 var pendingVentaItems=null,pendingReservas=null,pendingReservaIdx=0;
 
@@ -495,12 +498,20 @@ function doLogout(){
 function initApp(){loadConfig();loadProds();checkDots();}
 
 function loadConfig(){
-  apiGet("configuracion","select=clave,valor").then(function(rows){
-    if(!Array.isArray(rows))return;
+  Promise.all([
+    apiGet("configuracion","select=clave,valor"),
+    apiGet("rendiciones","select=created_at&tipo=eq.saldo_arrastrado&vendedor_id=eq.1&order=created_at.desc&limit=1")
+  ]).then(function(res){
+    var rows=Array.isArray(res[0])?res[0]:[];
     rows.forEach(function(r){
       if(r.clave==="cotizacion_usd")cotizActual=parseFloat(r.valor)||1520;
       if(r.clave==="periodo_actual"){periodoActual=r.valor;var el=document.getElementById("hPeriodo");if(el)el.textContent=r.valor;}
     });
+    // Fecha exacta del último cierre = cuando se creó el saldo arrastrado
+    var hist=Array.isArray(res[1])?res[1]:[];
+    if(hist.length&&hist[0].created_at){
+      _setPeriodoDesde(hist[0].created_at);
+    }
   });
 }
 
@@ -1713,12 +1724,14 @@ function loadPedidosWeb(){
   // WEB-: compartidos entre todos los vendedores
   // ORD-: solo los del vendedor logueado (vendedor_id=VENDEDOR_ID o null)
   var filtVend="&or=(vendedor_id.eq."+VENDEDOR_ID+",vendedor_id.is.null)";
+  // Fecha del inicio del periodo actual — cobrados anteriores no se muestran
+  var periodoQ=periodoActual?'&periodo=eq.'+encodeURIComponent(periodoActual):'';
   Promise.all([
     apiGet("pedidos_catalogo","select=*&confirmado_cobro=is.null&estado=neq.cancelado&order=created_at.desc&limit=200"+filtVend),
     apiGet("pedidos_catalogo","select=*&confirmado_cobro=eq.false&estado=neq.cancelado&order=created_at.desc&limit=200"+filtVend),
-    apiGet("pedidos_catalogo","select=*&confirmado_cobro=eq.true&order=created_at.desc&limit=50"+filtVend),
+    apiGet("pedidos_catalogo","select=*&confirmado_cobro=eq.true&estado=eq.cobrado&order=confirmado_at.desc&limit=50"+filtVend+(periodoActual?'&confirmado_at=gte.'+_getPeriodoDesde():'')),
     apiGet("pedidos_catalogo","select=*&estado=eq.cancelado&order=created_at.desc&limit=30"+filtVend),
-    apiGet("ventas_transferidas","select=*&order=created_at.desc&limit=100")
+    apiGet("ventas_transferidas","select=*&order=created_at.desc&limit=100"+(periodoQ))
   ]).then(function(res){
     var sinCobrar=(Array.isArray(res[0])?res[0]:[]).concat(Array.isArray(res[1])?res[1]:[]);
     var seen={}; sinCobrar=sinCobrar.filter(function(p){if(seen[p.id])return false;seen[p.id]=true;return true;});
@@ -2613,22 +2626,16 @@ function loadTransferidas(){
     var _enviadas=_todasTransf.filter(function(t){
       return t.creada_por&&t.creada_por.toLowerCase()===VENDEDOR_NOMBRE.toLowerCase();
     });
-    // Recibidas: pendientes siempre + todas las no-canceladas
+    // Recibidas: pendientes siempre + del periodo actual
     var data=_allTransf.filter(function(t){
       if(t.estado==='pendiente') return true;
-      if(t.estado!=='cancelada') return true;
-      // Canceladas solo del período actual
+      // Solo mostrar del periodo actual — las anteriores ya están archivadas
       return t.periodo&&periodoActual&&t.periodo===periodoActual;
     });
-    // Enviadas por mí: pendientes siempre + del período actual
-    // Enviadas: pendientes siempre + todas las del período actual
-    // Si periodo no coincide (campo puede ser null/diferente), mostrar igual las confirmadas recientes
+    // Enviadas: pendientes siempre + del periodo actual
     var enviadas=_enviadas.filter(function(t){
       if(t.estado==='pendiente') return true;
-      if(t.periodo&&periodoActual&&t.periodo===periodoActual) return true;
-      // Sin filtro de período: mostrar todas las no-canceladas enviadas
-      if(t.estado!=='cancelada') return true;
-      return false;
+      return t.periodo&&periodoActual&&t.periodo===periodoActual;
     });
 
     // ── STATS DE TRANSFERENCIAS ──────────────────────────────────────
