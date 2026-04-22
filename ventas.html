@@ -1508,83 +1508,78 @@ function executeVenta(items,reservaDecs){
       };
     });
     var newTotal=newItemsData.reduce(function(s,i){return s+i.total;},0);
-    // Ajustar stock con BD fresca — calcula diff neto para evitar doble reserva
-    apiGet("pedidos_catalogo","select=items&id=eq."+pedId).then(function(orig){
-      var origItems=[];try{origItems=JSON.parse((orig[0]||{}).items||"[]");}catch(e){}
-      var todosIds=[];
-      origItems.forEach(function(o){if(!o.isDecan&&o.producto_id&&todosIds.indexOf(o.producto_id)<0)todosIds.push(o.producto_id);});
-      newItemsData.forEach(function(n){if(!n.isDecan&&n.producto_id&&todosIds.indexOf(n.producto_id)<0)todosIds.push(n.producto_id);});
-      var stockProms=[];
-      // Ajustar stock productos individuales — patchStockFresco lee BD fresca internamente
-      if(todosIds.length){
-        var diffMap={};
-        origItems.forEach(function(o){
-          if(!o.isDecan&&o.producto_id){
-            diffMap[o.producto_id]=(diffMap[o.producto_id]||0)-(o.qty||1);
-          }
-        });
-        newItemsData.forEach(function(n){
-          if(!n.isDecan&&n.producto_id){
-            diffMap[n.producto_id]=(diffMap[n.producto_id]||0)+(n.qty||1);
-          }
-        });
-        Object.keys(diffMap).forEach(function(pidStr){
-          var diff=diffMap[pidStr]; // positivo=más items→reservar más; negativo=menos→liberar
-          if(diff===0)return;
-          var pid=parseInt(pidStr);
-          stockProms.push(patchStockFresco(pid,{stock_actual:-diff,reserva:+diff},'Editar pedido diff'));
-        });
-      }
-      // Ajustar stock de combos nuevos (los que no estaban en el pedido original)
-      var combosOrig=origItems.filter(function(o){return o.isCombo&&o.combo_id;}).map(function(o){return o.combo_id;});
-      var combosNuevos=newItemsData.filter(function(n){return n.isCombo&&n.combo_id&&combosOrig.indexOf(n.combo_id)<0;});
-      var combosEliminados=origItems.filter(function(o){return o.isCombo&&o.combo_id&&newItemsData.findIndex(function(n){return n.isCombo&&n.combo_id===o.combo_id;})<0;});
-      combosNuevos.forEach(function(combo){
-        stockProms.push(
-          apiGet("combo_items","select=*&combo_id=eq."+combo.combo_id).then(function(ci){
-            if(!Array.isArray(ci))return;
-            var chain=Promise.resolve();
-            ci.forEach(function(it){
-              var cant=(it.cantidad||1)*(combo.qty||1);
-              chain=chain.then(function(){
-                return patchStockFresco(it.producto_id,{stock_actual:-cant,reserva:+cant},"Editar pedido - combo nuevo");
-              });
-            });
-            return chain;
-          })
-        );
+    // Usar items originales guardados en memoria al abrir la edición
+    // NO leer de BD — podrían haber cambiado si hubo ediciones anteriores
+    var origItems=window._editandoPedidoOrigItems||[];
+    var todosIds=[];
+    origItems.forEach(function(o){if(!o.isDecan&&o.producto_id&&todosIds.indexOf(o.producto_id)<0)todosIds.push(o.producto_id);});
+    newItemsData.forEach(function(n){if(!n.isDecan&&n.producto_id&&todosIds.indexOf(n.producto_id)<0)todosIds.push(n.producto_id);});
+    var stockProms=[];
+    // Ajustar stock productos individuales — patchStockFresco lee BD fresca internamente
+    if(todosIds.length){
+      var diffMap={};
+      origItems.forEach(function(o){
+        if(!o.isDecan&&o.producto_id){
+          diffMap[o.producto_id]=(diffMap[o.producto_id]||0)-(o.qty||1);
+        }
       });
-      combosEliminados.forEach(function(combo){
-        stockProms.push(
-          apiGet("combo_items","select=*&combo_id=eq."+combo.combo_id).then(function(ci){
-            if(!Array.isArray(ci))return;
-            var chain=Promise.resolve();
-            ci.forEach(function(it){
-              var cant=(it.cantidad||1)*(combo.qty||1);
-              chain=chain.then(function(){
-                return patchStockFresco(it.producto_id,{stock_actual:+cant,reserva:-cant},"Editar pedido - combo eliminado");
-              });
-            });
-            return chain;
-          })
-        );
+      newItemsData.forEach(function(n){
+        if(!n.isDecan&&n.producto_id){
+          diffMap[n.producto_id]=(diffMap[n.producto_id]||0)+(n.qty||1);
+        }
       });
-      // Primero ajustar stock, DESPUÉS guardar el pedido — evita race conditions
-      return Promise.all(stockProms).then(function(){
-        return apiPatch("pedidos_catalogo",{items:JSON.stringify(newItemsData),total:Math.max(0,newTotal)},"id=eq."+pedId);
+      Object.keys(diffMap).forEach(function(pidStr){
+        var diff=diffMap[pidStr];
+        if(diff===0)return;
+        var pid=parseInt(pidStr);
+        stockProms.push(patchStockFresco(pid,{stock_actual:-diff,reserva:+diff},'Editar pedido diff'));
       });
+    }
+    // Ajustar stock de combos nuevos y eliminados
+    var combosOrig=origItems.filter(function(o){return o.isCombo&&o.combo_id;}).map(function(o){return o.combo_id;});
+    var combosNuevos=newItemsData.filter(function(n){return n.isCombo&&n.combo_id&&combosOrig.indexOf(n.combo_id)<0;});
+    var combosEliminados=origItems.filter(function(o){return o.isCombo&&o.combo_id&&newItemsData.findIndex(function(n){return n.isCombo&&n.combo_id===o.combo_id;})<0;});
+    combosNuevos.forEach(function(combo){
+      stockProms.push(
+        apiGet("combo_items","select=*&combo_id=eq."+combo.combo_id).then(function(ci){
+          if(!Array.isArray(ci))return;
+          var chain=Promise.resolve();
+          ci.forEach(function(it){
+            var cant=(it.cantidad||1)*(combo.qty||1);
+            chain=chain.then(function(){return patchStockFresco(it.producto_id,{stock_actual:-cant,reserva:+cant},"Editar pedido - combo nuevo");});
+          });
+          return chain;
+        })
+      );
+    });
+    combosEliminados.forEach(function(combo){
+      stockProms.push(
+        apiGet("combo_items","select=*&combo_id=eq."+combo.combo_id).then(function(ci){
+          if(!Array.isArray(ci))return;
+          var chain=Promise.resolve();
+          ci.forEach(function(it){
+            var cant=(it.cantidad||1)*(combo.qty||1);
+            chain=chain.then(function(){return patchStockFresco(it.producto_id,{stock_actual:+cant,reserva:-cant},"Editar pedido - combo eliminado");});
+          });
+          return chain;
+        })
+      );
+    });
+    // Primero ajustar stock, DESPUÉS guardar el pedido
+    Promise.all(stockProms).then(function(){
+      return apiPatch("pedidos_catalogo",{items:JSON.stringify(newItemsData),total:Math.max(0,newTotal)},"id=eq."+pedId);
     }).then(function(){
-      window._editandoPedidoId=null;window._editandoPedidoOrden=null;
+      window._editandoPedidoId=null;window._editandoPedidoOrden=null;window._editandoPedidoOrigItems=null;
       cart={};cstate={};decanState={};reservaDecisions={};
       updateCartBar();closeDrawer();renderCat();
-      toast("Pedido actualizado con precios recalculados ✅","tok");
+      toast("Pedido actualizado ✅","tok");
       loadPedidosWeb();
       apiGet("productos","select=id,stock_actual,reserva&activo=is.true&limit=2000").then(function(d){
         if(Array.isArray(d))d.forEach(function(p){var ex=prods.find(function(x){return x.id===p.id;});if(ex){ex.stock_actual=p.stock_actual;ex.reserva=p.reserva;}});
         renderCat();
       });
     }).catch(function(e){toast("Error al actualizar: "+(e.message||"ver consola"),"terr");});
-    return; // No continuar con la venta normal
+    return;
   }
 
   // ── VENTA NORMAL ───────────────────────────────────────────────────
@@ -1729,7 +1724,7 @@ function loadPedidosWeb(){
   Promise.all([
     apiGet("pedidos_catalogo","select=*&confirmado_cobro=is.null&estado=neq.cancelado&order=created_at.desc&limit=200"+filtVend),
     apiGet("pedidos_catalogo","select=*&confirmado_cobro=eq.false&estado=neq.cancelado&order=created_at.desc&limit=200"+filtVend),
-    apiGet("pedidos_catalogo","select=*&confirmado_cobro=eq.true&estado=eq.cobrado&order=confirmado_at.desc&limit=50"+filtVend+(periodoActual?'&confirmado_at=gte.'+_getPeriodoDesde():'')),
+    apiGet("pedidos_catalogo","select=*&confirmado_cobro=eq.true&estado=eq.cobrado&order=confirmado_at.desc&limit=50"+filtVend+(periodoActual?'&periodo=eq.'+encodeURIComponent(periodoActual):'')),
     apiGet("pedidos_catalogo","select=*&estado=eq.cancelado&order=created_at.desc&limit=30"+filtVend),
     apiGet("ventas_transferidas","select=*&order=created_at.desc&limit=100"+(periodoQ))
   ]).then(function(res){
@@ -2042,7 +2037,7 @@ function _mgConfirmarCobro(){
   var proms=[
     apiPatch('pedidos_catalogo',
       Object.assign({cobrado_parcial:nuevoCobrado,items_cobrados:JSON.stringify(merged)},
-        esSaldado?{estado:'cobrado',confirmado_cobro:true,confirmado_at:new Date().toISOString()}:{}),
+        esSaldado?{estado:'cobrado',confirmado_cobro:true,confirmado_at:new Date().toISOString(),periodo:periodoActual}:{}),
       'id=eq.'+id)
   ];
 
@@ -2228,7 +2223,7 @@ function confirmarCobro(pedId,btn){
     var ped=data[0];var items=[];
     try{items=typeof ped.items==="string"?JSON.parse(ped.items):ped.items;}catch(ex){}
     var nroOrden=ped.nro_orden||("WEB-"+pedId);
-    var promises=[apiPatch("pedidos_catalogo",{confirmado_cobro:true,confirmado_at:new Date().toISOString(),estado:"cobrado"},"id=eq."+pedId)];
+    var promises=[apiPatch("pedidos_catalogo",{confirmado_cobro:true,confirmado_at:new Date().toISOString(),estado:"cobrado",periodo:periodoActual},"id=eq."+pedId)];
     if(Array.isArray(items))items.forEach(function(it){
       // Registrar venta del item (combo o producto)
       promises.push(apiPost("ventas",{vendedor_id:VENDEDOR_ID,producto_id:it.producto_id||null,producto_nombre:it.nombre,cantidad:it.qty||1,precio_unitario:it.precio||0,segmento:it.segmento||"x1",total:it.total||0,periodo:periodoActual,estado:"confirmada",origen:"catalogo",nro_orden:nroOrden,forma_cobro:"pendiente",descuento:0,descuento_motivo:""}));
@@ -2334,6 +2329,8 @@ function editarPedido(pedId){
     cart={};cstate={};decanState={};
     window._editandoPedidoId=pedId;
     window._editandoPedidoOrden=ped.nro_orden||("#"+pedId);
+    // Guardar items originales en memoria — NO volver a leer de BD al confirmar
+    window._editandoPedidoOrigItems=JSON.parse(JSON.stringify(items));
     items.forEach(function(it){
       if(it.isDecan){
         var key="decan_"+(it.producto_id||it.id);
@@ -2346,7 +2343,6 @@ function editarPedido(pedId){
       }
     });
     updateCartBar();
-    // Navegar al catálogo y abrir drawer
     navTo("catalogo",document.querySelector(".tab"));
     setTimeout(function(){openDrawer();},300);
     toast("Pedido "+window._editandoPedidoOrden+" cargado — editá y confirmá","tok");
@@ -6684,7 +6680,7 @@ function cpConfirmar(pedId,cobradoYa,totalPed,pedItems){
       apiPatch("pedidos_catalogo",
         Object.assign(
           {cobrado_parcial:nuevoCobrado,items_cobrados:JSON.stringify(merged)},
-          esSaldado?{estado:"cobrado",confirmado_cobro:true,confirmado_at:new Date().toISOString()}:{}
+          esSaldado?{estado:"cobrado",confirmado_cobro:true,confirmado_at:new Date().toISOString(),periodo:periodoActual}:{}
         ),
         "id=eq."+pedId),
     ].concat(stockProms)).then(function(){
