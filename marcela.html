@@ -1468,15 +1468,7 @@ function executeVenta(items,reservaDecs){
       (item.comboItems||[]).forEach(function(ci){
         var prodId=ci.producto_id;
         var cantComp=(ci.cantidad||1)*item.qty;
-        var p=prods.find(function(x){return x.id===prodId;});
-        if(p){
-          var _sa=p.stock_actual||0;
-          var ns=Math.max(0,_sa-cantComp);
-          p.stock_actual=ns;
-          p.vendido_david=(p.vendido_david||0)+cantComp;
-          promises.push(apiPatch("productos",{stock_actual:ns,vendido_david:p.vendido_david},"id=eq."+prodId));
-          promises.push(apiPost("movimientos_stock",{producto_id:prodId,producto_nombre:p.nombre,tipo:"venta",cantidad:cantComp,stock_antes:_sa,stock_despues:ns,motivo:"Venta combo Marcela "+nroOrden,created_at:new Date().toISOString(),usuario:VENDEDOR_NOMBRE}).catch(function(){}));
-        }
+        patchStockFresco(prodId,{stock_actual:-cantComp,vendido_david:+cantComp},'Venta combo Marcela');
       });
     } else {
       var sub=(item.price*item.qty)-(item.descuento||0);
@@ -1491,16 +1483,14 @@ function executeVenta(items,reservaDecs){
         descuento_motivo:item.descMotivo||""
       }));
       if(!item.isDecan){
-        var p=prods.find(function(x){return x.id===item.id;});
-        if(p){
-          var _sa=p.stock_actual||0;
-          var ns=Math.max(0,_sa-item.qty);
-          var nuevoReserva=p.reserva||0;
-          if(reservaDecs&&reservaDecs[item.id]){nuevoReserva=Math.max(0,nuevoReserva-item.qty);}
-          promises.push(apiPatch("productos",{stock_actual:ns,vendido_david:(p.vendido_david||0)+item.qty,reserva:nuevoReserva},"id=eq."+item.id));
-          promises.push(apiPost("movimientos_stock",{producto_id:item.id,producto_nombre:item.nombre,tipo:"venta",cantidad:item.qty,stock_antes:_sa,stock_despues:ns,motivo:"Venta Marcela "+nroOrden,created_at:new Date().toISOString(),usuario:VENDEDOR_NOMBRE}).catch(function(){}));
-          p.stock_actual=ns;p.reserva=nuevoReserva;
+        var qty=item.qty;
+        var usadoDeReserva=reservaDecs&&reservaDecs[item.id]?qty:0;
+        if(usadoDeReserva>0){
+          promises.push(patchStockFresco(item.id,{reserva:-qty,vendido_david:+qty},'Venta Marcela desde reserva'));
+        } else {
+          promises.push(patchStockFresco(item.id,{stock_actual:-qty,vendido_david:+qty},'Venta Marcela directa'));
         }
+        promises.push(apiPost("movimientos_stock",{producto_id:item.id,producto_nombre:item.nombre,tipo:"venta",cantidad:qty,motivo:"Venta Marcela "+nroOrden,usuario:VENDEDOR_NOMBRE}).catch(function(){}));
       }
     }
   });
@@ -1717,19 +1707,13 @@ function confirmarCobro(pedId,btn){
     if(Array.isArray(items))items.forEach(function(it){
       var pid=it.producto_id;
       if(!pid||it.isDecan)return;
-      var p=prods.find(function(x){return x.id===pid;});
-      if(p){
-        var stockAntes=p.stock_actual||0;
-        var nuevaReserva=Math.max(0,(p.reserva||0)-(it.qty||1));
-        var nuevoVendido=(p.vendido_david||0)+(it.qty||1);
-        promises.push(patchStockFresco(pid,{reserva:-(it.qty||1),vendido_david:+(it.qty||1)},'Confirmar cobro pedido'));
-        promises.push(apiPost("movimientos_stock",{
-          producto_id:pid,producto_nombre:it.nombre,tipo:"venta",
-          cantidad:it.qty||1,stock_antes:stockAntes,stock_despues:stockAntes,
-          motivo:"Venta pedido web "+nroOrden+" (desde reserva)",
-          usuario:"Marcela",periodo:periodoActual
-        }));
-      }
+      promises.push(patchStockFresco(pid,{reserva:-(it.qty||1),vendido_david:+(it.qty||1)},'Confirmar cobro pedido Marcela'));
+      promises.push(apiPost("movimientos_stock",{
+        producto_id:pid,producto_nombre:it.nombre,tipo:"venta",
+        cantidad:it.qty||1,
+        motivo:"Venta pedido web "+nroOrden+" (desde reserva)",
+        usuario:"Marcela",periodo:periodoActual
+      }));
       promises.push(apiPost("ventas",{vendedor_id:VENDEDOR_ID,producto_id:pid,producto_nombre:it.nombre,cantidad:it.qty||1,precio_unitario:it.precio||0,segmento:it.segmento||"x1",total:it.total||0,periodo:periodoActual,estado:"confirmada",origen:"catalogo",nro_orden:nroOrden,forma_cobro:"pendiente",descuento:0,descuento_motivo:""}));
     });
     Promise.all(promises).then(function(){toast("Cobro confirmado!","tok");loadPedidosWeb();loadDineroData();renderCat();}).catch(function(){if(btn)btn.disabled=false;toast("Error al confirmar","terr");});
@@ -1746,17 +1730,14 @@ function cancelarPedidoWeb(pedId,btn){
     var promises=[apiPatch("pedidos_catalogo",{estado:"cancelado"},"id=eq."+pedId)];
     if(Array.isArray(items))items.forEach(function(it){
       if(it.isCombo){
-        // Return stock for each product inside the combo
-        var comboRef=combosVendedor.find(function(c){return c.id===it.combo_id;});
-        if(comboRef){
-          (comboRef.combo_items||[]).forEach(function(ci){
-            var cantTotal=(ci.cantidad||1)*(it.qty||1);
-            var p=prods.find(function(x){return x.id===ci.producto_id;});
-            if(p){
-              promises.push(patchStockFresco(ci.producto_id,{stock_actual:+cantTotal,reserva:-cantTotal},'Cancelación combo'));
-            }
+        // Return stock for each product inside the combo — siempre leer de BD
+        apiGet("combo_items","select=producto_id,cantidad&combo_id=eq."+(it.combo_id||0)).then(function(ci){
+          if(!Array.isArray(ci))return;
+          ci.forEach(function(cit){
+            var cantTotal=(cit.cantidad||1)*(it.qty||1);
+            patchStockFresco(cit.producto_id,{stock_actual:+cantTotal,reserva:-cantTotal},'Cancelación combo Marcela');
           });
-        }
+        }).catch(function(){});
         return;
       }
       var pid=it.producto_id;
@@ -2084,35 +2065,27 @@ function confirmarTransf(id,btn){
       // Stock already reserved - release reserva, update vendido_david
       if(Array.isArray(items))items.forEach(function(it){
         var pid=it.producto_id;
-        if(pid){var p=prods.find(function(x){return x.id===pid;});if(p){
-          var saRes=p.stock_actual||0;
-          var nr=Math.max(0,(p.reserva||0)-(it.qty||1));
-          var nv=(p.vendido_david||0)+(it.qty||1);
-          promises.push(patchStockFresco(pid,{reserva:-(it.qty||1),vendido_david:+(it.qty||1)},'Confirmar transf reserva'));
-          promises.push(apiPost("movimientos_stock",{
-            producto_id:pid,producto_nombre:it.nombre,tipo:"venta",
-            cantidad:it.qty||1,stock_antes:saRes,stock_despues:saRes,
-            motivo:"Transferencia "+v.nro_orden+" (desde reserva)",
-            usuario:"Marcela",periodo:periodoActual
-          }));
-        }}
+        if(!pid||it.isDecan)return;
+        promises.push(patchStockFresco(pid,{reserva:-(it.qty||1),vendido_david:+(it.qty||1)},'Confirmar transf reserva Marcela'));
+        promises.push(apiPost("movimientos_stock",{
+          producto_id:pid,producto_nombre:it.nombre,tipo:"venta",
+          cantidad:it.qty||1,
+          motivo:"Transferencia "+v.nro_orden+" (desde reserva)",
+          usuario:"Marcela",periodo:periodoActual
+        }));
       });
     } else {
       // No reserva - discount stock, update vendido_david
       if(Array.isArray(items))items.forEach(function(it){
         var pid=it.producto_id||it.id;
-        if(pid){var p=prods.find(function(x){return x.id===pid;});if(p){
-          var saT=p.stock_actual||0;
-          var ns=Math.max(0,saT-(it.qty||1));
-          var nv=(p.vendido_david||0)+(it.qty||1);
-          promises.push(patchStockFresco(pid,{stock_actual:-(it.qty||1),vendido_david:+(it.qty||1)},'Confirmar transf'));
-          promises.push(apiPost("movimientos_stock",{
-            producto_id:pid,producto_nombre:it.nombre,tipo:"venta",
-            cantidad:it.qty||1,stock_antes:saT,stock_despues:ns,
-            motivo:"Transferencia "+v.nro_orden+" (sin reserva)",
-            usuario:"Marcela",periodo:periodoActual
-          }));
-        }}
+        if(!pid||it.isDecan)return;
+        promises.push(patchStockFresco(pid,{stock_actual:-(it.qty||1),vendido_david:+(it.qty||1)},'Confirmar transf Marcela'));
+        promises.push(apiPost("movimientos_stock",{
+          producto_id:pid,producto_nombre:it.nombre,tipo:"venta",
+          cantidad:it.qty||1,
+          motivo:"Transferencia "+v.nro_orden+" (sin reserva)",
+          usuario:"Marcela",periodo:periodoActual
+        }));
       });
     }
     Promise.all(promises).then(function(){
