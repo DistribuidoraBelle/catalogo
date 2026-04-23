@@ -1600,20 +1600,11 @@ function executeVenta(items,reservaDecs){
         origen:"vendedor",descuento:item.descuento||0,
         descuento_motivo:item.descMotivo||""
       }));
-      // Reduce stock for each component x qty of combo sold
+      // Reduce stock for each component x qty of combo sold — siempre BD fresca
       (item.comboItems||[]).forEach(function(ci){
         var prodId=ci.producto_id;
         var cantComp=(ci.cantidad||1)*item.qty;
-        var p=prods.find(function(x){return x.id===prodId;});
-        if(p){
-          var ns=Math.max(0,(p.stock_actual||0)-cantComp);
-          p.stock_actual=ns;
-          p.vendido_david=(p.vendido_david||0)+cantComp;
-          promises.push(apiPatch("productos",{
-            stock_actual:ns,
-            vendido_david:p.vendido_david
-          },"id=eq."+prodId));
-        }
+        patchStockFresco(prodId,{stock_actual:-cantComp,vendido_david:+cantComp},'Venta combo');
       });
     } else {
       // ── NORMAL PRODUCT ──
@@ -1629,42 +1620,24 @@ function executeVenta(items,reservaDecs){
         descuento_motivo:item.descMotivo||""
       }));
       if(!item.isDecan){
-        var p=prods.find(function(x){return x.id===item.id;});
-        if(p){
-          var stockLibre=p.stock_actual||0;
-          var stockRes=p.reserva||0;
-          var qty=item.qty;
-          // El stock reservado YA fue descontado del stock_actual cuando se reservo.
-          // Al vender, si usamos unidades reservadas solo hay que liberar la reserva,
-          // no volver a descontar del stock_actual.
-          var usadoDeLibre=Math.min(qty,stockLibre);
-          var usadoDeReserva=Math.max(0,qty-usadoDeLibre);
-          // Solo descontar del stock_actual las unidades libres usadas
-          var ns=Math.max(0,stockLibre-usadoDeLibre);
-          // Liberar las unidades de reserva usadas
-          var nuevoReserva=Math.max(0,stockRes-usadoDeReserva);
-          var _stockAntes=stockLibre+stockRes;
-          promises.push(apiPatch("productos",{
-            stock_actual:ns,
-            vendido_david:(p.vendido_david||0)+qty,
-            reserva:nuevoReserva
-          },"id=eq."+item.id));
-          p.stock_actual=ns;p.reserva=nuevoReserva;
-          // Registrar movimiento de stock
-          try{promises.push(api("POST","movimientos_stock",{
-            producto_id:item.id,
-            producto_nombre:item.nombre,
-            tipo:"venta",
-            cantidad:qty,
-            stock_antes:_stockAntes,
-            stock_despues:ns+nuevoReserva,
-            motivo:"Venta "+( item.seg||"")+" — vendedor "+VENDEDOR_ID,
-            usuario:VENDEDOR_ID===1?"David":VENDEDOR_ID===2?"Facu":"Vendedor "+VENDEDOR_ID,
-            periodo:periodoActual||"general"
-          },null));
-}catch(e){}          // Marcar reserva como concretada si se usaron unidades reservadas
-          if(usadoDeReserva>0) reservaDecs[item.id]=true;
+        var qty=item.qty;
+        var usadoDeReserva=reservaDecs[item.id]?qty:0;
+        // Si el vendedor confirmó usar reserva → solo liberar reserva (stock ya fue descontado)
+        // Si no → descontar stock directamente
+        if(usadoDeReserva>0){
+          promises.push(patchStockFresco(item.id,{reserva:-qty,vendido_david:+qty},'Venta desde reserva'));
+        } else {
+          promises.push(patchStockFresco(item.id,{stock_actual:-qty,vendido_david:+qty},'Venta directa'));
         }
+        try{promises.push(api("POST","movimientos_stock",{
+          producto_id:item.id,
+          producto_nombre:item.nombre,
+          tipo:"venta",
+          cantidad:qty,
+          motivo:"Venta "+(item.seg||"")+" — vendedor "+VENDEDOR_ID,
+          usuario:VENDEDOR_ID===1?"David":VENDEDOR_ID===2?"Facu":"Vendedor "+VENDEDOR_ID,
+          periodo:periodoActual||"general"
+        },null));}catch(e){}
       }
     }
   });
@@ -2059,10 +2032,7 @@ function _mgConfirmarCobro(){
       }).catch(function(){});
     }
     if(pid&&!esDecanItem&&!esComboItem){
-      var p=prods.find(function(x){return x.id===pid;});
-      if(p){
-        proms.push(patchStockFresco(pid,{vendido_david:+s.qty,reserva:-s.qty},'Cobro parcial'));
-      }
+      proms.push(patchStockFresco(pid,{vendido_david:+s.qty,reserva:-s.qty},'Cobro parcial'));
     }
     proms.push(apiPost('ventas',{
       vendedor_id:VENDEDOR_ID,
@@ -2083,15 +2053,11 @@ function _mgConfirmarCobro(){
     }));
     // Registrar movimiento de stock
     if(it.producto_id&&!esDecanItem){
-      var pMov=prods.find(function(x){return x.id===it.producto_id;});
-      var stk=pMov?pMov.stock_actual:null;
       try{proms.push(apiPost('movimientos_stock',{
         producto_id:it.producto_id,
         producto_nombre:it.nombre,
         tipo:'venta',
         cantidad:s.qty,
-        stock_antes:stk!==null?stk+s.qty:null,
-        stock_despues:stk,
         motivo:'Venta '+(tipo==='reserva'?'reserva':'pedido web')+' — '+nroOrden,
         usuario:VENDEDOR_ID===1?'David':VENDEDOR_ID===2?'Facu':'Vendedor '+VENDEDOR_ID,
         periodo:periodo
@@ -3860,12 +3826,7 @@ function _ejecutarCobrarReservado(pedId,btn,formaCobro){
     var promises=[apiPatch("pedidos_catalogo",{confirmado_cobro:true,estado:"cobrado"},"id=eq."+pedId)];
     if(Array.isArray(items))items.forEach(function(it){
       if(!it.producto_id||it.isDecan||it.segmento==='decan')return;
-      var p=prods.find(function(x){return x.id===it.producto_id;});
-      if(p){
-        var nuevaReserva=Math.max(0,(p.reserva||0)-(it.qty||1));
-        var nuevoVendido=(p.vendido_david||0)+(it.qty||1);
-        promises.push(patchStockFresco(it.producto_id,{reserva:-(it.qty||1),vendido_david:+(it.qty||1)},'Cobrar reservado'));
-      }
+      promises.push(patchStockFresco(it.producto_id,{reserva:-(it.qty||1),vendido_david:+(it.qty||1)},'Cobrar reservado'));
       promises.push(apiPost("ventas",{
         vendedor_id:VENDEDOR_ID,producto_id:it.producto_id,producto_nombre:it.nombre,
         cantidad:it.qty||1,precio_unitario:it.precio||0,segmento:it.segmento||"x1",
@@ -6664,19 +6625,14 @@ function cpConfirmar(pedId,cobradoYa,totalPed,pedItems){
     idxsCobrados.forEach(function(idx){
       var it=pedItems[idx];
       if(!it||!it.producto_id||it.isDecan)return;
-      var p=(prods||[]).find(function(x){return x.id===it.producto_id;});
-      if(p){
-        var nuevoVendido=(p.vendido_david||0)+(it.qty||1);
-        var nuevoReserva=Math.max(0,(p.reserva||0)-(it.qty||1));
-        stockProms.push(patchStockFresco(it.producto_id,{vendido_david:+(it.qty||1),reserva:-(it.qty||1)},'Confirmar pedido'));
-        stockProms.push(apiPost("ventas",{
-          vendedor_id:VENDEDOR_ID,producto_id:it.producto_id,
-          producto_nombre:it.nombre,cantidad:it.qty||1,
-          precio_unitario:it.precio||0,segmento:it.segmento||"x1",
-          total:it.total||0,periodo:periodo,estado:"confirmada",
-          origen:"reserva",nro_orden:nro,forma_cobro:formaCobro
-        }));
-      }
+      stockProms.push(patchStockFresco(it.producto_id,{vendido_david:+(it.qty||1),reserva:-(it.qty||1)},'Confirmar pedido'));
+      stockProms.push(apiPost("ventas",{
+        vendedor_id:VENDEDOR_ID,producto_id:it.producto_id,
+        producto_nombre:it.nombre,cantidad:it.qty||1,
+        precio_unitario:it.precio||0,segmento:it.segmento||"x1",
+        total:it.total||0,periodo:periodo,estado:"confirmada",
+        origen:"reserva",nro_orden:nro,forma_cobro:formaCobro
+      }));
     });
     Promise.all([
       apiPatch("pedidos_catalogo",

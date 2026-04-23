@@ -7304,10 +7304,7 @@ function _mgConfirmarCobro(){
       }).catch(function(){});
     }
     if(pid&&!esDecanItem&&!esComboItem){
-      var p=prods.find(function(x){return x.id===pid;});
-      if(p){
-        proms.push(patchStockFresco(pid,{vendido_david:+s.qty,reserva:-s.qty},'Cobro parcial'));
-      }
+      proms.push(patchStockFresco(pid,{vendido_david:+s.qty,reserva:-s.qty},'Cobro parcial'));
     }
     proms.push(apiPost('ventas',{
       vendedor_id:VENDEDOR_ID,
@@ -16285,12 +16282,14 @@ async function adminEjecutarCierrePeriodo() {
   Promise.all(vends.map(function(v) {
     return Promise.all([
       apiGet('ventas',          'select=total,id&vendedor_id=eq.'+v.id+'&estado=eq.confirmada&periodo=eq.'+encodeURIComponent(periodoActual)),
-      apiGet('gastos_vendedor', 'select=monto,id,concepto,estado_comision,aprobado&vendedor_id=eq.'+v.id+'&periodo_cerrado=eq.false'),
-      apiGet('rendiciones',     'select=monto,id&vendedor_id=eq.'+v.id+'&estado=eq.aprobada&tipo=neq.saldo_arrastrado&periodo=eq.'+encodeURIComponent(periodoActual))
+      apiGet('gastos_vendedor', 'select=monto,id,concepto,estado_comision,aprobado,vendedor_id&vendedor_id=eq.'+v.id+'&periodo_cerrado=eq.false'),
+      apiGet('rendiciones',     'select=monto,id&vendedor_id=eq.'+v.id+'&estado=eq.aprobada&tipo=neq.saldo_arrastrado&periodo=eq.'+encodeURIComponent(periodoActual)),
+      apiGet('rendiciones',     'select=monto&vendedor_id=eq.'+v.id+'&estado=eq.aprobada&tipo=eq.saldo_arrastrado&periodo=eq.'+encodeURIComponent(periodoActual))
     ]).then(function(r) {
-      var ventas  = Array.isArray(r[0]) ? r[0] : [];
-      var gastos  = Array.isArray(r[1]) ? r[1] : [];
-      var rendics = Array.isArray(r[2]) ? r[2] : [];
+      var ventas    = Array.isArray(r[0]) ? r[0] : [];
+      var gastos    = Array.isArray(r[1]) ? r[1] : [];
+      var rendics   = Array.isArray(r[2]) ? r[2] : [];
+      var arrastrado= Array.isArray(r[3]) ? r[3] : [];
 
       // Todos los gastos aprobados entran al cierre — incluyendo comisiones de Marcela
       // Las comisiones de Marcela son gastos de David (vendedor_id=1) y él las rinde
@@ -16303,14 +16302,15 @@ async function adminEjecutarCierrePeriodo() {
       var gastosCerrar = gastos.filter(function(g){ return !esComisionMarcela3(g); });
       var gastosQuedan = gastos.filter(function(g){ return esComisionMarcela3(g); });
 
-      var tv = ventas.reduce( function(s,x){return s+(x.total||0);},  0);
+      var tv = ventas.reduce(   function(s,x){return s+(x.total||0);}, 0);
       var tg = gastosCerrar.reduce(function(s,x){return s+(x.monto||0);}, 0);
-      var tr = rendics.reduce(function(s,x){return s+(x.monto||0);},  0);
+      var tr = rendics.reduce(  function(s,x){return s+(x.monto||0);}, 0);
+      var ta = arrastrado.reduce(function(s,x){return s+(x.monto||0);}, 0);
 
       return {
         id: v.id, n: v.n,
-        tv: tv, tg: tg, tr: tr,
-        saldo: tv - tg - tr,
+        tv: tv, tg: tg, tr: tr, ta: ta,
+        saldo: tv - tg - tr + ta,
         ventasIds:      ventas.map(function(x){return x.id;}),
         gastosCerrarIds:gastosCerrar.map(function(x){return x.id;}),
         rendicsIds:     rendics.map(function(x){return x.id;})
@@ -16352,10 +16352,20 @@ async function adminEjecutarCierrePeriodo() {
       r.gastosCerrarIds.forEach(function(id) {
         ps.push(apiPatch('gastos_vendedor', {periodo_cerrado: periodoActual}, 'id=eq.'+id));
       });
-      // Rendiciones aprobadas: archivar
+      // Rendiciones aprobadas del periodo: archivar
       r.rendicsIds.forEach(function(id) {
         ps.push(apiPatch('rendiciones', {estado:'archivada', periodo:periodoActual}, 'id=eq.'+id));
       });
+      // Archivar también el saldo arrastrado anterior (del periodo que se cierra)
+      // Sin esto, el dashboard suma ambos saldos arrastrados y muestra el doble
+      ps.push(apiGet('rendiciones',
+        'select=id&vendedor_id=eq.'+r.id+'&tipo=eq.saldo_arrastrado&estado=eq.aprobada&periodo=eq.'+encodeURIComponent(periodoActual)
+      ).then(function(rows){
+        if(!Array.isArray(rows)||!rows.length)return;
+        return Promise.all(rows.map(function(row){
+          return apiPatch('rendiciones',{estado:'archivada'},'id=eq.'+row.id);
+        }));
+      }));
     });
     return Promise.all(ps).then(function(){ return resultados; });
   })
