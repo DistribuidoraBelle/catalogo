@@ -4768,48 +4768,57 @@ function confirmarPedido(id){
     var p=data[0];var items=[];
     try{items=typeof p.items==="string"?JSON.parse(p.items):p.items;}catch(ex){}
     var nroOrden=p.nro_orden||("WEB-"+id);
-    // Marcar pedido como cobrado
-    apiPatch("pedidos_catalogo",{confirmado_cobro:true,estado:"cobrado"},"id=eq."+id);
-    // Registrar venta definitiva y liberar reserva
+
+    // FIX: primero ejecutar todos los patches de stock y ventas
+    // DESPUÉS marcar el pedido como cobrado
+    var stockPromises=[];
     if(Array.isArray(items)){
       items.forEach(function(it){
         if(it.isCombo){
-          // Combo: register as venta and release stock from each combo product
-          apiPost("ventas",{
+          stockPromises.push(apiPost("ventas",{
             vendedor_id:1,producto_id:null,producto_nombre:it.nombre,
             cantidad:it.qty||1,precio_unitario:it.precio||0,segmento:"combo",
             total:it.total||0,estado:"confirmada",origen:"catalogo",
             nro_orden:nroOrden,periodo:periodoActual,forma_cobro:"pendiente"
-          });
-          // Release reserved stock — siempre leer de BD
-          apiGet("combo_items","select=producto_id,cantidad&combo_id=eq."+it.combo_id).then(function(ci){
-            if(!Array.isArray(ci))return;
-            ci.filter(function(cit){return cit.producto_id;}).forEach(function(cit){
-              var cantTotal=(cit.cantidad||1)*(it.qty||1);
-              patchStockFresco(cit.producto_id,{reserva:-cantTotal,vendido_david:+cantTotal},'Confirmar combo web');
-            });
-          });
+          }));
+          stockPromises.push(
+            apiGet("combo_items","select=producto_id,cantidad&combo_id=eq."+it.combo_id).then(function(ci){
+              if(!Array.isArray(ci))return;
+              var chain=Promise.resolve();
+              ci.filter(function(cit){return cit.producto_id;}).forEach(function(cit){
+                var cantTotal=(cit.cantidad||1)*(it.qty||1);
+                chain=chain.then(function(){
+                  return patchStockFresco(cit.producto_id,{reserva:-cantTotal,vendido_david:+cantTotal},'Confirmar combo web');
+                });
+              });
+              return chain;
+            })
+          );
           return;
         }
         if(it.isDecan||!it.producto_id)return;
-        // Normal product: release reserva
-        apiGet("productos","select=id,reserva,vendido_david&id=eq."+it.producto_id).then(function(ps){
-          if(!Array.isArray(ps)||!ps.length)return;
-          var prod=ps[0];
-          var nuevaReserva=Math.max(0,(prod.reserva||0)-(it.qty||1));
-          var nuevoVendido=(prod.vendido_david||0)+(it.qty||1);
-          apiPatch("productos",{reserva:nuevaReserva,vendido_david:nuevoVendido},"id=eq."+it.producto_id);
-        });
-        apiPost("ventas",{
+        stockPromises.push(
+          patchStockFresco(it.producto_id,{reserva:-(it.qty||1),vendido_david:+(it.qty||1)},'Confirmar pedido web')
+        );
+        stockPromises.push(apiPost("ventas",{
           vendedor_id:1,producto_id:it.producto_id,producto_nombre:it.nombre,
           cantidad:it.qty||1,precio_unitario:it.precio||0,segmento:it.segmento||"x1",
           total:it.total||0,estado:"confirmada",origen:"catalogo",
           nro_orden:nroOrden,periodo:periodoActual,forma_cobro:"pendiente"
-        });
+        }));
       });
     }
-    toast("Pedido confirmado y venta registrada","tok");
-    setTimeout(function(){loadPedidos();loadDashRendicion();},800);
+
+    // Stock y ventas primero — estado cobrado DESPUÉS
+    Promise.all(stockPromises).then(function(){
+      return apiPatch("pedidos_catalogo",{confirmado_cobro:true,estado:"cobrado",confirmado_at:new Date().toISOString()},"id=eq."+id);
+    }).then(function(){
+      toast("Pedido confirmado y venta registrada","tok");
+      setTimeout(function(){loadPedidos();loadDashRendicion();},800);
+    }).catch(function(e){
+      toast("Error al confirmar pedido: "+(e&&e.message||""),"terr");
+      console.error("confirmarPedido error:",e);
+    });
   });  });
 }
 
@@ -9010,7 +9019,7 @@ function confirmarRecepcion(){
     if(matchedId&&r.recibido>0){
       var p=prods.find(function(x){return x.id===matchedId;});
       promises.push(patchStockFresco(matchedId,{stock_actual:+r.recibido,en_viaje:-(r.item.cantidad_pedida||0)},'Recepcion pedido'));
-      promises.push(apiPost("movimientos_stock",{producto_id:matchedId,producto_nombre:(p?p.nombre:r.item.nombre_proveedor||("Prod #"+matchedId)),tipo:"entrada",cantidad:r.recibido,stock_antes:curStock,stock_despues:nuevoStock,motivo:"Recepcion pedido proveedor. Pedido: "+(_recepcionPedidoId||"?")+(r.item.faltante>0?" Faltante: "+r.item.faltante+"u":""),created_at:new Date().toISOString()}).catch(function(){}));
+      promises.push(apiPost("movimientos_stock",{producto_id:matchedId,producto_nombre:(p?p.nombre:r.item.nombre_proveedor||("Prod #"+matchedId)),tipo:"entrada",cantidad:r.recibido,motivo:"Recepcion pedido proveedor. Pedido: "+(_recepcionPedidoId||"?")+(r.faltante>0?" Faltante: "+r.faltante+"u":""),created_at:new Date().toISOString()}).catch(function(){}));
     } else if(!matchedId&&r.recibido>0){
       nuevos.push({item:r.item,recibido:r.recibido});
     }

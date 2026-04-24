@@ -1316,6 +1316,31 @@ function rmCart(id){delete cart[id];if(cstate[id])cstate[id].qty=0;updateCartBar
 
 // CONFIRMAR VENTA with reserva check
 var reservaCheckQueue=[];
+// ═══════════════════════════════════════════════════════════════════════
+// SISTEMA DE ALERTAS DE STOCK
+// ═══════════════════════════════════════════════════════════════════════
+function _alertaStock(msg){
+  console.error('[ALERTA STOCK]',msg);
+  apiPost('movimientos_stock',{producto_id:null,producto_nombre:'ALERTA SISTEMA',tipo:'alerta',cantidad:0,motivo:msg,usuario:VENDEDOR_NOMBRE||'sistema',periodo:periodoActual||'general'}).catch(function(){});
+  var cont=document.getElementById('_alertaCont');
+  if(!cont){cont=document.createElement('div');cont.id='_alertaCont';cont.style.cssText='position:fixed;bottom:70px;left:50%;transform:translateX(-50%);z-index:9999;display:flex;flex-direction:column;gap:.4rem;max-width:340px;width:95vw;pointer-events:none';document.body.appendChild(cont);}
+  var el=document.createElement('div');
+  el.style.cssText='background:rgba(180,30,30,.97);color:#fff;border-radius:8px;padding:.7rem 1rem;font-size:.72rem;font-weight:600;box-shadow:0 4px 16px rgba(0,0,0,.4);pointer-events:auto;cursor:pointer';
+  el.innerHTML='<strong>ALERTA:</strong> '+msg+'<br><span style="font-size:.62rem;opacity:.8">Toca para cerrar - avisá al admin</span>';
+  el.onclick=function(){el.remove();};
+  cont.appendChild(el);
+}
+
+function _badgeReserva(prodId,qty){
+  if(!prodId||!qty)return '';
+  var p=prods.find(function(x){return x.id===prodId;});
+  var reserva=p?p.reserva||0:0;
+  return reserva>=qty
+    ? '<span title="Reservado" style="display:inline-flex;align-items:center;justify-content:center;width:16px;height:16px;border-radius:50%;background:var(--cyan);color:#000;font-size:.52rem;font-weight:900;margin-right:.2rem;flex-shrink:0">R</span>'
+    : '<span title="Sin reserva de stock" style="display:inline-flex;align-items:center;justify-content:center;width:16px;height:16px;border-radius:50%;background:var(--red);color:#fff;font-size:.52rem;font-weight:900;margin-right:.2rem;flex-shrink:0">!</span>';
+}
+
+
 function confirmarVenta(){
   var items=Object.values(cart).filter(function(i){return !i.isDecan;});
   // Si el carrito tiene solo decans, incluirlos como items principales
@@ -2006,12 +2031,13 @@ function _mgConfirmarCobro(){
   var nroOrden=rec.nro_orden||('COB-'+Math.floor(100000+Math.random()*900000));
   var periodo=periodoActual||'general';
 
-  var proms=[
-    apiPatch('pedidos_catalogo',
-      Object.assign({cobrado_parcial:nuevoCobrado,items_cobrados:JSON.stringify(merged)},
-        esSaldado?{estado:'cobrado',confirmado_cobro:true,confirmado_at:new Date().toISOString(),periodo:periodoActual}:{}),
-      'id=eq.'+id)
-  ];
+  // FIX: separar patch de estado del patch de stock
+  // Si esSaldado, el estado cobrado se aplica DESPUÉS de que todos los patches de stock terminen
+  var _patchBase={cobrado_parcial:nuevoCobrado,items_cobrados:JSON.stringify(merged)};
+  var _patchSaldo=esSaldado?{estado:'cobrado',confirmado_cobro:true,confirmado_at:new Date().toISOString(),periodo:periodoActual}:{};
+  var proms=[];
+  // El patch base (cobrado_parcial + items_cobrados) siempre va junto con los stocks
+  proms.push(apiPatch('pedidos_catalogo',_patchBase,'id=eq.'+id));
 
   seleccionados.forEach(function(s){
     var it=items[s.idx];if(!it)return;
@@ -2065,6 +2091,11 @@ function _mgConfirmarCobro(){
   });
 
   Promise.all(proms).then(function(){
+    // Si está saldado, marcar como cobrado DESPUÉS de que todos los patches de stock terminaron
+    if(esSaldado){
+      return apiPatch('pedidos_catalogo',_patchSaldo,'id=eq.'+id);
+    }
+  }).then(function(){
     toast('Cobro de '+fmt(montoCobrar)+' registrado'+(esSaldado?' — ¡Pedido saldado!':''),'tok');
     document.getElementById('_moGestionar').remove();
     loadPedidosWeb();
@@ -2074,9 +2105,8 @@ function _mgConfirmarCobro(){
 
 function confirmarTransfConForma(id,forma,seleccionados,rec){
   var items=window._mgItems||[];
-  var proms=[
-    apiPatch('ventas_transferidas',{estado:'confirmada',confirmada_at:new Date().toISOString()},'id=eq.'+id)
-  ];
+  // FIX: stock PRIMERO — estado confirmada DESPUÉS
+  var proms=[];
 
   // Only register the selected items as ventas
   seleccionados.forEach(function(s){
@@ -2101,9 +2131,11 @@ function confirmarTransfConForma(id,forma,seleccionados,rec){
     var pid=it.producto_id||it.id;
     if(pid&&!it.isDecan){
       if(rec.con_reserva){
-        proms.push(patchStockFresco(pid,{reserva:-s.qty,vendido_david:+s.qty},'Transf con reserva'));
+        proms.push(patchStockFresco(pid,{reserva:-s.qty,vendido_david:+s.qty},'Transf con reserva')
+          .then(function(r){if(!r)_alertaStock("Stock de "+it.nombre+" no actualizó al confirmar "+rec.nro_orden);}));
       } else {
-        proms.push(patchStockFresco(pid,{stock_actual:-s.qty,vendido_david:+s.qty},'Transf stock libre'));
+        proms.push(patchStockFresco(pid,{stock_actual:-s.qty,vendido_david:+s.qty},'Transf stock libre')
+          .then(function(r){if(!r)_alertaStock("Stock de "+it.nombre+" no actualizó al confirmar "+rec.nro_orden);}));
       }
     }
   });
@@ -2124,6 +2156,8 @@ function confirmarTransfConForma(id,forma,seleccionados,rec){
   }
 
   Promise.all(proms).then(function(){
+    return apiPatch('ventas_transferidas',{estado:'confirmada',confirmada_at:new Date().toISOString()},'id=eq.'+id);
+  }).then(function(){
     toast('Cobro confirmado ('+forma+')'+(rec.con_reserva?' — reserva liberada':''),'tok');
     document.getElementById('_moGestionar').remove();
     loadTransferidas();loadDineroData();renderCat();
@@ -2147,8 +2181,12 @@ function renderPedCard(ped,cobrado){
     var _itSeg=it.segmento||"";var _itPrecio=it.precio||0;var _itBadge=(_itSeg==="especial"&&_itPrecio===0)?"<span style='font-size:.56rem;color:var(--blue);background:rgba(74,159,216,.12);padding:.08rem .3rem;border-radius:3px;margin-right:.25rem'>🎁 Bonificado</span>":_itSeg==="especial"?"<span style='font-size:.56rem;color:var(--red);background:rgba(220,60,60,.12);padding:.08rem .3rem;border-radius:3px;margin-right:.25rem'>Especial</span>":_itSeg==="pm"?"<span style='font-size:.56rem;color:var(--green);margin-right:.25rem'>x10</span>":_itSeg==="pe"?"<span style='font-size:.56rem;color:var(--cyan);margin-right:.25rem'>x3</span>":_itSeg==="decan"?"<span style='font-size:.56rem;color:var(--tx3);margin-right:.25rem'>Decan</span>":"";
     var _isCobItem=_cobIdx.indexOf(_ii)>=0;
     var _tacho=_isCobItem?"text-decoration:line-through;opacity:.45;":"";
-    var _chk=_isCobItem?"<span style='color:var(--green);margin-right:.2rem;font-size:.7rem'>✓</span>":"";
-    html+="<div style='display:flex;justify-content:space-between;align-items:center;padding:.05rem 0;"+_tacho+"'>"+(_cobIdx.indexOf(_ii)>=0?"\u2713 ":"")+"<span>"+_itBadge+it.nombre+" x"+(it.qty||1)+(_itPrecio>0?" <span style='font-size:.62rem;color:var(--tx3)'>— "+fmt(_itPrecio)+"/u</span>":"")+"</span><span style='font-weight:600'>"+fmt(it.total||0)+"</span></div>";
+    // Badge de reserva — R azul si está reservado, ! rojo si no
+    var _resB='';
+    if(!_isCobItem&&!it.isDecan&&!it.isCombo&&it.producto_id){
+      _resB=_badgeReserva(it.producto_id,it.qty||1);
+    }
+    html+="<div style='display:flex;justify-content:space-between;align-items:center;padding:.05rem 0;"+_tacho+"'>"+(_cobIdx.indexOf(_ii)>=0?"\u2713 ":"")+"<span>"+_resB+_itBadge+it.nombre+" x"+(it.qty||1)+(_itPrecio>0?" <span style='font-size:.62rem;color:var(--tx3)'>— "+fmt(_itPrecio)+"/u</span>":"")+"</span><span style='font-weight:600'>"+fmt(it.total||0)+"</span></div>";
   });
   html+="</div>";
   // Alerta de cambio de precio
@@ -2185,36 +2223,33 @@ function confirmarCobro(pedId,btn){
     var ped=data[0];var items=[];
     try{items=typeof ped.items==="string"?JSON.parse(ped.items):ped.items;}catch(ex){}
     var nroOrden=ped.nro_orden||("WEB-"+pedId);
-    var promises=[apiPatch("pedidos_catalogo",{confirmado_cobro:true,confirmado_at:new Date().toISOString(),estado:"cobrado",periodo:periodoActual},"id=eq."+pedId)];
+    // FIX: stock y ventas PRIMERO — estado cobrado DESPUÉS
+    var stockProms=[];
     if(Array.isArray(items))items.forEach(function(it){
-      // Registrar venta del item (combo o producto)
-      promises.push(apiPost("ventas",{vendedor_id:VENDEDOR_ID,producto_id:it.producto_id||null,producto_nombre:it.nombre,cantidad:it.qty||1,precio_unitario:it.precio||0,segmento:it.segmento||"x1",total:it.total||0,periodo:periodoActual,estado:"confirmada",origen:"catalogo",nro_orden:nroOrden,forma_cobro:"pendiente",descuento:0,descuento_motivo:""}));
-
+      stockProms.push(apiPost("ventas",{vendedor_id:VENDEDOR_ID,producto_id:it.producto_id||null,producto_nombre:it.nombre,cantidad:it.qty||1,precio_unitario:it.precio||0,segmento:it.segmento||"x1",total:it.total||0,periodo:periodoActual,estado:"confirmada",origen:"catalogo",nro_orden:nroOrden,forma_cobro:"pendiente",descuento:0,descuento_motivo:""}));
       if(it.isCombo&&it.combo_id){
-        // Combo: liberar reserva de cada producto desde BD — nunca cache
-        promises.push(
-          apiGet("combo_items","select=producto_id,cantidad&combo_id=eq."+it.combo_id).then(function(ci){
-            if(!Array.isArray(ci))return;
-            return Promise.all(ci.filter(function(cit){return cit.producto_id;}).map(function(cit){
-              var cant=(cit.cantidad||1)*(it.qty||1);
-              return patchStockFresco(cit.producto_id,{reserva:-cant,vendido_david:+cant},'Confirmar cobro combo web');
-            }));
-          })
-        );
+        stockProms.push(apiGet("combo_items","select=producto_id,cantidad&combo_id=eq."+it.combo_id).then(function(ci){
+          if(!Array.isArray(ci))return;
+          return Promise.all(ci.filter(function(cit){return cit.producto_id;}).map(function(cit){
+            return patchStockFresco(cit.producto_id,{reserva:-(cit.cantidad||1)*(it.qty||1),vendido_david:+(cit.cantidad||1)*(it.qty||1)},'Confirmar cobro combo web');
+          }));
+        }));
         return;
       }
-
       var pid=it.producto_id;
       if(!pid||it.isDecan)return;
-      promises.push(patchStockFresco(pid,{reserva:-(it.qty||1),vendido_david:+(it.qty||1)},'Confirmar cobro pedido'));
-      promises.push(apiPost("movimientos_stock",{
-        producto_id:pid,producto_nombre:it.nombre,tipo:"venta",
-        cantidad:it.qty||1,
-        motivo:"Venta pedido web "+nroOrden+" (desde reserva)",
-        usuario:VENDEDOR_NOMBRE||"vendedor",periodo:periodoActual
-      }).catch(function(){}));
+      stockProms.push(patchStockFresco(pid,{reserva:-(it.qty||1),vendido_david:+(it.qty||1)},'Confirmar cobro pedido')
+        .then(function(r){
+          if(!r)_alertaStock("El stock de "+it.nombre+" no pudo actualizarse al cobrar "+nroOrden);
+        })
+      );
+      stockProms.push(apiPost("movimientos_stock",{producto_id:pid,producto_nombre:it.nombre,tipo:"venta",cantidad:it.qty||1,motivo:"Venta pedido web "+nroOrden+" (desde reserva)",usuario:VENDEDOR_NOMBRE||"vendedor",periodo:periodoActual}).catch(function(){}));
     });
-    Promise.all(promises).then(function(){toast("Cobro confirmado!","tok");loadPedidosWeb();loadDineroData();renderCat();}).catch(function(){if(btn)btn.disabled=false;toast("Error al confirmar","terr");});
+    Promise.all(stockProms).then(function(){
+      return apiPatch("pedidos_catalogo",{confirmado_cobro:true,confirmado_at:new Date().toISOString(),estado:"cobrado",periodo:periodoActual},"id=eq."+pedId);
+    }).then(function(){
+      toast("Cobro confirmado!","tok");loadPedidosWeb();loadDineroData();renderCat();
+    }).catch(function(){if(btn)btn.disabled=false;toast("Error al confirmar","terr");});
   });
 }
 
@@ -2383,14 +2418,11 @@ function guardarEditPed(){
     if(!isDecan&&prodId&&origQty!==newQty){
       var diff=origQty-newQty; // positivo = bajó cant → devolver al stock
       if(diff!==0){
-        var p=prods.find(function(x){return x.id===prodId;});
-        if(p){
-          // Usar patchStockFresco para evitar prods stale
-          if(_conRes){
-            stockPromises.push(patchStockFresco(prodId,{reserva:-diff},'Editar pedido'));
-          } else {
-            stockPromises.push(patchStockFresco(prodId,{stock_actual:+diff},'Editar pedido'));
-          }
+        // FIX: eliminar prods.find() — siempre ajustar stock sin verificar cache
+        if(_conRes){
+          stockPromises.push(patchStockFresco(prodId,{reserva:-diff},'Editar pedido'));
+        } else {
+          stockPromises.push(patchStockFresco(prodId,{stock_actual:+diff},'Editar pedido'));
         }
       }
     }
@@ -5486,14 +5518,11 @@ function confirmarDevolucion(){
 
   // 3. If product OK -> return to stock
   if(volverAlStock&&v.producto_id&&v.segmento!=='decan'&&v.segmento!=='combo'){
-    var p=prods.find(function(x){return x.id===v.producto_id;});
-    if(p){
-      promises.push(patchStockFresco(v.producto_id,{stock_actual:+_devCant,vendido_david:-_devCant},'Devolucion')
-        .then(function(){
-          apiPost("movimientos_stock",{producto_id:v.producto_id,producto_nombre:v.producto_nombre,tipo:"devolucion",cantidad:_devCant,motivo:"Devolución. Motivo: "+motivo+(obs?" — "+obs:""),created_at:new Date().toISOString(),usuario:VENDEDOR_NOMBRE}).catch(function(){});
-        })
-      );
-    }
+    promises.push(patchStockFresco(v.producto_id,{stock_actual:+_devCant,vendido_david:-_devCant},'Devolucion')
+      .then(function(){
+        apiPost("movimientos_stock",{producto_id:v.producto_id,producto_nombre:v.producto_nombre,tipo:"devolucion",cantidad:_devCant,motivo:"Devolución. Motivo: "+motivo+(obs?" — "+obs:""),created_at:new Date().toISOString(),usuario:VENDEDOR_NOMBRE}).catch(function(){});
+      })
+    );
   }
 
   Promise.all(promises).then(function(){

@@ -1712,6 +1712,26 @@ function notificarVendedoresNuevoPedido(nroOrden, items, total){
   sendCallMeBot(kFacu,'5493515736780',msg);
 }
 
+// Reservar stock para un producto — lee BD fresca, con reintento si falla
+function _reservarProducto(pid, qty, intentos){
+  intentos=intentos||0;
+  apiGet("productos","select=id,stock_actual,reserva&id=eq."+pid)
+    .then(function(rows){
+      var fp=rows&&rows[0];
+      if(!fp){console.error('reserva: producto no encontrado id='+pid);return;}
+      var ns=Math.max(0,(fp.stock_actual||0)-qty);
+      var nr=(fp.reserva||0)+qty;
+      return fetch(SB_URL+"/rest/v1/productos?id=eq."+pid,{
+        method:"PATCH",
+        headers:{"Content-Type":"application/json","apikey":SB_KEY,"Authorization":"Bearer "+SB_KEY,"Prefer":"return=minimal"},
+        body:JSON.stringify({stock_actual:ns,reserva:nr})
+      });
+    }).catch(function(e){
+      console.error('reserva stock error pid='+pid+' intento='+intentos,e);
+      if(intentos<2){setTimeout(function(){_reservarProducto(pid,qty,intentos+1);},1500);}
+    });
+}
+
 function sendWA(){
   // Evitar doble envío
   if(window._sendingOrder){showToast('Pedido en proceso, esperá...');return;}
@@ -1829,12 +1849,11 @@ function sendWA(){
     window._sendingOrder=false;
     var waBtn=document.getElementById('waBtn');
     if(waBtn){waBtn.disabled=false;waBtn.style.opacity='';}
-    // Reservar stock — usar patchStockFresco para cada producto (lee BD fresca, nunca cache)
+    // Reservar stock — usar _reservarProducto que lee BD fresca, con reintento
     var todosIds=[];
     allCartItems.forEach(function(item){
-      if(item.isDecan)return; // decans no afectan stock
+      if(item.isDecan)return;
       if(item.isCombo){
-        // Combo: buscar productos desde combosPublicos
         var comboRef=combosPublicos.find(function(c){return c.id===item.comboId;});
         if(comboRef&&comboRef.combo_items){
           comboRef.combo_items.forEach(function(ci){
@@ -1844,55 +1863,29 @@ function sendWA(){
           });
         }
       } else {
-        // Producto normal — id puede ser string o número (claves de objeto JS son siempre string)
         var pid=parseInt(item.id);
-        if(pid){
-          todosIds.push({id:pid,qty:item.qty||1});
-        }
+        if(pid){todosIds.push({id:pid,qty:item.qty||1});}
       }
     });
-    // Agrupar cantidades por producto (por si el mismo producto aparece en combo y suelto)
     var qtxProd={};
     todosIds.forEach(function(x){qtxProd[x.id]=(qtxProd[x.id]||0)+x.qty;});
-    // patchStockFresco por cada producto — atómico, lee BD fresca cada vez
-    // Reservar stock — leer fresco y patchear, con reintento si falla
-    function _reservarProducto(pid, qty, intentos){
-      intentos=intentos||0;
-      apiGet("productos","select=id,stock_actual,reserva&id=eq."+pid)
-        .then(function(rows){
-          var fp=rows&&rows[0];
-          if(!fp){console.error('reserva: producto no encontrado id='+pid);return;}
-          var ns=Math.max(0,(fp.stock_actual||0)-qty);
-          var nr=(fp.reserva||0)+qty;
-          return fetch(SB_URL+"/rest/v1/productos?id=eq."+pid,{
-            method:"PATCH",
-            headers:{"Content-Type":"application/json","apikey":SB_KEY,"Authorization":"Bearer "+SB_KEY,"Prefer":"return=minimal"},
-            body:JSON.stringify({stock_actual:ns,reserva:nr})
-          });
-        }).catch(function(e){
-          console.error('reserva stock error pid='+pid+' intento='+intentos,e);
-          if(intentos<2){
-            setTimeout(function(){_reservarProducto(pid,qty,intentos+1);},1500);
-          }
-        });
-    }
     Object.keys(qtxProd).forEach(function(pid){
       _reservarProducto(parseInt(pid),qtxProd[pid],0);
     });
+    // FIX: window.open y vaciado del carrito DENTRO del .then() — solo si el pedido se guardó
+    notificarVendedoresNuevoPedido(nroOrden, pedidoItems, total);
+    window.open("https://wa.me/"+waNumber+"?text="+encodeURIComponent(msg),"_blank");
+    cart={};cstate={};decanState={};
+    updateCartCount();
+    document.getElementById("drawer").classList.remove("open");
+    document.getElementById("ov").classList.remove("open");
+    showToast("Pedido enviado! Orden: "+nroOrden);
   }).catch(function(){
     window._sendingOrder=false;
     var waBtn=document.getElementById('waBtn');
     if(waBtn){waBtn.disabled=false;waBtn.style.opacity='';}
     showToast('Error al registrar pedido. Intentá de nuevo.');
   });
-  // Notificar a David y Facu — fuera del .then() para garantizar ejecucion
-  notificarVendedoresNuevoPedido(nroOrden, pedidoItems, total);
-  window.open("https://wa.me/"+waNumber+"?text="+encodeURIComponent(msg),"_blank");
-  cart={};cstate={};decanState={};
-  updateCartCount();
-  document.getElementById("drawer").classList.remove("open");
-  document.getElementById("ov").classList.remove("open");
-  showToast("Pedido enviado! Orden: "+nroOrden);
 }
 
 
