@@ -2487,28 +2487,24 @@ function cancelarTransf(id,conReserva,btn){
     if(conReserva&&Array.isArray(items)){
       items.forEach(function(it){
         var pid=it.producto_id;
-        if(pid){
-          var p=prods.find(function(x){return x.id===pid;});
-          if(p){
-            // Leer BD fresca para verificar reserva real antes de devolver
-            promises.push(
-              apiGet("productos","select=id,stock_actual,reserva&id=eq."+pid).then(function(rows){
-                var fp=rows&&rows[0];
-                if(!fp)return;
-                var reservaReal=fp.reserva||0;
-                if(reservaReal<=0)return; // sin reserva, no devolver
-                var devQty=Math.min(it.qty||1, reservaReal);
-                return patchStockFresco(pid,{stock_actual:+devQty,reserva:-devQty},"Cancelar transf")
-                  .then(function(){
-                    return apiPost("movimientos_stock",{producto_id:pid,
-                      producto_nombre:it.nombre||"",tipo:"cancelacion_transferencia",
-                      cantidad:devQty,motivo:"Transferencia cancelada - stock devuelto",
-                      usuario:VENDEDOR_NOMBRE||"vendedor",periodo:periodoActual}).catch(function(){});
-                  });
-              })
-            );
-          }
-        }
+        if(!pid||it.isDecan)return;
+        // FIX: eliminar prods.find() — siempre leer BD fresca para devolver stock
+        promises.push(
+          apiGet("productos","select=id,stock_actual,reserva&id=eq."+pid).then(function(rows){
+            var fp=rows&&rows[0];
+            if(!fp)return;
+            var reservaReal=fp.reserva||0;
+            if(reservaReal<=0)return;
+            var devQty=Math.min(it.qty||1, reservaReal);
+            return patchStockFresco(pid,{stock_actual:+devQty,reserva:-devQty},"Cancelar transf")
+              .then(function(){
+                return apiPost("movimientos_stock",{producto_id:pid,
+                  producto_nombre:it.nombre||"",tipo:"cancelacion_transferencia",
+                  cantidad:devQty,motivo:"Transferencia cancelada - stock devuelto",
+                  usuario:VENDEDOR_NOMBRE||"vendedor",periodo:periodoActual}).catch(function(){});
+              });
+          })
+        );
       });
     }
     Promise.all(promises).then(function(){
@@ -2937,12 +2933,17 @@ function confirmarTransf(id,btn){
     if(!Array.isArray(data)||!data.length)return;
     var v=data[0];var items=[];
     try{items=typeof v.items==="string"?JSON.parse(v.items):v.items;}catch(e){}
-    var promises=[
-      apiPatch("ventas_transferidas",{estado:"confirmada",confirmada_at:new Date().toISOString()},"id=eq."+id)
-    ];
-    // Register individual ventas per product
+
+    // FIX CRÍTICO: primero ejecutar los patches de stock, DESPUÉS marcar como confirmada
+    // Antes el estado='confirmada' iba junto con los patches en Promise.all
+    // Si un patch fallaba después de que Supabase guardaba el estado,
+    // la transferida quedaba confirmada sin stock actualizado
+
+    var stockPromises=[];
+
+    // Registrar ventas individuales por producto
     if(Array.isArray(items))items.forEach(function(it){
-      promises.push(apiPost("ventas",{
+      stockPromises.push(apiPost("ventas",{
         vendedor_id:VENDEDOR_ID,producto_id:it.producto_id||null,
         producto_nombre:it.nombre,cantidad:it.qty||1,
         precio_unitario:it.precio||0,segmento:it.segmento||"x1",
@@ -2951,12 +2952,12 @@ function confirmarTransf(id,btn){
         descuento:0,descuento_motivo:"",forma_cobro:v.forma_cobro||getFormaCobro()||"efectivo"
       }));
     });
+
     if(v.con_reserva){
-      // Stock ya descontado al transferir — liberar reserva y actualizar vendido_david
       if(Array.isArray(items))items.forEach(function(it){
         var pid=it.producto_id;
         if(!pid||it.isDecan)return;
-        promises.push(
+        stockPromises.push(
           patchStockFresco(pid,{reserva:-(it.qty||1),vendido_david:+(it.qty||1)},'Confirmar transf reservada')
           .then(function(){
             return apiPost("movimientos_stock",{
@@ -2969,11 +2970,10 @@ function confirmarTransf(id,btn){
         );
       });
     } else {
-      // Sin reserva — descontar stock directamente desde BD fresca
       if(Array.isArray(items))items.forEach(function(it){
         var pid=it.producto_id||it.id;
         if(!pid||it.isDecan)return;
-        promises.push(
+        stockPromises.push(
           patchStockFresco(pid,{stock_actual:-(it.qty||1),vendido_david:+(it.qty||1)},'Confirmar transf sin reserva')
           .then(function(){
             return apiPost("movimientos_stock",{
@@ -2986,7 +2986,12 @@ function confirmarTransf(id,btn){
         );
       });
     }
-    Promise.all(promises).then(function(){
+
+    // Esperar que TODOS los patches de stock terminen correctamente
+    // SOLO ENTONCES marcar la transferida como confirmada
+    Promise.all(stockPromises).then(function(){
+      return apiPatch("ventas_transferidas",{estado:"confirmada",confirmada_at:new Date().toISOString()},"id=eq."+id);
+    }).then(function(){
       // If this transfer was from Marcela (deposito), handle commissions
       if(v.creada_por==='Marcela'&&v.nro_orden){
         // Calculate commission from items
@@ -5627,13 +5632,13 @@ function ejecutarTransfer(targetId,targetNombre){
       descuento_motivo:item.descMotivo||""};
   });
   var conReserva=document.getElementById("transferConReserva")&&document.getElementById("transferConReserva").checked;
-  // If con_reserva: discount stock now
   var stockPromises=[];
-  var reservaEjecutadaOk=false;
+  var reservasOk=0;
+  var reservasTotal=0;
   if(conReserva){
-    // Reservar desde BD fresca — evita errores de caché
     perfs.filter(function(i){return !i.isDecan;}).forEach(function(item){
       if(!item.id)return;
+      reservasTotal++;
       stockPromises.push(
         apiGet("productos","select=id,stock_actual,reserva&id=eq."+item.id).then(function(rows){
           var fp=rows&&rows[0];
@@ -5641,7 +5646,7 @@ function ejecutarTransfer(targetId,targetNombre){
           if((fp.stock_actual||0)<=0){toast("Sin stock para: "+item.nombre,"twarn");return;}
           return patchStockFresco(item.id,{stock_actual:-item.qty,reserva:+item.qty},"Reserva transfer")
             .then(function(r){
-              if(r!==null)reservaEjecutadaOk=true;
+              if(r!==null)reservasOk++;
               else toast("Error reservando: "+item.nombre,"terr");
             });
         }).catch(function(e){toast("Error de red: "+item.nombre,"terr");})
@@ -5649,6 +5654,8 @@ function ejecutarTransfer(targetId,targetNombre){
     });
   }
   Promise.all(stockPromises).then(function(){
+    // reserva_ejecutada=true solo si TODOS los productos se reservaron
+    var reservaEjecutadaOk=conReserva&&reservasOk>0&&reservasOk===reservasTotal;
     return apiPost("ventas_transferidas",{
       creada_por:VENDEDOR_NOMBRE,asignada_a:targetId,
       reserva_ejecutada:conReserva&&reservaEjecutadaOk,
