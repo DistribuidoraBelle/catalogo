@@ -256,6 +256,7 @@ td{padding:.35rem .5rem;font-size:.78rem;color:var(--tx2);vertical-align:middle;
     <div class="sb-item admin-only" onclick="navTo('periodos',this)"><span>&#128197;</span><span>Periodos</span></div>
     <div class="sb-item admin-only" onclick="navTo('pedidos',this)"><span>&#128203;</span><span>Pedidos Web</span></div>
     <div class="sb-sec admin-only">Registro</div>
+    <div class="sb-item admin-only" onclick="navTo('auditoria-stock',this)"><span>🔍</span><span>Auditoría Stock</span></div>
     <div class="sb-item admin-only" onclick="navTo('movimientos',this)"><span>&#128196;</span><span>Movimientos Stock</span></div>
     <div class="sb-item admin-only" onclick="navTo('reclamos',this)"><span>&#128227;</span><span>Reclamos</span></div>
     <div class="sb-item admin-only" onclick="navTo('registros',this)"><span>&#128202;</span><span>Registros Historicos</span></div>
@@ -848,6 +849,11 @@ td{padding:.35rem .5rem;font-size:.78rem;color:var(--tx2);vertical-align:middle;
       </div>
       <div id="pedidosWebList">
         <div class="loading"><div class="spin"></div>Cargando pedidos...</div>
+      </div>
+    </div>
+    <div class="page" id="page-auditoria-stock" style="display:none">
+      <div id="auditoriaContainer">
+        <div class="loading"><div class="spin"></div>Cargando auditoría...</div>
       </div>
     </div>
     <div class="page" id="page-movimientos" style="display:none">
@@ -6741,7 +6747,7 @@ function guardarNuevoProdFromModal(){
   });
 }
 
-var PAGE_TITLES={diagnostico:"Diagn\u00f3stico del Sistema",dashboard:"Dashboard",stock:"Stock y Precios","catalogo-edit":"Editar Catalogo",rendicion:"Rendicion David","historial-ventas":"Historial Ventas",pedidos:"Pedidos Web",movimientos:"Movimientos Stock",reclamos:"Reclamos",registros:"Registros Historicos",combos:"Combos y Ofertas",pestanas:"Pestanas del Catalogo","contacto-admin":"Pagina de Contacto",carrusel:"Carrusel",cierre:"Cierre de Periodo",clientes:"Clientes",cotizHistorial:"Historial y Facturacion","cotiz-historial":"Historial y Facturacion","compras-ia":"Ayudante de Compras","pedidos-proveedor":"Pedidos al Proveedor",cuentas:"Gestion de Cuentas",periodos:"Periodos"};
+var PAGE_TITLES={diagnostico:"Diagn\u00f3stico del Sistema",dashboard:"Dashboard",stock:"Stock y Precios","catalogo-edit":"Editar Catalogo",rendicion:"Rendicion David","historial-ventas":"Historial Ventas",pedidos:"Pedidos Web",movimientos:"Movimientos Stock","auditoria-stock":"Auditoría de Stock",reclamos:"Reclamos",registros:"Registros Historicos",combos:"Combos y Ofertas",pestanas:"Pestanas del Catalogo","contacto-admin":"Pagina de Contacto",carrusel:"Carrusel",cierre:"Cierre de Periodo",clientes:"Clientes",cotizHistorial:"Historial y Facturacion","cotiz-historial":"Historial y Facturacion","compras-ia":"Ayudante de Compras","pedidos-proveedor":"Pedidos al Proveedor",cuentas:"Gestion de Cuentas",periodos:"Periodos"};
 
 // -- COMBOS -----------------------------------------------------------
 var combosData=[];
@@ -12855,6 +12861,7 @@ function navTo(pg,el){
   if(pg==="historial-ventas")loadHistorialDavid();
   if(pg==="pedidos")loadPedidos();
   if(pg==="movimientos")loadMovimientos();
+  if(pg==="auditoria-stock")loadAuditoriaStock();
   if(pg==="reclamos")loadReclamos();
   if(pg==="registros")loadRegistros();
   if(pg==="combos")loadCombos();
@@ -12884,7 +12891,198 @@ function navTo(pg,el){
 
 
 // ═══════════════════════════════════════════════════════════════════════
-// SISTEMA DE RECLAMOS ADMIN v2
+// AUDITORÍA DE STOCK
+// ═══════════════════════════════════════════════════════════════════════
+function loadAuditoriaStock(){
+  var cont=document.getElementById("auditoriaContainer");
+  if(!cont)return;
+  cont.innerHTML="<div class='loading'><div class='spin'></div>Analizando stock...</div>";
+
+  Promise.all([
+    apiGet("productos","select=id,nombre,empresa,stock_actual,reserva,vendido_david,activo&activo=is.true&order=empresa,nombre&limit=2000"),
+    apiGet("pedidos_catalogo","select=nro_orden,estado,items,vendedor_id&estado=in.(pendiente,reservado)&limit=500"),
+    apiGet("ventas_transferidas","select=nro_orden,estado,items,con_reserva&estado=eq.pendiente&limit=200")
+  ]).then(function(res){
+    var productos = res[0]||[];
+    var pedidos = res[1]||[];
+    var transferidas = res[2]||[];
+
+    // Calcular reservas esperadas por producto desde pedidos activos
+    var reservasEsperadas = {};
+    pedidos.forEach(function(ped){
+      var items=[];
+      try{items=typeof ped.items==="string"?JSON.parse(ped.items):ped.items;}catch(e){}
+      if(!Array.isArray(items))return;
+      items.forEach(function(it){
+        if(!it.producto_id||it.isDecan||it.isCombo)return;
+        var pid=it.producto_id;
+        if(!reservasEsperadas[pid])reservasEsperadas[pid]={qty:0,pedidos:[]};
+        reservasEsperadas[pid].qty+=(it.qty||1);
+        reservasEsperadas[pid].pedidos.push(ped.nro_orden);
+      });
+    });
+    transferidas.forEach(function(t){
+      if(!t.con_reserva)return;
+      var items=[];
+      try{items=typeof t.items==="string"?JSON.parse(t.items):t.items;}catch(e){}
+      if(!Array.isArray(items))return;
+      items.forEach(function(it){
+        if(!it.producto_id||it.isDecan)return;
+        var pid=it.producto_id;
+        if(!reservasEsperadas[pid])reservasEsperadas[pid]={qty:0,pedidos:[]};
+        reservasEsperadas[pid].qty+=(it.qty||1);
+        reservasEsperadas[pid].pedidos.push(t.nro_orden);
+      });
+    });
+
+    // Detectar inconsistencias
+    var inconsistencias=[];
+    var stockBajo=[];
+    var sinProblemas=0;
+
+    productos.forEach(function(p){
+      var esperada=(reservasEsperadas[p.id]||{qty:0}).qty;
+      var real=p.reserva||0;
+      var stock=p.stock_actual||0;
+      var pedidosRel=(reservasEsperadas[p.id]||{pedidos:[]}).pedidos;
+      var fisico=stock+real;
+
+      var problemas=[];
+      if(real!==esperada){
+        if(real>esperada)problemas.push({tipo:"fantasma",txt:"Reserva fantasma: tiene "+real+" pero pedidos activos solo justifican "+esperada,sev:"alta"});
+        else problemas.push({tipo:"faltante",txt:"Reserva faltante: tiene "+real+" pero pedidos activos requieren "+esperada,sev:"alta"});
+      }
+      if(stock<0)problemas.push({tipo:"negativo",txt:"Stock negativo: "+stock+"u",sev:"critica"});
+      if(fisico===0&&real>0)problemas.push({tipo:"sin_fisico",txt:"Sin stock físico pero tiene "+real+" reservadas",sev:"alta"});
+
+      if(problemas.length>0){
+        inconsistencias.push({p:p,problemas:problemas,esperada:esperada,pedidos:pedidosRel});
+      } else {
+        if(stock>=0&&stock<=2&&real===0)stockBajo.push(p);
+        sinProblemas++;
+      }
+    });
+
+    // Ordenar por severidad
+    var orden={critica:0,alta:1,media:2};
+    inconsistencias.sort(function(a,b){
+      var sa=Math.min.apply(null,a.problemas.map(function(p){return orden[p.sev]||9;}));
+      var sb=Math.min.apply(null,b.problemas.map(function(p){return orden[p.sev]||9;}));
+      return sa-sb;
+    });
+
+    // Render
+    var html="";
+
+    // Resumen
+    var criticas=inconsistencias.filter(function(x){return x.problemas.some(function(p){return p.sev==="critica";});}).length;
+    var altas=inconsistencias.filter(function(x){return x.problemas.some(function(p){return p.sev==="alta";});}).length;
+    html+="<div style='display:grid;grid-template-columns:repeat(4,1fr);gap:.5rem;margin-bottom:1rem'>";
+    html+="<div style='background:var(--sur2);border-radius:8px;padding:.6rem;text-align:center;border:1px solid rgba(220,60,60,.3)'>";
+    html+="<div style='font-size:1.4rem;font-weight:700;color:var(--red)'>"+criticas+"</div>";
+    html+="<div style='font-size:.62rem;color:var(--tx3);text-transform:uppercase'>Críticas</div></div>";
+    html+="<div style='background:var(--sur2);border-radius:8px;padding:.6rem;text-align:center;border:1px solid rgba(255,180,0,.3)'>";
+    html+="<div style='font-size:1.4rem;font-weight:700;color:var(--yel)'>"+altas+"</div>";
+    html+="<div style='font-size:.62rem;color:var(--tx3);text-transform:uppercase'>Alertas</div></div>";
+    html+="<div style='background:var(--sur2);border-radius:8px;padding:.6rem;text-align:center;border:1px solid rgba(255,180,0,.2)'>";
+    html+="<div style='font-size:1.4rem;font-weight:700;color:var(--yel)'>"+stockBajo.length+"</div>";
+    html+="<div style='font-size:.62rem;color:var(--tx3);text-transform:uppercase'>Stock bajo</div></div>";
+    html+="<div style='background:var(--sur2);border-radius:8px;padding:.6rem;text-align:center;border:1px solid rgba(76,175,130,.3)'>";
+    html+="<div style='font-size:1.4rem;font-weight:700;color:var(--green)'>"+sinProblemas+"</div>";
+    html+="<div style='font-size:.62rem;color:var(--tx3);text-transform:uppercase'>Sin problemas</div></div>";
+    html+="</div>";
+
+    if(!inconsistencias.length&&!stockBajo.length){
+      html+="<div style='background:rgba(76,175,130,.1);border:1px solid rgba(76,175,130,.3);border-radius:8px;padding:1.2rem;text-align:center'>";
+      html+="<div style='font-size:1.5rem'>✅</div>";
+      html+="<div style='font-size:.8rem;color:var(--green);font-weight:600;margin-top:.3rem'>Todo el stock está consistente</div>";
+      html+="<div style='font-size:.68rem;color:var(--tx3);margin-top:.2rem'>"+sinProblemas+" productos verificados</div>";
+      html+="</div>";
+      cont.innerHTML=html;return;
+    }
+
+    // Inconsistencias
+    if(inconsistencias.length){
+      html+="<div style='font-size:.72rem;font-weight:700;color:var(--tx2);margin-bottom:.5rem;text-transform:uppercase;letter-spacing:.05em'>⚠️ Inconsistencias detectadas ("+inconsistencias.length+")</div>";
+      inconsistencias.forEach(function(x){
+        var p=x.p;
+        var esCritica=x.problemas.some(function(pr){return pr.sev==="critica";});
+        var borderColor=esCritica?"rgba(220,60,60,.4)":"rgba(255,180,0,.3)";
+        var badgeColor=esCritica?"var(--red)":"var(--yel)";
+        html+="<div style='background:var(--sur2);border:1px solid "+borderColor+";border-radius:8px;padding:.7rem .9rem;margin-bottom:.45rem'>";
+        html+="<div style='display:flex;justify-content:space-between;align-items:flex-start;gap:.5rem'>";
+        html+="<div style='flex:1;min-width:0'>";
+        html+="<div style='font-size:.78rem;font-weight:700;color:var(--tx)'>"+p.nombre+"</div>";
+        html+="<div style='font-size:.63rem;color:var(--tx3)'>"+p.empresa+"</div>";
+        html+="</div>";
+        html+="<div style='text-align:right;flex-shrink:0'>";
+        html+="<span style='font-size:.62rem;background:"+badgeColor+";color:#000;border-radius:4px;padding:.1rem .4rem;font-weight:700'>"+( esCritica?"CRÍTICO":"ALERTA")+"</span>";
+        html+="</div></div>";
+        // Datos del stock
+        html+="<div style='display:grid;grid-template-columns:repeat(3,1fr);gap:.3rem;margin:.5rem 0;font-size:.68rem'>";
+        html+="<div style='background:var(--sur3);border-radius:5px;padding:.3rem .5rem;text-align:center'>";
+        html+="<div style='color:var(--tx3)'>Stock libre</div><div style='font-weight:700;color:"+(p.stock_actual<0?"var(--red)":"var(--tx)")+"'>"+p.stock_actual+"</div></div>";
+        html+="<div style='background:var(--sur3);border-radius:5px;padding:.3rem .5rem;text-align:center'>";
+        html+="<div style='color:var(--tx3)'>Reserva real</div><div style='font-weight:700;color:var(--cyan)'>"+p.reserva+"</div></div>";
+        html+="<div style='background:var(--sur3);border-radius:5px;padding:.3rem .5rem;text-align:center'>";
+        html+="<div style='color:var(--tx3)'>Reserva esperada</div><div style='font-weight:700;color:"+(x.esperada!==(p.reserva||0)?"var(--yel)":"var(--green)")+"'>"+x.esperada+"</div></div>";
+        html+="</div>";
+        // Problemas
+        x.problemas.forEach(function(pr){
+          html+="<div style='font-size:.67rem;color:"+badgeColor+";margin-top:.2rem'>→ "+pr.txt+"</div>";
+        });
+        // Pedidos relacionados
+        if(x.pedidos.length){
+          html+="<div style='font-size:.62rem;color:var(--tx3);margin-top:.3rem'>Pedidos activos: "+x.pedidos.join(", ")+"</div>";
+        }
+        // Botón corrección sugerida
+        var diff=(p.reserva||0)-x.esperada;
+        if(diff!==0){
+          var accion=diff>0?"Liberar "+Math.abs(diff)+"u de reserva fantasma":"Agregar "+Math.abs(diff)+"u de reserva faltante";
+          html+="<div style='margin-top:.5rem'>";
+          html+="<button class='btn btn-g' style='font-size:.65rem;padding:.25rem .6rem' onclick='auditoriaCorregir("+p.id+","+(-diff)+",\""+p.nombre.replace(/"/g,"'")+"\")'>🔧 "+accion+"</button>";
+          html+="</div>";
+        }
+        html+="</div>";
+      });
+    }
+
+    // Stock bajo
+    if(stockBajo.length){
+      html+="<div style='font-size:.72rem;font-weight:700;color:var(--tx2);margin:.8rem 0 .5rem;text-transform:uppercase;letter-spacing:.05em'>📉 Stock bajo (≤ 2 unidades)</div>";
+      html+="<div style='display:grid;grid-template-columns:repeat(auto-fill,minmax(200px,1fr));gap:.4rem'>";
+      stockBajo.forEach(function(p){
+        html+="<div style='background:var(--sur2);border:1px solid rgba(255,180,0,.2);border-radius:7px;padding:.5rem .7rem;display:flex;justify-content:space-between;align-items:center'>";
+        html+="<div><div style='font-size:.72rem;font-weight:600;color:var(--tx)'>"+p.nombre.split("|")[0].trim()+"</div>";
+        html+="<div style='font-size:.6rem;color:var(--tx3)'>"+p.empresa+"</div></div>";
+        html+="<div style='font-size:1.1rem;font-weight:700;color:"+(p.stock_actual===0?"var(--red)":"var(--yel)")+"'>"+p.stock_actual+"u</div>";
+        html+="</div>";
+      });
+      html+="</div>";
+    }
+
+    // Última actualización
+    html+="<div style='font-size:.6rem;color:var(--tx3);text-align:right;margin-top:1rem'>Última verificación: "+new Date().toLocaleString("es-AR",{timeZone:"America/Argentina/Buenos_Aires"})+" &nbsp;";
+    html+="<button class='btn btn-g' style='font-size:.62rem;padding:.2rem .5rem' onclick='loadAuditoriaStock()'>↺ Actualizar</button></div>";
+
+    cont.innerHTML=html;
+  }).catch(function(e){
+    cont.innerHTML="<div class='empty'>Error al cargar auditoría: "+(e&&e.message?e.message:"")+"</div>";
+  });
+}
+
+function auditoriaCorregir(prodId, deltaReserva, nombre){
+  var accion=deltaReserva>0?"Agregar "+deltaReserva+"u de reserva faltante":"Liberar "+Math.abs(deltaReserva)+"u de reserva fantasma";
+  if(!confirm("¿Corregir \""+nombre+"\"?\n"+accion+"\n\nEsto ajustará la reserva en la BD.")){return;}
+  patchStockFresco(prodId,{reserva:deltaReserva,stock_actual:-deltaReserva},"Corrección auditoría manual").then(function(){
+    toast("Corrección aplicada ✅","tok");
+    loadAuditoriaStock();
+  }).catch(function(e){
+    toast("Error al corregir: "+(e&&e.message||""),"terr");
+  });
+}
+
+
 // ═══════════════════════════════════════════════════════════════════════
 var _reclamoActivo=null;
 
@@ -16187,11 +16385,25 @@ function adminCerrarPeriodoModal() {
 
   _hid(mb, 'cper-periodo-actual', periodoActual);
 
-  var mf = document.createElement('div'); mf.className = 'mf';
+  var mf = document.createElement('div'); mf.className = 'mf'; mf.style.flexDirection='column'; mf.style.gap='.5rem';
+  // Checkbox de confirmación
+  var confDiv = document.createElement('div');
+  confDiv.style.cssText = 'display:flex;align-items:center;gap:.5rem;background:rgba(220,60,60,.08);border:1px solid rgba(220,60,60,.3);border-radius:6px;padding:.5rem .7rem;cursor:pointer';
+  confDiv.innerHTML = '<input type="checkbox" id="cper-confirm" onchange="document.getElementById(\'cper-exec-btn\').disabled=!this.checked" style="width:16px;height:16px;cursor:pointer"> <label for="cper-confirm" style="font-size:.72rem;color:var(--red);cursor:pointer;font-weight:600">Entiendo que el cierre de periodo es irreversible y los datos son correctos</label>';
+  mf.appendChild(confDiv);
+  // Botones
+  var btns = document.createElement('div'); btns.style.cssText='display:flex;gap:.5rem;justify-content:flex-end';
   var cb = document.createElement('button'); cb.className = 'btn btn-g'; cb.textContent = 'Cancelar'; cb.onclick = function(){_mc('moAdminCierrePeriodo');};
-  var sb = document.createElement('button'); sb.className = 'btn btn-a'; sb.style.fontWeight = '700';
-  sb.textContent = '⚡ CERRAR PERIODO'; sb.onclick = adminEjecutarCierrePeriodo;
-  mf.appendChild(cb); mf.appendChild(sb);
+  var sb = document.createElement('button'); sb.className = 'btn btn-a'; sb.style.fontWeight = '700'; sb.id = 'cper-exec-btn'; sb.disabled = true; sb.style.opacity='.5';
+  sb.textContent = '⚡ CERRAR PERIODO';
+  sb.onclick = function(){ if(!sb.disabled) adminEjecutarCierrePeriodo(); };
+  sb.addEventListener('change', function(){ sb.style.opacity = sb.disabled ? '.5' : '1'; });
+  // Observer para cambiar opacidad al habilitar
+  document.getElementById('cper-confirm') && document.getElementById('cper-confirm').addEventListener('change', function(){
+    sb.style.opacity = this.checked ? '1' : '.5';
+  });
+  btns.appendChild(cb); btns.appendChild(sb);
+  mf.appendChild(btns);
 
   wrap.appendChild(mh); wrap.appendChild(mb); wrap.appendChild(mf);
   mo.appendChild(wrap);
