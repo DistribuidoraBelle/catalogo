@@ -4870,11 +4870,215 @@ function cancelarPedido(id){
 }
 
 
-// MOVIMIENTOS
+// ═══════════════════════════════════════════════════════════════════════
+// FUNCIONES DE ACCIÓN DESDE MODAL DE GESTIÓN ADMIN
+// Llamadas desde botones dinámicos en el modal _moGestionar
+// ═══════════════════════════════════════════════════════════════════════
+
+function editarPedido(pedId){
+  // En el admin, abrir el pedido en un modal de edición simple
+  apiGet("pedidos_catalogo","select=*&id=eq."+pedId).then(function(data){
+    if(!Array.isArray(data)||!data.length){toast("Pedido no encontrado","twarn");return;}
+    var ped=data[0];var items=[];
+    try{items=typeof ped.items==="string"?JSON.parse(ped.items):ped.items||[];}catch(e){}
+    // Abrir modal de edición con los items del pedido
+    var mo=document.getElementById("moEditPedAdmin");
+    if(!mo){mo=document.createElement("div");mo.id="moEditPedAdmin";mo.className="mo";document.body.appendChild(mo);}
+    var html="<div class='md' style='max-width:520px;width:95%'>";
+    html+="<div class='mh'><div class='mtt'>Editar pedido "+ped.nro_orden+"</div><button class='btn btn-g xb' onclick='cerrarModal(\"moEditPedAdmin\")'>✕</button></div>";
+    html+="<div class='mb'>";
+    html+="<table style='width:100%;border-collapse:collapse;font-size:.78rem;margin-bottom:.8rem'><thead><tr><th style='text-align:left;padding:.3rem;border-bottom:1px solid var(--bd)'>Producto</th><th style='text-align:center;padding:.3rem;border-bottom:1px solid var(--bd)'>Cant</th><th style='text-align:right;padding:.3rem;border-bottom:1px solid var(--bd)'>Total</th></tr></thead><tbody>";
+    items.forEach(function(it,idx){
+      html+="<tr><td style='padding:.3rem;color:var(--tx2);font-size:.72rem'>"+(it.isDecan?"(Decan) ":"")+(it.isCombo?"(Combo) ":"")+it.nombre+"</td>";
+      html+="<td style='text-align:center;padding:.3rem'><input type='number' min='0' value='"+(it.qty||1)+"' style='width:55px;padding:.2rem;text-align:center;background:var(--sur2);border:1px solid var(--bd);border-radius:4px;color:var(--tx)' data-idx='"+idx+"' class='_epQty'></td>";
+      html+="<td style='text-align:right;padding:.3rem;color:var(--acc);font-weight:600'>"+fmt(it.total||0)+"</td></tr>";
+    });
+    html+="</tbody></table>";
+    html+="<div style='display:flex;gap:.5rem'>";
+    html+="<button class='btn btn-g' style='flex:1;justify-content:center' onclick='cerrarModal(\"moEditPedAdmin\")'>Cancelar</button>";
+    html+="<button class='btn btn-a' style='flex:1;justify-content:center' onclick='_belleGuardarEditPed("+pedId+")'>Guardar</button>";
+    html+="</div></div></div>";
+    mo.innerHTML=html;
+    mo._ped=ped;mo._items=items;
+    mo.classList.add("open");
+  });
+}
+
+function _belleGuardarEditPed(pedId){
+  var mo=document.getElementById("moEditPedAdmin");
+  if(!mo||!mo._ped)return;
+  var items=mo._items;
+  var inputs=document.querySelectorAll("._epQty");
+  inputs.forEach(function(inp){
+    var idx=parseInt(inp.dataset.idx);
+    if(isNaN(idx)||!items[idx])return;
+    var newQty=parseInt(inp.value)||0;
+    var oldQty=items[idx].qty||1;
+    items[idx].qty=newQty;
+    items[idx].total=(items[idx].precio||0)*newQty;
+    // Ajustar stock si hay diferencia
+    if(newQty!==oldQty&&items[idx].producto_id&&!items[idx].isDecan){
+      var diff=oldQty-newQty;
+      if(mo._ped.estado==="reservado"){
+        patchStockFresco(items[idx].producto_id,{reserva:-diff},"Edición pedido admin");
+      } else {
+        patchStockFresco(items[idx].producto_id,{stock_actual:+diff},"Edición pedido admin");
+      }
+    }
+  });
+  var total=items.reduce(function(s,it){return s+(it.total||0);},0);
+  apiPatch("pedidos_catalogo",{items:JSON.stringify(items),total:total},"id=eq."+pedId).then(function(){
+    toast("Pedido actualizado","tok");
+    cerrarModal("moEditPedAdmin");
+    loadPedidos();
+  }).catch(function(e){toast("Error al guardar: "+(e.message||""),"terr");});
+}
+
+function editarTransf(id){
+  toast("Edición de transferidas disponible desde el panel del vendedor","twarn");
+}
+
+function cancelarPedidoWeb(pedId,btn){
+  bellConfirm("Cancelar este pedido web? El stock reservado vuelve al inventario.",function(){
+    if(btn)btn.disabled=true;
+    apiGet("pedidos_catalogo","select=*&id=eq."+pedId).then(function(data){
+      if(!Array.isArray(data)||!data.length)return;
+      var ped=data[0];var items=[];
+      try{items=typeof ped.items==="string"?JSON.parse(ped.items):ped.items;}catch(ex){}
+      var estadoPed=ped.estado;
+      var stockProms=[];
+      if(Array.isArray(items))items.forEach(function(it){
+        if(it.isCombo){
+          if(estadoPed!=="reservado"&&estadoPed!=="pendiente")return;
+          stockProms.push(apiGet("combo_items","select=producto_id,cantidad&combo_id=eq."+it.combo_id).then(function(ci){
+            if(!Array.isArray(ci))return;
+            return Promise.all(ci.filter(function(cit){return cit.producto_id;}).map(function(cit){
+              return patchStockFresco(cit.producto_id,{stock_actual:+(cit.cantidad||1)*(it.qty||1),reserva:-(cit.cantidad||1)*(it.qty||1)},'Admin cancelar combo web');
+            }));
+          }));
+          return;
+        }
+        var pid=it.producto_id;
+        if(!pid||it.isDecan)return;
+        if(estadoPed!=="reservado"&&estadoPed!=="pendiente")return;
+        var qty=it.qty||1;
+        stockProms.push(apiGet("productos","select=id,stock_actual,reserva&id=eq."+pid).then(function(rows){
+          var fp=rows&&rows[0];if(!fp)return;
+          var devQty=Math.min(qty,fp.reserva||0);
+          if(devQty<=0)return;
+          return patchStockFresco(pid,{stock_actual:+devQty,reserva:-devQty},'Admin cancelar web');
+        }));
+      });
+      Promise.all(stockProms).then(function(){
+        return apiPatch("pedidos_catalogo",{estado:"cancelado"},"id=eq."+pedId);
+      }).then(function(){
+        toast("Pedido cancelado — stock devuelto","twarn");
+        loadPedidos();
+      }).catch(function(e){toast("Error: "+(e.message||""),"terr");if(btn)btn.disabled=false;});
+    });
+  });
+}
+
+function cancelarPedReservado(pedId,btn){
+  bellConfirm("Cancelar pedido reservado? El stock vuelve al inventario.",function(){
+    if(btn)btn.disabled=true;
+    apiGet("pedidos_catalogo","select=*&id=eq."+pedId).then(function(data){
+      if(!Array.isArray(data)||!data.length)return;
+      var ped=data[0];var items=[];
+      try{items=typeof ped.items==="string"?JSON.parse(ped.items):ped.items;}catch(ex){}
+      var stockProms=[];
+      if(Array.isArray(items))items.forEach(function(it){
+        var pid=it.producto_id;
+        if(!pid||it.isDecan||it.isCombo)return;
+        var qty=it.qty||1;
+        stockProms.push(apiGet("productos","select=id,stock_actual,reserva&id=eq."+pid).then(function(rows){
+          var fp=rows&&rows[0];if(!fp)return;
+          var devQty=Math.min(qty,fp.reserva||0);
+          if(devQty<=0)return;
+          return patchStockFresco(pid,{stock_actual:+devQty,reserva:-devQty},'Admin cancelar reserva');
+        }));
+      });
+      Promise.all(stockProms).then(function(){
+        return apiPatch("pedidos_catalogo",{estado:"cancelado"},"id=eq."+pedId);
+      }).then(function(){
+        toast("Pedido reservado cancelado — stock devuelto","twarn");
+        loadPedidos();
+      }).catch(function(e){toast("Error: "+(e.message||""),"terr");if(btn)btn.disabled=false;});
+    });
+  });
+}
+
+function cancelarTransf(id,conReserva,btn){
+  bellConfirm("Cancelar transferida? "+(conReserva?"El stock reservado vuelve al inventario.":""),function(){
+    if(btn)btn.disabled=true;
+    apiGet("ventas_transferidas","select=*&id=eq."+id).then(function(data){
+      if(!Array.isArray(data)||!data.length)return;
+      var v=data[0];var items=[];
+      try{items=typeof v.items==="string"?JSON.parse(v.items):v.items;}catch(e){}
+      var stockProms=[apiPatch("ventas_transferidas",{estado:"cancelada"},"id=eq."+id)];
+      if(conReserva&&Array.isArray(items)){
+        items.forEach(function(it){
+          var pid=it.producto_id;
+          if(!pid||it.isDecan)return;
+          stockProms.push(apiGet("productos","select=id,stock_actual,reserva&id=eq."+pid).then(function(rows){
+            var fp=rows&&rows[0];if(!fp)return;
+            var devQty=Math.min(it.qty||1,fp.reserva||0);
+            if(devQty<=0)return;
+            return patchStockFresco(pid,{stock_actual:+devQty,reserva:-devQty},'Admin cancelar transf');
+          }));
+        });
+      }
+      Promise.all(stockProms).then(function(){
+        toast("Transferida cancelada"+(conReserva?" — stock devuelto":""),"twarn");
+        loadPedidos();
+      }).catch(function(e){toast("Error: "+(e.message||""),"terr");if(btn)btn.disabled=false;});
+    });
+  });
+}
+
+function reciboPedidoPDF(pedId){
+  apiGet("pedidos_catalogo","select=*&id=eq."+pedId).then(function(data){
+    if(!Array.isArray(data)||!data.length){toast("Pedido no encontrado","twarn");return;}
+    var ped=data[0];
+    var items=[];try{items=typeof ped.items==="string"?JSON.parse(ped.items):ped.items||[];}catch(ex){}
+    var fecha=new Date(ped.created_at).toLocaleString("es-AR",{day:"2-digit",month:"2-digit",year:"2-digit",hour:"2-digit",minute:"2-digit",timeZone:"America/Argentina/Buenos_Aires"});
+    var nro=ped.nro_orden||("R-"+pedId);
+    var w=window.open("","_blank","width=680,height=900");
+    if(!w){toast("Permití popups para generar el PDF","twarn");return;}
+    var cobrado=ped.cobrado_parcial||0;
+    var total=ped.total||0;
+    var saldo=total-cobrado;
+    var h="<!DOCTYPE html><html><head><meta charset='utf-8'><title>Remito "+nro+"</title>";
+    h+="<style>*{box-sizing:border-box;margin:0;padding:0}body{font-family:Arial,sans-serif;color:#1a1a1a;padding:32px;max-width:600px;margin:0 auto}";
+    h+=".logo{font-size:26px;font-weight:700;color:#c4965a;margin-bottom:4px}.header{display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:24px;padding-bottom:16px;border-bottom:3px solid #c4965a}";
+    h+="table{width:100%;border-collapse:collapse;margin:16px 0;font-size:13px}thead th{background:#1a1a1a;color:#fff;padding:8px 10px;text-align:left}";
+    h+="tbody td{padding:7px 10px;border-bottom:1px solid #eee}";
+    h+=".tot{display:flex;justify-content:space-between;font-size:14px;padding:4px 0}.tot.main{font-size:17px;font-weight:700;color:#c4965a;border-top:2px solid #1a1a1a;padding-top:8px;margin-top:4px}";
+    h+=".saldo{color:#c0392b;font-weight:700}@media print{body{padding:16px}}</style></head><body>";
+    h+="<div class='header'><div><div class='logo'>Distribuidora Belle</div><div style='font-size:11px;color:#888'>Perfumes arabes e internacionales</div></div>";
+    h+="<div style='text-align:right'><div style='font-size:20px;font-weight:700;text-transform:uppercase'>Remito</div>";
+    h+="<div style='color:#c4965a;font-weight:600'>"+nro+"</div><div style='font-size:11px;color:#888'>"+fecha+"</div></div></div>";
+    if(ped.notas){h+="<div style='background:#f9f9f9;border:1px solid #eee;border-radius:6px;padding:10px 14px;margin-bottom:16px;font-size:13px'><strong>Cliente:</strong> "+ped.notas+"</div>";}
+    h+="<table><thead><tr><th>Producto</th><th style='text-align:center'>Cant</th><th style='text-align:right'>Total</th></tr></thead><tbody>";
+    items.forEach(function(it){
+      h+="<tr><td>"+(it.isDecan?"&#9883; ":"")+(it.isCombo?"&#127873; ":"")+it.nombre+"</td><td style='text-align:center'>"+( it.qty||1)+"</td><td style='text-align:right'>$"+((it.total||0).toLocaleString("es-AR"))+"</td></tr>";
+    });
+    h+="</tbody></table>";
+    h+="<div class='tot'><span>Total</span><span>$"+(total.toLocaleString("es-AR"))+"</span></div>";
+    if(cobrado>0){h+="<div class='tot' style='color:#27ae60'><span>Cobrado</span><span>$"+(cobrado.toLocaleString("es-AR"))+"</span></div>";}
+    if(saldo>0){h+="<div class='tot saldo'><span>Saldo pendiente</span><span>$"+(saldo.toLocaleString("es-AR"))+"</span></div>";}
+    h+="<div style='margin-top:48px;display:grid;grid-template-columns:1fr 1fr;gap:40px'>";
+    h+="<div style='border-top:1px solid #999;padding-top:8px'><div style='font-size:11px;color:#888'>FIRMA CLIENTE</div></div>";
+    h+="<div style='border-top:1px solid #999;padding-top:8px'><div style='font-size:11px;color:#888'>FIRMA VENDEDOR</div></div></div>";
+    h+="<div style='text-align:center;margin-top:32px'><button onclick='window.print()' style='background:#c4965a;color:#fff;border:none;border-radius:6px;padding:10px 28px;font-size:14px;cursor:pointer;font-weight:600'>Imprimir / Guardar PDF</button></div>";
+    h+="</body></html>";
+    w.document.write(h);w.document.close();
+  });
+}
+
+
 function loadMovimientos(){
   var cont=document.getElementById("movimientosContainer");
-  if(!cont)return;
-  cont.innerHTML="<div class='loading'><div class='spin'></div>Cargando...</div>";
 
   var desde=document.getElementById("movDesde")?document.getElementById("movDesde").value:"";
   var hasta=document.getElementById("movHasta")?document.getElementById("movHasta").value:"";
