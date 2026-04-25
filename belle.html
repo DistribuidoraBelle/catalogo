@@ -6429,14 +6429,15 @@ function abrirControlPedido(pedidoId){
   var lblEl=document.getElementById("ctrlByLabel");
   if(lblEl)lblEl.textContent="Control por: "+userName.trim();
 
-  // Load everything
+  // Load everything — siempre leer items frescos de BD
   Promise.all([
     apiGet("pedidos_proveedor_items","select=*&pedido_id=eq."+pedidoId),
     apiGet("pedidos_proveedor","select=id,nro_pedido,proveedor,estado,controlado_por,controlado_at&id=eq."+pedidoId+"&limit=1"),
-    (prods&&prods.length>0)?Promise.resolve(null):apiGet("productos","select=id,nombre,empresa,stock_actual,en_viaje&activo=is.true&order=empresa,nombre&limit=2000")
+    apiGet("productos","select=id,nombre,empresa,stock_actual,en_viaje&activo=is.true&order=empresa,nombre&limit=2000")
   ]).then(function(res){
     var items=Array.isArray(res[0])?res[0]:[];
     var pedido=Array.isArray(res[1])&&res[1][0]?res[1][0]:null;
+    // FIX: siempre actualizar prods con datos frescos de BD
     if(Array.isArray(res[2])&&res[2].length>0)prods=res[2];
 
     _controlItems=items;
@@ -6883,6 +6884,11 @@ function confirmarControl(){
     apiPatch("pedidos_proveedor_items",patch,"id=eq."+it.id)
       .then(function(){
         clearTimeout(_saveTimer);
+        // ── Si se marcó como NUEVO y el item tenía un producto macheado antes ──
+        // bajar en_viaje del producto anterior
+        if(d.catalogoAccion==="nuevo"&&it.producto_id){
+          patchStockFresco(it.producto_id,{en_viaje:-it.cantidad_pedida},'Item desmacheado → marcado como nuevo').catch(function(e){console.error("[belle] error silencioso:",e);});
+        }
         // ── Actualizar stock_actual y en_viaje en productos ──
         if(d.prodId && cantRec>0){
           var p=prods.find(function(x){return x.id===d.prodId;});
@@ -11975,34 +11981,84 @@ function guardarControlPedido(){
 
   Object.keys(decisions).forEach(function(itemId){
     var d=decisions[itemId];
-    var cantPedida=((_controlItems||[]).find(function(it){return String(it.id)===String(itemId);})||{}).cantidad_pedida||0;
+    var itemOrig=(_controlItems||[]).find(function(it){return String(it.id)===String(itemId);})||{};
+    var cantPedida=itemOrig.cantidad_pedida||0;
     var cantRecibida=d.cantRecibida||0;
     var noLlego=cantPedida>0&&cantRecibida===0;
     var llegoParcial=cantPedida>0&&cantRecibida>0&&cantRecibida<cantPedida;
+
     // Determinar estado_item correcto
     var estadoItem;
     if(noLlego){
-      // No llegó nada — va directo a faltante/incidencias
       estadoItem='faltante';
     } else if(d.catalogoAccion==='match'){
-      estadoItem=llegoParcial?'macheado':'macheado'; // parcial igual macheado, faltante se crea aparte
+      estadoItem='macheado';
     } else if(d.catalogoAccion==='nuevo'){
       estadoItem='nuevo';
     } else {
       estadoItem='pendiente_catalogo';
     }
+
     var patch={
       cantidad_recibida: cantRecibida,
       cantidad_fallada: d.cantFallada||0,
       estado_item: estadoItem,
-      producto_id: noLlego?null:(d.prodId||null),
+      // FIX: si acción=nuevo, producto_id siempre null (sin importar el fuzzy match)
+      producto_id: (noLlego||d.catalogoAccion==='nuevo')?null:(d.prodId||null),
       observacion: d.obsFallada||''
     };
-    // Si llegó parcialmente, guardar cuánto faltó en observacion
     if(llegoParcial&&!patch.observacion){
       patch.observacion='Llegaron '+cantRecibida+' de '+cantPedida+' pedidas';
     }
     proms.push(apiPatch('pedidos_proveedor_items',patch,'id=eq.'+itemId));
+
+    // ── Manejar en_viaje ──────────────────────────────────────────
+    // El en_viaje SOLO se sube desde incConfirmarMatch (macheo manual).
+    // guardarControlPedido solo lo BAJA en casos donde corresponde:
+
+    // CASO 1: acción=nuevo y el item YA ESTABA macheado en BD (estado=macheado)
+    // → el en_viaje fue sumado previamente por incConfirmarMatch → hay que bajarlo
+    if(d.catalogoAccion==='nuevo'&&itemOrig.producto_id&&
+       (itemOrig.estado_item==='macheado'||itemOrig.estado_item==='controlado')){
+      var pidViejo=itemOrig.producto_id;
+      proms.push(
+        apiGet('productos','select=id,en_viaje&id=eq.'+pidViejo).then(function(rows){
+          var p=rows&&rows[0];if(!p)return;
+          var nv=Math.max(0,(p.en_viaje||0)-cantPedida);
+          return apiPatch('productos',{en_viaje:nv},'id=eq.'+pidViejo);
+        }).catch(function(e){console.error('[belle] error silencioso:',e);})
+      );
+    }
+
+    // CASO 2: acción=match Y cantRecibida>0 → llegó, hay que bajar en_viaje
+    // Solo si el item YA ESTABA macheado en BD (en_viaje fue sumado previamente)
+    if(d.catalogoAccion==='match'&&cantRecibida>0&&d.prodId&&
+       (itemOrig.estado_item==='macheado'||itemOrig.estado_item==='controlado')){
+      var pidNuevo=d.prodId;
+      var cantBajar=Math.min(cantRecibida,cantPedida);
+      proms.push(
+        apiGet('productos','select=id,stock_actual,en_viaje,costo_ind&id=eq.'+pidNuevo).then(function(rows){
+          var p=rows&&rows[0];if(!p)return;
+          var ns=(p.stock_actual||0)+cantRecibida;
+          var nv=Math.max(0,(p.en_viaje||0)-cantBajar);
+          var patchProd={stock_actual:ns,en_viaje:nv};
+          // Costo promedio ponderado
+          var cActual=p.costo_ind||0;
+          var pCompra=itemOrig.precio_usd||0;
+          if(pCompra>0&&ns>0){
+            patchProd.costo_ind=Math.round(((( p.stock_actual||0)*cActual)+(cantRecibida*pCompra))/ns*100)/100;
+          }
+          return apiPatch('productos',patchProd,'id=eq.'+pidNuevo);
+        }).catch(function(e){console.error('[belle] error silencioso:',e);})
+      );
+      // Registrar movimiento
+      proms.push(apiPost('movimientos_stock',{
+        producto_id:pidNuevo,tipo:'entrada',cantidad:cantRecibida,
+        motivo:'Control pedido proveedor — '+(itemOrig.nombre_proveedor||''),
+        usuario:(document.getElementById('sbUser')||{}).textContent||'admin',
+        periodo:periodoActual||''
+      }).catch(function(e){console.error('[belle] error silencioso:',e);}));
+    }
   });
 
   // Mark pedido as controlado
