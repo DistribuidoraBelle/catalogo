@@ -9043,9 +9043,9 @@ function verDetallePedido(id){
 
   // Cargar cotización si no está en memoria
   if(!window._cotizActual){
-    apiGet('cotizaciones','select=valor&activa=is.true&limit=1').then(function(r){
-      if(Array.isArray(r)&&r[0])window._cotizActual=r[0].valor;
-    });
+    apiGet('configuracion','select=valor&clave=eq.cotizacion_usd&limit=1').then(function(r){
+      if(Array.isArray(r)&&r[0])window._cotizActual=parseFloat(r[0].valor)||cotizActual||1520;
+    }).catch(function(){window._cotizActual=cotizActual||1520;});
   }
   Promise.all([
     apiGet("pedidos_proveedor_items","select=*&pedido_id=eq."+id),
@@ -10518,6 +10518,7 @@ function editarItemsPedidoProveedor(pedidoId){
       }
       window._eppPedidoId=pedidoId;
       window._eppItems=items.map(function(it){return Object.assign({},it);});
+      window._eppItemsOrig=items.map(function(it){return Object.assign({},it);});
       var ti=document.getElementById("epp-title");
       if(ti)ti.textContent="Editar: "+pedido.nro_pedido+" — "+pedido.proveedor;
       eppRenderItems();
@@ -10607,18 +10608,28 @@ function eppAgregarItem(){
 
 function eppGuardar(){
   var items=window._eppItems||[];
+  var itemsOrig=window._eppItemsOrig||[];
   var total=items.reduce(function(s,it){return s+(parseFloat(it.precio_usd||0)*(it.cantidad_pedida||0));},0);
   var promises=[];
 
-  // Patch existing items, post new ones, delete removed ones
-  // Items with id = existing, items without id = new
   var toInsert=items.filter(function(it){return !it.id;});
   var toUpdate=items.filter(function(it){return !!it.id;});
 
+  // IDs eliminados por el admin (estaban en orig pero no en items actual)
+  var currentIds=items.filter(function(it){return !!it.id;}).map(function(it){return it.id;});
+  var toDelete=itemsOrig.filter(function(it){return it.id&&currentIds.indexOf(it.id)<0;});
+
   toUpdate.forEach(function(it){
+    var orig=itemsOrig.find(function(o){return o.id===it.id;})||{};
+    var diffCant=(it.cantidad_pedida||0)-(orig.cantidad_pedida||0);
     promises.push(apiPatch("pedidos_proveedor_items",{
       cantidad_pedida:it.cantidad_pedida,precio_usd:it.precio_usd
     },"id=eq."+it.id));
+    // Ajustar en_viaje si cambió la cantidad y el item ya está macheado
+    if(diffCant!==0&&it.producto_id&&
+       (it.estado_item==='macheado'||it.estado_item==='controlado'||it.estado_item==='pendiente_catalogo')){
+      promises.push(patchStockFresco(it.producto_id,{en_viaje:diffCant},'epp cambio cantidad'));
+    }
   });
 
   toInsert.forEach(function(it){
@@ -10630,14 +10641,21 @@ function eppGuardar(){
     }));
   });
 
-  // Update pedido total
+  // Eliminar items removidos y ajustar en_viaje
+  toDelete.forEach(function(it){
+    promises.push(apiPatch("pedidos_proveedor_items",{estado_item:"cancelado"},"id=eq."+it.id));
+    if(it.producto_id&&(it.estado_item==='macheado'||it.estado_item==='controlado')){
+      promises.push(patchStockFresco(it.producto_id,{en_viaje:-(it.cantidad_pedida||0)},'epp item eliminado'));
+    }
+  });
+
   promises.push(apiPatch("pedidos_proveedor",{total_usd:total.toFixed(2)},"id=eq."+window._eppPedidoId));
 
   Promise.all(promises).then(function(){
     toast("Pedido actualizado — u$d "+total.toFixed(2),"tok");
     cerrarModal("moEditPedProv");
     loadPedidosProveedor();
-  });
+  }).catch(function(e){toast("Error al guardar: "+(e.message||""),"terr");console.error(e);});
 }
 
 
