@@ -7990,116 +7990,126 @@ function renderTopProds(ventas){
 }
 
 // -- CLIENTES ----------------------------------------------------------
+// ═══════════════════════════════════════════════════════════════
+// MÓDULO CLIENTES (admin) — tabla clientes real
+// ═══════════════════════════════════════════════════════════════
 var clientesData=[];
+var _clienteFicha=null;
 
 function loadClientes(){
-  apiGet("pedidos_catalogo","select=*&order=created_at.desc").then(function(data){
-    if(!Array.isArray(data)){clientesData=[];renderClientes([]);return;}
-    // Extract clients from notas and nro_orden
-    var clienteMap={};
-    data.forEach(function(ped){
-      var notas=ped.notas||"";
-      var clienteMatch=notas.match(/Cliente:\s*([^|]+)/);
-      var telMatch=notas.match(/Tel:\s*([^|]+)/);
-      var nombre=clienteMatch?clienteMatch[1].trim():"Anonimo";
-      var tel=telMatch?telMatch[1].trim():"";
-      var key=nombre.toLowerCase();
-      if(!clienteMap[key]){
-        clienteMap[key]={
-          nombre:nombre,tel:tel,
-          pedidos:[],totalComprado:0,
-          ultimaCompra:null,estado:"activo"
-        };
-      }
-      var items=[];try{items=typeof ped.items==="string"?JSON.parse(ped.items):ped.items;}catch(ex){}
-      clienteMap[key].pedidos.push({
-        id:ped.id,nro:ped.nro_orden,
-        fecha:ped.created_at,
-        total:ped.total||0,
-        estado:ped.estado||"pendiente",
-        items:items
-      });
-      if(ped.estado!=="cancelado")clienteMap[key].totalComprado+=ped.total||0;
-      if(!clienteMap[key].ultimaCompra||ped.created_at>clienteMap[key].ultimaCompra)
-        clienteMap[key].ultimaCompra=ped.created_at;
-    });
-    clientesData=Object.values(clienteMap).sort(function(a,b){return b.totalComprado-a.totalComprado;});
+  var cont=document.getElementById("clientesGrid");
+  if(!cont)return;
+  cont.innerHTML="<div class='loading'><div class='spin'></div>Cargando clientes...</div>";
+  Promise.all([
+    apiGet("clientes","select=*,vendedores(nombre)&order=created_at.desc&limit=500"),
+    apiGet("vendedores","select=id,nombre&activo=is.true")
+  ]).then(function(res){
+    clientesData=Array.isArray(res[0])?res[0]:[];
+    var _vendedores=Array.isArray(res[1])?res[1]:[];
     renderClientes(clientesData);
-  }).catch(function(){renderClientes([]);});
+    var sel=document.getElementById("clienteFiltVend");
+    if(sel){sel.innerHTML='<option value="">Todos los vendedores</option>'+_vendedores.map(function(v){return'<option value="'+v.id+'">'+v.nombre+'</option>';}).join('');}
+  }).catch(function(){cont.innerHTML="<div class='empty'>Error al cargar clientes</div>";});
 }
 
-function filterClientes(){
-  var q=(document.getElementById("clienteSrch").value||"").toLowerCase();
-  var filtered=q?clientesData.filter(function(c){
-    return norm(c.nombre||"").indexOf(norm(q))>=0||(c.tel||"").indexOf(q)>=0;
-  }):clientesData;
+function filtrarClientes(){
+  var q=(document.getElementById("clienteSrch")||{value:""}).value.toLowerCase().trim();
+  var est=(document.getElementById("clienteFiltEst")||{value:""}).value;
+  var vend=(document.getElementById("clienteFiltVend")||{value:""}).value;
+  var filtered=clientesData.filter(function(c){
+    if(q&&!((c.nombre||"")+" "+(c.apellido||"")+" "+(c.email||"")+" "+(c.telefono_principal||"")).toLowerCase().includes(q))return false;
+    if(est&&c.estado!==est)return false;
+    if(vend&&String(c.vendedor_asignado_id)!==vend)return false;
+    return true;
+  });
   renderClientes(filtered);
 }
 
 function renderClientes(clientes){
   var grid=document.getElementById("clientesGrid");if(!grid)return;
-  if(!clientes.length){
-    grid.innerHTML="<div class='empty' style='grid-column:1/-1'>Sin clientes registrados todavia. Los pedidos web con nombre aparecen aca.</div>";
-    return;
-  }
+  if(!clientes.length){grid.innerHTML="<div class='empty' style='grid-column:1/-1'>Sin clientes registrados. Los clientes se crean cuando alguien se registra desde el catálogo.</div>";return;}
+  var estColor={activo:"var(--green)",suspendido:"var(--red)",pendiente:"var(--yel)"};
   grid.innerHTML=clientes.map(function(c){
-    var ultima=c.ultimaCompra?new Date(c.ultimaCompra).toLocaleString("es-AR",{day:"2-digit",month:"2-digit",year:"2-digit",hour:"2-digit",minute:"2-digit",timeZone:"America/Argentina/Buenos_Aires"}):"";
-    var pedActivos=c.pedidos.filter(function(p){return p.estado!=="cancelado"&&p.estado!=="cobrado";}).length;
-    var totalPeds=c.pedidos.length;
-    var frecLabel=totalPeds>=5?"<span class='badge bg-green'>Frecuente</span>":totalPeds>=2?"<span class='badge bg-yel'>Recurrente</span>":"<span class='badge'>Nuevo</span>";
-    return"<div style='background:var(--sur);border:1px solid var(--bd);border-radius:var(--r);padding:.9rem;cursor:pointer' onclick='verClienteDetalle(\""+c.nombre.replace(/"/g,"'")+"\")'>"+
+    var nombre=(c.nombre||"")+" "+(c.apellido||"");
+    var ultima=c.ultimo_pedido_at?new Date(c.ultimo_pedido_at).toLocaleDateString("es-AR",{day:"2-digit",month:"2-digit",year:"2-digit"}):"—";
+    var vend=c.vendedores?c.vendedores.nombre:"Sin asignar";
+    var est=c.estado||"activo";
+    return "<div style='background:var(--sur);border:1px solid var(--bd);border-radius:var(--r);padding:.9rem;cursor:pointer' onclick='verClienteFicha("+c.id+")'>"+
       "<div style='display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:.5rem'>"+
-        "<div>"+
-          "<div style='font-size:.9rem;font-weight:600;color:var(--tx)'>"+c.nombre+"</div>"+
-          (c.tel?"<div style='font-size:.7rem;color:var(--tx3)'><a href='https://wa.me/549"+c.tel.replace(/\D/g,"")+"' target='_blank' style='color:var(--green)'>"+c.tel+"</a></div>":"")+
-        "</div>"+
-        frecLabel+
+        "<div style='min-width:0;flex:1'><div style='font-size:.88rem;font-weight:600;color:var(--tx)'>"+nombre+"</div><div style='font-size:.7rem;color:var(--tx3)'>"+(c.email||"—")+"</div></div>"+
+        "<span style='font-size:.62rem;font-weight:600;color:"+estColor[est]+";background:"+estColor[est]+"18;border:1px solid "+estColor[est]+"44;border-radius:10px;padding:.15rem .45rem;flex-shrink:0;margin-left:.4rem'>"+est+"</span>"+
       "</div>"+
-      "<div style='display:grid;grid-template-columns:1fr 1fr 1fr;gap:.4rem;margin-bottom:.5rem'>"+
-        "<div style='text-align:center;background:var(--sur2);border-radius:6px;padding:.4rem'>"+
-          "<div style='font-size:.58rem;color:var(--tx3);text-transform:uppercase'>Pedidos</div>"+
-          "<div style='font-size:.95rem;font-weight:700;color:var(--tx)'>"+totalPeds+"</div>"+
-        "</div>"+
-        "<div style='text-align:center;background:var(--sur2);border-radius:6px;padding:.4rem'>"+
-          "<div style='font-size:.58rem;color:var(--tx3);text-transform:uppercase'>Pendientes</div>"+
-          "<div style='font-size:.95rem;font-weight:700;color:var(--yel)'>"+pedActivos+"</div>"+
-        "</div>"+
-        "<div style='text-align:center;background:var(--sur2);border-radius:6px;padding:.4rem'>"+
-          "<div style='font-size:.58rem;color:var(--tx3);text-transform:uppercase'>Total</div>"+
-          "<div style='font-size:.9rem;font-weight:700;color:var(--acc)'>"+fmt(c.totalComprado)+"</div>"+
-        "</div>"+
+      "<div style='display:grid;grid-template-columns:1fr 1fr;gap:.4rem;margin-bottom:.5rem'>"+
+        "<div style='background:var(--sur2);border-radius:6px;padding:.4rem .5rem'><div style='font-size:.58rem;color:var(--tx3);text-transform:uppercase'>Precio</div><div style='font-size:.75rem;font-weight:600;color:var(--acc)'>"+(c.lista_precios==="mayorista_vip"?"VIP":c.lista_precios==="mayorista"?"Mayorista":"Minorista")+"</div></div>"+
+        "<div style='background:var(--sur2);border-radius:6px;padding:.4rem .5rem'><div style='font-size:.58rem;color:var(--tx3);text-transform:uppercase'>Vendedor</div><div style='font-size:.75rem;font-weight:600;color:var(--tx)'>"+vend+"</div></div>"+
       "</div>"+
-      "<div style='font-size:.65rem;color:var(--tx3)'>Ultima compra: "+ultima+"</div>"+
+      "<div style='font-size:.65rem;color:var(--tx3);'>Último pedido: "+ultima+(c.cuenta_corriente_habilitada?" · <span style='color:var(--acc)'>💳 CC</span>":"")+"</div>"+
     "</div>";
   }).join("");
 }
 
-function verClienteDetalle(nombre){
-  var c=clientesData.find(function(x){return x.nombre===nombre;});
-  if(!c)return;
-  var html="<div style='position:fixed;inset:0;background:rgba(0,0,0,.75);z-index:600;display:flex;align-items:center;justify-content:center;padding:1rem' onclick='this.remove()'>"+
-    "<div style='background:var(--sur);border:1px solid var(--bd);border-radius:var(--r);padding:1.2rem;max-width:500px;width:100%;max-height:80vh;overflow-y:auto' onclick='event.stopPropagation()'>"+
-      "<div style='display:flex;justify-content:space-between;align-items:center;margin-bottom:.9rem'>"+
-        "<h3 style='color:var(--acc)'>"+c.nombre+"</h3>"+
-        "<button onclick='this.closest(\"[onclick]\").remove()' class='btn btn-g' style='padding:.2rem .5rem'>X</button>"+
+function verClienteFicha(id){
+  _clienteFicha=clientesData.find(function(x){return x.id===id;});
+  if(!_clienteFicha)return;
+  var c=_clienteFicha;
+  Promise.all([
+    apiGet("pedidos_clientes","select=id,nro_orden,total,estado,created_at&cliente_id=eq."+id+"&order=created_at.desc&limit=10"),
+    apiGet("clientes_direcciones","select=*&cliente_id=eq."+id),
+    apiGet("vendedores","select=id,nombre&activo=is.true")
+  ]).then(function(res){
+    var pedidos=Array.isArray(res[0])?res[0]:[];
+    var dirs=Array.isArray(res[1])?res[1]:[];
+    var vends=Array.isArray(res[2])?res[2]:[];
+    var mo=document.createElement("div");mo.id="_moClienteFicha";mo.className="mo open";
+    var nombre=(c.nombre||"")+" "+(c.apellido||"");
+    var total=pedidos.filter(function(p){return p.estado!=="cancelado";}).reduce(function(s,p){return s+(p.total||0);},0);
+    var vendsOpts=vends.map(function(v){return'<option value="'+v.id+'"'+( c.vendedor_asignado_id===v.id?" selected":"")+'>'+v.nombre+'</option>';}).join('');
+    mo.innerHTML="<div class='md' style='max-width:640px;width:95%;max-height:90vh;overflow-y:auto'>"+
+      "<div class='mh'><div class='mtt'>"+nombre+"</div><button class='btn btn-g xb' onclick='document.getElementById("_moClienteFicha").remove()'>✕</button></div>"+
+      "<div class='mb' style='display:flex;flex-direction:column;gap:.8rem'>"+
+      // Stats
+      "<div style='display:grid;grid-template-columns:repeat(3,1fr);gap:.5rem'>"+
+        "<div style='background:var(--sur2);border-radius:8px;padding:.6rem;text-align:center'><div style='font-size:.58rem;color:var(--tx3);text-transform:uppercase'>Pedidos</div><div style='font-size:1.3rem;font-weight:700;color:var(--tx)'>"+pedidos.length+"</div></div>"+
+        "<div style='background:var(--sur2);border-radius:8px;padding:.6rem;text-align:center'><div style='font-size:.58rem;color:var(--tx3);text-transform:uppercase'>Total comprado</div><div style='font-size:.95rem;font-weight:700;color:var(--acc)'>"+fmt(total)+"</div></div>"+
+        "<div style='background:var(--sur2);border-radius:8px;padding:.6rem;text-align:center'><div style='font-size:.58rem;color:var(--tx3);text-transform:uppercase'>Saldo CC</div><div style='font-size:1rem;font-weight:700;color:var(--acc)'>"+fmt(Math.abs(c.saldo_cc||0))+"</div></div>"+
       "</div>"+
-      "<div style='font-size:.8rem;color:var(--tx2);margin-bottom:.9rem'>Total comprado: <b style='color:var(--acc)'>"+fmt(c.totalComprado)+"</b> &bull; "+c.pedidos.length+" pedidos</div>"+
-      c.pedidos.map(function(p){
-        var fecha=new Date(p.fecha).toLocaleString("es-AR",{day:"2-digit",month:"2-digit",year:"2-digit",hour:"2-digit",minute:"2-digit",timeZone:"America/Argentina/Buenos_Aires"});
-        var estColor=p.estado==="cobrado"?"var(--green)":p.estado==="cancelado"?"var(--red)":"var(--yel)";
-        var itemsHtml=(p.items||[]).slice(0,3).map(function(it){return"<span style='font-size:.65rem;color:var(--tx3)'>"+it.nombre+" x"+(it.qty||1)+"</span>";}).join(", ");
-        return"<div style='border:1px solid var(--bd);border-radius:6px;padding:.6rem .8rem;margin-bottom:.5rem'>"+
-          "<div style='display:flex;justify-content:space-between;margin-bottom:.2rem'>"+
-            "<span style='font-size:.75rem;color:var(--tx)'>"+p.nro+"</span>"+
-            "<span style='font-size:.75rem;font-weight:600;color:var(--acc)'>"+fmt(p.total)+"</span>"+
-          "</div>"+
-          "<div style='font-size:.65rem;color:var(--tx3);margin-bottom:.2rem'>"+fecha+" &bull; <span style='color:"+estColor+"'>"+p.estado+"</span></div>"+
-          "<div>"+itemsHtml+"</div>"+
-        "</div>";
-      }).join("")+
-    "</div>"+
-  "</div>";
-  document.body.insertAdjacentHTML("beforeend",html);
+      // Config
+      "<div style='display:grid;grid-template-columns:1fr 1fr;gap:.6rem'>"+
+        "<div><label style='font-size:.7rem;color:var(--tx3);display:block;margin-bottom:.2rem'>Estado</label><select id='_cfEst' style='width:100%;padding:.35rem .5rem;border:1px solid var(--bd);border-radius:5px;font-size:.78rem;background:var(--sur2);color:var(--tx)'><option value='activo'"+(c.estado==="activo"?" selected":"")+">Activo</option><option value='suspendido'"+(c.estado==="suspendido"?" selected":"")+">Suspendido</option><option value='pendiente'"+(c.estado==="pendiente"?" selected":"")+">Pendiente</option></select></div>"+
+        "<div><label style='font-size:.7rem;color:var(--tx3);display:block;margin-bottom:.2rem'>Lista de precios</label><select id='_cfPrec' style='width:100%;padding:.35rem .5rem;border:1px solid var(--bd);border-radius:5px;font-size:.78rem;background:var(--sur2);color:var(--tx)'><option value='minorista'"+(c.lista_precios==="minorista"?" selected":"")+">Minorista x1</option><option value='mayorista'"+(c.lista_precios==="mayorista"?" selected":"")+">Mayorista x10</option><option value='mayorista_vip'"+(c.lista_precios==="mayorista_vip"?" selected":"")+">VIP</option></select></div>"+
+        "<div><label style='font-size:.7rem;color:var(--tx3);display:block;margin-bottom:.2rem'>Vendedor asignado</label><select id='_cfVend' style='width:100%;padding:.35rem .5rem;border:1px solid var(--bd);border-radius:5px;font-size:.78rem;background:var(--sur2);color:var(--tx)'><option value=''>Sin asignar</option>"+vendsOpts+"</select></div>"+
+        "<div><label style='font-size:.7rem;color:var(--tx3);display:block;margin-bottom:.2rem'>Límite crédito ($)</label><input type='number' id='_cfLim' value='"+(c.limite_credito||0)+"' style='width:100%;padding:.35rem .5rem;border:1px solid var(--bd);border-radius:5px;font-size:.78rem;background:var(--sur2);color:var(--tx)'></div>"+
+      "</div>"+
+      "<label style='display:flex;align-items:center;gap:.4rem;cursor:pointer;font-size:.78rem'><input type='checkbox' id='_cfCC' "+(c.cuenta_corriente_habilitada?"checked":"")+"> Cuenta corriente habilitada</label>"+
+      "<div><label style='font-size:.7rem;color:var(--tx3);display:block;margin-bottom:.2rem'>Notas internas</label><textarea id='_cfNotas' rows='2' style='width:100%;padding:.4rem .6rem;border:1px solid var(--bd);border-radius:6px;font-size:.78rem;background:var(--sur2);color:var(--tx);resize:vertical'>"+(c.notas_internas||"")+"</textarea></div>"+
+      "<button class='btn btn-a' style='width:100%' onclick='_guardarCambiosCliente("+c.id+")'>Guardar cambios</button>"+
+      // Pedidos
+      (pedidos.length?"<div style='font-size:.72rem;font-weight:600;text-transform:uppercase;color:var(--acc);margin-bottom:.4rem'>Últimos pedidos</div>"+
+        pedidos.map(function(p){
+          var fecha=new Date(p.created_at).toLocaleDateString("es-AR",{day:"2-digit",month:"2-digit",year:"2-digit"});
+          return "<div style='display:flex;justify-content:space-between;padding:.4rem .6rem;background:var(--sur2);border-radius:6px;margin-bottom:.3rem;font-size:.78rem'>"+
+            "<span>"+p.nro_orden+"</span><span>"+fecha+"</span>"+
+            "<span style='font-weight:600;color:var(--acc)'>"+fmt(p.total)+"</span>"+
+            "<span style='font-size:.68rem;color:var(--tx3)'>"+p.estado+"</span></div>";
+        }).join(""):"")+
+      "</div></div>";
+    document.body.appendChild(mo);
+    mo.addEventListener("click",function(e){if(e.target===mo)mo.remove();});
+  });
+}
+
+function _guardarCambiosCliente(id){
+  var est=(document.getElementById("_cfEst")||{value:"activo"}).value;
+  var prec=(document.getElementById("_cfPrec")||{value:"minorista"}).value;
+  var vend=(document.getElementById("_cfVend")||{value:""}).value;
+  var cc=(document.getElementById("_cfCC")||{checked:false}).checked;
+  var lim=parseFloat((document.getElementById("_cfLim")||{value:"0"}).value)||0;
+  var notas=(document.getElementById("_cfNotas")||{value:""}).value.trim();
+  apiPatch("clientes",{estado:est,lista_precios:prec,vendedor_asignado_id:vend?parseInt(vend):null,cuenta_corriente_habilitada:cc,limite_credito:lim,notas_internas:notas||null,updated_at:new Date().toISOString()},"id=eq."+id).then(function(){
+    toast("Cliente actualizado","tok");
+    var mo=document.getElementById("_moClienteFicha");if(mo)mo.remove();
+    loadClientes();
+  }).catch(function(e){toast("Error al guardar","terr");});
 }
 
 // -- HISTORIAL COTIZACION ----------------------------------------------
