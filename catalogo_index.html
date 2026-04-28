@@ -4118,6 +4118,8 @@ function notaGuardar(){
 }
 </script>
 <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/dist/umd/supabase.js"></script>
+<!-- Google Maps JavaScript API + Places + Directions (FASE B - domicilios y rutas) -->
+<script src="https://maps.googleapis.com/maps/api/js?key=AIzaSyDNoIeGswrjA2FcL2G4ZUPi6iu5Wzf68cY&libraries=places&loading=async&language=es&region=AR" async defer></script>
 <script>
 // ═══════════════════════════════════════════════════════
 // REALTIME — Supabase WebSocket — actualizaciones en vivo
@@ -4563,14 +4565,22 @@ function catRegistro(){
       };
       if(authUserId) dataCliente.auth_user_id = authUserId;
 
-      return apiPost("clientes", dataCliente).then(function(){
+      return apiPost("clientes", dataCliente).then(function(rowsCli){
+        // Recuperar el cliente recién creado (con su nuevo id)
+        var clienteNuevo = Array.isArray(rowsCli) && rowsCli.length ? rowsCli[0] : null;
+        if(clienteNuevo){
+          _catCliente = clienteNuevo;
+        }
         // Si la sesión vino directa (auto-confirm en Supabase) → ya está logueado
         if(res.data && res.data.session){
-          _catToast("¡Cuenta creada! Ya estás dentro","tok");
-          _catDrawerView = "panel";
-          // onAuthStateChange se encarga del resto
+          _catSession = res.data.session;
+          _catToast("¡Cuenta creada! Ahora agregá tu dirección","tok");
+          // OBLIGATORIO: pedir domicilio antes de poder seguir
+          setTimeout(function(){
+            _catPedirPrimerDomicilio();
+          }, 400);
         } else {
-          // Necesita confirmar email
+          // Necesita confirmar email (config de Supabase)
           _catToast("Cuenta creada. Revisá tu email para confirmarla.","tok");
           _catDrawerView = "login";
           catRenderDrawer();
@@ -4694,7 +4704,7 @@ function _catRenderTab(){
   } else if(_catPanelTab === "pedidos"){
     _catRenderTabPedidos(box);
   } else if(_catPanelTab === "direcciones"){
-    box.innerHTML = "<div style='text-align:center;padding:2rem 1rem;color:var(--mid);font-size:.85rem'><div style='font-size:2rem;margin-bottom:.5rem'>&#128205;</div>Próximamente: tus direcciones de entrega</div>";
+    _catRenderTabDirecciones(box);
   } else if(_catPanelTab === "favoritos"){
     box.innerHTML = "<div style='text-align:center;padding:2rem 1rem;color:var(--mid);font-size:.85rem'><div style='font-size:2rem;margin-bottom:.5rem'>&hearts;</div>Próximamente: tus productos favoritos</div>";
   } else if(_catPanelTab === "cc"){
@@ -5026,6 +5036,550 @@ function _catTimelinePedido(ped, logs){
   });
   h += "</div>";
   return h;
+}
+
+// ════════════════════════════════════════════════════════════════════
+// FASE B Sub-bloque 4 — DIRECCIONES (Google Maps + Paq.ar)
+// ════════════════════════════════════════════════════════════════════
+
+// Coordenadas de referencia: centro de Córdoba Capital, Argentina
+// Cambiar después por la dirección exacta del depósito de Belle
+var BELLE_DEPOSITO_LAT = -31.4201;
+var BELLE_DEPOSITO_LNG = -64.1888;
+var BELLE_RADIO_KM = 40;       // Si está más lejos: Paq.ar
+var BELLE_PAQAR_MIN_UNIDADES = 5; // 5+ unidades = envío gratis por Paq.ar
+
+// Estado del selector de direcciones (se reinicia cada vez que se abre)
+var _catDir = {
+  map: null,
+  marker: null,
+  autocomplete: null,
+  pos: null,        // {lat, lng}
+  componentes: {},  // calle, numero, ciudad, etc — extraídos de Place
+  direccionFmt: "",
+  distanciaKm: null,
+  modoEntrega: "vendedor", // "vendedor" o "correo"
+  cb: null          // callback al guardar
+};
+
+// Calcula distancia en km entre dos puntos (Haversine)
+function _catDistKm(lat1, lng1, lat2, lng2){
+  var R = 6371;
+  var dLat = (lat2-lat1) * Math.PI/180;
+  var dLng = (lng2-lng1) * Math.PI/180;
+  var a = Math.sin(dLat/2)*Math.sin(dLat/2) +
+          Math.cos(lat1*Math.PI/180)*Math.cos(lat2*Math.PI/180) *
+          Math.sin(dLng/2)*Math.sin(dLng/2);
+  var c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1-a));
+  return R * c;
+}
+
+// Espera a que cargue el SDK de Google Maps
+function _catGmapsReady(){
+  return new Promise(function(resolve, reject){
+    var max = 60; // 6 segundos máximo
+    var i = 0;
+    var t = setInterval(function(){
+      if(window.google && window.google.maps && window.google.maps.places){
+        clearInterval(t);
+        resolve();
+      } else if(++i > max){
+        clearInterval(t);
+        reject(new Error("Google Maps no se cargó (¿problemas de red? ¿API key inválida?)"));
+      }
+    }, 100);
+  });
+}
+
+// ── Modal selector de domicilio (REUTILIZABLE: registro y panel) ────
+// callback(direccion) recibe el objeto completo o null si canceló.
+function _catAbrirSelectorDomicilio(opts){
+  opts = opts || {};
+  var titulo = opts.titulo || "Agregar dirección";
+  var direccionExistente = opts.direccion || null;
+  _catDir.cb = opts.cb || function(){};
+  _catDir.pos = direccionExistente && direccionExistente.lat ? {lat: direccionExistente.lat, lng: direccionExistente.lng} : null;
+  _catDir.componentes = direccionExistente ? {
+    calle: direccionExistente.calle || "",
+    numero: direccionExistente.numero || "",
+    barrio: direccionExistente.barrio || "",
+    ciudad: direccionExistente.ciudad || "",
+    provincia: direccionExistente.provincia || "",
+    pais: direccionExistente.pais || "Argentina",
+    codigo_postal: direccionExistente.codigo_postal || ""
+  } : {};
+  _catDir.direccionFmt = direccionExistente ? (direccionExistente.direccion_completa || "") : "";
+  _catDir.distanciaKm = direccionExistente ? direccionExistente.distancia_km : null;
+  _catDir.modoEntrega = direccionExistente ? (direccionExistente.modo_entrega || "vendedor") : "vendedor";
+
+  var mo = document.getElementById("_catMoDir");
+  if(!mo){
+    mo = document.createElement("div");
+    mo.id = "_catMoDir";
+    mo.style.cssText = "position:fixed;inset:0;background:rgba(20,15,8,.75);z-index:1300;display:flex;align-items:center;justify-content:center;padding:.5rem";
+    document.body.appendChild(mo);
+  }
+  mo.innerHTML = "<div style='background:#fff;border-radius:14px;max-width:600px;width:100%;max-height:94vh;display:flex;flex-direction:column;box-shadow:0 8px 40px rgba(0,0,0,.3)'>"+
+    "<div style='padding:.9rem 1.1rem;border-bottom:1px solid #e8d9bf;display:flex;justify-content:space-between;align-items:center;flex-shrink:0'>"+
+      "<div style='font-size:.95rem;font-weight:700;color:var(--dark)'>"+_catEsc(titulo)+"</div>"+
+      "<button onclick='_catCerrarSelectorDir(false)' style='background:none;border:none;font-size:1.4rem;cursor:pointer;color:var(--mid);padding:0;line-height:1'>&times;</button>"+
+    "</div>"+
+    "<div style='overflow-y:auto;padding:.9rem 1.1rem;flex:1' id='_catDirBody'>"+
+      "<div style='text-align:center;padding:2rem 1rem;color:var(--mid)'><div class='cat-spin' style='margin-bottom:.5rem'></div>Cargando mapa...</div>"+
+    "</div>"+
+    "</div>";
+
+  _catGmapsReady().then(function(){
+    _catRenderSelectorDirUI();
+  }).catch(function(e){
+    console.error("[belle-cat] Google Maps no cargó:",e);
+    var b = document.getElementById("_catDirBody");
+    if(b) b.innerHTML = "<div style='text-align:center;padding:2rem 1rem;color:#c5443a'>"+
+      "<div style='font-size:2rem;margin-bottom:.5rem'>&#9888;</div>"+
+      "<div style='font-weight:600;margin-bottom:.3rem'>No se pudo cargar el mapa</div>"+
+      "<div style='font-size:.78rem;color:var(--mid)'>Revisá tu conexión a internet</div>"+
+      "<button onclick='_catCerrarSelectorDir(false)' style='margin-top:1rem;background:var(--accent);color:#fff;border:none;padding:.5rem 1rem;border-radius:6px;cursor:pointer'>Cerrar</button>"+
+      "</div>";
+  });
+}
+
+function _catCerrarSelectorDir(guardar){
+  if(guardar && _catDir.cb){
+    // Disparar callback con los datos
+    var datos = _catRecolectarDir();
+    if(!datos) return; // validación falló
+    _catDir.cb(datos);
+  }
+  var mo = document.getElementById("_catMoDir");
+  if(mo) mo.remove();
+  _catDir.map = null;
+  _catDir.marker = null;
+  _catDir.autocomplete = null;
+}
+
+// Renderiza el form interno del modal selector
+function _catRenderSelectorDirUI(){
+  var b = document.getElementById("_catDirBody");
+  if(!b) return;
+  var pos = _catDir.pos || {lat: BELLE_DEPOSITO_LAT, lng: BELLE_DEPOSITO_LNG};
+  var c = _catDir.componentes || {};
+
+  var h = "";
+
+  // Buscador con autocomplete
+  h += "<div style='margin-bottom:.7rem'>";
+  h += "<label style='font-size:.7rem;color:var(--mid);text-transform:uppercase;font-weight:600'>Buscar dirección</label>";
+  h += "<input type='text' id='_catDirSearch' placeholder='Empezá a escribir tu dirección...' style='width:100%;padding:.55rem .7rem;border:1px solid #e8d9bf;border-radius:7px;font-size:.88rem;background:#fff;color:var(--dark);margin-top:.25rem;box-sizing:border-box;font-family:inherit'>";
+  h += "<div style='font-size:.66rem;color:var(--mid);margin-top:.2rem'>Ej: \"Av. Colón 1234, Córdoba\"</div>";
+  h += "</div>";
+
+  // Mapa
+  h += "<div id='_catDirMap' style='width:100%;height:240px;border-radius:9px;border:1px solid #e8d9bf;background:#f5f0e8;margin-bottom:.5rem'></div>";
+  h += "<div style='font-size:.66rem;color:var(--mid);margin-bottom:1rem;text-align:center'>Arrastrá el alfiler para ajustar la ubicación exacta</div>";
+
+  // Aviso de distancia (se llena al actualizar pin)
+  h += "<div id='_catDirAviso' style='margin-bottom:1rem'></div>";
+
+  // Campos editables
+  h += "<div style='display:grid;grid-template-columns:1fr 1fr;gap:.5rem;margin-bottom:.5rem'>";
+  h += "<div><label style='font-size:.66rem;color:var(--mid);text-transform:uppercase;font-weight:600'>Etiqueta *</label>";
+  h += "<input type='text' id='_catDirEtiqueta' placeholder='Casa, Trabajo...' value='"+_catEsc((c.etiqueta||"Casa"))+"' style='width:100%;padding:.45rem .6rem;border:1px solid #e8d9bf;border-radius:7px;font-size:.84rem;background:#fff;color:var(--dark);margin-top:.2rem;box-sizing:border-box;font-family:inherit'></div>";
+  h += "<div><label style='font-size:.66rem;color:var(--mid);text-transform:uppercase;font-weight:600'>Piso/Depto</label>";
+  h += "<input type='text' id='_catDirPiso' placeholder='Ej: 3B' value='"+_catEsc(c.piso_depto||"")+"' style='width:100%;padding:.45rem .6rem;border:1px solid #e8d9bf;border-radius:7px;font-size:.84rem;background:#fff;color:var(--dark);margin-top:.2rem;box-sizing:border-box;font-family:inherit'></div>";
+  h += "</div>";
+
+  h += "<div style='display:grid;grid-template-columns:2fr 1fr;gap:.5rem;margin-bottom:.5rem'>";
+  h += "<div><label style='font-size:.66rem;color:var(--mid);text-transform:uppercase;font-weight:600'>Calle *</label>";
+  h += "<input type='text' id='_catDirCalle' value='"+_catEsc(c.calle||"")+"' style='width:100%;padding:.45rem .6rem;border:1px solid #e8d9bf;border-radius:7px;font-size:.84rem;background:#fff;color:var(--dark);margin-top:.2rem;box-sizing:border-box;font-family:inherit'></div>";
+  h += "<div><label style='font-size:.66rem;color:var(--mid);text-transform:uppercase;font-weight:600'>Número *</label>";
+  h += "<input type='text' id='_catDirNumero' value='"+_catEsc(c.numero||"")+"' style='width:100%;padding:.45rem .6rem;border:1px solid #e8d9bf;border-radius:7px;font-size:.84rem;background:#fff;color:var(--dark);margin-top:.2rem;box-sizing:border-box;font-family:inherit'></div>";
+  h += "</div>";
+
+  h += "<div style='margin-bottom:.5rem'><label style='font-size:.66rem;color:var(--mid);text-transform:uppercase;font-weight:600'>Barrio</label>";
+  h += "<input type='text' id='_catDirBarrio' value='"+_catEsc(c.barrio||"")+"' style='width:100%;padding:.45rem .6rem;border:1px solid #e8d9bf;border-radius:7px;font-size:.84rem;background:#fff;color:var(--dark);margin-top:.2rem;box-sizing:border-box;font-family:inherit'></div>";
+
+  h += "<div style='display:grid;grid-template-columns:1fr 1fr 1fr;gap:.5rem;margin-bottom:.5rem'>";
+  h += "<div><label style='font-size:.66rem;color:var(--mid);text-transform:uppercase;font-weight:600'>Ciudad *</label>";
+  h += "<input type='text' id='_catDirCiudad' value='"+_catEsc(c.ciudad||"")+"' style='width:100%;padding:.45rem .6rem;border:1px solid #e8d9bf;border-radius:7px;font-size:.84rem;background:#fff;color:var(--dark);margin-top:.2rem;box-sizing:border-box;font-family:inherit'></div>";
+  h += "<div><label style='font-size:.66rem;color:var(--mid);text-transform:uppercase;font-weight:600'>Provincia *</label>";
+  h += "<input type='text' id='_catDirProvincia' value='"+_catEsc(c.provincia||"")+"' style='width:100%;padding:.45rem .6rem;border:1px solid #e8d9bf;border-radius:7px;font-size:.84rem;background:#fff;color:var(--dark);margin-top:.2rem;box-sizing:border-box;font-family:inherit'></div>";
+  h += "<div><label style='font-size:.66rem;color:var(--mid);text-transform:uppercase;font-weight:600'>CP *</label>";
+  h += "<input type='text' id='_catDirCP' value='"+_catEsc(c.codigo_postal||"")+"' style='width:100%;padding:.45rem .6rem;border:1px solid #e8d9bf;border-radius:7px;font-size:.84rem;background:#fff;color:var(--dark);margin-top:.2rem;box-sizing:border-box;font-family:inherit'></div>";
+  h += "</div>";
+
+  h += "<div style='margin-bottom:.8rem'><label style='font-size:.66rem;color:var(--mid);text-transform:uppercase;font-weight:600'>Referencias / aclaraciones</label>";
+  h += "<textarea id='_catDirRef' rows='2' placeholder='Ej: timbre rojo, portón gris, casa con árbol al frente...' style='width:100%;padding:.45rem .6rem;border:1px solid #e8d9bf;border-radius:7px;font-size:.82rem;background:#fff;color:var(--dark);margin-top:.2rem;box-sizing:border-box;font-family:inherit;resize:vertical'>"+_catEsc(_catDir.referencias||"")+"</textarea></div>";
+
+  // Botones
+  h += "<div style='display:flex;gap:.5rem;justify-content:flex-end;padding-top:.5rem;border-top:1px solid #e8d9bf'>";
+  h += "<button onclick='_catCerrarSelectorDir(false)' style='background:transparent;color:var(--mid);border:1px solid #e8d9bf;padding:.55rem 1rem;border-radius:7px;font-size:.85rem;cursor:pointer'>Cancelar</button>";
+  h += "<button onclick='_catCerrarSelectorDir(true)' style='background:var(--accent);color:#fff;border:none;padding:.55rem 1.2rem;border-radius:7px;font-size:.85rem;font-weight:600;cursor:pointer'>Guardar dirección</button>";
+  h += "</div>";
+
+  b.innerHTML = h;
+
+  // Inicializar mapa, autocomplete y marker
+  setTimeout(function(){
+    _catInicializarMapa(pos);
+  }, 50);
+}
+
+// Inicializa el mapa + marker arrastrable + autocomplete
+function _catInicializarMapa(initialPos){
+  var mapEl = document.getElementById("_catDirMap");
+  if(!mapEl || !window.google || !window.google.maps) return;
+
+  _catDir.map = new google.maps.Map(mapEl, {
+    center: initialPos,
+    zoom: _catDir.pos ? 16 : 12,
+    disableDefaultUI: false,
+    streetViewControl: false,
+    fullscreenControl: false,
+    mapTypeControl: false,
+    zoomControl: true,
+    gestureHandling: "greedy"
+  });
+
+  _catDir.marker = new google.maps.Marker({
+    position: initialPos,
+    map: _catDir.map,
+    draggable: true,
+    title: "Tu dirección"
+  });
+
+  // Cuando el usuario arrastra el pin, recalcular distancia y actualizar aviso
+  _catDir.marker.addListener("dragend", function(){
+    var p = _catDir.marker.getPosition();
+    _catDir.pos = {lat: p.lat(), lng: p.lng()};
+    _catActualizarAvisoDistancia();
+    // Geocodificar inverso para llenar campos automáticamente
+    _catGeocodeReverse(_catDir.pos);
+  });
+
+  // Autocomplete del buscador
+  var inp = document.getElementById("_catDirSearch");
+  if(inp){
+    _catDir.autocomplete = new google.maps.places.Autocomplete(inp, {
+      fields: ["address_components","formatted_address","geometry","name"]
+    });
+    _catDir.autocomplete.addListener("place_changed", function(){
+      var place = _catDir.autocomplete.getPlace();
+      if(!place || !place.geometry || !place.geometry.location){
+        _catToast("No encontramos esa dirección, probá con otra","twarn");
+        return;
+      }
+      var loc = place.geometry.location;
+      _catDir.pos = {lat: loc.lat(), lng: loc.lng()};
+      _catDir.map.setCenter(_catDir.pos);
+      _catDir.map.setZoom(17);
+      _catDir.marker.setPosition(_catDir.pos);
+      _catDir.direccionFmt = place.formatted_address || "";
+      _catParsearComponentes(place.address_components || []);
+      _catActualizarCamposUI();
+      _catActualizarAvisoDistancia();
+    });
+  }
+
+  // Si ya hay posición previa, calcular distancia ya
+  if(_catDir.pos){
+    _catActualizarAvisoDistancia();
+  } else {
+    // Posición inicial = depósito
+    _catDir.pos = initialPos;
+  }
+}
+
+// Geocoding inverso: dado un punto, obtener calle, número, etc
+function _catGeocodeReverse(pos){
+  if(!window.google || !window.google.maps) return;
+  var g = new google.maps.Geocoder();
+  g.geocode({location: pos}, function(results, status){
+    if(status === "OK" && results && results[0]){
+      var r = results[0];
+      _catDir.direccionFmt = r.formatted_address || "";
+      _catParsearComponentes(r.address_components || []);
+      _catActualizarCamposUI();
+    }
+  });
+}
+
+// Extrae los componentes (calle, número, ciudad, etc) de un Place
+function _catParsearComponentes(comps){
+  var c = {};
+  comps.forEach(function(comp){
+    var types = comp.types || [];
+    if(types.indexOf("street_number") >= 0)         c.numero = comp.long_name;
+    else if(types.indexOf("route") >= 0)            c.calle = comp.long_name;
+    else if(types.indexOf("sublocality") >= 0 || types.indexOf("sublocality_level_1") >= 0) c.barrio = comp.long_name;
+    else if(types.indexOf("locality") >= 0)         c.ciudad = comp.long_name;
+    else if(types.indexOf("administrative_area_level_2") >= 0 && !c.ciudad) c.ciudad = comp.long_name;
+    else if(types.indexOf("administrative_area_level_1") >= 0) c.provincia = comp.long_name;
+    else if(types.indexOf("country") >= 0)          c.pais = comp.long_name;
+    else if(types.indexOf("postal_code") >= 0)      c.codigo_postal = comp.long_name;
+  });
+  // Mergear con lo que ya hay (preserva etiqueta y piso_depto)
+  _catDir.componentes = Object.assign({}, _catDir.componentes, c);
+}
+
+// Refresca los inputs del form con _catDir.componentes
+function _catActualizarCamposUI(){
+  var c = _catDir.componentes || {};
+  var ids = {
+    "_catDirCalle": c.calle,
+    "_catDirNumero": c.numero,
+    "_catDirBarrio": c.barrio,
+    "_catDirCiudad": c.ciudad,
+    "_catDirProvincia": c.provincia,
+    "_catDirCP": c.codigo_postal
+  };
+  Object.keys(ids).forEach(function(id){
+    var el = document.getElementById(id);
+    if(el && ids[id]) el.value = ids[id];
+  });
+}
+
+// Calcula distancia y muestra aviso (verde / amarillo Paq.ar / rojo)
+function _catActualizarAvisoDistancia(){
+  var avi = document.getElementById("_catDirAviso");
+  if(!avi || !_catDir.pos) return;
+  var dist = _catDistKm(BELLE_DEPOSITO_LAT, BELLE_DEPOSITO_LNG, _catDir.pos.lat, _catDir.pos.lng);
+  _catDir.distanciaKm = Math.round(dist * 10) / 10;
+  if(dist <= BELLE_RADIO_KM){
+    _catDir.modoEntrega = "vendedor";
+    avi.innerHTML = "<div style='background:#e8f5e0;border:1px solid #b8d8a8;border-radius:7px;padding:.55rem .75rem;font-size:.78rem;color:#3a6f2a;display:flex;align-items:center;gap:.5rem'>"+
+      "<span style='font-size:1.1rem'>&check;</span>"+
+      "<div><b>Entrega a domicilio disponible</b><br><span style='font-size:.7rem'>Estás a "+_catDir.distanciaKm+" km del centro de distribución</span></div>"+
+      "</div>";
+  } else {
+    _catDir.modoEntrega = "correo";
+    avi.innerHTML = "<div style='background:#fef9e8;border:1px solid #f4d987;border-radius:7px;padding:.6rem .75rem;font-size:.78rem;color:#7a5a1a'>"+
+      "<div style='font-weight:600;margin-bottom:.2rem'>&#128230; Envío por Correo Argentino (Paq.ar)</div>"+
+      "<div style='font-size:.72rem;line-height:1.4'>Estás a "+_catDir.distanciaKm+" km del centro de distribución, fuera del radio de entrega a domicilio del vendedor.</div>"+
+      "<div style='font-size:.72rem;margin-top:.3rem;line-height:1.4'>&#128230; <b>A partir de "+BELLE_PAQAR_MIN_UNIDADES+" unidades el envío es GRATIS.</b> Con menos unidades vas a ver el costo al confirmar el pedido.</div>"+
+      "<div style='font-size:.7rem;margin-top:.3rem;color:#8a6f3a'>Asegurate de completar bien todos los campos: calle, número, ciudad, provincia y código postal.</div>"+
+      "</div>";
+  }
+}
+
+// Recolecta los datos del form para guardar
+function _catRecolectarDir(){
+  var etiqueta = (document.getElementById("_catDirEtiqueta")||{value:""}).value.trim();
+  var calle = (document.getElementById("_catDirCalle")||{value:""}).value.trim();
+  var numero = (document.getElementById("_catDirNumero")||{value:""}).value.trim();
+  var barrio = (document.getElementById("_catDirBarrio")||{value:""}).value.trim();
+  var ciudad = (document.getElementById("_catDirCiudad")||{value:""}).value.trim();
+  var provincia = (document.getElementById("_catDirProvincia")||{value:""}).value.trim();
+  var cp = (document.getElementById("_catDirCP")||{value:""}).value.trim();
+  var piso = (document.getElementById("_catDirPiso")||{value:""}).value.trim();
+  var ref = (document.getElementById("_catDirRef")||{value:""}).value.trim();
+
+  // Validaciones
+  if(!etiqueta){_catToast("Ingresá una etiqueta (Casa, Trabajo...)","twarn");return null;}
+  if(!calle){_catToast("Falta la calle","twarn");return null;}
+  if(!numero){_catToast("Falta el número","twarn");return null;}
+  if(!ciudad){_catToast("Falta la ciudad","twarn");return null;}
+  if(!provincia){_catToast("Falta la provincia","twarn");return null;}
+  if(!cp){_catToast("Falta el código postal","twarn");return null;}
+  if(!_catDir.pos){_catToast("Buscá tu dirección en el mapa primero","twarn");return null;}
+
+  var dirCompleta = calle+" "+numero+(piso?", "+piso:"")+", "+ciudad+", "+provincia+(cp?", CP "+cp:"")+", "+(_catDir.componentes.pais||"Argentina");
+  return {
+    etiqueta: etiqueta,
+    calle: calle,
+    numero: numero,
+    piso_depto: piso || null,
+    barrio: barrio || null,
+    ciudad: ciudad,
+    provincia: provincia,
+    codigo_postal: cp,
+    pais: _catDir.componentes.pais || "Argentina",
+    direccion_completa: dirCompleta,
+    lat: _catDir.pos.lat,
+    lng: _catDir.pos.lng,
+    distancia_km: _catDir.distanciaKm,
+    modo_entrega: _catDir.modoEntrega,
+    referencias: ref || null
+  };
+}
+
+// ── TAB DIRECCIONES del panel del cliente ────────────────────────────
+function _catRenderTabDirecciones(box){
+  if(!_catCliente){box.innerHTML="<div class='empty'>Sin datos</div>";return;}
+  box.innerHTML = "<div style='text-align:center;padding:2rem 1rem;color:var(--mid)'><div class='cat-spin' style='margin-bottom:.5rem'></div>Cargando direcciones...</div>";
+
+  apiGet("clientes_direcciones","select=*&cliente_id=eq."+_catCliente.id+"&order=principal.desc,created_at.desc").then(function(rows){
+    var dirs = Array.isArray(rows) ? rows : [];
+    var h = "";
+
+    // Botón agregar
+    h += "<button onclick='_catNuevaDir()' style='width:100%;background:var(--accent);color:#fff;border:none;padding:.6rem;border-radius:8px;font-size:.85rem;font-weight:600;cursor:pointer;margin-bottom:1rem;display:flex;align-items:center;justify-content:center;gap:.4rem'>+ Agregar nueva dirección</button>";
+
+    if(!dirs.length){
+      h += "<div style='text-align:center;padding:1.5rem 1rem;color:var(--mid);background:#faf5ec;border-radius:9px'>"+
+        "<div style='font-size:2rem;margin-bottom:.4rem;opacity:.5'>&#128205;</div>"+
+        "<div style='font-size:.85rem;font-weight:600;color:var(--dark);margin-bottom:.2rem'>Aún no tenés direcciones guardadas</div>"+
+        "<div style='font-size:.74rem'>Agregá una para poder hacer pedidos</div>"+
+        "</div>";
+    } else {
+      h += "<div style='display:flex;flex-direction:column;gap:.6rem'>";
+      dirs.forEach(function(d){
+        h += _catCardDireccion(d);
+      });
+      h += "</div>";
+    }
+    box.innerHTML = h;
+  }).catch(function(e){
+    console.error("[belle-cat] _catRenderTabDirecciones error:",e);
+    box.innerHTML = "<div style='text-align:center;color:#c5443a;padding:2rem'>Error al cargar direcciones</div>";
+  });
+}
+
+function _catCardDireccion(d){
+  var modoLabel = d.modo_entrega === "correo" ? "&#128230; Envío por Correo (Paq.ar)" : "&#128666; Entrega a domicilio";
+  var modoColor = d.modo_entrega === "correo" ? "#7a5a1a" : "#3a6f2a";
+  var modoBg    = d.modo_entrega === "correo" ? "#fef9e8" : "#e8f5e0";
+
+  var h = "";
+  h += "<div style='background:#fff;border:1px solid "+(d.principal?"var(--accent)":"#e8d9bf")+";border-radius:9px;padding:.8rem;'>";
+  h += "<div style='display:flex;justify-content:space-between;align-items:flex-start;gap:.5rem;margin-bottom:.4rem'>";
+  h += "<div style='min-width:0;flex:1'>";
+  h += "<div style='display:flex;align-items:center;gap:.4rem;flex-wrap:wrap'>";
+  h += "<span style='font-size:.9rem;font-weight:700;color:var(--dark)'>"+_catEsc(d.etiqueta||"Sin etiqueta")+"</span>";
+  if(d.principal) h += "<span style='font-size:.6rem;background:var(--accent);color:#fff;padding:.1rem .4rem;border-radius:10px;font-weight:600'>PRINCIPAL</span>";
+  h += "</div>";
+  h += "<div style='font-size:.78rem;color:var(--dark);margin-top:.25rem;line-height:1.4'>"+_catEsc(d.direccion_completa || ((d.calle||"")+" "+(d.numero||"")))+"</div>";
+  if(d.piso_depto) h += "<div style='font-size:.72rem;color:var(--mid);margin-top:.15rem'>Piso/Depto: "+_catEsc(d.piso_depto)+"</div>";
+  if(d.referencias) h += "<div style='font-size:.7rem;color:var(--mid);margin-top:.2rem;font-style:italic'>&quot;"+_catEsc(d.referencias)+"&quot;</div>";
+  h += "</div>";
+  h += "</div>";
+  // Modo de entrega
+  h += "<div style='background:"+modoBg+";border-radius:5px;padding:.3rem .55rem;font-size:.7rem;color:"+modoColor+";margin:.5rem 0;font-weight:500'>"+modoLabel+(d.distancia_km?" · "+d.distancia_km+" km":"")+"</div>";
+  // Botones
+  h += "<div style='display:flex;gap:.4rem;flex-wrap:wrap'>";
+  if(!d.principal){
+    h += "<button onclick='_catMarcarPrincipal("+d.id+")' style='font-size:.7rem;padding:.3rem .65rem;background:transparent;border:1px solid var(--accent);color:var(--accent);border-radius:5px;cursor:pointer;font-weight:500'>&#9733; Marcar principal</button>";
+  }
+  h += "<button onclick='_catEditarDir("+d.id+")' style='font-size:.7rem;padding:.3rem .65rem;background:transparent;border:1px solid #c4965a;color:#c4965a;border-radius:5px;cursor:pointer'>&#9998; Editar</button>";
+  h += "<button onclick='_catEliminarDir("+d.id+")' style='font-size:.7rem;padding:.3rem .65rem;background:transparent;border:1px solid #c5443a;color:#c5443a;border-radius:5px;cursor:pointer'>&times; Eliminar</button>";
+  h += "</div>";
+  h += "</div>";
+  return h;
+}
+
+function _catNuevaDir(){
+  _catAbrirSelectorDomicilio({
+    titulo: "Agregar dirección",
+    cb: function(datos){
+      if(!datos || !_catCliente) return;
+      datos.cliente_id = _catCliente.id;
+      // Si es la primera dirección, marcarla principal
+      apiGet("clientes_direcciones","select=id&cliente_id=eq."+_catCliente.id+"&limit=1").then(function(prev){
+        if(!prev || !prev.length) datos.principal = true;
+        return apiPost("clientes_direcciones", datos).then(function(){
+          _catToast("Dirección guardada","tok");
+          _catRenderTab();
+        });
+      }).catch(function(e){
+        console.error("[belle-cat] _catNuevaDir error:",e);
+        _catToast("Error al guardar","terr");
+      });
+    }
+  });
+}
+
+function _catEditarDir(id){
+  apiGet("clientes_direcciones","select=*&id=eq."+id+"&limit=1").then(function(rows){
+    var d = rows && rows[0];
+    if(!d) return;
+    _catAbrirSelectorDomicilio({
+      titulo: "Editar dirección",
+      direccion: d,
+      cb: function(datos){
+        if(!datos) return;
+        fetch(SB_URL+"/rest/v1/clientes_direcciones?id=eq."+id, {
+          method: "PATCH",
+          headers:{"Content-Type":"application/json","apikey":SB_KEY,"Authorization":"Bearer "+SB_KEY,"Prefer":"return=minimal"},
+          body: JSON.stringify(Object.assign({}, datos, {updated_at:new Date().toISOString()}))
+        }).then(function(r){
+          if(!r.ok) throw new Error("HTTP "+r.status);
+          _catToast("Dirección actualizada","tok");
+          _catRenderTab();
+        }).catch(function(e){
+          console.error("[belle-cat] editar dir error:",e);
+          _catToast("Error al actualizar","terr");
+        });
+      }
+    });
+  });
+}
+
+function _catEliminarDir(id){
+  if(!confirm("¿Eliminar esta dirección?")) return;
+  fetch(SB_URL+"/rest/v1/clientes_direcciones?id=eq."+id, {
+    method: "DELETE",
+    headers:{"apikey":SB_KEY,"Authorization":"Bearer "+SB_KEY}
+  }).then(function(r){
+    if(!r.ok) throw new Error("HTTP "+r.status);
+    _catToast("Dirección eliminada","tok");
+    _catRenderTab();
+  }).catch(function(e){
+    console.error("[belle-cat] eliminar dir error:",e);
+    _catToast("Error al eliminar","terr");
+  });
+}
+
+function _catMarcarPrincipal(id){
+  if(!_catCliente) return;
+  // Primero, desmarcar todas
+  fetch(SB_URL+"/rest/v1/clientes_direcciones?cliente_id=eq."+_catCliente.id, {
+    method: "PATCH",
+    headers:{"Content-Type":"application/json","apikey":SB_KEY,"Authorization":"Bearer "+SB_KEY,"Prefer":"return=minimal"},
+    body: JSON.stringify({principal: false})
+  }).then(function(){
+    // Después marcar la elegida
+    return fetch(SB_URL+"/rest/v1/clientes_direcciones?id=eq."+id, {
+      method: "PATCH",
+      headers:{"Content-Type":"application/json","apikey":SB_KEY,"Authorization":"Bearer "+SB_KEY,"Prefer":"return=minimal"},
+      body: JSON.stringify({principal: true})
+    });
+  }).then(function(){
+    _catToast("Dirección principal actualizada","tok");
+    _catRenderTab();
+  }).catch(function(e){
+    console.error("[belle-cat] marcar principal error:",e);
+    _catToast("Error","terr");
+  });
+}
+
+// Después del registro: forzar carga del primer domicilio
+function _catPedirPrimerDomicilio(){
+  // Asegurarse que el drawer esté abierto
+  var dw = document.getElementById("drawerCuenta");
+  if(dw && !dw.classList.contains("open")){
+    toggleMiCuenta();
+  }
+  _catAbrirSelectorDomicilio({
+    titulo: "Cargá tu primera dirección",
+    cb: function(datos){
+      if(!datos || !_catCliente) return;
+      datos.cliente_id = _catCliente.id;
+      datos.principal = true; // primera = principal
+      apiPost("clientes_direcciones", datos).then(function(){
+        _catToast("¡Listo! Ya podés hacer pedidos","tok");
+        _catDrawerView = "panel";
+        _catPanelTab = "direcciones";
+        catRenderDrawer();
+      }).catch(function(e){
+        console.error("[belle-cat] guardar primer domicilio error:",e);
+        _catToast("Error al guardar la dirección. Probá desde el panel.","terr");
+        _catDrawerView = "panel";
+        _catPanelTab = "direcciones";
+        catRenderDrawer();
+      });
+    }
+  });
+  // Si el usuario cierra sin guardar, también va al panel (puede agregarla después)
+  // Eso lo maneja el botón Cancelar dentro del modal
 }
 
 </script>
