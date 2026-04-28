@@ -1910,7 +1910,159 @@ function _reservarProducto(pid, qty, intentos){
     });
 }
 
+// FASE B Sub-bloque 5 — Wrapper de sendWA que pide cliente + dirección si está logueado.
+// El sendWA "original" se renombra a _sendWAOriginal. La nueva sendWA decide el flujo.
 function sendWA(){
+  // Validaciones rápidas antes de involucrar al cliente
+  var items=Object.values(cart);
+  if(!items.length) return;
+
+  // Si no hay sesión activa, sugerir crear cuenta pero permitir seguir
+  if(!_catSession || !_catCliente){
+    _catSugerirRegistroAntesPedido();
+    return;
+  }
+
+  // Hay sesión: chequear que tenga al menos una dirección
+  apiGet("clientes_direcciones","select=*&cliente_id=eq."+_catCliente.id+"&order=principal.desc,created_at.desc").then(function(rows){
+    var dirs = Array.isArray(rows) ? rows : [];
+    if(!dirs.length){
+      // No tiene ninguna dirección: forzar a crear una antes de continuar
+      _catToast("Necesitás cargar tu dirección antes de hacer un pedido","twarn");
+      _catNuevaDir();
+      return;
+    }
+    // Si tiene UNA sola → usarla directamente, no preguntar
+    if(dirs.length === 1){
+      _continuarSendWA(dirs[0]);
+      return;
+    }
+    // Si tiene varias → mostrar selector
+    _catElegirDireccionParaPedido(dirs);
+  }).catch(function(e){
+    console.error("[belle-cat] sendWA error cargando direcciones:",e);
+    _catToast("Error al cargar tus direcciones","terr");
+  });
+}
+
+// Cartelito invitando a crear cuenta antes de pedir (no obliga, deja seguir)
+function _catSugerirRegistroAntesPedido(){
+  var mo = document.createElement("div");
+  mo.style.cssText = "position:fixed;inset:0;background:rgba(20,15,8,.7);z-index:1300;display:flex;align-items:center;justify-content:center;padding:1rem";
+  mo.innerHTML = "<div style='background:#fff;border-radius:14px;max-width:420px;width:100%;padding:1.4rem;box-shadow:0 8px 40px rgba(0,0,0,.3);text-align:center'>"+
+    "<div style='font-size:2.5rem;margin-bottom:.4rem'>&#128100;</div>"+
+    "<div style='font-size:1.05rem;font-weight:700;color:var(--dark);margin-bottom:.4rem'>¿Crear una cuenta?</div>"+
+    "<div style='font-size:.85rem;color:var(--mid);margin-bottom:1.1rem;line-height:1.45'>Si te registrás vas a poder ver el seguimiento de tu pedido en tiempo real y guardar tus direcciones para próximas compras.</div>"+
+    "<div style='display:flex;flex-direction:column;gap:.45rem'>"+
+      "<button id='_btnAbrirReg' style='background:var(--accent);color:#fff;border:none;padding:.65rem;border-radius:8px;font-size:.88rem;font-weight:600;cursor:pointer'>Crear cuenta gratis</button>"+
+      "<button id='_btnLoginExist' style='background:transparent;color:var(--accent);border:1px solid var(--accent);padding:.55rem;border-radius:8px;font-size:.82rem;cursor:pointer'>Ya tengo cuenta</button>"+
+      "<button id='_btnSeguirSinCuenta' style='background:transparent;color:var(--mid);border:none;padding:.5rem;font-size:.78rem;cursor:pointer;margin-top:.2rem'>Seguir sin cuenta &rarr;</button>"+
+    "</div>"+
+    "</div>";
+  document.body.appendChild(mo);
+  mo.addEventListener("click", function(e){if(e.target===mo)mo.remove();});
+  setTimeout(function(){
+    var b1 = document.getElementById("_btnAbrirReg");
+    if(b1) b1.onclick = function(){mo.remove();_catDrawerView="registro";if(!document.getElementById("drawerCuenta").classList.contains("open"))toggleMiCuenta();else catRenderDrawer();};
+    var b2 = document.getElementById("_btnLoginExist");
+    if(b2) b2.onclick = function(){mo.remove();_catDrawerView="login";if(!document.getElementById("drawerCuenta").classList.contains("open"))toggleMiCuenta();else catRenderDrawer();};
+    var b3 = document.getElementById("_btnSeguirSinCuenta");
+    if(b3) b3.onclick = function(){mo.remove();_continuarSendWA(null);};
+  }, 50);
+}
+
+// Modal "Elegir dirección" cuando hay varias
+function _catElegirDireccionParaPedido(dirs){
+  var mo = document.createElement("div");
+  mo.id = "_catMoElegirDir";
+  mo.style.cssText = "position:fixed;inset:0;background:rgba(20,15,8,.75);z-index:1300;display:flex;align-items:center;justify-content:center;padding:1rem";
+  var h = "<div style='background:#fff;border-radius:14px;max-width:480px;width:100%;max-height:88vh;display:flex;flex-direction:column;box-shadow:0 8px 40px rgba(0,0,0,.3)'>"+
+    "<div style='padding:1rem 1.1rem;border-bottom:1px solid #e8d9bf;display:flex;justify-content:space-between;align-items:center'>"+
+      "<div style='font-size:.95rem;font-weight:700;color:var(--dark)'>¿Dónde lo enviamos?</div>"+
+      "<button onclick='document.getElementById(&quot;_catMoElegirDir&quot;).remove()' style='background:none;border:none;font-size:1.3rem;cursor:pointer;color:var(--mid);padding:0;line-height:1'>&times;</button>"+
+    "</div>"+
+    "<div style='overflow-y:auto;padding:1rem 1.1rem;flex:1'>";
+  dirs.forEach(function(d){
+    var modoLabel = d.modo_entrega === "correo" ? "&#128230; Correo (Paq.ar)" : "&#128666; Entrega vendedor";
+    var modoColor = d.modo_entrega === "correo" ? "#7a5a1a" : "#3a6f2a";
+    var modoBg    = d.modo_entrega === "correo" ? "#fef9e8" : "#e8f5e0";
+    h += "<div onclick='_catSeleccionarDirPedido("+d.id+")' style='border:1px solid #e8d9bf;border-radius:9px;padding:.8rem;margin-bottom:.55rem;cursor:pointer;transition:border-color .15s' onmouseover='this.style.borderColor=&quot;var(--accent)&quot;' onmouseout='this.style.borderColor=&quot;#e8d9bf&quot;'>"+
+      "<div style='display:flex;align-items:center;gap:.4rem;flex-wrap:wrap;margin-bottom:.3rem'>"+
+        "<span style='font-size:.9rem;font-weight:700;color:var(--dark)'>"+_catEsc(d.etiqueta||"Sin etiqueta")+"</span>"+
+        (d.principal?"<span style='font-size:.6rem;background:var(--accent);color:#fff;padding:.1rem .4rem;border-radius:10px;font-weight:600'>PRINCIPAL</span>":"")+
+      "</div>"+
+      "<div style='font-size:.78rem;color:var(--dark);margin-bottom:.3rem;line-height:1.4'>"+_catEsc(d.direccion_completa || ((d.calle||"")+" "+(d.numero||"")))+"</div>"+
+      "<div style='background:"+modoBg+";display:inline-block;border-radius:5px;padding:.2rem .55rem;font-size:.66rem;color:"+modoColor+";font-weight:500'>"+modoLabel+(d.distancia_km?" · "+d.distancia_km+" km":"")+"</div>"+
+      "</div>";
+  });
+  h += "<button onclick='document.getElementById(&quot;_catMoElegirDir&quot;).remove();_catNuevaDir()' style='width:100%;background:transparent;color:var(--accent);border:1px dashed var(--accent);padding:.55rem;border-radius:7px;font-size:.82rem;cursor:pointer;margin-top:.3rem'>+ Agregar nueva dirección</button>";
+  h += "</div></div>";
+  mo.innerHTML = h;
+  mo.addEventListener("click", function(e){if(e.target===mo)mo.remove();});
+  document.body.appendChild(mo);
+}
+
+function _catSeleccionarDirPedido(id){
+  var mo = document.getElementById("_catMoElegirDir");
+  if(mo) mo.remove();
+  apiGet("clientes_direcciones","select=*&id=eq."+id+"&limit=1").then(function(rows){
+    var d = rows && rows[0];
+    if(!d){_catToast("Dirección no encontrada","terr");return;}
+    _continuarSendWA(d);
+  }).catch(function(e){
+    console.error("[belle-cat] seleccionar dir error:",e);
+    _catToast("Error","terr");
+  });
+}
+
+// Continuar el envío del pedido con la dirección elegida (puede ser null si "sin cuenta")
+function _continuarSendWA(direccion){
+  // Calcular costo de envío si Paq.ar y <5 unidades
+  var totalUnits = 0;
+  Object.values(cart).forEach(function(it){
+    if(!it.isDecan) totalUnits += (it.qty || 0);
+    if(it.isCombo){
+      var comboRef = combosPublicos.find(function(c){return c.id===it.comboId;});
+      if(comboRef && comboRef.combo_items){
+        comboRef.combo_items.forEach(function(ci){
+          if(!ci.es_decan) totalUnits += (ci.cantidad||1) * (it.qty||1);
+        });
+      }
+    }
+  });
+
+  var costoEnvio = 0;
+  var avisoEnvio = "";
+  if(direccion && direccion.modo_entrega === "correo"){
+    if(totalUnits >= BELLE_PAQAR_MIN_UNIDADES){
+      avisoEnvio = "Tu pedido tiene "+totalUnits+" unidades, así que el envío por Correo (Paq.ar) es GRATIS.";
+    } else {
+      // Acá podríamos tener una tabla de costos. Por ahora estimación simple.
+      // El cliente lo confirma con el vendedor por WhatsApp.
+      costoEnvio = -1; // marca "a coordinar con el vendedor"
+      avisoEnvio = "Tu pedido tiene "+totalUnits+" unidades. Para envío gratis necesitás "+BELLE_PAQAR_MIN_UNIDADES+"+ unidades. Si querés enviarlo igual, el costo lo coordinás con el vendedor por WhatsApp.";
+    }
+  }
+
+  // Si hay aviso de Paq.ar, mostrarlo y pedir confirmación
+  if(avisoEnvio){
+    var ok = confirm(avisoEnvio + "\n\n¿Continuar con el pedido?");
+    if(!ok) return;
+  }
+
+  // Llamar al sendWA original con los datos de cliente/dirección como contexto
+  window._sendWAContext = {
+    cliente_id: _catCliente ? _catCliente.id : null,
+    direccion_entrega_id: direccion ? direccion.id : null,
+    direccion_obj: direccion,
+    modo_entrega: direccion ? direccion.modo_entrega : "vendedor",
+    distancia_km: direccion ? direccion.distancia_km : null,
+    costo_envio: costoEnvio
+  };
+  _sendWAOriginal();
+}
+
+function _sendWAOriginal(){
   // Evitar doble envío
   if(window._sendingOrder){showToast('Pedido en proceso, esperá...');return;}
   window._sendingOrder=true;
@@ -1982,7 +2134,32 @@ function sendWA(){
     msg+="- "+item.nombre+"\n  "+item.qty+" x "+fmt(price)+" ("+segL+") = "+fmt(sub)+"\n\n";
     pedidoItems.push({producto_id:item.isDecan?item.prodId:item.id,nombre:item.nombre,qty:item.qty,segmento:segL,precio:price,total:sub,isDecan:item.isDecan||false});
   });
-  msg+="Orden: "+nroOrden+"\nTotal: "+fmt(total)+"\n\nHola! Me gustar\u00eda confirmar este pedido. Soy cliente web.";
+
+  // FASE B Sub-bloque 5: agregar info de cliente y dirección al mensaje WA
+  var ctx = window._sendWAContext || {};
+  if(ctx.direccion_obj){
+    var d = ctx.direccion_obj;
+    msg += "_______________\n\n";
+    msg += "📍 Dirección de entrega:\n";
+    msg += d.direccion_completa || ((d.calle||"")+" "+(d.numero||""));
+    if(d.piso_depto) msg += "\n   Piso/Depto: " + d.piso_depto;
+    if(d.referencias) msg += "\n   Ref: " + d.referencias;
+    msg += "\n";
+    if(ctx.modo_entrega === "correo"){
+      msg += "\n📦 Envío por Correo Argentino (Paq.ar)";
+      if(ctx.costo_envio === -1){
+        msg += "\n   ⚠ Menos de "+BELLE_PAQAR_MIN_UNIDADES+" unidades — costo a coordinar";
+      } else {
+        msg += "\n   ✓ "+totalUnits+" unidades — envío GRATIS";
+      }
+    } else {
+      msg += "\n🚚 Entrega a domicilio";
+      if(ctx.distancia_km) msg += " · "+ctx.distancia_km+" km";
+    }
+    msg += "\n_______________\n";
+  }
+
+  msg+="\nOrden: "+nroOrden+"\nTotal: "+fmt(total)+"\n\nHola! Me gustar\u00eda confirmar este pedido. Soy cliente web.";
   // Build full items list including combos for the pedido record
   // Construir fullPedidoItems directamente desde el carrito — fuente de verdad
   var allCartItems=Object.values(cart);
@@ -2022,8 +2199,17 @@ function sendWA(){
       });
     }
   });
+
+  // FASE B Sub-bloque 5: enriquecer pedido con cliente_id + dirección + modo
+  var pedidoData = {items:fullPedidoItems,total:total,estado:"pendiente",confirmado_cobro:false,nro_orden:nroOrden};
+  if(ctx.cliente_id) pedidoData.cliente_id = ctx.cliente_id;
+  if(ctx.direccion_entrega_id) pedidoData.direccion_entrega_id = ctx.direccion_entrega_id;
+  if(ctx.modo_entrega) pedidoData.modo_entrega = ctx.modo_entrega;
+  if(ctx.distancia_km != null) pedidoData.distancia_km = ctx.distancia_km;
+  if(ctx.costo_envio && ctx.costo_envio > 0) pedidoData.costo_envio = ctx.costo_envio;
+
   // Guardar pedido con todos los items
-  apiPost("pedidos_catalogo",{items:fullPedidoItems,total:total,estado:"pendiente",confirmado_cobro:false,nro_orden:nroOrden}).then(function(){
+  apiPost("pedidos_catalogo",pedidoData).then(function(){
     window._sendingOrder=false;
     var waBtn=document.getElementById('waBtn');
     if(waBtn){waBtn.disabled=false;waBtn.style.opacity='';}
@@ -2058,6 +2244,8 @@ function sendWA(){
     document.getElementById("drawer").classList.remove("open");
     document.getElementById("ov").classList.remove("open");
     showToast("Pedido enviado! Orden: "+nroOrden);
+    // Limpiar contexto
+    window._sendWAContext = null;
   }).catch(function(){
     window._sendingOrder=false;
     var waBtn=document.getElementById('waBtn');
@@ -5166,11 +5354,16 @@ function _catRenderSelectorDirUI(){
 
   var h = "";
 
-  // Buscador con autocomplete
-  h += "<div style='margin-bottom:.7rem'>";
-  h += "<label style='font-size:.7rem;color:var(--mid);text-transform:uppercase;font-weight:600'>Buscar dirección</label>";
-  h += "<input type='text' id='_catDirSearch' placeholder='Empezá a escribir tu dirección...' style='width:100%;padding:.55rem .7rem;border:1px solid #e8d9bf;border-radius:7px;font-size:.88rem;background:#fff;color:var(--dark);margin-top:.25rem;box-sizing:border-box;font-family:inherit'>";
-  h += "<div style='font-size:.66rem;color:var(--mid);margin-top:.2rem'>Ej: \"Av. Colón 1234, Córdoba\"</div>";
+  // Buscador prominente con autocomplete + fallback con botón
+  h += "<div style='background:linear-gradient(135deg, #fdf8f0, #faf5ec);border:2px solid var(--accent);border-radius:10px;padding:.7rem .8rem;margin-bottom:.8rem'>";
+  h += "<div style='font-size:.7rem;color:var(--accent);text-transform:uppercase;font-weight:700;letter-spacing:.05em;margin-bottom:.3rem;display:flex;align-items:center;gap:.4rem'>";
+  h += "<span style='font-size:1rem'>&#128269;</span> Buscar mi dirección en Google Maps";
+  h += "</div>";
+  h += "<div style='display:flex;gap:.4rem'>";
+  h += "<input type='text' id='_catDirSearch' placeholder='Ej: Av. Colón 1234 Córdoba' autocomplete='off' style='flex:1;padding:.6rem .75rem;border:1px solid #d4ba8a;border-radius:7px;font-size:.92rem;background:#fff;color:var(--dark);box-sizing:border-box;font-family:inherit;outline:none' onkeydown='if(event.key===\"Enter\"){event.preventDefault();_catBuscarDireccionManual();}'>";
+  h += "<button onclick='_catBuscarDireccionManual()' style='background:var(--accent);color:#fff;border:none;padding:.6rem 1rem;border-radius:7px;font-size:.85rem;font-weight:600;cursor:pointer;flex-shrink:0' title='Buscar'>Buscar</button>";
+  h += "</div>";
+  h += "<div style='font-size:.66rem;color:var(--mid);margin-top:.35rem'>Escribí calle + número + ciudad. Mientras escribís te aparecen sugerencias.</div>";
   h += "</div>";
 
   // Mapa
@@ -5259,25 +5452,29 @@ function _catInicializarMapa(initialPos){
   // Autocomplete del buscador
   var inp = document.getElementById("_catDirSearch");
   if(inp){
-    _catDir.autocomplete = new google.maps.places.Autocomplete(inp, {
-      fields: ["address_components","formatted_address","geometry","name"]
-    });
-    _catDir.autocomplete.addListener("place_changed", function(){
-      var place = _catDir.autocomplete.getPlace();
-      if(!place || !place.geometry || !place.geometry.location){
-        _catToast("No encontramos esa dirección, probá con otra","twarn");
-        return;
-      }
-      var loc = place.geometry.location;
-      _catDir.pos = {lat: loc.lat(), lng: loc.lng()};
-      _catDir.map.setCenter(_catDir.pos);
-      _catDir.map.setZoom(17);
-      _catDir.marker.setPosition(_catDir.pos);
-      _catDir.direccionFmt = place.formatted_address || "";
-      _catParsearComponentes(place.address_components || []);
-      _catActualizarCamposUI();
-      _catActualizarAvisoDistancia();
-    });
+    try {
+      _catDir.autocomplete = new google.maps.places.Autocomplete(inp, {
+        fields: ["address_components","formatted_address","geometry","name"],
+        // Sin restricción de país por defecto — el cliente puede estar en cualquier lado
+        // (Paq.ar funciona en todo el país y radio largo)
+        types: ["address"]
+      });
+      _catDir.autocomplete.addListener("place_changed", function(){
+        var place = _catDir.autocomplete.getPlace();
+        if(!place || !place.geometry || !place.geometry.location){
+          // Si no devolvió geometry, probar con geocode manual
+          _catBuscarDireccionManual();
+          return;
+        }
+        _catAplicarDireccionEncontrada(place.geometry.location, place.address_components || [], place.formatted_address || "");
+      });
+      console.log("[belle-cat] Autocomplete inicializado correctamente");
+    } catch(e){
+      console.error("[belle-cat] Error inicializando Autocomplete:", e);
+      // Si falla el autocomplete (ej. Places API no habilitada), avisar pero
+      // dejar funcionando el botón "Buscar" como fallback
+      _catToast("Sugerencias no disponibles. Usá el botón Buscar para ubicar tu dirección.","twarn");
+    }
   }
 
   // Si ya hay posición previa, calcular distancia ya
@@ -5287,6 +5484,47 @@ function _catInicializarMapa(initialPos){
     // Posición inicial = depósito
     _catDir.pos = initialPos;
   }
+}
+
+// Aplicar resultado de búsqueda (centra el mapa, mueve marker, llena campos)
+function _catAplicarDireccionEncontrada(loc, addressComponents, formattedAddress){
+  _catDir.pos = {lat: typeof loc.lat==="function"?loc.lat():loc.lat, lng: typeof loc.lng==="function"?loc.lng():loc.lng};
+  if(_catDir.map){
+    _catDir.map.setCenter(_catDir.pos);
+    _catDir.map.setZoom(17);
+  }
+  if(_catDir.marker){
+    _catDir.marker.setPosition(_catDir.pos);
+  }
+  _catDir.direccionFmt = formattedAddress || "";
+  _catParsearComponentes(addressComponents || []);
+  _catActualizarCamposUI();
+  _catActualizarAvisoDistancia();
+}
+
+// Búsqueda manual con Geocoder (fallback si Autocomplete no funciona o el usuario aprieta el botón)
+function _catBuscarDireccionManual(){
+  var inp = document.getElementById("_catDirSearch");
+  if(!inp) return;
+  var q = (inp.value || "").trim();
+  if(!q){_catToast("Escribí una dirección primero","twarn");return;}
+  if(!window.google || !window.google.maps){_catToast("El mapa todavía está cargando, esperá un segundo","twarn");return;}
+
+  var g = new google.maps.Geocoder();
+  g.geocode({address: q, region: "AR"}, function(results, status){
+    if(status === "OK" && results && results[0]){
+      var r = results[0];
+      _catAplicarDireccionEncontrada(r.geometry.location, r.address_components || [], r.formatted_address || "");
+    } else if(status === "ZERO_RESULTS"){
+      _catToast("No encontramos esa dirección. Probá con más detalles (ciudad).","twarn");
+    } else if(status === "REQUEST_DENIED"){
+      _catToast("Error de permisos en Google Maps. Avisanos.","terr");
+      console.error("[belle-cat] Geocoder REQUEST_DENIED — revisar restricciones de la API key");
+    } else {
+      _catToast("Error al buscar: "+status,"terr");
+      console.error("[belle-cat] Geocoder error:", status);
+    }
+  });
 }
 
 // Geocoding inverso: dado un punto, obtener calle, número, etc
