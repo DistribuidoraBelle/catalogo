@@ -4442,28 +4442,99 @@ function initCatAuth(){
   }
 }
 
-// Carga datos del cliente desde tabla `clientes` usando el email de la sesión
+// Carga datos del cliente desde tabla `clientes` usando el email de la sesión.
+// Si el cliente NO existe (caso login con Google primera vez), lo crea automáticamente
+// con los datos que vienen del provider OAuth.
 function _catCargarClienteData(){
   if(!_catSession || !_catSession.user) return;
-  var email = _catSession.user.email;
+  var user = _catSession.user;
+  var email = user.email;
   if(!email) return;
   apiGet("clientes","select=*&email=eq."+encodeURIComponent(email)+"&limit=1")
     .then(function(rows){
       if(rows && rows.length){
+        // Cliente ya existe → todo normal
         _catCliente = rows[0];
+        _catFinalizarCargaCliente();
       } else {
-        _catCliente = null;
-      }
-      if(typeof catActualizarBoton === 'function') catActualizarBoton();
-      if(typeof catCargarFavsIds === 'function') catCargarFavsIds();
-      // Si el drawer está abierto, re-renderizarlo
-      var dw = document.getElementById("drawerCuenta");
-      if(dw && dw.classList.contains("open") && typeof catRenderDrawer === 'function'){
-        _catDrawerView = "panel";
-        catRenderDrawer();
+        // Cliente NO existe. Si vino por OAuth → autocrearlo.
+        var esOAuth = user.app_metadata && user.app_metadata.provider && user.app_metadata.provider !== 'email';
+        if(esOAuth){
+          _catAutocrearClienteDesdeOAuth(user);
+        } else {
+          // Sesión normal pero sin cliente: raro, dejar null (no debería pasar)
+          _catCliente = null;
+          _catFinalizarCargaCliente();
+        }
       }
     })
     .catch(function(e){ console.error("[belle-cat] _catCargarClienteData error:", e); });
+}
+
+// Crea el registro en `clientes` con los datos que vienen del provider OAuth (Google/Facebook)
+function _catAutocrearClienteDesdeOAuth(user){
+  var meta = user.user_metadata || {};
+  // Google manda: full_name, name, given_name, family_name, picture, email
+  // Facebook manda: full_name, name, picture
+  var nombreCompleto = meta.full_name || meta.name || "";
+  var nombre = meta.given_name || (nombreCompleto.split(" ")[0] || "");
+  var apellido = meta.family_name || (nombreCompleto.split(" ").slice(1).join(" ") || "");
+  if(!nombre) nombre = (user.email||"").split("@")[0]; // fallback
+
+  var datos = {
+    nombre: nombre,
+    apellido: apellido || null,
+    email: user.email,
+    auth_user_id: user.id,
+    // teléfono y dirección los completará después
+    activo: true,
+    cuenta_corriente_habilitada: false,
+    saldo_cc: 0
+  };
+  console.log("[belle-cat] Autocreando cliente OAuth:",datos);
+
+  apiPost("clientes", datos).then(function(rowsCreated){
+    var nuevo = Array.isArray(rowsCreated) && rowsCreated.length ? rowsCreated[0] : null;
+    if(nuevo){
+      _catCliente = nuevo;
+      _catToast("¡Bienvenido "+nombre+"! Cargá tu dirección para empezar","tok");
+      // Pedir domicilio obligatorio + completar teléfono
+      _catFinalizarCargaCliente();
+      // Forzar pedido de primer domicilio
+      setTimeout(function(){
+        if(typeof _catPedirPrimerDomicilio === 'function'){
+          _catPedirPrimerDomicilio();
+        }
+      }, 600);
+    } else {
+      // Si por alguna razón no devolvió la fila, recargar
+      console.warn("[belle-cat] autocrear no devolvió fila, reintentando lectura");
+      apiGet("clientes","select=*&email=eq."+encodeURIComponent(user.email)+"&limit=1").then(function(rows2){
+        if(rows2 && rows2.length){
+          _catCliente = rows2[0];
+          _catFinalizarCargaCliente();
+          setTimeout(function(){
+            if(typeof _catPedirPrimerDomicilio === 'function') _catPedirPrimerDomicilio();
+          }, 600);
+        }
+      });
+    }
+  }).catch(function(e){
+    console.error("[belle-cat] autocrear cliente OAuth error:",e);
+    _catToast("Error al crear tu cuenta. Intentá de nuevo.","terr");
+  });
+}
+
+// Pasos finales después de tener _catCliente cargado (existía o se acaba de crear)
+function _catFinalizarCargaCliente(){
+  if(typeof catActualizarBoton === 'function') catActualizarBoton();
+  if(typeof catCargarFavsIds === 'function') catCargarFavsIds();
+  // Si el drawer está abierto, re-renderizarlo
+  var dw = document.getElementById("drawerCuenta");
+  if(dw && dw.classList.contains("open") && typeof catRenderDrawer === 'function'){
+    _catDrawerView = "panel";
+    catRenderDrawer();
+  }
 }
 
 // Disparar init cuando esté el SDK
@@ -4551,6 +4622,25 @@ function _catRenderLogin(body){
   h += "</div>";
 
   h += "<div style='display:flex;flex-direction:column;gap:.7rem'>";
+
+  // Botón "Continuar con Google"
+  h += "<button onclick='catLoginGoogle()' style='background:#fff;color:#3c4043;border:1px solid #dadce0;padding:.65rem;border-radius:8px;font-size:.88rem;font-weight:500;cursor:pointer;display:flex;align-items:center;justify-content:center;gap:.6rem;font-family:inherit;transition:box-shadow .15s' onmouseover='this.style.boxShadow=&quot;0 1px 3px rgba(60,64,67,.15)&quot;' onmouseout='this.style.boxShadow=&quot;none&quot;'>"+
+    "<svg width='18' height='18' viewBox='0 0 18 18' xmlns='http://www.w3.org/2000/svg'>"+
+      "<path fill='#4285F4' d='M17.64 9.2c0-.637-.057-1.251-.164-1.84H9v3.481h4.844a4.14 4.14 0 0 1-1.796 2.716v2.259h2.908c1.702-1.567 2.684-3.875 2.684-6.615z'/>"+
+      "<path fill='#34A853' d='M9 18c2.43 0 4.467-.806 5.956-2.18l-2.908-2.259c-.806.54-1.837.86-3.048.86-2.344 0-4.328-1.584-5.036-3.711H.957v2.332A8.997 8.997 0 0 0 9 18z'/>"+
+      "<path fill='#FBBC05' d='M3.964 10.71A5.41 5.41 0 0 1 3.682 9c0-.593.102-1.17.282-1.71V4.958H.957A8.996 8.996 0 0 0 0 9c0 1.452.348 2.827.957 4.042l3.007-2.332z'/>"+
+      "<path fill='#EA4335' d='M9 3.58c1.321 0 2.508.454 3.44 1.345l2.582-2.58C13.463.891 11.426 0 9 0A8.997 8.997 0 0 0 .957 4.958L3.964 7.29C4.672 5.163 6.656 3.58 9 3.58z'/>"+
+    "</svg>"+
+    "<span>Continuar con Google</span>"+
+    "</button>";
+
+  // Divisor
+  h += "<div style='display:flex;align-items:center;gap:.6rem;margin:.3rem 0'>";
+  h += "<div style='flex:1;height:1px;background:#e8d9bf'></div>";
+  h += "<span style='font-size:.66rem;color:var(--mid);text-transform:uppercase;letter-spacing:.05em'>o con email</span>";
+  h += "<div style='flex:1;height:1px;background:#e8d9bf'></div>";
+  h += "</div>";
+
   h += "<div><label style='font-size:.7rem;color:var(--mid);text-transform:uppercase;font-weight:600;letter-spacing:.04em'>Email</label>";
   h += "<input type='email' id='_catLoginEmail' autocomplete='email' onkeydown='if(event.key===&quot;Enter&quot;)document.getElementById(&quot;_catLoginPwd&quot;).focus()' style='width:100%;padding:.6rem .8rem;border:1px solid var(--accent-light, #e8d9bf);border-radius:8px;font-size:.92rem;background:#fff;color:var(--dark);margin-top:.3rem;box-sizing:border-box;font-family:inherit'></div>";
 
@@ -4595,6 +4685,24 @@ function _catRenderRegistro(body){
 
   h += "<div style='background:#fef9f0;border:1px solid #f4e3c1;border-radius:7px;padding:.55rem .7rem;margin-bottom:.8rem;font-size:.72rem;color:#8a6f3a'>";
   h += "&#9432; Después de registrarte vas a poder agregar tu dirección de entrega.";
+  h += "</div>";
+
+  // Botón "Continuar con Google" arriba (más rápido que llenar el form)
+  h += "<button onclick='catLoginGoogle()' style='width:100%;background:#fff;color:#3c4043;border:1px solid #dadce0;padding:.65rem;border-radius:8px;font-size:.88rem;font-weight:500;cursor:pointer;display:flex;align-items:center;justify-content:center;gap:.6rem;font-family:inherit;margin-bottom:.8rem;transition:box-shadow .15s' onmouseover='this.style.boxShadow=&quot;0 1px 3px rgba(60,64,67,.15)&quot;' onmouseout='this.style.boxShadow=&quot;none&quot;'>"+
+    "<svg width='18' height='18' viewBox='0 0 18 18' xmlns='http://www.w3.org/2000/svg'>"+
+      "<path fill='#4285F4' d='M17.64 9.2c0-.637-.057-1.251-.164-1.84H9v3.481h4.844a4.14 4.14 0 0 1-1.796 2.716v2.259h2.908c1.702-1.567 2.684-3.875 2.684-6.615z'/>"+
+      "<path fill='#34A853' d='M9 18c2.43 0 4.467-.806 5.956-2.18l-2.908-2.259c-.806.54-1.837.86-3.048.86-2.344 0-4.328-1.584-5.036-3.711H.957v2.332A8.997 8.997 0 0 0 9 18z'/>"+
+      "<path fill='#FBBC05' d='M3.964 10.71A5.41 5.41 0 0 1 3.682 9c0-.593.102-1.17.282-1.71V4.958H.957A8.996 8.996 0 0 0 0 9c0 1.452.348 2.827.957 4.042l3.007-2.332z'/>"+
+      "<path fill='#EA4335' d='M9 3.58c1.321 0 2.508.454 3.44 1.345l2.582-2.58C13.463.891 11.426 0 9 0A8.997 8.997 0 0 0 .957 4.958L3.964 7.29C4.672 5.163 6.656 3.58 9 3.58z'/>"+
+    "</svg>"+
+    "<span>Registrarme con Google</span>"+
+    "</button>";
+
+  // Divisor
+  h += "<div style='display:flex;align-items:center;gap:.6rem;margin-bottom:.8rem'>";
+  h += "<div style='flex:1;height:1px;background:#e8d9bf'></div>";
+  h += "<span style='font-size:.66rem;color:var(--mid);text-transform:uppercase;letter-spacing:.05em'>o con email</span>";
+  h += "<div style='flex:1;height:1px;background:#e8d9bf'></div>";
   h += "</div>";
 
   h += "<div style='display:flex;flex-direction:column;gap:.7rem'>";
@@ -4670,6 +4778,32 @@ function _catCambiarVista(vista){
 }
 
 // ── LOGIN ────────────────────────────────────────────────────────────
+// ── LOGIN/REGISTRO con Google (OAuth) ─────────────────────────────────
+// Tanto login como registro usan el mismo flujo: Supabase abre la ventana de Google,
+// el usuario elige su cuenta, Supabase recibe la confirmación y dispara onAuthStateChange.
+// Si el cliente no existe en la tabla `clientes`, lo crea automáticamente con los datos
+// que vienen de Google (nombre, email, foto). Después le pide domicilio.
+function catLoginGoogle(){
+  if(!_sbAuth){_catToast("Sistema cargando, esperá un segundo","twarn");return;}
+  // Marcar que la sesión que viene es OAuth-Google (para diferenciar el flujo post-login)
+  try{ sessionStorage.setItem('_catOAuthFlow', 'google'); } catch(e){}
+  _sbAuth.auth.signInWithOAuth({
+    provider: 'google',
+    options: {
+      // Volver al sitio actual después del login
+      redirectTo: window.location.origin + window.location.pathname,
+      queryParams: {
+        // Pedir info de email + perfil básico
+        access_type: 'online',
+        prompt: 'select_account'
+      }
+    }
+  }).catch(function(e){
+    console.error("[belle-cat] catLoginGoogle error:",e);
+    _catToast("No se pudo iniciar el login con Google","terr");
+  });
+}
+
 function catLogin(){
   var email = (document.getElementById("_catLoginEmail")||{value:""}).value.trim().toLowerCase();
   var pwd = (document.getElementById("_catLoginPwd")||{value:""}).value;
