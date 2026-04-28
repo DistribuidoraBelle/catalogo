@@ -457,6 +457,19 @@ function _setPeriodoDesde(fecha){_periodoDesde=fecha||"2000-01-01T00:00:00";}
 var dineroData={vendido:0,gastos:0,entregado:0,saldo:0};
 var pendingVentaItems=null,pendingReservas=null,pendingReservaIdx=0;
 
+// Cache de vendedores: para mostrar "Asignado a Facu" cuando el pedido tiene otro vendedor_id
+var _vendedoresCache={};
+function _cargarVendedoresCache(){
+  return apiGet("vendedores","select=id,nombre&activo=is.true").then(function(rows){
+    if(!Array.isArray(rows))return;
+    rows.forEach(function(v){_vendedoresCache[v.id]=v.nombre;});
+  }).catch(function(e){console.error("[belle] error silencioso:",e);});
+}
+function _vendedorNombre(vid){
+  if(!vid)return null;
+  return _vendedoresCache[vid]||("Vendedor #"+vid);
+}
+
 var CREDS={
   david:{pass:"david123",id:1,nombre:"David"},
   facu:{pass:"facu123",id:2,nombre:"Facu"}
@@ -1341,6 +1354,1123 @@ function _badgeReserva(prodId,qty){
 }
 
 
+// ═══════════════════════════════════════════════════════════════
+// MIS CLIENTES — panel vendedor
+// ═══════════════════════════════════════════════════════════════
+var _vcData=[];
+
+function loadClientesVendedor(){
+  var pg=document.getElementById("pg-clientes-vend");
+  if(!pg)return;
+  pg.innerHTML="<div class='loading'><div class='spin'></div>Cargando clientes...</div>";
+
+  // Vista por defecto: mis clientes
+  if(!window._vcVista)window._vcVista="mios";
+
+  // Cache de vendedores en paralelo
+  if(!Object.keys(_vendedoresCache).length)_cargarVendedoresCache();
+
+  // Cargar TODO de una sola consulta y filtrar en memoria — más simple y permite cambiar de vista sin re-fetch
+  apiGet("clientes","select=*&order=created_at.desc&limit=1000").then(function(data){
+    _vcData=Array.isArray(data)?data:[];
+    _renderClientesVend(pg);
+  }).catch(function(){pg.innerHTML="<div class='empty'>Error al cargar clientes</div>";});
+}
+
+function _vcCambiarVista(vista){
+  window._vcVista=vista;
+  var pg=document.getElementById("pg-clientes-vend");
+  if(pg)_renderClientesVend(pg);
+}
+
+function _renderClientesVend(pg){
+  var q=(pg._busq||"").toLowerCase();
+  var vista=window._vcVista||"mios";
+
+  // Filtrar por vista
+  var base;
+  if(vista==="mios"){
+    base=_vcData.filter(function(c){return c.vendedor_asignado_id===VENDEDOR_ID;});
+  } else if(vista==="sinasignar"){
+    base=_vcData.filter(function(c){return !c.vendedor_asignado_id;});
+  } else {
+    base=_vcData;
+  }
+  // Filtrar por búsqueda
+  var lista=q?base.filter(function(c){
+    return ((c.nombre||"")+" "+(c.apellido||"")+" "+(c.telefono_principal||"")+" #"+c.id+" "+(c.email||"")).toLowerCase().includes(q);
+  }):base;
+
+  // Contadores para chips
+  var cMios=_vcData.filter(function(c){return c.vendedor_asignado_id===VENDEDOR_ID;}).length;
+  var cSin=_vcData.filter(function(c){return !c.vendedor_asignado_id;}).length;
+  var cTodos=_vcData.length;
+
+  var html="<div style='padding:1rem'>";
+
+  // Toggle de vistas (chips)
+  html+="<div style='display:flex;gap:.35rem;flex-wrap:wrap;margin-bottom:.7rem'>";
+  var chips=[
+    {key:"mios",label:"Mis clientes",count:cMios},
+    {key:"sinasignar",label:"Sin asignar",count:cSin},
+    {key:"todos",label:"Todos",count:cTodos}
+  ];
+  chips.forEach(function(ch){
+    var act=vista===ch.key;
+    html+="<button onclick='_vcCambiarVista(\""+ch.key+"\")' style='font-size:.72rem;padding:.3rem .7rem;border-radius:18px;cursor:pointer;"+
+      "border:1px solid "+(act?"var(--acc)":"var(--bd)")+";"+
+      "background:"+(act?"var(--acc)":"var(--sur2)")+";"+
+      "color:"+(act?"#fff":"var(--tx2)")+";"+
+      "font-weight:"+(act?"600":"400")+"'>"+ch.label+
+      (ch.count?" <span style='margin-left:.2rem;font-size:.62rem;background:rgba(255,255,255,.25);border-radius:8px;padding:0 .3rem'>"+ch.count+"</span>":"")+
+      "</button>";
+  });
+  html+="</div>";
+
+  // Buscador + botón crear cliente
+  html+="<div style='display:flex;gap:.5rem;margin-bottom:1rem;flex-wrap:wrap;align-items:center'>";
+  html+="<input type='text' id='vcSrch' placeholder='Buscar por nombre, ID, teléfono...' value='"+(q||"").replace(/'/g,"&#39;")+"' oninput='_vcFiltrar(this.value)' style='flex:1;min-width:150px;padding:.45rem .7rem;border:1px solid var(--bd);border-radius:7px;font-size:.82rem;background:var(--sur2);color:var(--tx)'>";
+  html+="<button class='btn btn-a' style='padding:.45rem .8rem;font-size:.78rem' onclick='abrirCrearCliente()'>➕ Nuevo cliente</button>";
+  html+="<span style='font-size:.72rem;color:var(--tx3)'>"+lista.length+" mostrados</span>";
+  html+="</div>";
+
+  if(!lista.length){
+    var msg=q?"Sin resultados":(vista==="mios"?"No tenés clientes asignados. Tomá clientes desde \"Sin asignar\" o creá uno nuevo.":vista==="sinasignar"?"No hay clientes sin asignar":"Sin clientes registrados");
+    html+="<div class='empty'>"+msg+"</div>";
+    html+="</div>";pg.innerHTML=html;return;
+  }
+
+  var estColor={activo:"var(--green)",suspendido:"var(--red)",pendiente:"var(--yel)"};
+  lista.forEach(function(c){
+    var nombre=((c.nombre||"")+" "+(c.apellido||"")).trim()||"(sin nombre)";
+    var est=c.estado||"activo";
+    var tel=c.telefono_principal||"";
+    var ultima=c.ultimo_pedido_at?new Date(c.ultimo_pedido_at).toLocaleDateString("es-AR",{day:"2-digit",month:"2-digit",year:"2-digit"}):"—";
+    var esMio=c.vendedor_asignado_id===VENDEDOR_ID;
+    var esSinAsignar=!c.vendedor_asignado_id;
+    var asignadoOtro=c.vendedor_asignado_id&&c.vendedor_asignado_id!==VENDEDOR_ID;
+
+    html+="<div style='background:var(--sur);border:1px solid var(--bd);border-radius:var(--r);padding:.9rem;margin-bottom:.6rem'>";
+
+    // Header con nombre, ID y estado
+    html+="<div style='display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:.5rem;gap:.5rem'>";
+    html+="<div style='flex:1;min-width:0'>";
+    html+="<div style='font-size:.88rem;font-weight:600;color:var(--tx);display:flex;align-items:center;gap:.4rem;flex-wrap:wrap'>";
+    html+="<span>"+nombre+"</span>";
+    html+="<span style='font-size:.65rem;font-weight:500;color:var(--tx3);background:var(--sur2);padding:.1rem .4rem;border-radius:4px'>#"+c.id+"</span>";
+    if(c.cuenta_corriente_habilitada)html+="<span style='font-size:.6rem;color:var(--acc);background:rgba(196,150,90,.12);padding:.05rem .35rem;border-radius:4px;border:1px solid rgba(196,150,90,.3)'>💳 CC</span>";
+    html+="</div>";
+    if(tel)html+="<a href='https://wa.me/549"+tel.replace(/\D/g,"")+"' target='_blank' style='font-size:.72rem;color:var(--green);text-decoration:none'>📱 "+tel+"</a>";
+    if(asignadoOtro){
+      var nomVend=_vendedorNombre(c.vendedor_asignado_id);
+      html+="<div style='font-size:.66rem;color:var(--blue);margin-top:.2rem'>👤 Vendedor: "+nomVend+"</div>";
+    }
+    html+="</div>";
+    html+="<span style='font-size:.62rem;font-weight:600;color:"+estColor[est]+";border:1px solid "+estColor[est]+"44;border-radius:10px;padding:.15rem .45rem;flex-shrink:0'>"+est+"</span>";
+    html+="</div>";
+
+    // Info rápida
+    html+="<div style='display:grid;grid-template-columns:1fr 1fr;gap:.4rem;margin-bottom:.6rem'>";
+    html+="<div style='background:var(--sur2);border-radius:6px;padding:.35rem .5rem'>";
+    html+="<div style='font-size:.6rem;color:var(--tx3);text-transform:uppercase'>Precio</div>";
+    html+="<div style='font-size:.75rem;font-weight:600;color:var(--acc)'>"+(c.lista_precios==="mayorista_vip"?"VIP":c.lista_precios==="mayorista"?"Mayorista":"Minorista")+"</div></div>";
+    html+="<div style='background:var(--sur2);border-radius:6px;padding:.35rem .5rem'>";
+    html+="<div style='font-size:.6rem;color:var(--tx3);text-transform:uppercase'>Último pedido</div>";
+    html+="<div style='font-size:.75rem;font-weight:600;color:var(--tx)'>"+ultima+"</div></div>";
+    html+="</div>";
+
+    // Botones de acción
+    html+="<div style='display:flex;gap:.4rem;flex-wrap:wrap'>";
+
+    // Tomar cliente: solo si está sin asignar
+    if(esSinAsignar){
+      html+="<button class='btn btn-a' style='font-size:.72rem;padding:.35rem .7rem' onclick='tomarCliente("+c.id+",\""+nombre.replace(/"/g,"'")+"\")'>✋ Tomar cliente</button>";
+    }
+    // Cargar pedido: solo a clientes míos (los de otros vendedores no debería tocar)
+    if(esMio){
+      html+="<button class='btn btn-a' style='font-size:.72rem;padding:.35rem .7rem' onclick='vcCargarPedido("+c.id+",\""+nombre.replace(/"/g,"'")+"\",\""+(c.lista_precios||"minorista")+"\")'>📦 Cargar pedido</button>";
+    }
+    // Ficha: cualquiera puede ver
+    html+="<button class='btn btn-g' style='font-size:.72rem;padding:.35rem .7rem' onclick='abrirFichaCliente("+c.id+")'>👤 Ficha</button>";
+    // WhatsApp
+    if(tel)html+="<a href='https://wa.me/549"+tel.replace(/\D/g,"")+"' target='_blank' class='btn btn-g' style='font-size:.72rem;padding:.35rem .7rem;text-decoration:none'>💬 WA</a>";
+    // Historial pedidos
+    html+="<button class='btn btn-g' style='font-size:.72rem;padding:.35rem .7rem' onclick='vcVerHistorial("+c.id+",\""+nombre.replace(/"/g,"'")+"\")'>📋 Pedidos</button>";
+    // CC: solo si está habilitada
+    if(c.cuenta_corriente_habilitada)html+="<button class='btn btn-g' style='font-size:.72rem;padding:.35rem .7rem;border-color:var(--acc);color:var(--acc)' onclick='vcVerCC("+c.id+",\""+nombre.replace(/"/g,"'")+"\")'>💳 CC</button>";
+    html+="</div>";
+    html+="</div>";
+  });
+
+  html+="</div>";
+  pg.innerHTML=html;
+  pg._busq=q;
+}
+
+function _vcFiltrar(q){
+  var pg=document.getElementById("pg-clientes-vend");
+  if(!pg)return;
+  pg._busq=q;
+  _renderClientesVend(pg);
+}
+
+// ── Tomar cliente sin asignar ──
+function tomarCliente(clienteId,clienteNombre){
+  if(!confirm("Tomar a "+clienteNombre+" como cliente tuyo?"))return;
+  apiGet("clientes","select=id,vendedor_asignado_id&id=eq."+clienteId+"&limit=1").then(function(rows){
+    var c=rows&&rows[0];
+    if(!c)return;
+    if(c.vendedor_asignado_id&&c.vendedor_asignado_id!==VENDEDOR_ID){
+      var nv=_vendedorNombre(c.vendedor_asignado_id);
+      toast("Ya fue tomado por "+nv,"twarn");
+      loadClientesVendedor();
+      return;
+    }
+    return apiPatch("clientes",{vendedor_asignado_id:VENDEDOR_ID},"id=eq."+clienteId).then(function(){
+      toast(clienteNombre+" ahora es tu cliente","tok");
+      loadClientesVendedor();
+    });
+  }).catch(function(e){console.error("[belle] tomarCliente error:",e);toast("Error al tomar cliente","terr");});
+}
+
+// ── Crear cliente nuevo ──
+function abrirCrearCliente(){
+  var mo=document.createElement("div");mo.className="mo open";mo.id="_moCrearCliente";
+  mo.style.zIndex="99999";
+  var h="<div class='md' style='max-width:500px;width:95%;max-height:90vh;display:flex;flex-direction:column'>";
+  h+="<div class='mh'><div class='mtt'>➕ Nuevo cliente</div>";
+  h+="<button class='btn btn-g xb' onclick='document.getElementById(\"_moCrearCliente\").remove()'>✕</button></div>";
+  h+="<div class='mb' style='overflow-y:auto;display:flex;flex-direction:column;gap:.7rem'>";
+  // Campos
+  h+="<div style='display:grid;grid-template-columns:1fr 1fr;gap:.5rem'>";
+  h+="<div><label style='font-size:.66rem;color:var(--tx3);text-transform:uppercase;font-weight:600'>Nombre *</label><input type='text' id='_ncNombre' style='width:100%;padding:.45rem .6rem;border:1px solid var(--bd);border-radius:6px;font-size:.84rem;background:var(--sur2);color:var(--tx);margin-top:.2rem'></div>";
+  h+="<div><label style='font-size:.66rem;color:var(--tx3);text-transform:uppercase;font-weight:600'>Apellido</label><input type='text' id='_ncApellido' style='width:100%;padding:.45rem .6rem;border:1px solid var(--bd);border-radius:6px;font-size:.84rem;background:var(--sur2);color:var(--tx);margin-top:.2rem'></div>";
+  h+="</div>";
+  h+="<div><label style='font-size:.66rem;color:var(--tx3);text-transform:uppercase;font-weight:600'>Teléfono</label><input type='text' id='_ncTel' placeholder='3515121193' style='width:100%;padding:.45rem .6rem;border:1px solid var(--bd);border-radius:6px;font-size:.84rem;background:var(--sur2);color:var(--tx);margin-top:.2rem'></div>";
+  h+="<div><label style='font-size:.66rem;color:var(--tx3);text-transform:uppercase;font-weight:600'>Email</label><input type='email' id='_ncEmail' style='width:100%;padding:.45rem .6rem;border:1px solid var(--bd);border-radius:6px;font-size:.84rem;background:var(--sur2);color:var(--tx);margin-top:.2rem'></div>";
+  h+="<div><label style='font-size:.66rem;color:var(--tx3);text-transform:uppercase;font-weight:600'>Lista de precios</label>";
+  h+="<select id='_ncLista' style='width:100%;padding:.45rem .6rem;border:1px solid var(--bd);border-radius:6px;font-size:.84rem;background:var(--sur2);color:var(--tx);margin-top:.2rem'>";
+  h+="<option value='minorista'>Minorista (precio web)</option>";
+  h+="<option value='mayorista'>Mayorista</option>";
+  h+="<option value='mayorista_vip'>Mayorista VIP</option>";
+  h+="</select></div>";
+  h+="<div style='display:flex;align-items:center;gap:.5rem;background:var(--sur2);padding:.55rem .7rem;border-radius:7px'>";
+  h+="<input type='checkbox' id='_ncCC' style='width:18px;height:18px;cursor:pointer'>";
+  h+="<label for='_ncCC' style='font-size:.78rem;color:var(--tx);cursor:pointer'>💳 Habilitar Cuenta Corriente</label>";
+  h+="</div>";
+  h+="<div><label style='font-size:.66rem;color:var(--tx3);text-transform:uppercase;font-weight:600'>Notas internas</label><textarea id='_ncNotas' rows='2' style='width:100%;padding:.45rem .6rem;border:1px solid var(--bd);border-radius:6px;font-size:.82rem;background:var(--sur2);color:var(--tx);margin-top:.2rem;resize:vertical;font-family:inherit'></textarea></div>";
+  h+="<div style='display:flex;gap:.5rem;justify-content:flex-end;margin-top:.4rem'>";
+  h+="<button class='btn btn-g' onclick='document.getElementById(\"_moCrearCliente\").remove()'>Cancelar</button>";
+  h+="<button class='btn btn-a' onclick='_guardarNuevoCliente()'>Crear y asignarme</button>";
+  h+="</div>";
+  h+="</div></div>";
+  mo.innerHTML=h;
+  document.body.appendChild(mo);
+  mo.addEventListener("click",function(e){if(e.target===mo)mo.remove();});
+  setTimeout(function(){var el=document.getElementById("_ncNombre");if(el)el.focus();},100);
+}
+
+function _guardarNuevoCliente(){
+  var nombre=(document.getElementById("_ncNombre")||{value:""}).value.trim();
+  if(!nombre){toast("Ingresá al menos el nombre","twarn");return;}
+  var apellido=(document.getElementById("_ncApellido")||{value:""}).value.trim();
+  var tel=(document.getElementById("_ncTel")||{value:""}).value.trim();
+  var email=(document.getElementById("_ncEmail")||{value:""}).value.trim();
+  var lista=(document.getElementById("_ncLista")||{value:"minorista"}).value;
+  var cc=(document.getElementById("_ncCC")||{checked:false}).checked;
+  var notas=(document.getElementById("_ncNotas")||{value:""}).value.trim();
+  var data={
+    nombre:nombre,
+    apellido:apellido||null,
+    telefono_principal:tel||null,
+    email:email||null,
+    lista_precios:lista,
+    cuenta_corriente_habilitada:cc,
+    saldo_cc:0,
+    estado:"activo",
+    vendedor_asignado_id:VENDEDOR_ID,
+    notas_internas:notas||null
+  };
+  apiPost("clientes",data).then(function(){
+    toast("Cliente "+nombre+" creado y asignado","tok");
+    var mo=document.getElementById("_moCrearCliente");if(mo)mo.remove();
+    loadClientesVendedor();
+  }).catch(function(e){console.error("[belle] _guardarNuevoCliente error:",e);toast("Error al crear cliente","terr");});
+}
+
+// ── Ficha del cliente con datos editables y toggle CC ──
+function abrirFichaCliente(clienteId){
+  var mo=document.createElement("div");mo.className="mo open";mo.id="_moFichaCliente";
+  mo.style.zIndex="99999";
+  var h="<div class='md' style='max-width:520px;width:95%;max-height:90vh;display:flex;flex-direction:column'>";
+  h+="<div class='mh'><div class='mtt'>👤 Ficha cliente</div>";
+  h+="<button class='btn btn-g xb' onclick='document.getElementById(\"_moFichaCliente\").remove()'>✕</button></div>";
+  h+="<div class='mb' id='_fichaCliBody' style='overflow-y:auto'><div class='loading'><div class='spin'></div></div></div>";
+  h+="</div>";
+  mo.innerHTML=h;
+  document.body.appendChild(mo);
+  mo.addEventListener("click",function(e){if(e.target===mo)mo.remove();});
+
+  apiGet("clientes","select=*&id=eq."+clienteId+"&limit=1").then(function(rows){
+    var c=rows&&rows[0];
+    var el=document.getElementById("_fichaCliBody");
+    if(!el)return;
+    if(!c){el.innerHTML="<div class='empty'>Cliente no encontrado</div>";return;}
+    window._fichaCliActual=c;
+    var puedeEditar=(c.vendedor_asignado_id===VENDEDOR_ID)||!c.vendedor_asignado_id;
+    var html="";
+    // Header con ID + estado
+    html+="<div style='background:var(--sur2);border-radius:8px;padding:.7rem .9rem;margin-bottom:.7rem'>";
+    html+="<div style='font-size:.72rem;color:var(--tx3);text-transform:uppercase;font-weight:600;margin-bottom:.2rem'>Cliente #"+c.id+"</div>";
+    var nomFull=((c.nombre||"")+" "+(c.apellido||"")).trim();
+    html+="<div style='font-size:1rem;font-weight:600;color:var(--tx)'>"+nomFull+"</div>";
+    html+="<div style='font-size:.7rem;color:var(--tx3);margin-top:.15rem'>Creado: "+new Date(c.created_at).toLocaleDateString("es-AR")+"</div>";
+    html+="</div>";
+    if(!puedeEditar){
+      html+="<div style='background:rgba(74,159,216,.1);border:1px solid rgba(74,159,216,.3);border-radius:7px;padding:.5rem .7rem;margin-bottom:.7rem;font-size:.74rem;color:var(--blue)'>👤 Asignado a <b>"+_vendedorNombre(c.vendedor_asignado_id)+"</b>. Solo el admin o el vendedor asignado puede editar.</div>";
+    }
+    // Campos
+    var disabledAttr=puedeEditar?"":"disabled";
+    var inputStyle="width:100%;padding:.45rem .6rem;border:1px solid var(--bd);border-radius:6px;font-size:.84rem;background:var(--sur2);color:var(--tx);margin-top:.2rem";
+    if(!puedeEditar)inputStyle+=";opacity:.6;cursor:not-allowed";
+    html+="<div style='display:grid;grid-template-columns:1fr 1fr;gap:.5rem;margin-bottom:.6rem'>";
+    html+="<div><label style='font-size:.66rem;color:var(--tx3);text-transform:uppercase;font-weight:600'>Nombre</label><input type='text' id='_fcNombre' "+disabledAttr+" value='"+(c.nombre||"").replace(/'/g,"&#39;")+"' style='"+inputStyle+"'></div>";
+    html+="<div><label style='font-size:.66rem;color:var(--tx3);text-transform:uppercase;font-weight:600'>Apellido</label><input type='text' id='_fcApellido' "+disabledAttr+" value='"+(c.apellido||"").replace(/'/g,"&#39;")+"' style='"+inputStyle+"'></div>";
+    html+="</div>";
+    html+="<div style='margin-bottom:.6rem'><label style='font-size:.66rem;color:var(--tx3);text-transform:uppercase;font-weight:600'>Teléfono</label><input type='text' id='_fcTel' "+disabledAttr+" value='"+(c.telefono_principal||"").replace(/'/g,"&#39;")+"' style='"+inputStyle+"'></div>";
+    html+="<div style='margin-bottom:.6rem'><label style='font-size:.66rem;color:var(--tx3);text-transform:uppercase;font-weight:600'>Email</label><input type='email' id='_fcEmail' "+disabledAttr+" value='"+(c.email||"").replace(/'/g,"&#39;")+"' style='"+inputStyle+"'></div>";
+    html+="<div style='margin-bottom:.6rem'><label style='font-size:.66rem;color:var(--tx3);text-transform:uppercase;font-weight:600'>Lista de precios</label>";
+    html+="<select id='_fcLista' "+disabledAttr+" style='"+inputStyle+"'>";
+    ["minorista","mayorista","mayorista_vip"].forEach(function(v){
+      var lab=v==="mayorista_vip"?"Mayorista VIP":v==="mayorista"?"Mayorista":"Minorista";
+      html+="<option value='"+v+"' "+(c.lista_precios===v?"selected":"")+">"+lab+"</option>";
+    });
+    html+="</select></div>";
+    html+="<div style='margin-bottom:.6rem'><label style='font-size:.66rem;color:var(--tx3);text-transform:uppercase;font-weight:600'>Estado</label>";
+    html+="<select id='_fcEstado' "+disabledAttr+" style='"+inputStyle+"'>";
+    ["activo","pendiente","suspendido"].forEach(function(v){html+="<option value='"+v+"' "+((c.estado||"activo")===v?"selected":"")+">"+v+"</option>";});
+    html+="</select></div>";
+
+    // Toggle CC
+    html+="<div style='display:flex;align-items:center;gap:.5rem;background:var(--sur2);padding:.55rem .7rem;border-radius:7px;margin-bottom:.6rem'>";
+    html+="<input type='checkbox' id='_fcCC' "+disabledAttr+" "+(c.cuenta_corriente_habilitada?"checked":"")+" style='width:18px;height:18px;cursor:"+(puedeEditar?"pointer":"not-allowed")+"'>";
+    html+="<label for='_fcCC' style='font-size:.78rem;color:var(--tx);cursor:"+(puedeEditar?"pointer":"not-allowed")+";flex:1'>💳 Cuenta Corriente habilitada</label>";
+    if(c.cuenta_corriente_habilitada)html+="<span style='font-size:.7rem;color:"+(c.saldo_cc<0?"var(--red)":"var(--green)")+"'>Saldo: "+fmt(c.saldo_cc||0)+"</span>";
+    html+="</div>";
+
+    // Notas internas
+    html+="<div style='margin-bottom:.6rem'><label style='font-size:.66rem;color:var(--tx3);text-transform:uppercase;font-weight:600'>Notas internas (no las ve el cliente)</label>";
+    html+="<textarea id='_fcNotas' "+disabledAttr+" rows='2' style='"+inputStyle+";resize:vertical;font-family:inherit'>"+(c.notas_internas||"").replace(/</g,"&lt;")+"</textarea></div>";
+
+    // Vendedor asignado (info)
+    html+="<div style='background:var(--sur2);border-radius:7px;padding:.5rem .7rem;margin-bottom:.7rem;font-size:.75rem'>";
+    html+="<span style='color:var(--tx3)'>Vendedor asignado:</span> ";
+    html+=c.vendedor_asignado_id?"<b>"+_vendedorNombre(c.vendedor_asignado_id)+"</b>":"<span style='color:var(--yel)'>Sin asignar</span>";
+    html+="</div>";
+
+    // Botones
+    if(puedeEditar){
+      html+="<div style='display:flex;gap:.5rem;justify-content:flex-end'>";
+      html+="<button class='btn btn-g' onclick='document.getElementById(\"_moFichaCliente\").remove()'>Cerrar</button>";
+      html+="<button class='btn btn-a' onclick='_guardarFichaCliente("+c.id+")'>💾 Guardar cambios</button>";
+      html+="</div>";
+    }
+    el.innerHTML=html;
+  }).catch(function(e){console.error("[belle] abrirFichaCliente error:",e);});
+}
+
+function _guardarFichaCliente(clienteId){
+  var nombre=(document.getElementById("_fcNombre")||{value:""}).value.trim();
+  if(!nombre){toast("El nombre es obligatorio","twarn");return;}
+  var data={
+    nombre:nombre,
+    apellido:(document.getElementById("_fcApellido")||{value:""}).value.trim()||null,
+    telefono_principal:(document.getElementById("_fcTel")||{value:""}).value.trim()||null,
+    email:(document.getElementById("_fcEmail")||{value:""}).value.trim()||null,
+    lista_precios:(document.getElementById("_fcLista")||{value:"minorista"}).value,
+    estado:(document.getElementById("_fcEstado")||{value:"activo"}).value,
+    cuenta_corriente_habilitada:(document.getElementById("_fcCC")||{checked:false}).checked,
+    notas_internas:(document.getElementById("_fcNotas")||{value:""}).value.trim()||null
+  };
+  apiPatch("clientes",data,"id=eq."+clienteId).then(function(){
+    toast("Cliente actualizado","tok");
+    var mo=document.getElementById("_moFichaCliente");if(mo)mo.remove();
+    loadClientesVendedor();
+  }).catch(function(e){console.error("[belle] _guardarFichaCliente error:",e);toast("Error al guardar","terr");});
+}
+
+// ── Cargar pedido a cliente (abre modal con catálogo simplificado) ──
+function vcCargarPedido(clienteId, clienteNombre, listaPre){
+  var mo=document.createElement("div");mo.className="mo open";mo.id="_moVcPedido";
+  var segKey={minorista:"precio_min_ars",mayorista:"precio_may_ars",mayorista_vip:"precio_may_ars"}[listaPre]||"precio_min_ars";
+  var segLabel={minorista:"Minorista",mayorista:"Mayorista",mayorista_vip:"VIP"}[listaPre]||"Minorista";
+  var _items={};
+  var h="<div class='md' style='max-width:560px;width:95%;max-height:90vh;display:flex;flex-direction:column'>";
+  h+="<div class='mh'><div class='mtt'>Pedido para "+clienteNombre+"</div><button class='btn btn-g xb' onclick='document.getElementById(\"_moVcPedido\").remove()'>✕</button></div>";
+  h+="<div style='padding:.6rem 1rem;border-bottom:1px solid var(--bd);display:flex;gap:.5rem'>";
+  h+="<input type='text' id='_vcPedBusq' placeholder='Buscar producto...' oninput='_vcPedFiltrar()' style='flex:1;padding:.4rem .6rem;border:1px solid var(--bd);border-radius:6px;font-size:.82rem;background:var(--sur2);color:var(--tx)'>";
+  h+="<span style='font-size:.68rem;color:var(--tx3);align-self:center'>"+segLabel+"</span>";
+  h+="</div>";
+  h+="<div id='_vcPedLista' style='flex:1;overflow-y:auto;padding:.5rem 1rem'></div>";
+  h+="<div style='padding:.8rem 1rem;border-top:1px solid var(--bd);display:flex;gap:.5rem;align-items:center;flex-wrap:wrap'>";
+  h+="<div style='flex:1;min-width:120px'><div style='font-size:.68rem;color:var(--tx3)'>Total</div><div id='_vcPedTotal' style='font-size:1.1rem;font-weight:700;color:var(--acc)'>$0</div></div>";
+  h+="<button class='btn btn-a' style='font-size:.78rem' onclick='_vcConfirmarPedido("+clienteId+",\""+clienteNombre.replace(/"/g,"'")+"\",\"reservar\")'>📋 Reservar</button>";
+  h+="<button class='btn btn-green' style='font-size:.78rem' onclick='_vcConfirmarPedido("+clienteId+",\""+clienteNombre.replace(/"/g,"'")+"\",\"cobrar\")'>💰 Cobrar al toque</button>";
+  h+="</div></div>";
+  mo.innerHTML=h;
+  document.body.appendChild(mo);
+  mo.addEventListener("click",function(e){if(e.target===mo)mo.remove();});
+  // Cargar productos
+  mo._items={};mo._segKey=segKey;mo._clienteId=clienteId;mo._clienteNombre=clienteNombre;
+  _vcPedRender("");
+}
+
+function _vcPedFiltrar(){
+  var q=(document.getElementById("_vcPedBusq")||{value:""}).value;
+  _vcPedRender(q);
+}
+
+function _vcPedRender(q){
+  var el=document.getElementById("_vcPedLista");if(!el)return;
+  var mo=document.getElementById("_moVcPedido");if(!mo)return;
+  var segKey=mo._segKey||"precio_min_ars";
+  var ql=q.toLowerCase();
+  var lista=(prods||[]).filter(function(p){
+    if(!p.activo||!(p[segKey]))return false;
+    if(ql&&!p.nombre.toLowerCase().includes(ql)&&!(p.empresa||"").toLowerCase().includes(ql))return false;
+    return true;
+  }).slice(0,80);
+  if(!lista.length){el.innerHTML="<div class='empty'>Sin resultados</div>";return;}
+  el.innerHTML=lista.map(function(p){
+    var nombre=p.nombre||""; var nc=nombre.indexOf(" - ")>-1?nombre.split(" - ").slice(1).join(" - ").split("|")[0].trim():nombre;
+    var qty=mo._items[p.id]||0;
+    return "<div style='display:flex;align-items:center;gap:.5rem;padding:.4rem 0;border-bottom:1px solid var(--bd)'>"+
+      "<div style='flex:1;min-width:0'><div style='font-size:.8rem;font-weight:500'>"+nc+"</div><div style='font-size:.65rem;color:var(--tx3)'>"+( p.empresa||"")+"</div></div>"+
+      "<div style='font-size:.78rem;font-weight:600;color:var(--acc);white-space:nowrap'>"+fmt(p[segKey])+"</div>"+
+      "<div style='display:flex;align-items:center;gap:.2rem;flex-shrink:0'>"+
+        "<button onclick='_vcPedChg("+p.id+",-1)' style='width:22px;height:22px;border:1px solid var(--bd);border-radius:4px;background:transparent;cursor:pointer;font-size:.9rem;display:flex;align-items:center;justify-content:center'>−</button>"+
+        "<span id='_vqn-"+p.id+"' style='width:24px;text-align:center;font-size:.8rem;font-weight:600'>"+( qty||0)+"</span>"+
+        "<button onclick='_vcPedChg("+p.id+",1)' style='width:22px;height:22px;border:1px solid var(--bd);border-radius:4px;background:transparent;cursor:pointer;font-size:.9rem;display:flex;align-items:center;justify-content:center'>+</button>"+
+      "</div></div>";
+  }).join("");
+}
+
+function _vcPedChg(pid,delta){
+  var mo=document.getElementById("_moVcPedido");if(!mo)return;
+  mo._items[pid]=Math.max(0,(mo._items[pid]||0)+delta);
+  if(mo._items[pid]===0)delete mo._items[pid];
+  var el=document.getElementById("_vqn-"+pid);if(el)el.textContent=mo._items[pid]||0;
+  // Recalcular total
+  var segKey=mo._segKey||"precio_min_ars";
+  var total=0;
+  Object.keys(mo._items).forEach(function(id){
+    var p=(prods||[]).find(function(x){return x.id==id;});
+    if(p)total+=(p[segKey]||0)*mo._items[id];
+  });
+  var tel=document.getElementById("_vcPedTotal");if(tel)tel.textContent=fmt(total);
+}
+
+// Bugs 1, 2, 3: reescritura completa
+// - Migra de pedidos_clientes (en desuso) a pedidos_catalogo con cliente_id
+// - SIEMPRE reserva (stock_actual -N + reserva +N), nunca descuenta directo
+// - Acepta accion: "reservar" (queda en_preparacion) o "cobrar" (queda cobrado al toque)
+function _vcConfirmarPedido(clienteId,clienteNombre,accion){
+  accion=accion||"reservar"; // default seguro: reservar
+  var mo=document.getElementById("_moVcPedido");if(!mo)return;
+  if(!Object.keys(mo._items).length){toast("Agregá productos al pedido","twarn");return;}
+  var segKey=mo._segKey||"precio_min_ars";
+  var items=[];var total=0;
+  // Validación de stock primero
+  var stockInsuf=null;
+  Object.keys(mo._items).forEach(function(id){
+    var p=(prods||[]).find(function(x){return x.id==id;});
+    if(!p||!mo._items[id])return;
+    var qty=mo._items[id];
+    var disp=(p.stock_actual||0)+(p.reserva||0);
+    if(qty>disp&&!stockInsuf){stockInsuf=p.nombre;return;}
+    var precio=p[segKey]||0;
+    items.push({producto_id:p.id,nombre:p.nombre,qty:qty,precio:precio,total:precio*qty,segmento:segKey.includes("may")?"pm":"pi"});
+    total+=precio*qty;
+  });
+  if(stockInsuf){toast("Stock insuficiente: "+stockInsuf,"terr");return;}
+  if(!items.length){toast("Sin productos válidos","twarn");return;}
+
+  var nroOrden="ORD-"+Math.floor(100000+Math.random()*900000);
+  var labelAccion=accion==="cobrar"?"Cobrar al toque":"Reservar para entregar";
+  if(!confirm(labelAccion+" - "+fmt(total)+" para "+clienteNombre+"?"))return;
+
+  // Estado del pedido según acción
+  // reservar → estado='reservado', estado_envio='en_preparacion', confirmado_cobro=false
+  // cobrar → estado='cobrado', estado_envio='entregado', confirmado_cobro=true (cobrado al instante)
+  var pedidoData={
+    nro_orden:nroOrden,
+    cliente_id:clienteId,
+    vendedor_id:VENDEDOR_ID,
+    items:JSON.stringify(items),
+    total:total,
+    confirmado_cobro:accion==="cobrar",
+    periodo:periodoActual,
+    notas:"Pedido creado desde Mis Clientes para "+clienteNombre
+  };
+  if(accion==="cobrar"){
+    pedidoData.estado="cobrado";
+    pedidoData.estado_envio="entregado";
+    pedidoData.confirmado_at=new Date().toISOString();
+  } else {
+    pedidoData.estado="reservado";
+    pedidoData.estado_envio="en_preparacion";
+  }
+
+  apiPost("pedidos_catalogo",pedidoData).then(function(){
+    // SIEMPRE reservar primero (luego, si "cobrar", consumir reserva en una segunda pasada)
+    // Esto unifica el flujo y deja trazabilidad en movimientos_stock
+    var reservaChain=Promise.resolve();
+    items.forEach(function(it){
+      reservaChain=reservaChain.then(function(){
+        return patchStockFresco(it.producto_id,{stock_actual:-it.qty,reserva:+it.qty},"Reserva pedido cliente "+nroOrden)
+          .then(function(){
+            return apiPost("movimientos_stock",{
+              producto_id:it.producto_id,producto_nombre:it.nombre,tipo:"reserva",
+              cantidad:it.qty,motivo:"Reserva pedido "+nroOrden+" - cliente "+clienteNombre,
+              usuario:VENDEDOR_NOMBRE||"vendedor",periodo:periodoActual
+            }).catch(function(e){console.error("[belle] error silencioso:",e);});
+          });
+      });
+    });
+    // Si accion="cobrar", consumir reserva → vendido_david
+    if(accion==="cobrar"){
+      items.forEach(function(it){
+        reservaChain=reservaChain.then(function(){
+          return patchStockFresco(it.producto_id,{reserva:-it.qty,vendido_david:+it.qty},"Cobro pedido cliente "+nroOrden);
+        });
+      });
+    }
+    return reservaChain.then(function(){
+      // Buscar id del pedido recién creado
+      return apiGet("pedidos_catalogo","select=id&nro_orden=eq."+nroOrden+"&limit=1").then(function(rows){
+        var pedId=rows&&rows[0]&&rows[0].id;
+        if(!pedId)return;
+        // Si "cobrar" → registrar venta(s) para reportes/comisiones
+        if(accion==="cobrar"){
+          items.forEach(function(it){
+            apiPost("ventas",{
+              vendedor_id:VENDEDOR_ID,
+              producto_id:it.producto_id,
+              producto_nombre:it.nombre,
+              cantidad:it.qty,
+              precio_unitario:it.precio,
+              segmento:it.segmento||"x1",
+              total:it.total,
+              periodo:periodoActual,
+              estado:"confirmada",
+              origen:"vendedor",
+              nro_orden:nroOrden,
+              forma_cobro:"efectivo",
+              descuento:0,descuento_motivo:""
+            }).catch(function(e){console.error("[belle] error silencioso:",e);});
+          });
+          _logEstadoPedidoV(pedId,"entregado","Cobrado al toque por "+VENDEDOR_NOMBRE);
+        } else {
+          _logEstadoPedidoV(pedId,"en_preparacion","Reservado para "+clienteNombre+" por "+VENDEDOR_NOMBRE);
+        }
+      });
+    });
+  }).then(function(){
+    // Actualizar ultimo_pedido_at del cliente
+    apiPatch("clientes",{ultimo_pedido_at:new Date().toISOString()},"id=eq."+clienteId).catch(function(e){console.error("[belle] error silencioso:",e);});
+    toast("Pedido "+nroOrden+" "+(accion==="cobrar"?"cobrado":"reservado"),"tok");
+    mo.remove();
+    loadClientesVendedor();
+    renderCat();
+    if(typeof loadPedidosWeb==="function")loadPedidosWeb();
+    if(typeof loadDineroData==="function")loadDineroData();
+  }).catch(function(e){console.error("[belle] _vcConfirmarPedido error:",e);toast("Error al crear pedido","terr");});
+}
+
+// ── Historial de pedidos del cliente ──────────────────────────
+function vcVerHistorial(clienteId, clienteNombre){
+  var mo=document.createElement("div");mo.className="mo open";mo.id="_moVcHistorial";
+  mo.innerHTML="<div class='md' style='max-width:560px;width:95%;max-height:85vh;overflow-y:auto'>"+
+    "<div class='mh'><div class='mtt'>Historial — "+clienteNombre+"</div>"+
+    "<button class='btn btn-g xb' onclick='document.getElementById(\"_moVcHistorial\").remove()'>✕</button></div>"+
+    "<div class='mb' id='_vcHistContenido'><div class='loading'><div class='spin'></div></div></div></div>";
+  document.body.appendChild(mo);
+  mo.addEventListener("click",function(e){if(e.target===mo)mo.remove();});
+  // Cargar pedidos_catalogo vinculados a este cliente
+  apiGet("pedidos_catalogo","select=id,nro_orden,total,estado,cobrado_parcial,es_cc,created_at&cliente_id=eq."+clienteId+"&order=created_at.desc&limit=20").then(function(peds){
+    var el=document.getElementById("_vcHistContenido");if(!el)return;
+    if(!Array.isArray(peds)||!peds.length){el.innerHTML="<div class='empty'>Sin pedidos</div>";return;}
+    var labels={pendiente:"Pendiente",confirmado:"Confirmado",en_preparacion:"En prep.",en_reparto:"En reparto",entregado:"Entregado",cancelado:"Cancelado",cobrado:"Cobrado"};
+    el.innerHTML=peds.map(function(p){
+      var fecha=new Date(p.created_at).toLocaleDateString("es-AR",{day:"2-digit",month:"2-digit",year:"2-digit"});
+      var cobrado=p.cobrado_parcial||0;
+      var pendiente=p.total-cobrado;
+      var esCC=p.es_cc;
+      return "<div style='border:1px solid var(--bd);border-radius:8px;padding:.6rem .8rem;margin-bottom:.5rem'>"+
+        "<div style='display:flex;justify-content:space-between;align-items:center;margin-bottom:.3rem'>"+
+        "<div><div style='font-size:.82rem;font-weight:600'>"+p.nro_orden+(esCC?" <span style='font-size:.65rem;color:var(--acc);background:rgba(196,150,90,.12);border:1px solid var(--acc);border-radius:4px;padding:.05rem .3rem'>💳 CC</span>":"")+"</div>"+
+        "<div style='font-size:.68rem;color:var(--tx3)'>"+fecha+" — "+(labels[p.estado]||p.estado)+"</div></div>"+
+        "<div style='text-align:right'><div style='font-size:.82rem;font-weight:600;color:var(--acc)'>"+fmt(p.total)+"</div>"+
+        (esCC&&pendiente>0?"<div style='font-size:.68rem;color:var(--red)'>Debe: "+fmt(pendiente)+"</div>":"")+"</div></div>"+
+        (esCC&&p.estado!=="cobrado"?"<button class='btn btn-a' style='width:100%;font-size:.72rem;padding:.3rem' onclick='vcCobrarPedidoCC("+p.id+",\""+p.nro_orden+"\","+p.total+","+(p.cobrado_parcial||0)+","+clienteId+")'>💰 Cobrar</button>":"")+"</div>";
+    }).join("");
+  });
+}
+
+// ── Ver cuenta corriente del cliente ──────────────────────────
+function vcVerCC(clienteId, clienteNombre){
+  var mo=document.createElement("div");mo.className="mo open";mo.id="_moVcCC";
+  mo.innerHTML="<div class='md' style='max-width:500px;width:95%;max-height:85vh;overflow-y:auto'>"+
+    "<div class='mh'><div class='mtt'>CC — "+clienteNombre+"</div>"+
+    "<button class='btn btn-g xb' onclick='document.getElementById(\"_moVcCC\").remove()'>✕</button></div>"+
+    "<div class='mb' id='_vcCCContenido'><div class='loading'><div class='spin'></div></div>"+
+    "<div style='margin-top:1rem'><div style='font-size:.78rem;font-weight:600;margin-bottom:.4rem'>Registrar pago</div>"+
+    "<div style='display:flex;gap:.4rem;flex-wrap:wrap'>"+
+    "<input type='number' id='_vcCCMonto' placeholder='Monto $' style='flex:1;min-width:100px;padding:.4rem .6rem;border:1px solid var(--bd);border-radius:6px;font-size:.82rem;background:var(--sur2);color:var(--tx)'>"+
+    "<select id='_vcCCForma' style='padding:.4rem .6rem;border:1px solid var(--bd);border-radius:6px;font-size:.82rem;background:var(--sur2);color:var(--tx)'>"+
+      "<option value='efectivo'>Efectivo</option><option value='transferencia'>Transferencia</option><option value='tarjeta'>Tarjeta</option>"+
+    "</select>"+
+    "<button class='btn btn-a' style='font-size:.78rem' onclick='_vcRegistrarPago("+clienteId+")'>Registrar</button>"+
+    "</div></div></div></div>";
+  document.body.appendChild(mo);
+  mo.addEventListener("click",function(e){if(e.target===mo)mo.remove();});
+  // Cargar movimientos
+  Promise.all([
+    apiGet("clientes","select=saldo_cc&id=eq."+clienteId),
+    apiGet("cuenta_corriente_movimientos","select=*&cliente_id=eq."+clienteId+"&order=created_at.desc&limit=20")
+  ]).then(function(res){
+    var el=document.getElementById("_vcCCContenido");if(!el)return;
+    var saldo=res[0]&&res[0][0]?res[0][0].saldo_cc||0:0;
+    var movs=Array.isArray(res[1])?res[1]:[];
+    var h="<div style='background:var(--sur2);border-radius:8px;padding:.8rem;text-align:center;margin-bottom:.8rem'>";
+    h+="<div style='font-size:.7rem;color:var(--tx3)'>Saldo pendiente</div>";
+    h+="<div style='font-size:1.5rem;font-weight:700;color:"+(saldo>0?"var(--green)":"var(--red)")+"'>$"+Math.round(Math.abs(saldo)).toLocaleString("es-AR")+"</div>";
+    h+="<div style='font-size:.68rem;color:var(--tx3)'>"+(saldo>0?"A favor del cliente":"Deuda del cliente")+"</div></div>";
+    if(movs.length){
+      h+="<div style='font-size:.72rem;font-weight:600;text-transform:uppercase;color:var(--acc);margin-bottom:.4rem'>Últimos movimientos</div>";
+      movs.forEach(function(m){
+        var esDebito=m.tipo==="cargo"||m.tipo==="concesion";
+        var fecha=new Date(m.created_at).toLocaleDateString("es-AR",{day:"2-digit",month:"2-digit",year:"2-digit"});
+        h+="<div style='display:flex;justify-content:space-between;padding:.4rem .6rem;background:var(--sur2);border-radius:6px;margin-bottom:.3rem;font-size:.78rem'>";
+        h+="<div><div>"+( m.descripcion||m.tipo)+"</div><div style='font-size:.65rem;color:var(--tx3)'>"+fecha+"</div></div>";
+        h+="<div style='font-weight:600;color:"+(esDebito?"var(--red)":"var(--green)")+"'>"+(esDebito?"-":"+")+fmt(Math.abs(m.monto))+"</div></div>";
+      });
+    } else {h+="<div class='empty'>Sin movimientos</div>";}
+    el.innerHTML=h;
+  });
+}
+
+function _vcRegistrarPago(clienteId){
+  var monto=parseFloat((document.getElementById("_vcCCMonto")||{value:0}).value)||0;
+  var forma=(document.getElementById("_vcCCForma")||{value:"efectivo"}).value;
+  if(!monto||monto<=0){toast("Ingresá el monto","twarn");return;}
+  apiPost("cuenta_corriente_movimientos",{
+    cliente_id:clienteId,tipo:"pago_total",monto:monto,
+    descripcion:"Pago en "+(forma==="efectivo"?"efectivo":forma)+" — "+new Date().toLocaleDateString("es-AR"),
+    vendedor_id:VENDEDOR_ID,fecha:new Date().toISOString().split("T")[0]
+  }).then(function(){
+    // Actualizar saldo
+    return apiGet("clientes","select=saldo_cc&id=eq."+clienteId);
+  }).then(function(rows){
+    if(!rows||!rows[0])return;
+    var nuevoSaldo=(rows[0].saldo_cc||0)+monto;
+    return apiPatch("clientes",{saldo_cc:nuevoSaldo},"id=eq."+clienteId);
+  }).then(function(){
+    toast("Pago de "+fmt(monto)+" registrado","tok");
+    document.getElementById("_vcCCMonto").value="";
+    vcVerCC(clienteId,"");
+  }).catch(function(){toast("Error al registrar pago","terr");});
+}
+
+
+// ═══════════════════════════════════════════════════════════════
+// SISTEMA CLIENTE ASIGNADO + CUENTA CORRIENTE
+// ═══════════════════════════════════════════════════════════════
+var _carritoCliente = null; // {id, nombre, apellido, telefono_principal, cuenta_corriente_habilitada, es_cc}
+
+function abrirBuscadorCliente(){
+  // Modo carrito: asigna a _carritoCliente (flujo existente para crear nuevo pedido)
+  window._busqClienteModo={tipo:"carrito"};
+  _abrirBuscadorClienteUI("Buscar cliente",true);
+}
+
+// Nueva: abre el mismo buscador pero asigna a un pedido existente
+function abrirBuscadorClienteParaPedido(pedId,clienteActualId){
+  window._busqClienteModo={tipo:"pedido",pedId:pedId,clienteActualId:clienteActualId||null};
+  _abrirBuscadorClienteUI("Asignar cliente al pedido",!!clienteActualId);
+}
+
+// UI compartida del modal buscador
+function _abrirBuscadorClienteUI(titulo,mostrarQuitar){
+  var mo=document.createElement("div");mo.className="mo open";mo.id="_moBuscarCliente";
+  mo.style.zIndex="99999"; // por si está sobre otro modal
+  mo.innerHTML="<div class='md' style='max-width:460px;width:95%'>"+
+    "<div class='mh'><div class='mtt'>"+titulo+"</div>"+
+    "<button class='btn btn-g xb' onclick='document.getElementById(\"_moBuscarCliente\").remove()'>✕</button></div>"+
+    "<div class='mb'>"+
+    "<div style='display:flex;gap:.4rem;margin-bottom:.8rem'>"+
+    "<input type='text' id='_busqCli' placeholder='Nombre, #ID o tel\u00e9fono...' style='flex:1;padding:.45rem .65rem;border:1px solid var(--bd);border-radius:6px;font-size:.84rem;background:var(--sur2);color:var(--tx)' oninput='_buscarClienteDrawer()' onkeydown='if(event.key===\"Enter\")_buscarClienteDrawer()'>"+
+    "<button class='btn btn-a' onclick='_buscarClienteDrawer()'>Buscar</button>"+
+    "</div>"+
+    "<div id='_busqCliResultados'><div style='font-size:.78rem;color:var(--tx3);text-align:center;padding:1rem'>Escribí para buscar...</div></div>"+
+    (mostrarQuitar?"<div style='margin-top:.8rem;border-top:1px solid var(--bd);padding-top:.7rem'>"+
+      "<button class='btn btn-g' style='width:100%;justify-content:center;font-size:.78rem' onclick='_quitarClienteDelModal()'>✕ Quitar cliente asignado</button>"+
+      "</div>":"")+
+    "</div></div>";
+  document.body.appendChild(mo);
+  mo.addEventListener("click",function(e){if(e.target===mo)mo.remove();});
+  setTimeout(function(){var el=document.getElementById("_busqCli");if(el)el.focus();},100);
+}
+
+// Quitar cliente: distingue según modo
+function _quitarClienteDelModal(){
+  var modo=window._busqClienteModo||{tipo:"carrito"};
+  if(modo.tipo==="pedido"&&modo.pedId){
+    if(!confirm("Desasignar cliente de este pedido?"))return;
+    apiPatch("pedidos_catalogo",{cliente_id:null,estado_envio:null,es_cc:false},"id=eq."+modo.pedId).then(function(){
+      _logEstadoPedidoV(modo.pedId,"cliente_desasignado","Cliente desasignado por "+VENDEDOR_NOMBRE);
+      toast("Cliente desasignado del pedido","tok");
+      var moB=document.getElementById("_moBuscarCliente");if(moB)moB.remove();
+      var moG=document.getElementById("_moGestionar");if(moG)moG.remove();
+      loadPedidosWeb();
+    }).catch(function(e){console.error("[belle] _quitarClienteDelModal error:",e);toast("Error","terr");});
+  } else {
+    // Modo carrito: comportamiento existente
+    _desasignarCliente();
+  }
+}
+
+
+
+function _buscarClienteDrawer(){
+  var q=(document.getElementById("_busqCli")||{value:""}).value.trim();
+  var el=document.getElementById("_busqCliResultados");
+  if(!el)return;
+  if(!q){el.innerHTML='<div style="font-size:.78rem;color:var(--tx3);text-align:center;padding:1rem">Escribí para buscar...</div>';return;}
+  el.innerHTML='<div class="loading"><div class="spin"></div></div>';
+  // Buscar por ID si empieza con # o es número puro
+  var isId=/^#?\d+$/.test(q);
+  var filtro=isId?"id=eq."+q.replace("#","")+"&limit=1":
+    "or=(nombre.ilike.*"+encodeURIComponent(q)+"*,apellido.ilike.*"+encodeURIComponent(q)+"*,telefono_principal.ilike.*"+encodeURIComponent(q)+"*)&limit=10";
+  apiGet("clientes","select=id,nombre,apellido,telefono_principal,cuenta_corriente_habilitada,estado&activo=is.false&limit=1||"+filtro).catch(function(){return[];}).then(function(){
+    // Usar query correcta
+    return fetch(SB_URL+"/rest/v1/clientes?"+filtro+"&order=nombre",{
+      headers:{"apikey":SB_KEY,"Authorization":"Bearer "+SB_KEY}
+    }).then(function(r){return r.json();});
+  }).then(function(data){
+    if(!Array.isArray(data)||!data.length){
+      el.innerHTML='<div style="font-size:.78rem;color:var(--tx3);text-align:center;padding:1rem">Sin resultados para "'+q+'"</div>';return;
+    }
+    el.innerHTML=data.map(function(c){
+      var nombre=(c.nombre||"")+" "+(c.apellido||"");
+      var tel=c.telefono_principal||"";
+      return "<div onclick='_seleccionarClienteDrawer("+c.id+")' style='display:flex;justify-content:space-between;align-items:center;padding:.6rem .75rem;border:1px solid var(--bd);border-radius:7px;margin-bottom:.4rem;cursor:pointer;background:var(--sur)'"+
+        " onmouseover='this.style.borderColor=\"var(--acc)\"' onmouseout='this.style.borderColor=\"var(--bd)\"'>"+
+        "<div><div style='font-size:.85rem;font-weight:600;color:var(--tx)'>"+nombre+"</div>"+
+        "<div style='font-size:.68rem;color:var(--tx3)'>#"+c.id+(tel?" · "+tel:"")+(c.cuenta_corriente_habilitada?" · 💳 CC":"")+"</div></div>"+
+        "<span style='font-size:.7rem;color:var(--acc)'>Seleccionar →</span>"+
+        "</div>";
+    }).join("");
+  }).catch(function(){el.innerHTML='<div style="font-size:.78rem;color:var(--red);text-align:center;padding:1rem">Error al buscar</div>';});
+}
+
+function _seleccionarClienteDrawer(id){
+  var modo=window._busqClienteModo||{tipo:"carrito"};
+  // ── Modo: asignar a pedido existente ──
+  if(modo.tipo==="pedido"&&modo.pedId){
+    apiGet("clientes","select=id,nombre,apellido,telefono_principal,cuenta_corriente_habilitada&id=eq."+id).then(function(rows){
+      var c=rows&&rows[0];if(!c)return;
+      var nom=(c.nombre||"")+" "+(c.apellido||"");
+      if(!confirm("Asignar el pedido a "+nom.trim()+" (#"+c.id+")?"))return;
+      // Patch del pedido
+      var patch={cliente_id:c.id,estado_envio:"en_preparacion"};
+      apiPatch("pedidos_catalogo",patch,"id=eq."+modo.pedId).then(function(){
+        var nota=modo.clienteActualId?"Cliente cambiado a "+nom.trim()+" (#"+c.id+") por "+VENDEDOR_NOMBRE
+          :"Cliente asignado: "+nom.trim()+" (#"+c.id+") por "+VENDEDOR_NOMBRE;
+        _logEstadoPedidoV(modo.pedId,modo.clienteActualId?"cliente_cambiado":"cliente_asignado",nota);
+        // Actualizar último pedido del cliente
+        apiPatch("clientes",{ultimo_pedido_at:new Date().toISOString()},"id=eq."+c.id).catch(function(e){console.error("[belle] error silencioso:",e);});
+        toast(nom.trim()+" asignado al pedido","tok");
+        var moB=document.getElementById("_moBuscarCliente");if(moB)moB.remove();
+        var moG=document.getElementById("_moGestionar");if(moG)moG.remove();
+        loadPedidosWeb();
+      }).catch(function(e){console.error("[belle] _seleccionarClienteDrawer pedido error:",e);toast("Error al asignar","terr");});
+    });
+    return;
+  }
+  // ── Modo carrito (existente) ──
+  apiGet("clientes","select=id,nombre,apellido,telefono_principal,cuenta_corriente_habilitada&id=eq."+id).then(function(rows){
+    var c=rows&&rows[0];if(!c)return;
+    _carritoCliente={
+      id:c.id,nombre:c.nombre,apellido:c.apellido,
+      telefono:c.telefono_principal,
+      cuenta_corriente_habilitada:c.cuenta_corriente_habilitada,
+      es_cc:false
+    };
+    // Actualizar UI del drawer
+    var info=document.getElementById("drawerClienteInfo");
+    if(info)info.innerHTML="<span style='font-weight:600;color:var(--tx)'>"+(c.nombre||"")+" "+(c.apellido||"")+"</span> <span style='color:var(--tx3);font-size:.7rem'>#"+c.id+"</span>";
+    // Mostrar toggle CC solo si tiene CC habilitada
+    var ccToggle=document.getElementById("drawerCCToggle");
+    if(ccToggle)ccToggle.style.display=c.cuenta_corriente_habilitada?"":"none";
+    var ccCheck=document.getElementById("drawerEsCC");
+    if(ccCheck)ccCheck.checked=false;
+    var ccAlert=document.getElementById("drawerCCAlert");
+    if(ccAlert)ccAlert.style.display="none";
+    // Cerrar modal buscador
+    var mo=document.getElementById("_moBuscarCliente");if(mo)mo.remove();
+    toast((c.nombre||"")+" asignado al pedido","tok");
+  });
+}
+
+function _desasignarCliente(){
+  _carritoCliente=null;
+  var info=document.getElementById("drawerClienteInfo");
+  if(info)info.innerHTML="Sin cliente asignado";
+  var ccToggle=document.getElementById("drawerCCToggle");
+  if(ccToggle)ccToggle.style.display="none";
+  var ccCheck=document.getElementById("drawerEsCC");
+  if(ccCheck)ccCheck.checked=false;
+  var mo=document.getElementById("_moBuscarCliente");if(mo)mo.remove();
+  toast("Cliente desasignado","tok");
+}
+
+function toggleCCDrawer(checked){
+  if(_carritoCliente)_carritoCliente.es_cc=checked;
+  var alert=document.getElementById("drawerCCAlert");
+  if(alert)alert.style.display=checked?"":"none";
+  // Si es CC, deshabilitar forma de cobro (no se cobra ahora)
+  var fc=document.getElementById("formaCobro");
+  if(fc){fc.disabled=checked;fc.style.opacity=checked?".4":"1";}
+}
+
+// ── Limpiar cliente al vaciar carrito ─────────────────────────
+function _limpiarCarritoCliente(){
+  _carritoCliente=null;
+  var info=document.getElementById("drawerClienteInfo");
+  if(info)info.innerHTML="Sin cliente asignado";
+  var ccToggle=document.getElementById("drawerCCToggle");
+  if(ccToggle)ccToggle.style.display="none";
+  var ccCheck=document.getElementById("drawerEsCC");
+  if(ccCheck){ccCheck.checked=false;}
+  var fc=document.getElementById("formaCobro");
+  if(fc){fc.disabled=false;fc.style.opacity="1";}
+}
+
+// ── Helper log de estados desde ventas ───────────────────────
+function _logEstadoPedidoV(pedidoId, estado, nota){
+  apiPost('pedidos_estados_log',{pedido_id:pedidoId,pedido_tabla:'pedidos_catalogo',estado:estado,nota:nota||null,usuario:VENDEDOR_NOMBRE||'vendedor'}).catch(function(e){console.error('[belle] error silencioso:',e);});
+}
+
+// ══════════════════════════════════════════════════════════════
+// ASIGNACIÓN DE PEDIDOS — Tomar / Transferir
+// ══════════════════════════════════════════════════════════════
+
+// Tomar un pedido sin asignar → vendedor_id = mío + log
+function tomarPedido(pedId){
+  if(!confirm("Tomar este pedido y asignártelo? Solo vos podrás gestionarlo después."))return;
+  apiGet("pedidos_catalogo","select=id,vendedor_id,nro_orden&id=eq."+pedId+"&limit=1").then(function(rows){
+    var p=rows&&rows[0];
+    if(!p){toast("Pedido no encontrado","terr");return;}
+    if(p.vendedor_id&&p.vendedor_id!==VENDEDOR_ID){
+      var _vn=_vendedorNombre(p.vendedor_id);
+      toast("El pedido ya fue tomado por "+_vn,"twarn");
+      loadPedidosWeb();
+      return;
+    }
+    if(p.vendedor_id===VENDEDOR_ID){toast("Ya estaba asignado a vos","twarn");return;}
+    return apiPatch("pedidos_catalogo",{vendedor_id:VENDEDOR_ID},"id=eq."+pedId).then(function(){
+      _logEstadoPedidoV(pedId,"asignado","Tomado por "+VENDEDOR_NOMBRE);
+      toast("Pedido "+(p.nro_orden||("#"+pedId))+" tomado","tok");
+      var mo=document.getElementById("_moGestionar");if(mo)mo.remove();
+      loadPedidosWeb();
+    });
+  }).catch(function(e){console.error("[belle] tomarPedido error:",e);toast("Error al tomar pedido","terr");});
+}
+
+// Transferir un pedido a otro vendedor
+function abrirTransferirPedido(pedId){
+  apiGet("vendedores","select=id,nombre&activo=is.true&id=neq."+VENDEDOR_ID).then(function(otros){
+    if(!Array.isArray(otros)||!otros.length){toast("No hay otros vendedores activos","twarn");return;}
+    var mo=document.createElement("div");mo.className="mo open";mo.id="_moTransferirPed";
+    mo.style.zIndex="99999"; // sobre _moGestionar (99998)
+    var h="<div class='md' style='max-width:440px;width:95%'>";
+    h+="<div class='mh'><div class='mtt'>Transferir pedido</div>";
+    h+="<button class='btn btn-g xb' onclick='document.getElementById(\"_moTransferirPed\").remove()'>✕</button></div>";
+    h+="<div class='mb' style='display:flex;flex-direction:column;gap:.7rem'>";
+    h+="<div style='font-size:.78rem;color:var(--tx2);line-height:1.4'>El pedido pasará al otro vendedor. Quedará una nota indicando que viene de <b>"+VENDEDOR_NOMBRE+"</b>.</div>";
+    h+="<div style='font-size:.7rem;color:var(--tx3);text-transform:uppercase;font-weight:600'>Transferir a</div>";
+    h+="<div style='display:flex;flex-direction:column;gap:.4rem'>";
+    otros.forEach(function(v){
+      h+="<button class='btn btn-a' style='justify-content:flex-start;padding:.55rem .8rem' onclick='_confirmarTransferirPedido("+pedId+","+v.id+",\""+v.nombre.replace(/\"/g,"")+"\")'>👤 "+v.nombre+"</button>";
+    });
+    h+="</div>";
+    h+="</div></div>";
+    mo.innerHTML=h;
+    document.body.appendChild(mo);
+    mo.addEventListener("click",function(e){if(e.target===mo)mo.remove();});
+  }).catch(function(e){console.error("[belle] abrirTransferirPedido error:",e);toast("Error al cargar vendedores","terr");});
+}
+
+function _confirmarTransferirPedido(pedId,nuevoVendedorId,nuevoNombre){
+  if(!confirm("Transferir el pedido a "+nuevoNombre+"?"))return;
+  apiGet("pedidos_catalogo","select=id,vendedor_id,nro_orden&id=eq."+pedId+"&limit=1").then(function(rows){
+    var p=rows&&rows[0];
+    if(!p){toast("Pedido no encontrado","terr");return;}
+    if(p.vendedor_id&&p.vendedor_id!==VENDEDOR_ID){
+      toast("Ya no es tu pedido — se actualizó","twarn");
+      loadPedidosWeb();
+      return;
+    }
+    return apiPatch("pedidos_catalogo",{vendedor_id:nuevoVendedorId},"id=eq."+pedId).then(function(){
+      _logEstadoPedidoV(pedId,"transferido","Transferido de "+VENDEDOR_NOMBRE+" a "+nuevoNombre);
+      toast("Pedido "+(p.nro_orden||("#"+pedId))+" transferido a "+nuevoNombre,"tok");
+      var moT=document.getElementById("_moTransferirPed");if(moT)moT.remove();
+      var moG=document.getElementById("_moGestionar");if(moG)moG.remove();
+      loadPedidosWeb();
+    });
+  }).catch(function(e){console.error("[belle] _confirmarTransferirPedido error:",e);toast("Error al transferir","terr");});
+}
+
+// Lee el último log de transferencia/asignación de un pedido (para mostrar leyenda)
+function _leerLogAsignacion(pedId){
+  return apiGet("pedidos_estados_log","select=estado,nota,usuario,created_at&pedido_id=eq."+pedId+"&estado=in.(asignado,transferido)&order=created_at.desc&limit=1").then(function(rows){
+    if(Array.isArray(rows)&&rows.length)return rows[0];
+    return null;
+  }).catch(function(){return null;});
+}
+
+// Modal con historial completo de cambios del pedido (timeline)
+function verHistorialPedido(pedId){
+  var mo=document.createElement("div");mo.className="mo open";mo.id="_moHistorialPed";
+  mo.style.zIndex="99999"; // sobre _moGestionar
+  var h="<div class='md' style='max-width:520px;width:95%;max-height:85vh;display:flex;flex-direction:column'>";
+  h+="<div class='mh'><div class='mtt'>📜 Historial del pedido</div>";
+  h+="<button class='btn btn-g xb' onclick='document.getElementById(\"_moHistorialPed\").remove()'>✕</button></div>";
+  h+="<div class='mb' id='_histPedBody' style='overflow-y:auto;flex:1'><div class='loading'><div class='spin'></div></div></div>";
+  h+="</div>";
+  mo.innerHTML=h;
+  document.body.appendChild(mo);
+  mo.addEventListener("click",function(e){if(e.target===mo)mo.remove();});
+
+  // Cargar log + datos del pedido
+  Promise.all([
+    apiGet("pedidos_catalogo","select=id,nro_orden,created_at,vendedor_id,cliente_id,estado,estado_envio&id=eq."+pedId+"&limit=1"),
+    apiGet("pedidos_estados_log","select=estado,nota,usuario,created_at&pedido_id=eq."+pedId+"&order=created_at.asc")
+  ]).then(function(res){
+    var ped=Array.isArray(res[0])&&res[0][0]?res[0][0]:null;
+    var logs=Array.isArray(res[1])?res[1]:[];
+    var el=document.getElementById("_histPedBody");
+    if(!el)return;
+
+    var nro=ped?(ped.nro_orden||"#"+pedId):"#"+pedId;
+    var fechaCre=ped?new Date(ped.created_at).toLocaleString("es-AR",{day:"2-digit",month:"2-digit",year:"2-digit",hour:"2-digit",minute:"2-digit",timeZone:"America/Argentina/Buenos_Aires"}):"";
+
+    var html="<div style='padding:.5rem .8rem;background:var(--sur2);border-radius:7px;margin-bottom:.7rem;font-size:.78rem'>";
+    html+="<div><b>Pedido</b> "+nro+"</div>";
+    html+="<div style='font-size:.7rem;color:var(--tx3)'>Creado: "+fechaCre+"</div>";
+    html+="</div>";
+
+    // Estado tipos a labels
+    var labels={
+      pendiente:"Pendiente",reservado:"Reservado",cobrado:"Cobrado",cancelado:"Cancelado",cobrado_parcial:"Cobro parcial",
+      en_preparacion:"En preparación",en_reparto:"En reparto",entregado:"Entregado",
+      asignado:"✋ Vendedor asignado",transferido:"↪ Vendedor transferido",
+      cliente_asignado:"+ Cliente asignado",cliente_cambiado:"↪ Cliente cambiado",cliente_desasignado:"✕ Cliente desasignado"
+    };
+    var iconColor={
+      asignado:"var(--green)",transferido:"var(--blue)",
+      cliente_asignado:"var(--cyan)",cliente_cambiado:"var(--cyan)",cliente_desasignado:"var(--red)",
+      cancelado:"var(--red)",cobrado:"var(--green)",entregado:"var(--green)",
+      reservado:"var(--cyan)",en_preparacion:"var(--yel)",en_reparto:"var(--blue)"
+    };
+
+    // Evento de creación primero
+    html+="<div style='border-left:2px solid var(--bd);padding-left:.85rem;margin-left:.5rem;position:relative'>";
+    html+="<div style='display:flex;gap:.6rem;padding:.55rem 0;font-size:.78rem;position:relative'>";
+    html+="<div style='position:absolute;left:-1.2rem;top:.85rem;width:12px;height:12px;border-radius:50%;background:var(--acc);border:2px solid var(--acc)'></div>";
+    html+="<div style='flex:1'>";
+    html+="<div style='font-weight:600;color:var(--tx)'>📦 Pedido creado</div>";
+    html+="<div style='color:var(--tx3);font-size:.7rem'>"+fechaCre+"</div>";
+    html+="</div></div>";
+
+    if(!logs.length){
+      html+="<div style='padding:.5rem 0;font-size:.75rem;color:var(--tx3);font-style:italic'>Sin cambios registrados todavía.</div>";
+    } else {
+      logs.forEach(function(log){
+        var fecha=new Date(log.created_at).toLocaleString("es-AR",{day:"2-digit",month:"2-digit",year:"2-digit",hour:"2-digit",minute:"2-digit",timeZone:"America/Argentina/Buenos_Aires"});
+        var etiqueta=labels[log.estado]||log.estado;
+        var color=iconColor[log.estado]||"var(--tx2)";
+        html+="<div style='display:flex;gap:.6rem;padding:.55rem 0;font-size:.78rem;position:relative;border-top:1px solid var(--bd)'>";
+        html+="<div style='position:absolute;left:-1.2rem;top:.85rem;width:12px;height:12px;border-radius:50%;background:var(--bg-card,var(--sur));border:2px solid "+color+"'></div>";
+        html+="<div style='flex:1'>";
+        html+="<div style='font-weight:500;color:"+color+"'>"+etiqueta+"</div>";
+        if(log.nota)html+="<div style='font-size:.72rem;color:var(--tx2);margin-top:.15rem'>"+log.nota+"</div>";
+        html+="<div style='color:var(--tx3);font-size:.65rem;margin-top:.15rem'>"+fecha+(log.usuario?" · "+log.usuario:"")+"</div>";
+        html+="</div></div>";
+      });
+    }
+    html+="</div>";
+    el.innerHTML=html;
+  }).catch(function(e){
+    console.error("[belle] verHistorialPedido error:",e);
+    var el=document.getElementById("_histPedBody");
+    if(el)el.innerHTML="<div class='empty'>Error al cargar el historial</div>";
+  });
+}
+
+// ── Post-venta: vincular pedido a cliente y CC si corresponde ──
+function _postVentaCliente(nroOrden, items, total){
+  if(!_carritoCliente)return;
+  var c=_carritoCliente;
+  var esCC=c.es_cc&&c.cuenta_corriente_habilitada;
+  apiGet("pedidos_catalogo","select=id&nro_orden=eq."+nroOrden+"&limit=1").then(function(rows){
+    var pedId=rows&&rows[0]&&rows[0].id;
+    if(!pedId)return;
+    return apiPatch("pedidos_catalogo",{
+      cliente_id:c.id,
+      es_cc:esCC,
+      estado_envio:"en_preparacion"
+    },"id=eq."+pedId).then(function(){
+      // Log de estado
+      _logEstadoPedidoV(pedId,'en_preparacion','Pedido asignado al cliente por '+VENDEDOR_NOMBRE);
+      if(esCC){
+        return apiPost("cuenta_corriente_movimientos",{
+          cliente_id:c.id,tipo:"cargo",monto:total,
+          descripcion:"Pedido "+nroOrden+" en consignación",
+          pedido_id:pedId,vendedor_id:VENDEDOR_ID,
+          fecha:new Date().toISOString().split("T")[0]
+        }).then(function(){
+          return apiGet("clientes","select=saldo_cc&id=eq."+c.id).then(function(rows){
+            var s=rows&&rows[0]?rows[0].saldo_cc||0:0;
+            return apiPatch("clientes",{saldo_cc:s-total,ultimo_pedido_at:new Date().toISOString()},"id=eq."+c.id);
+          });
+        });
+      } else {
+        return apiPatch("clientes",{ultimo_pedido_at:new Date().toISOString()},"id=eq."+c.id);
+      }
+    });
+  }).catch(function(e){console.error('[belle] error silencioso:',e);});
+  _limpiarCarritoCliente();
+}
+
+// ── COBRO DE PEDIDO CC (desde Mis Clientes) ───────────────────
+function vcCobrarPedidoCC(pedidoId, nroOrden, totalPed, cobradoHasta, clienteId){
+  var pendiente=totalPed-cobradoHasta;
+  var mo=document.createElement("div");mo.className="mo open";mo.id="_moCobrarCC";
+  var h="<div class='md' style='max-width:460px;width:95%'>";
+  h+="<div class='mh'><div class='mtt'>Cobrar — "+nroOrden+"</div>";
+  h+="<button class='btn btn-g xb' onclick='document.getElementById(\"_moCobrarCC\").remove()'>✕</button></div>";
+  h+="<div class='mb' style='display:flex;flex-direction:column;gap:.8rem'>";
+  h+="<div style='display:grid;grid-template-columns:1fr 1fr;gap:.5rem'>";
+  h+="<div style='background:var(--sur2);border-radius:8px;padding:.6rem;text-align:center'><div style='font-size:.6rem;color:var(--tx3);text-transform:uppercase'>Total pedido</div><div style='font-size:1rem;font-weight:700;color:var(--tx)'>"+fmt(totalPed)+"</div></div>";
+  h+="<div style='background:var(--sur2);border-radius:8px;padding:.6rem;text-align:center'><div style='font-size:.6rem;color:var(--tx3);text-transform:uppercase'>Pendiente</div><div style='font-size:1rem;font-weight:700;color:var(--red)'>"+fmt(pendiente)+"</div></div>";
+  h+="</div>";
+  // Opción 1: cobrar productos individuales
+  h+="<div style='border:1px solid var(--bd);border-radius:8px;padding:.7rem'>";
+  h+="<div style='font-size:.75rem;font-weight:600;color:var(--acc);margin-bottom:.5rem'>Opción 1 — Cobrar productos</div>";
+  h+="<div id='_ccProdLista' style='max-height:200px;overflow-y:auto;font-size:.78rem;color:var(--tx3);text-align:center'>Cargando...</div>";
+  h+="</div>";
+  // Opción 2: cobrar monto parcial
+  h+="<div style='border:1px solid var(--bd);border-radius:8px;padding:.7rem'>";
+  h+="<div style='font-size:.75rem;font-weight:600;color:var(--acc);margin-bottom:.4rem'>Opción 2 — Cobrar monto parcial</div>";
+  h+="<div style='font-size:.65rem;color:var(--yel);background:rgba(255,200,0,.08);border:1px solid rgba(255,200,0,.3);border-radius:5px;padding:.35rem .5rem;margin-bottom:.5rem'>⚠️ Si después editás el pedido, el monto puede variar.</div>";
+  h+="<div style='display:flex;gap:.4rem'>";
+  h+="<input type='number' id='_ccMontoParcial' placeholder='Monto a cobrar $' min='0' max='"+pendiente+"' style='flex:1;padding:.45rem .6rem;border:1px solid var(--bd);border-radius:6px;font-size:.82rem;background:var(--sur2);color:var(--tx)'>";
+  h+="<select id='_ccFormaPago' style='padding:.45rem .6rem;border:1px solid var(--bd);border-radius:6px;font-size:.82rem;background:var(--sur2);color:var(--tx)'>";
+  h+="<option value='efectivo'>Efectivo</option><option value='transferencia'>Transferencia</option><option value='tarjeta'>Tarjeta</option>";
+  h+="</select></div>";
+  h+="<button class='btn btn-a' style='width:100%;margin-top:.5rem' onclick='_confirmarCobrarCC("+pedidoId+","+clienteId+","+totalPed+","+cobradoHasta+")'>Registrar cobro parcial</button>";
+  h+="</div>";
+  h+="</div></div>";
+  mo.innerHTML=h;
+  document.body.appendChild(mo);
+  mo.addEventListener("click",function(e){if(e.target===mo)mo.remove();});
+  // Cargar productos del pedido para opción 1
+  apiGet("pedidos_catalogo","select=items,items_cobrados&id=eq."+pedidoId).then(function(rows){
+    var p=rows&&rows[0];if(!p)return;
+    var items=[];try{items=typeof p.items==="string"?JSON.parse(p.items):p.items||[];}catch(e){}
+    var cobrados=[];try{cobrados=typeof p.items_cobrados==="string"?JSON.parse(p.items_cobrados):p.items_cobrados||[];}catch(e){}
+    var el=document.getElementById("_ccProdLista");if(!el)return;
+    var noCobbrados=items.filter(function(_,i){return cobrados.indexOf(i)<0;});
+    if(!noCobbrados.length){el.innerHTML="<div style='color:var(--green);text-align:center;padding:.5rem'>✅ Todos los productos cobrados</div>";return;}
+    el.innerHTML=noCobbrados.map(function(it,i){
+      var nc=it.nombre?it.nombre.indexOf(" - ")>-1?it.nombre.split(" - ").slice(1).join(" - ").split("|")[0].trim():it.nombre:"";
+      return "<div style='display:flex;justify-content:space-between;align-items:center;padding:.35rem .4rem;border-bottom:1px solid var(--bd)'>"+
+        "<label style='display:flex;align-items:center;gap:.4rem;cursor:pointer;font-size:.78rem;flex:1'>"+
+        "<input type='checkbox' class='_ccProdCheck' data-idx='"+i+"' data-total='"+(it.total||0)+"' style='accent-color:var(--acc)'> "+nc+" x"+(it.qty||1)+
+        "</label><span style='font-size:.78rem;font-weight:600;color:var(--acc)'>"+fmt(it.total||0)+"</span>"+
+        "</div>";
+    }).join("") + "<div style='margin-top:.6rem'><button class='btn btn-a' style='width:100%;font-size:.78rem' onclick='_cobrarProductosCC("+pedidoId+","+clienteId+","+totalPed+")'>Cobrar seleccionados</button></div>";
+  });
+}
+
+function _cobrarProductosCC(pedidoId, clienteId, totalPed){
+  var checks=document.querySelectorAll("._ccProdCheck:checked");
+  if(!checks.length){toast("Seleccioná al menos un producto","twarn");return;}
+  var totalCobrar=0;
+  var idxs=[];
+  checks.forEach(function(c){totalCobrar+=parseFloat(c.dataset.total)||0;idxs.push(parseInt(c.dataset.idx));});
+  if(!confirm("Cobrar "+fmt(totalCobrar)+" por "+checks.length+" producto(s)?"))return;
+  // Obtener items_cobrados actuales
+  apiGet("pedidos_catalogo","select=items_cobrados,cobrado_parcial,total,items&id=eq."+pedidoId).then(function(rows){
+    var p=rows&&rows[0];if(!p)return;
+    var cobrados=[];try{cobrados=typeof p.items_cobrados==="string"?JSON.parse(p.items_cobrados):p.items_cobrados||[];}catch(e){}
+    var nuevoCobrados=cobrados.concat(idxs);
+    var items=[];try{items=typeof p.items==="string"?JSON.parse(p.items):p.items||[];}catch(e){}
+    var nuevoCobrado=(p.cobrado_parcial||0)+totalCobrar;
+    var esSaldado=nuevoCobrado>=totalPed-1;
+    var promises=[
+      apiPatch("pedidos_catalogo",Object.assign({items_cobrados:JSON.stringify(nuevoCobrados),cobrado_parcial:nuevoCobrado},esSaldado?{estado:"cobrado",confirmado_cobro:true}:{}),"id=eq."+pedidoId)
+    ];
+    // Registrar pago en CC
+    promises.push(apiPost("cuenta_corriente_movimientos",{
+      cliente_id:clienteId,tipo:"pago_parcial",monto:totalCobrar,
+      descripcion:"Cobro "+idxs.length+" producto(s) — pedido #"+pedidoId,
+      pedido_id:pedidoId,vendedor_id:VENDEDOR_ID,
+      fecha:new Date().toISOString().split("T")[0]
+    }));
+    // Actualizar saldo CC cliente
+    promises.push(apiGet("clientes","select=saldo_cc&id=eq."+clienteId).then(function(rows){
+      var s=rows&&rows[0]?rows[0].saldo_cc||0:0;
+      return apiPatch("clientes",{saldo_cc:s+totalCobrar},"id=eq."+clienteId);
+    }));
+    return Promise.all(promises);
+  }).then(function(){
+    toast("Cobro registrado","tok");
+    var mo=document.getElementById("_moCobrarCC");if(mo)mo.remove();
+    loadClientesVendedor();
+  }).catch(function(e){toast("Error al registrar cobro","terr");console.error(e);});
+}
+
+function _confirmarCobrarCC(pedidoId, clienteId, totalPed, cobradoHasta){
+  var monto=parseFloat((document.getElementById("_ccMontoParcial")||{value:0}).value)||0;
+  var forma=(document.getElementById("_ccFormaPago")||{value:"efectivo"}).value;
+  var pendiente=totalPed-cobradoHasta;
+  if(!monto||monto<=0){toast("Ingresá el monto","twarn");return;}
+  if(monto>pendiente+1){toast("El monto supera lo pendiente ("+fmt(pendiente)+")","twarn");return;}
+  if(!confirm("Registrar cobro de "+fmt(monto)+" ("+forma+")?\n\nRecordá: si editás el pedido el monto puede variar."))return;
+  var nuevoCobrado=cobradoHasta+monto;
+  var esSaldado=nuevoCobrado>=totalPed-1;
+  Promise.all([
+    apiPatch("pedidos_catalogo",Object.assign({cobrado_parcial:nuevoCobrado},esSaldado?{estado:"cobrado",confirmado_cobro:true}:{}),"id=eq."+pedidoId),
+    apiPost("cuenta_corriente_movimientos",{
+      cliente_id:clienteId,tipo:esSaldado?"pago_total":"pago_parcial",monto:monto,
+      descripcion:"Cobro "+forma+" — pedido #"+pedidoId+(esSaldado?" (saldado)":""),
+      pedido_id:pedidoId,vendedor_id:VENDEDOR_ID,
+      fecha:new Date().toISOString().split("T")[0]
+    }),
+    apiGet("clientes","select=saldo_cc&id=eq."+clienteId).then(function(rows){
+      var s=rows&&rows[0]?rows[0].saldo_cc||0:0;
+      return apiPatch("clientes",{saldo_cc:s+monto},"id=eq."+clienteId);
+    })
+  ]).then(function(){
+    toast("Cobro de "+fmt(monto)+" registrado"+(esSaldado?" — ¡Pedido saldado!":""),"tok");
+    var mo=document.getElementById("_moCobrarCC");if(mo)mo.remove();
+    loadClientesVendedor();
+  }).catch(function(e){toast("Error al registrar","terr");console.error(e);});
+}
+
 function confirmarVenta(){
   var items=Object.values(cart).filter(function(i){return !i.isDecan;});
   // Si el carrito tiene solo decans, incluirlos como items principales
@@ -1678,6 +2808,10 @@ function executeVenta(items,reservaDecs){
   });
 
   // Cerrar drawer INMEDIATAMENTE (optimistic UI)
+  var _nroOrdenVenta=nroOrden;
+  var _itemsVenta=allItems;
+  var _totalVenta=allItems.reduce(function(s,i){return s+(i.price*i.qty)-(i.descuento||0);},0);
+  var _clienteVenta=_carritoCliente;
   cart={};cstate={};decanState={};reservaDecisions={};
   updateCartBar();closeDrawer();
   toast("Guardando venta...","tok");
@@ -1687,6 +2821,8 @@ function executeVenta(items,reservaDecs){
     var _btn=document.getElementById("drawerConfirmBtn");
     if(_btn){_btn.disabled=false;_btn.textContent="Registrar venta";}
     toast("✅ Venta registrada","tok");
+    // Vincular cliente y CC si corresponde
+    if(_clienteVenta)_postVentaCliente(_nroOrdenVenta,_itemsVenta,_totalVenta);
     if(window._pendingDepositoIds&&window._pendingDepositoIds.length){
       Promise.all(window._pendingDepositoIds.map(function(did){
         return apiPatch("ventas",{estado:"reemplazada"},"id=eq."+did);
@@ -1718,6 +2854,8 @@ function loadPedidosWeb(){
   var filtVend="&or=(vendedor_id.eq."+VENDEDOR_ID+",vendedor_id.is.null)";
   // Fecha del inicio del periodo actual — cobrados anteriores no se muestran
   var periodoQ=periodoActual?'&periodo=eq.'+encodeURIComponent(periodoActual):'';
+  // Cache de vendedores en paralelo (necesario para mostrar "Asignado a X")
+  if(!Object.keys(_vendedoresCache).length)_cargarVendedoresCache();
   Promise.all([
     apiGet("pedidos_catalogo","select=*&confirmado_cobro=is.null&estado=neq.cancelado&order=created_at.desc&limit=200"+filtVend),
     apiGet("pedidos_catalogo","select=*&confirmado_cobro=eq.false&estado=neq.cancelado&order=created_at.desc&limit=200"+filtVend),
@@ -1922,6 +3060,59 @@ function _gestionarPedido(tipo,id){
       '</select>'+
     '</div>';
 
+    // ── ASIGNACIÓN: panel con botones Tomar / Transferir (solo pedidos web) ──
+    if(tipo==='web'){
+      var asigBox='<div style="background:var(--sur2);border:1px solid var(--bd);border-radius:8px;padding:.55rem .8rem;margin-bottom:.7rem">';
+      if(!rec.vendedor_id){
+        asigBox+='<div style="display:flex;justify-content:space-between;align-items:center;gap:.5rem;flex-wrap:wrap">';
+        asigBox+='<div><div style="font-size:.62rem;color:var(--tx3);text-transform:uppercase;font-weight:600">Vendedor</div>';
+        asigBox+='<div style="font-size:.78rem;color:var(--yel);font-weight:600">⚠ Sin asignar</div></div>';
+        asigBox+='<button class="btn btn-a" style="padding:.4rem .8rem;font-size:.74rem" onclick="tomarPedido('+id+')">✋ Tomar pedido</button>';
+        asigBox+='</div>';
+      } else if(rec.vendedor_id===VENDEDOR_ID){
+        asigBox+='<div style="display:flex;justify-content:space-between;align-items:center;gap:.5rem;flex-wrap:wrap">';
+        asigBox+='<div><div style="font-size:.62rem;color:var(--tx3);text-transform:uppercase;font-weight:600">Vendedor</div>';
+        asigBox+='<div style="font-size:.78rem;color:var(--green);font-weight:600">✓ Tomado por mí</div></div>';
+        asigBox+='<button class="btn btn-g" style="padding:.4rem .8rem;font-size:.74rem" onclick="abrirTransferirPedido('+id+')">↪ Transferir</button>';
+        asigBox+='</div>';
+      } else {
+        var _vn=_vendedorNombre(rec.vendedor_id);
+        asigBox+='<div style="display:flex;justify-content:space-between;align-items:center;gap:.5rem;flex-wrap:wrap">';
+        asigBox+='<div><div style="font-size:.62rem;color:var(--tx3);text-transform:uppercase;font-weight:600">Vendedor</div>';
+        asigBox+='<div style="font-size:.78rem;color:var(--blue);font-weight:600">👤 '+_vn+'</div></div>';
+        asigBox+='<button class="btn btn-g" style="padding:.4rem .8rem;font-size:.74rem" onclick="abrirTransferirPedido('+id+')">↪ Cambiar</button>';
+        asigBox+='</div>';
+      }
+      // Mostrar leyenda de transferencia si hay log
+      asigBox+='<div id="_mgAsigLog" style="font-size:.66rem;color:var(--tx3);margin-top:.3rem;font-style:italic"></div>';
+      asigBox+='</div>';
+      html+=asigBox;
+
+      // ── CLIENTE: panel para asignar/cambiar/desasignar cliente del pedido ──
+      var cliBox='<div style="background:var(--sur2);border:1px solid var(--bd);border-radius:8px;padding:.55rem .8rem;margin-bottom:.7rem" id="_mgCliBox">';
+      cliBox+='<div style="display:flex;justify-content:space-between;align-items:center;gap:.5rem;flex-wrap:wrap">';
+      cliBox+='<div style="min-width:0;flex:1"><div style="font-size:.62rem;color:var(--tx3);text-transform:uppercase;font-weight:600">Cliente</div>';
+      if(rec.cliente_id){
+        cliBox+='<div id="_mgCliNombre" style="font-size:.78rem;color:var(--cyan);font-weight:600">Cargando...</div>';
+      } else {
+        cliBox+='<div style="font-size:.78rem;color:var(--tx3);font-weight:500">— Sin asignar —</div>';
+      }
+      cliBox+='</div>';
+      if(rec.cliente_id){
+        cliBox+='<button class="btn btn-g" style="padding:.4rem .8rem;font-size:.74rem" onclick="abrirBuscadorClienteParaPedido('+id+','+rec.cliente_id+')">↪ Cambiar</button>';
+      } else {
+        cliBox+='<button class="btn btn-a" style="padding:.4rem .8rem;font-size:.74rem" onclick="abrirBuscadorClienteParaPedido('+id+',null)">+ Asignar cliente</button>';
+      }
+      cliBox+='</div>';
+      cliBox+='</div>';
+      html+=cliBox;
+
+      // Botón ver historial completo
+      html+='<div style="margin-bottom:.7rem">';
+      html+='<button class="btn btn-g" style="width:100%;justify-content:center;font-size:.72rem;padding:.4rem" onclick="verHistorialPedido('+id+')">📜 Ver historial de cambios</button>';
+      html+='</div>';
+    }
+
     // Action buttons depending on tipo
     html+='<div style="display:flex;gap:.5rem;flex-wrap:wrap;margin-bottom:.5rem">';
 
@@ -1955,6 +3146,27 @@ function _gestionarPedido(tipo,id){
     document.getElementById('_mgBody').innerHTML=html;
     window._mgItems=items;
     window._mgRec=rec;
+
+    // Cargar leyenda de transferencia/asignación si existe
+    if(tipo==='web'){
+      _leerLogAsignacion(id).then(function(log){
+        var el=document.getElementById("_mgAsigLog");
+        if(el&&log&&log.nota){
+          el.textContent="↪ "+log.nota;
+        }
+      });
+      // Cargar nombre del cliente asignado al pedido (si hay)
+      if(rec.cliente_id){
+        apiGet("clientes","select=id,nombre,apellido,cuenta_corriente_habilitada&id=eq."+rec.cliente_id+"&limit=1").then(function(rows){
+          var c=rows&&rows[0];
+          var el=document.getElementById("_mgCliNombre");
+          if(!el||!c)return;
+          var nom=((c.nombre||"")+" "+(c.apellido||"")).trim()||"Cliente #"+c.id;
+          el.innerHTML=nom+" <span style='color:var(--tx3);font-size:.68rem;font-weight:400'>(#"+c.id+")</span>"+
+            (c.cuenta_corriente_habilitada?" <span style='font-size:.6rem;color:var(--acc);background:rgba(196,150,90,.12);padding:.05rem .3rem;border-radius:3px;margin-left:.2rem'>💳 CC</span>":"");
+        }).catch(function(e){console.error("[belle] error silencioso:",e);});
+      }
+    }
 
     // Wire up checkbox change for resumen
     setTimeout(function(){
@@ -2034,6 +3246,12 @@ function _mgConfirmarCobro(){
   // FIX: separar patch de estado del patch de stock
   // Si esSaldado, el estado cobrado se aplica DESPUÉS de que todos los patches de stock terminen
   var _patchBase={cobrado_parcial:nuevoCobrado,items_cobrados:JSON.stringify(merged)};
+  // Bug 5 fix: si pedido sin asignar, auto-asignar al vendedor que cobra (incluso en cobro parcial)
+  var _autoAsignar=!rec.vendedor_id;
+  if(_autoAsignar){
+    _patchBase.vendedor_id=VENDEDOR_ID;
+    _logEstadoPedidoV(id,"asignado","Auto-asignado al cobrar por "+VENDEDOR_NOMBRE);
+  }
   var _patchSaldo=esSaldado?{estado:'cobrado',confirmado_cobro:true,confirmado_at:new Date().toISOString(),periodo:periodoActual}:{};
   var proms=[];
   // El patch base (cobrado_parcial + items_cobrados) siempre va junto con los stocks
@@ -2091,9 +3309,27 @@ function _mgConfirmarCobro(){
   });
 
   Promise.all(proms).then(function(){
-    // Si está saldado, marcar como cobrado DESPUÉS de que todos los patches de stock terminaron
     if(esSaldado){
-      return apiPatch('pedidos_catalogo',_patchSaldo,'id=eq.'+id);
+      return apiPatch('pedidos_catalogo',_patchSaldo,'id=eq.'+id).then(function(){
+        // Log estado entregado si el pedido tiene cliente asignado
+        if(rec.cliente_id){
+          _logEstadoPedidoV(id,'entregado','Pedido cobrado y entregado por '+VENDEDOR_NOMBRE);
+          // Si era CC registrar pago en movimientos CC
+          if(rec.es_cc){
+            apiPost('cuenta_corriente_movimientos',{
+              cliente_id:rec.cliente_id,tipo:'pago_total',monto:montoCobrar,
+              descripcion:'Cobro final — '+nroOrden,
+              pedido_id:id,vendedor_id:VENDEDOR_ID,
+              fecha:new Date().toISOString().split('T')[0]
+            }).then(function(){
+              return apiGet('clientes','select=saldo_cc&id=eq.'+rec.cliente_id).then(function(rows){
+                var s=rows&&rows[0]?rows[0].saldo_cc||0:0;
+                return apiPatch('clientes',{saldo_cc:s+montoCobrar},'id=eq.'+rec.cliente_id);
+              });
+            }).catch(function(e){console.error('[belle] error silencioso:',e);});
+          }
+        }
+      });
     }
   }).then(function(){
     toast('Cobro de '+fmt(montoCobrar)+' registrado'+(esSaldado?' — ¡Pedido saldado!':''),'tok');
@@ -2168,9 +3404,22 @@ function renderPedCard(ped,cobrado){
   var fecha=new Date(ped.created_at).toLocaleString("es-AR",{day:"2-digit",month:"2-digit",year:"2-digit",hour:"2-digit",minute:"2-digit",timeZone:"America/Argentina/Buenos_Aires"});
   var items=[];try{items=typeof ped.items==="string"?JSON.parse(ped.items):ped.items;}catch(ex){}
   var cancelado=ped.estado==="cancelado";
+  // Badge de asignación: sin asignar / mío / de otro vendedor
+  var _asigBadge="";
+  if(!cancelado&&!cobrado){
+    if(!ped.vendedor_id){
+      _asigBadge="<span class='badge bg-yel' style='font-size:.55rem;margin-left:.4rem'>⚠ Sin asignar</span>";
+    } else if(ped.vendedor_id===VENDEDOR_ID){
+      _asigBadge="<span class='badge bg-green' style='font-size:.55rem;margin-left:.4rem'>✓ Tomado por mí</span>";
+    } else {
+      var _vn=_vendedorNombre(ped.vendedor_id);
+      _asigBadge="<span class='badge' style='font-size:.55rem;margin-left:.4rem;background:rgba(74,159,216,.15);color:var(--blue);border:1px solid rgba(74,159,216,.4)'>👤 "+_vn+"</span>";
+    }
+  }
   var html="<div class='ped-card"+(cobrado||cancelado?"":" nuevo")+"'>";
   html+="<div class='ped-header'>";
   html+="<div><div style='font-size:.78rem;font-weight:500;color:var(--tx)'>Pedido web <span style='color:var(--acc);font-size:.7rem'>"+(ped.nro_orden||("#"+ped.id))+"</span>"+
+    _asigBadge+
     (ped.estado==="entregado"?"<span class='badge bg-cyan' style='margin-left:.4rem;font-size:.55rem'>Entregado por Marcela</span>":"")+
     "</div>";
   html+="<div class='ped-fecha'>"+fecha+"</div></div>";
@@ -2246,7 +3495,13 @@ function confirmarCobro(pedId,btn){
       stockProms.push(apiPost("movimientos_stock",{producto_id:pid,producto_nombre:it.nombre,tipo:"venta",cantidad:it.qty||1,motivo:"Venta pedido web "+nroOrden+" (desde reserva)",usuario:VENDEDOR_NOMBRE||"vendedor",periodo:periodoActual}).catch(function(e){console.error("[belle] error silencioso:",e);}));
     });
     Promise.all(stockProms).then(function(){
-      return apiPatch("pedidos_catalogo",{confirmado_cobro:true,confirmado_at:new Date().toISOString(),estado:"cobrado",periodo:periodoActual},"id=eq."+pedId);
+      // Bug 4 fix: si el pedido NO tenía vendedor asignado, auto-asignarlo al que cobra
+      var patchFinal={confirmado_cobro:true,confirmado_at:new Date().toISOString(),estado:"cobrado",periodo:periodoActual};
+      if(!ped.vendedor_id){
+        patchFinal.vendedor_id=VENDEDOR_ID;
+        _logEstadoPedidoV(pedId,"asignado","Auto-asignado al cobrar por "+VENDEDOR_NOMBRE);
+      }
+      return apiPatch("pedidos_catalogo",patchFinal,"id=eq."+pedId);
     }).then(function(){
       toast("Cobro confirmado!","tok");loadPedidosWeb();loadDineroData();renderCat();
     }).catch(function(){if(btn)btn.disabled=false;toast("Error al confirmar","terr");});
@@ -2303,7 +3558,10 @@ function cancelarPedidoWeb(pedId,btn){
       ));
 
     });
-    Promise.all(promises).then(function(){toast("Pedido cancelado - stock devuelto","twarn");loadPedidosWeb();renderCat();}).catch(function(){if(btn)btn.disabled=false;});
+    Promise.all(promises).then(function(){
+      if(ped.cliente_id)_logEstadoPedidoV(pedId,'cancelado','Pedido cancelado');
+      toast("Pedido cancelado - stock devuelto","twarn");loadPedidosWeb();renderCat();
+    }).catch(function(){if(btn)btn.disabled=false;});
   });  });
 }
 function cancelarEdicionPedido(){
@@ -4077,13 +5335,23 @@ function confirmarReservarPed(){
     window._editandoPedidoOrden=null;
   } else {
     // NUEVO pedido
-    savePromise=apiPost("pedidos_catalogo",{
+    // Bug 9 fix: si hay cliente registrado asignado al carrito, vincularlo
+    var pedidoData={
       items:JSON.stringify(itemsData),total:total,
       estado:"reservado",confirmado_cobro:false,
       nro_orden:nroOrden,
       vendedor_id:VENDEDOR_ID,
       notas:"Cliente: "+cliente+(tel?" | Tel: "+tel:"")+(nota?" | "+nota:"")+(entregaStr?" | Entrega: "+entregaStr:"")
-    });
+    };
+    if(_carritoCliente&&_carritoCliente.id){
+      pedidoData.cliente_id=_carritoCliente.id;
+      pedidoData.estado_envio="en_preparacion";
+      // Si tiene CC marcado, registrar
+      if(_carritoCliente.es_cc&&_carritoCliente.cuenta_corriente_habilitada){
+        pedidoData.es_cc=true;
+      }
+    }
+    savePromise=apiPost("pedidos_catalogo",pedidoData);
   }
   savePromise.then(function(){
     // Reservar en SECUENCIA para evitar que requests simultáneos se pisen
@@ -4148,6 +5416,35 @@ function confirmarReservarPed(){
     updateCartBar();closeDrawer();renderCat();
     window._reservandoPed=false;
     toast("Pedido reservado para "+cliente+" - "+nroOrden,"tok");
+
+    // Bug 9 fix: si hay cliente registrado, log + CC + actualizar último_pedido
+    if(_carritoCliente&&_carritoCliente.id&&!_editId){
+      // Buscar el id del pedido recién creado para hacer log y movimientos CC
+      apiGet("pedidos_catalogo","select=id&nro_orden=eq."+nroOrden+"&limit=1").then(function(rows){
+        var nuevoPedId=rows&&rows[0]&&rows[0].id;
+        if(!nuevoPedId)return;
+        var c=_carritoCliente;
+        _logEstadoPedidoV(nuevoPedId,"en_preparacion","Pedido reservado para cliente por "+VENDEDOR_NOMBRE);
+        // Actualizar último_pedido del cliente
+        apiPatch("clientes",{ultimo_pedido_at:new Date().toISOString()},"id=eq."+c.id).catch(function(e){console.error("[belle] error silencioso:",e);});
+        // Si es CC, registrar movimiento
+        if(c.es_cc&&c.cuenta_corriente_habilitada){
+          apiPost("cuenta_corriente_movimientos",{
+            cliente_id:c.id,tipo:"cargo",monto:total,
+            descripcion:"Pedido "+nroOrden+" en consignación (reservado)",
+            pedido_id:nuevoPedId,vendedor_id:VENDEDOR_ID,
+            fecha:new Date().toISOString().split("T")[0]
+          }).then(function(){
+            return apiGet("clientes","select=saldo_cc&id=eq."+c.id).then(function(rows2){
+              var s=rows2&&rows2[0]?rows2[0].saldo_cc||0:0;
+              return apiPatch("clientes",{saldo_cc:s-total},"id=eq."+c.id);
+            });
+          }).catch(function(e){console.error("[belle] error silencioso:",e);});
+        }
+      }).catch(function(e){console.error("[belle] error silencioso:",e);});
+      _limpiarCarritoCliente();
+    }
+
     loadPedidosWeb();
   }).catch(function(){window._reservandoPed=false;toast("Error al reservar","terr");});
 }
@@ -5529,6 +6826,7 @@ function navTo(pg,el){
   var sb=document.querySelector('.sidebar');var ov=document.getElementById('mobOverlay');
   if(sb&&sb.classList.contains('mob-open')){sb.classList.remove('mob-open');}
   if(ov)ov.style.display='none';
+  if(pg==="clientes-vend")loadClientesVendedor();
   if(pg==="catalogo"){if(!document.getElementById("prodList"))buildCatalogo();renderCat();loadCombosVendedor();loadQuickPanels();}
   if(pg==="pedidos-web")loadPedidosWeb();
   if(pg==="transferidas")loadTransferidas();
@@ -7643,6 +8941,7 @@ function _loadObjetivosVendedor(){
     </div>
   </header>
   <div class="tabs">
+    <div class="tab" onclick="navTo('clientes-vend',this)">Mis Clientes</div>
     <div class="tab act" onclick="navTo('catalogo',this)">Catalogo</div>
     <div class="tab" onclick="navTo('pedidos-web',this)">Pedidos<span class="dot" id="dotPedidos"></span></div>
     <div class="tab" onclick="navTo('transferidas',this)">Transferidas<span class="dot" id="dotTransf"></span></div>
@@ -7659,6 +8958,7 @@ function _loadObjetivosVendedor(){
     <div class="tab" onclick="navTo('cotizaciones',this)">Cotizaciones<span class="dot" id="dotCotiz"></span></div>
   </div>
   <div class="content">
+    <div class="page" id="pg-clientes-vend"></div>
     <div class="page act" id="pg-catalogo"></div>
     <div class="page" id="pg-pedidos-web"></div>
     <div class="page" id="pg-transferidas"></div>
@@ -7716,6 +9016,22 @@ function _loadObjetivosVendedor(){
         <option value="usd_billete">USD Billete</option>
         <option value="otro">Otro</option>
       </select>
+    </div>
+    <!-- ASIGNAR CLIENTE -->
+    <div style="margin-bottom:.5rem;border:1px solid var(--bd);border-radius:var(--rs);padding:.5rem .65rem;background:var(--sur2)">
+      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:.3rem">
+        <label style="font-size:.6rem;color:var(--tx3);text-transform:uppercase;letter-spacing:.05em">Asignar cliente (opcional)</label>
+        <button onclick="abrirBuscadorCliente()" style="background:none;border:none;color:var(--acc);font-size:.72rem;cursor:pointer;padding:0">🔍 Buscar</button>
+      </div>
+      <div id="drawerClienteInfo" style="font-size:.78rem;color:var(--tx2)">Sin cliente asignado</div>
+      <!-- Toggle CC — solo visible si el cliente tiene CC habilitada -->
+      <div id="drawerCCToggle" style="display:none;margin-top:.4rem;padding-top:.4rem;border-top:1px solid var(--bd)">
+        <label style="display:flex;align-items:center;gap:.4rem;cursor:pointer;font-size:.75rem;color:var(--tx)">
+          <input type="checkbox" id="drawerEsCC" onchange="toggleCCDrawer(this.checked)" style="accent-color:var(--acc)">
+          <span>💳 Registrar como Cuenta Corriente</span>
+        </label>
+        <div id="drawerCCAlert" style="display:none;font-size:.65rem;color:var(--yel);margin-top:.2rem">⚠️ El pedido no se cobrará ahora. Quedará pendiente en la CC del cliente.</div>
+      </div>
     </div>
     <div style="display:flex;gap:.4rem;flex-wrap:wrap;margin-bottom:.4rem">
       <button class="btn btn-a" id="drawerConfirmBtn" style="flex:1;min-width:120px;padding:.6rem;font-size:.82rem;justify-content:center" onclick="confirmarVenta()">Registrar venta</button>

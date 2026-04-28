@@ -1219,9 +1219,12 @@ td{padding:.35rem .5rem;font-size:.78rem;color:var(--tx2);vertical-align:middle;
 
     <!-- CUENTAS -->
     <div class="page" id="page-clientes">
-      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:1rem">
-        <div style="font-size:.8rem;color:var(--tx2)">Clientes que realizaron pedidos web. Historial de compras por cliente.</div>
-        <div class="sbox"><span class="sbi">&#128269;</span><input type="text" id="clienteSrch" placeholder="Buscar cliente..." oninput="filterClientes()" style="width:200px"></div>
+      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:1rem;gap:.5rem;flex-wrap:wrap">
+        <div style="font-size:.8rem;color:var(--tx2)">Clientes registrados. Historial de compras y configuración por cliente.</div>
+        <div style="display:flex;gap:.5rem;align-items:center">
+          <button class="btn btn-a" style="padding:.4rem .8rem;font-size:.78rem" onclick="abrirCrearClienteAdmin()">➕ Nuevo cliente</button>
+          <div class="sbox"><span class="sbi">&#128269;</span><input type="text" id="clienteSrch" placeholder="Buscar cliente..." oninput="filterClientes()" style="width:200px"></div>
+        </div>
       </div>
       <div id="clientesGrid" style="display:grid;grid-template-columns:repeat(auto-fill,minmax(260px,1fr));gap:.8rem"></div>
     </div>
@@ -8053,7 +8056,7 @@ function verClienteFicha(id){
   if(!_clienteFicha)return;
   var c=_clienteFicha;
   Promise.all([
-    apiGet("pedidos_clientes","select=id,nro_orden,total,estado,created_at&cliente_id=eq."+id+"&order=created_at.desc&limit=10"),
+    apiGet("pedidos_catalogo","select=id,nro_orden,total,estado,created_at&cliente_id=eq."+id+"&order=created_at.desc&limit=10"),
     apiGet("clientes_direcciones","select=*&cliente_id=eq."+id),
     apiGet("vendedores","select=id,nombre&activo=is.true")
   ]).then(function(res){
@@ -8099,7 +8102,10 @@ function verClienteFicha(id){
     h+="<input type='checkbox' id='_cfCC' "+(c.cuenta_corriente_habilitada?"checked":"")+"> Cuenta corriente habilitada</label>";
     h+="<div><label style='font-size:.7rem;color:var(--tx3);display:block;margin-bottom:.2rem'>Notas internas</label>";
     h+="<textarea id='_cfNotas' rows='2' style='width:100%;padding:.4rem .6rem;border:1px solid var(--bd);border-radius:6px;font-size:.78rem;background:var(--sur2);color:var(--tx);resize:vertical'>"+(c.notas_internas||"")+"</textarea></div>";
-    h+="<button class='btn btn-a' style='width:100%' onclick='_guardarCambiosCliente("+c.id+")'>Guardar cambios</button>";
+    h+="<div style='display:flex;gap:.5rem'>";
+    h+="<button class='btn btn-a' style='flex:1' onclick='_guardarCambiosCliente("+c.id+")'>💾 Guardar cambios</button>";
+    h+="<button class='btn btn-red' style='padding:.5rem .9rem' onclick='_eliminarClienteAdmin("+c.id+")' title='Eliminar cliente (solo admin)'>🗑 Eliminar</button>";
+    h+="</div>";
     if(pedidos.length){
       h+="<div style='font-size:.72rem;font-weight:600;text-transform:uppercase;color:var(--acc);margin-bottom:.4rem'>&#218;ltimos pedidos</div>";
       pedidos.forEach(function(p){
@@ -8129,6 +8135,110 @@ function _guardarCambiosCliente(id){
     var mo=document.getElementById("_moClienteFicha");if(mo)mo.remove();
     loadClientes();
   }).catch(function(e){toast("Error al guardar","terr");});
+}
+
+// Solo admin: eliminar cliente. Verifica que no tenga pedidos activos ni saldo CC pendiente
+function _eliminarClienteAdmin(id){
+  var c=clientesData.find(function(x){return x.id===id;});
+  if(!c)return;
+  var nom=((c.nombre||"")+" "+(c.apellido||"")).trim()||"Cliente #"+id;
+  // Validar primero pedidos activos y saldo CC
+  apiGet("pedidos_catalogo","select=id,nro_orden,estado&cliente_id=eq."+id+"&estado=in.(pendiente,reservado,en_preparacion,en_reparto,cobrado_parcial)").then(function(rows){
+    var activos=Array.isArray(rows)?rows:[];
+    if(activos.length){
+      var lista=activos.slice(0,5).map(function(p){return p.nro_orden;}).join(", ");
+      bellConfirm("⚠ "+nom+" tiene "+activos.length+" pedido(s) activo(s): "+lista+(activos.length>5?"...":"")+".\n\nNO podés eliminar mientras tenga pedidos en curso. Cancelá o cobrá esos pedidos primero.",function(){});
+      return;
+    }
+    if((c.saldo_cc||0)<-0.01){
+      bellConfirm("⚠ "+nom+" tiene un saldo CC pendiente de "+fmt(Math.abs(c.saldo_cc))+".\n\nNO podés eliminar mientras tenga deuda. Saldá la cuenta corriente primero.",function(){});
+      return;
+    }
+    // Pedir confirmación final
+    bellConfirm("¿Eliminar definitivamente a "+nom+"? Esta acción no se puede deshacer. Se borrarán también: direcciones, teléfonos, archivos, favoritos, listas, carrito persistente, movimientos CC y notificaciones del cliente. Los pedidos cerrados quedan en historial pero sin vincular.",function(){
+      // Eliminar primero las dependencias en cadena
+      var dependencias=[
+        "clientes_direcciones","clientes_telefonos","clientes_archivos",
+        "clientes_favoritos","clientes_listas_compra","clientes_carrito",
+        "clientes_notificaciones","cuenta_corriente_movimientos"
+      ];
+      var chain=Promise.resolve();
+      dependencias.forEach(function(t){
+        chain=chain.then(function(){return apiDelete(t,"cliente_id=eq."+id).catch(function(e){console.error("[belle] error silencioso eliminando "+t+":",e);});});
+      });
+      // Desvincular pedidos cerrados (no borrarlos, solo quitar cliente_id)
+      chain=chain.then(function(){return apiPatch("pedidos_catalogo",{cliente_id:null,es_cc:false},"cliente_id=eq."+id).catch(function(e){console.error("[belle] error silencioso:",e);});});
+      // Finalmente eliminar el cliente
+      chain=chain.then(function(){return apiDelete("clientes","id=eq."+id);});
+      chain.then(function(){
+        toast("Cliente "+nom+" eliminado","twarn");
+        var mo=document.getElementById("_moClienteFicha");if(mo)mo.remove();
+        loadClientes();
+      }).catch(function(e){console.error("[belle] _eliminarClienteAdmin error:",e);toast("Error al eliminar","terr");});
+    });
+  }).catch(function(e){console.error("[belle] _eliminarClienteAdmin pre-check error:",e);toast("Error al verificar pedidos","terr");});
+}
+
+// Crear nuevo cliente desde admin
+function abrirCrearClienteAdmin(){
+  var mo=document.createElement("div");mo.className="mo open";mo.id="_moCrearClienteAdmin";
+  apiGet("vendedores","select=id,nombre&activo=is.true").then(function(vends){
+    var vendsOpts=(Array.isArray(vends)?vends:[]).map(function(v){return "<option value='"+v.id+"'>"+v.nombre+"</option>";}).join("");
+    var h="<div class='md' style='max-width:520px;width:95%;max-height:90vh;display:flex;flex-direction:column'>";
+    h+="<div class='mh'><div class='mtt'>➕ Nuevo cliente</div>";
+    h+="<button class='btn btn-g xb' onclick='var _m=document.getElementById(\"_moCrearClienteAdmin\");if(_m)_m.remove()'>✕</button></div>";
+    h+="<div class='mb' style='overflow-y:auto;display:flex;flex-direction:column;gap:.6rem'>";
+    h+="<div style='display:grid;grid-template-columns:1fr 1fr;gap:.5rem'>";
+    h+="<div><label style='font-size:.66rem;color:var(--tx3);text-transform:uppercase;font-weight:600'>Nombre *</label><input type='text' id='_naNombre' style='width:100%;padding:.45rem .6rem;border:1px solid var(--bd);border-radius:6px;font-size:.84rem;background:var(--sur2);color:var(--tx);margin-top:.2rem'></div>";
+    h+="<div><label style='font-size:.66rem;color:var(--tx3);text-transform:uppercase;font-weight:600'>Apellido</label><input type='text' id='_naApellido' style='width:100%;padding:.45rem .6rem;border:1px solid var(--bd);border-radius:6px;font-size:.84rem;background:var(--sur2);color:var(--tx);margin-top:.2rem'></div>";
+    h+="</div>";
+    h+="<div><label style='font-size:.66rem;color:var(--tx3);text-transform:uppercase;font-weight:600'>Teléfono</label><input type='text' id='_naTel' style='width:100%;padding:.45rem .6rem;border:1px solid var(--bd);border-radius:6px;font-size:.84rem;background:var(--sur2);color:var(--tx);margin-top:.2rem'></div>";
+    h+="<div><label style='font-size:.66rem;color:var(--tx3);text-transform:uppercase;font-weight:600'>Email</label><input type='email' id='_naEmail' style='width:100%;padding:.45rem .6rem;border:1px solid var(--bd);border-radius:6px;font-size:.84rem;background:var(--sur2);color:var(--tx);margin-top:.2rem'></div>";
+    h+="<div style='display:grid;grid-template-columns:1fr 1fr;gap:.5rem'>";
+    h+="<div><label style='font-size:.66rem;color:var(--tx3);text-transform:uppercase;font-weight:600'>Lista de precios</label>";
+    h+="<select id='_naLista' style='width:100%;padding:.45rem .6rem;border:1px solid var(--bd);border-radius:6px;font-size:.84rem;background:var(--sur2);color:var(--tx);margin-top:.2rem'>";
+    h+="<option value='minorista'>Minorista (web)</option><option value='mayorista'>Mayorista</option><option value='mayorista_vip'>VIP</option></select></div>";
+    h+="<div><label style='font-size:.66rem;color:var(--tx3);text-transform:uppercase;font-weight:600'>Vendedor</label>";
+    h+="<select id='_naVend' style='width:100%;padding:.45rem .6rem;border:1px solid var(--bd);border-radius:6px;font-size:.84rem;background:var(--sur2);color:var(--tx);margin-top:.2rem'>";
+    h+="<option value=''>Sin asignar</option>"+vendsOpts+"</select></div>";
+    h+="</div>";
+    h+="<div style='display:flex;align-items:center;gap:.5rem;background:var(--sur2);padding:.55rem .7rem;border-radius:7px'>";
+    h+="<input type='checkbox' id='_naCC' style='width:18px;height:18px;cursor:pointer'>";
+    h+="<label for='_naCC' style='font-size:.78rem;color:var(--tx);cursor:pointer'>💳 Habilitar Cuenta Corriente</label>";
+    h+="</div>";
+    h+="<div><label style='font-size:.66rem;color:var(--tx3);text-transform:uppercase;font-weight:600'>Notas internas</label><textarea id='_naNotas' rows='2' style='width:100%;padding:.45rem .6rem;border:1px solid var(--bd);border-radius:6px;font-size:.82rem;background:var(--sur2);color:var(--tx);margin-top:.2rem;resize:vertical;font-family:inherit'></textarea></div>";
+    h+="<div style='display:flex;gap:.5rem;justify-content:flex-end;margin-top:.3rem'>";
+    h+="<button class='btn btn-g' onclick='var _m=document.getElementById(\"_moCrearClienteAdmin\");if(_m)_m.remove()'>Cancelar</button>";
+    h+="<button class='btn btn-a' onclick='_guardarNuevoClienteAdmin()'>Crear cliente</button>";
+    h+="</div></div></div>";
+    mo.innerHTML=h;
+    document.body.appendChild(mo);
+    mo.addEventListener("click",function(e){if(e.target===mo)mo.remove();});
+    setTimeout(function(){var el=document.getElementById("_naNombre");if(el)el.focus();},100);
+  });
+}
+
+function _guardarNuevoClienteAdmin(){
+  var nombre=(document.getElementById("_naNombre")||{value:""}).value.trim();
+  if(!nombre){toast("El nombre es obligatorio","twarn");return;}
+  var data={
+    nombre:nombre,
+    apellido:(document.getElementById("_naApellido")||{value:""}).value.trim()||null,
+    telefono_principal:(document.getElementById("_naTel")||{value:""}).value.trim()||null,
+    email:(document.getElementById("_naEmail")||{value:""}).value.trim()||null,
+    lista_precios:(document.getElementById("_naLista")||{value:"minorista"}).value,
+    cuenta_corriente_habilitada:(document.getElementById("_naCC")||{checked:false}).checked,
+    saldo_cc:0,
+    estado:"activo",
+    notas_internas:(document.getElementById("_naNotas")||{value:""}).value.trim()||null
+  };
+  var vend=(document.getElementById("_naVend")||{value:""}).value;
+  if(vend)data.vendedor_asignado_id=parseInt(vend);
+  apiPost("clientes",data).then(function(){
+    toast("Cliente "+nombre+" creado","tok");
+    var mo=document.getElementById("_moCrearClienteAdmin");if(mo)mo.remove();
+    loadClientes();
+  }).catch(function(e){console.error("[belle] _guardarNuevoClienteAdmin error:",e);toast("Error al crear cliente","terr");});
 }
 
 // -- HISTORIAL COTIZACION ----------------------------------------------
