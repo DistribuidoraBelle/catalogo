@@ -4480,7 +4480,7 @@ document.addEventListener('DOMContentLoaded', function(){
 
 // Estado global del drawer Mi Cuenta
 var _catDrawerView = "login"; // "login" | "registro" | "recuperar" | "panel"
-var _catPanelTab = "perfil";  // "perfil" | "pedidos" | "favoritos" | "direcciones" | "cc"
+var _catPanelTab = "pedidos";  // "pedidos" (default) | "favoritos" | "direcciones" | "compras" | "perfil"
 
 // ── Helpers de UI ────────────────────────────────────────────────────
 function _catEsc(s){return String(s==null?"":s).replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;").replace(/"/g,"&quot;").replace(/'/g,"&#39;");}
@@ -4855,17 +4855,20 @@ function _catRenderPanel(body){
   h += "<div style='font-size:.72rem;opacity:.85;margin-top:.15rem'>"+_catEsc(c.email||"")+"</div>";
   h += "</div>";
 
-  // Tabs
+  // Tabs (orden definido por usuario):
+  // 1) Pedidos (default) — pedidos activos + CC (saldo+movs si tiene)
+  // 2) Favoritos
+  // 3) Direcciones
+  // 4) Mis compras — pedidos cobrados/entregados (historial)
+  // 5) Perfil
   h += "<div style='display:flex;gap:.25rem;border-bottom:1px solid #e8d9bf;margin-bottom:1rem;overflow-x:auto;-webkit-overflow-scrolling:touch'>";
   var tabs = [
-    {key:"perfil", label:"Perfil", icon:"&#128100;"},
-    {key:"pedidos", label:"Pedidos", icon:"&#128230;"},
+    {key:"pedidos",     label:"Pedidos",     icon:"&#128230;"},
+    {key:"favoritos",   label:"Favoritos",   icon:"&hearts;"},
     {key:"direcciones", label:"Direcciones", icon:"&#128205;"},
-    {key:"favoritos", label:"Favoritos", icon:"&hearts;"}
+    {key:"compras",     label:"Mis compras", icon:"&#128722;"},
+    {key:"perfil",      label:"Perfil",      icon:"&#128100;"}
   ];
-  if(c.cuenta_corriente_habilitada){
-    tabs.push({key:"cc", label:"Cuenta Corriente", icon:"&#128179;"});
-  }
   tabs.forEach(function(t){
     var act = _catPanelTab === t.key;
     h += "<button onclick='_catSetTab(&quot;"+t.key+"&quot;)' style='background:none;border:none;border-bottom:2px solid "+(act?"var(--accent)":"transparent")+";padding:.55rem .7rem;font-size:.78rem;color:"+(act?"var(--accent)":"var(--mid)")+";cursor:pointer;font-weight:"+(act?"600":"400")+";white-space:nowrap;font-family:inherit;display:flex;align-items:center;gap:.3rem'>"+t.icon+" "+t.label+"</button>";
@@ -4895,17 +4898,16 @@ function _catSetTab(tab){
 function _catRenderTab(){
   var box = document.getElementById("_catTabBody");
   if(!box) return;
-  // Por ahora solo placeholders — se irán completando en sub-bloques siguientes
-  if(_catPanelTab === "perfil"){
-    _catRenderTabPerfil(box);
-  } else if(_catPanelTab === "pedidos"){
+  if(_catPanelTab === "pedidos"){
     _catRenderTabPedidos(box);
-  } else if(_catPanelTab === "direcciones"){
-    _catRenderTabDirecciones(box);
   } else if(_catPanelTab === "favoritos"){
     _catRenderTabFavoritos(box);
-  } else if(_catPanelTab === "cc"){
-    box.innerHTML = "<div style='text-align:center;padding:2rem 1rem;color:var(--mid);font-size:.85rem'><div style='font-size:2rem;margin-bottom:.5rem'>&#128179;</div>Próximamente: detalle de tu cuenta corriente</div>";
+  } else if(_catPanelTab === "direcciones"){
+    _catRenderTabDirecciones(box);
+  } else if(_catPanelTab === "compras"){
+    _catRenderTabCompras(box);
+  } else if(_catPanelTab === "perfil"){
+    _catRenderTabPerfil(box);
   }
 }
 
@@ -5010,25 +5012,131 @@ function _catRenderTabPedidos(box){
   box.innerHTML = "<div style='text-align:center;padding:2rem 1rem;color:var(--mid);font-size:.85rem'>"+
     "<div class='cat-spin' style='margin-bottom:.6rem'></div>Cargando tus pedidos...</div>";
 
-  apiGet("pedidos_catalogo","select=*&cliente_id=eq."+_catCliente.id+"&order=created_at.desc&limit=50").then(function(rows){
-    var pedidos = Array.isArray(rows) ? rows : [];
-    if(!pedidos.length){
-      box.innerHTML = "<div style='text-align:center;padding:2.5rem 1rem;color:var(--mid)'>"+
+  // Cargar pedidos + (si tiene CC) movimientos
+  var promesas = [
+    apiGet("pedidos_catalogo","select=*&cliente_id=eq."+_catCliente.id+"&order=created_at.desc&limit=100")
+  ];
+  if(_catCliente.cuenta_corriente_habilitada){
+    promesas.push(
+      apiGet("cuenta_corriente_movimientos","select=*&cliente_id=eq."+_catCliente.id+"&order=created_at.desc&limit=20")
+        .catch(function(e){console.error("[belle-cat] CC movs error:",e); return [];})
+    );
+  } else {
+    promesas.push(Promise.resolve([]));
+  }
+
+  Promise.all(promesas).then(function(res){
+    var pedidos = Array.isArray(res[0]) ? res[0] : [];
+    var movs = Array.isArray(res[1]) ? res[1] : [];
+
+    // Filtrar pedidos ACTIVOS (no cobrados completos, no entregados, no cancelados)
+    // El cliente NO ve cancelados — esos solo los ven admin/vendedor.
+    // "cobrado_parcial" SÍ aparece (es CC en marcha).
+    var activos = pedidos.filter(function(p){
+      if(p.estado === "cancelado") return false;
+      if(p.estado === "cobrado" && p.estado_envio === "entregado") return false;
+      if(p.estado === "cobrado") return false; // pago completo → va a "Mis compras"
+      return true;
+    });
+
+    var h = "";
+
+    // ── BLOQUE CUENTA CORRIENTE arriba (si está habilitada) ──
+    if(_catCliente.cuenta_corriente_habilitada){
+      var saldo = _catCliente.saldo_cc || 0;
+      var saldoColor = saldo < -0.01 ? "#c5443a" : (saldo > 0.01 ? "#5a8a4a" : "#7a7a7a");
+      var saldoLabel = saldo < -0.01 ? "Tenés deuda" : (saldo > 0.01 ? "A tu favor" : "Sin saldo");
+      h += "<div style='background:linear-gradient(135deg, #fdf8f0, #faf5ec);border:1px solid #e8d9bf;border-radius:10px;padding:.85rem 1rem;margin-bottom:1rem'>";
+      h += "<div style='display:flex;justify-content:space-between;align-items:center;gap:.5rem;margin-bottom:.3rem'>";
+      h += "<div style='font-size:.7rem;color:var(--mid);text-transform:uppercase;font-weight:700;letter-spacing:.05em'>&#128179; Cuenta Corriente</div>";
+      h += "<div style='font-size:.66rem;color:"+saldoColor+";font-weight:600'>"+saldoLabel+"</div>";
+      h += "</div>";
+      h += "<div style='font-size:1.4rem;font-weight:800;color:"+saldoColor+";margin-bottom:.4rem'>"+_catFmtMoney(Math.abs(saldo))+"</div>";
+
+      // Movimientos recientes (max 5 visibles, el resto desplegable)
+      if(movs.length){
+        h += "<div style='border-top:1px solid #e8d9bf;padding-top:.5rem;margin-top:.3rem'>";
+        h += "<div style='font-size:.66rem;color:var(--mid);text-transform:uppercase;font-weight:600;margin-bottom:.4rem'>Movimientos recientes</div>";
+        var ver = movs.slice(0, 5);
+        ver.forEach(function(m){
+          var monto = parseFloat(m.monto || 0);
+          var es = monto >= 0 ? "deuda" : "pago";
+          var color = es === "pago" ? "#5a8a4a" : "#c5443a";
+          var signo = es === "pago" ? "−" : "+";
+          var f = _catFmtFecha(m.created_at, false);
+          h += "<div style='display:flex;justify-content:space-between;align-items:flex-start;gap:.5rem;padding:.35rem 0;border-bottom:1px solid #f5f0e8;font-size:.76rem'>";
+          h += "<div style='min-width:0;flex:1'>";
+          h += "<div style='color:var(--dark)'>"+_catEsc(m.descripcion || m.tipo || "Movimiento")+"</div>";
+          h += "<div style='font-size:.66rem;color:var(--mid);margin-top:.1rem'>"+f+"</div>";
+          h += "</div>";
+          h += "<div style='font-weight:700;color:"+color+";flex-shrink:0'>"+signo+_catFmtMoney(Math.abs(monto))+"</div>";
+          h += "</div>";
+        });
+        if(movs.length > 5){
+          h += "<div style='font-size:.7rem;color:var(--mid);text-align:center;padding-top:.4rem'>Y "+(movs.length-5)+" movimiento(s) más...</div>";
+        }
+        h += "</div>";
+      } else {
+        h += "<div style='font-size:.72rem;color:var(--mid);font-style:italic'>Sin movimientos todavía</div>";
+      }
+      h += "</div>";
+    }
+
+    // ── PEDIDOS ACTIVOS ──
+    if(!activos.length){
+      h += "<div style='text-align:center;padding:2rem 1rem;color:var(--mid)'>"+
         "<div style='font-size:2.5rem;margin-bottom:.5rem;opacity:.5'>&#128230;</div>"+
-        "<div style='font-size:.9rem;font-weight:600;color:var(--dark);margin-bottom:.3rem'>Aún no tenés pedidos</div>"+
-        "<div style='font-size:.78rem;color:var(--mid)'>Cuando hagas tu primer pedido va a aparecer acá</div>"+
+        "<div style='font-size:.9rem;font-weight:600;color:var(--dark);margin-bottom:.3rem'>"+(pedidos.length?"No tenés pedidos pendientes":"Aún no tenés pedidos")+"</div>"+
+        "<div style='font-size:.78rem;color:var(--mid)'>"+(pedidos.length?"Mirá tus compras anteriores en \"Mis compras\"":"Cuando hagas tu primer pedido va a aparecer acá")+"</div>"+
+        "</div>";
+    } else {
+      h += "<div style='font-size:.7rem;color:var(--mid);text-transform:uppercase;font-weight:600;margin-bottom:.5rem;letter-spacing:.04em'>Pedidos en curso</div>";
+      h += "<div style='display:flex;flex-direction:column;gap:.7rem'>";
+      activos.forEach(function(p){
+        h += _catCardPedido(p);
+      });
+      h += "</div>";
+    }
+
+    box.innerHTML = h;
+  }).catch(function(e){
+    console.error("[belle-cat] _catRenderTabPedidos error:",e);
+    box.innerHTML = "<div style='text-align:center;padding:2rem 1rem;color:#c5443a;font-size:.85rem'>Error al cargar pedidos</div>";
+  });
+}
+
+// Tab Mis compras: pedidos cobrados/entregados (historial). Sin cancelados.
+function _catRenderTabCompras(box){
+  if(!_catCliente){box.innerHTML = "<div class='empty'>Sin datos</div>";return;}
+  box.innerHTML = "<div style='text-align:center;padding:2rem 1rem;color:var(--mid);font-size:.85rem'>"+
+    "<div class='cat-spin' style='margin-bottom:.6rem'></div>Cargando tus compras...</div>";
+
+  apiGet("pedidos_catalogo","select=*&cliente_id=eq."+_catCliente.id+"&order=created_at.desc&limit=100").then(function(rows){
+    var pedidos = Array.isArray(rows) ? rows : [];
+    // Solo cobrados/entregados (cancelados NO los ve el cliente)
+    var historial = pedidos.filter(function(p){
+      if(p.estado === "cancelado") return false;
+      return (p.estado === "cobrado") || (p.estado_envio === "entregado");
+    });
+    if(!historial.length){
+      box.innerHTML = "<div style='text-align:center;padding:2.5rem 1rem;color:var(--mid)'>"+
+        "<div style='font-size:2.5rem;margin-bottom:.5rem;opacity:.5'>&#128722;</div>"+
+        "<div style='font-size:.9rem;font-weight:600;color:var(--dark);margin-bottom:.3rem'>Aún no tenés compras finalizadas</div>"+
+        "<div style='font-size:.78rem;color:var(--mid)'>Cuando termines de pagar y recibir un pedido va a aparecer en este historial</div>"+
         "</div>";
       return;
     }
-    var h = "<div style='display:flex;flex-direction:column;gap:.7rem'>";
-    pedidos.forEach(function(p){
+    var h = "";
+    h += "<div style='font-size:.7rem;color:var(--mid);text-transform:uppercase;font-weight:600;margin-bottom:.5rem;letter-spacing:.04em'>"+historial.length+" compra"+(historial.length===1?"":"s")+"</div>";
+    h += "<div style='display:flex;flex-direction:column;gap:.7rem'>";
+    historial.forEach(function(p){
       h += _catCardPedido(p);
     });
     h += "</div>";
     box.innerHTML = h;
   }).catch(function(e){
-    console.error("[belle-cat] _catRenderTabPedidos error:",e);
-    box.innerHTML = "<div style='text-align:center;padding:2rem 1rem;color:#c5443a;font-size:.85rem'>Error al cargar pedidos</div>";
+    console.error("[belle-cat] _catRenderTabCompras error:",e);
+    box.innerHTML = "<div style='text-align:center;padding:2rem 1rem;color:#c5443a;font-size:.85rem'>Error al cargar tu historial</div>";
   });
 }
 
