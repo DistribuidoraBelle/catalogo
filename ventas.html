@@ -5802,7 +5802,7 @@ function agregarCombo(comboId){
 }
 
 
-var PAGES=["catalogo","pedidos-web","transferidas","historial","movimientos","dinero","deposito","gastos","rendicion","reclamo","reservas","pedidos-prov","devoluciones","calculadora","cotizaciones"];
+var PAGES=["clientes-vend","catalogo","pedidos-web","rutas","transferidas","historial","movimientos","dinero","deposito","gastos","rendicion","reclamo","reservas","pedidos-prov","devoluciones","calculadora","cotizaciones"];
 
 // ── PEDIDOS PROVEEDOR (David) ─────────────────────────────────────────
 
@@ -6872,6 +6872,7 @@ function navTo(pg,el){
   if(pg==="clientes-vend")loadClientesVendedor();
   if(pg==="catalogo"){if(!document.getElementById("prodList"))buildCatalogo();renderCat();loadCombosVendedor();loadQuickPanels();}
   if(pg==="pedidos-web")loadPedidosWeb();
+  if(pg==="rutas")loadRutas();
   if(pg==="transferidas")loadTransferidas();
   if(pg==="historial")loadHistorial();
   if(pg==="movimientos")loadMovimientos();
@@ -8959,7 +8960,849 @@ function _loadObjetivosVendedor(){
   }).catch(function(){el.style.display="none";});
 }
 
+// ════════════════════════════════════════════════════════════════════
+// FASE B Sub-bloque 8 — RUTAS (Maps + Distance Matrix + Directions)
+// ════════════════════════════════════════════════════════════════════
+
+// Estado del módulo Rutas
+var _rt = {
+  pedidosDisponibles: [],   // Pedidos con dirección, listos para repartir
+  pedidosSeleccionados: [], // [{id, ...pedido, direccion}]
+  vendedorDirs: [],         // Mis direcciones de partida
+  puntoPartida: null,       // {lat, lng, label}
+  rutaCalculada: null,      // {orden:[idx], distanciaTotal, tiempoTotal}
+  map: null,
+  directionsService: null,
+  directionsRenderer: null,
+  geocoder: null,
+  paso: 1                    // 1: seleccionar pedidos | 2: punto partida | 3: ver/ajustar | 4: confirmada
+};
+
+function loadRutas(){
+  var pg = document.getElementById("pg-rutas");
+  if(!pg) return;
+  pg.style.display = "block";
+  // Resetear estado al entrar
+  _rt.pedidosSeleccionados = [];
+  _rt.puntoPartida = null;
+  _rt.rutaCalculada = null;
+  _rt.paso = 1;
+  pg.innerHTML = "<div class='loading'><div class='spin'></div>Cargando rutas...</div>";
+
+  // Cargar en paralelo: pedidos listos para repartir + mis direcciones de partida + rutas activas hoy
+  Promise.all([
+    apiGet("pedidos_catalogo",
+      "select=id,nro_orden,total,estado,estado_envio,cliente_id,direccion_entrega_id,modo_entrega,distancia_km,created_at,items"+
+      "&vendedor_id=eq."+VENDEDOR_ID+
+      "&estado=in.(reservado,cobrado_parcial,cobrado)"+
+      "&estado_envio=is.null"+
+      "&cliente_id=not.is.null"+
+      "&direccion_entrega_id=not.is.null"+
+      "&order=created_at.desc&limit=200"
+    ),
+    apiGet("vendedores_direcciones","select=*&vendedor_id=eq."+VENDEDOR_ID+"&order=predeterminada.desc,created_at.desc"),
+    // Pedidos hoy en reparto (rutas activas)
+    apiGet("pedidos_catalogo",
+      "select=id,nro_orden,total,estado_envio,cliente_id,direccion_entrega_id,reparto_at"+
+      "&vendedor_id=eq."+VENDEDOR_ID+
+      "&estado_envio=eq.en_reparto"+
+      "&order=reparto_at.desc.nullslast,created_at.desc&limit=50"
+    )
+  ]).then(function(res){
+    _rt.pedidosDisponibles = Array.isArray(res[0]) ? res[0] : [];
+    _rt.vendedorDirs = Array.isArray(res[1]) ? res[1] : [];
+    _rt.pedidosEnReparto = Array.isArray(res[2]) ? res[2] : [];
+    _renderRutasMain();
+  }).catch(function(e){
+    console.error("[belle] loadRutas error:",e);
+    pg.innerHTML = "<div class='empty'>Error al cargar rutas: "+(e.message||"desconocido")+"</div>";
+  });
+}
+
+// Render principal con tabs internos: "Armar ruta" / "En reparto" / "Mis direcciones"
+function _renderRutasMain(){
+  var pg = document.getElementById("pg-rutas");
+  if(!pg) return;
+  if(!_rt.subTab) _rt.subTab = "armar";
+
+  var h = "";
+  // Header con sub-tabs
+  h += "<div style='display:flex;gap:.4rem;border-bottom:1px solid var(--bd);margin-bottom:1rem;flex-wrap:wrap'>";
+  var subTabs = [
+    {key:"armar",   label:"🗺 Armar ruta",     count: _rt.pedidosDisponibles.length},
+    {key:"reparto", label:"🚚 En reparto",     count: (_rt.pedidosEnReparto||[]).length},
+    {key:"misdir",  label:"📍 Mis direcciones", count: _rt.vendedorDirs.length}
+  ];
+  subTabs.forEach(function(t){
+    var act = _rt.subTab === t.key;
+    h += "<button onclick='_rtSubTab(\""+t.key+"\")' style='background:none;border:none;border-bottom:2px solid "+(act?"var(--acc)":"transparent")+";padding:.5rem .8rem;font-size:.82rem;color:"+(act?"var(--acc)":"var(--tx2)")+";cursor:pointer;font-weight:"+(act?"600":"400")+";white-space:nowrap'>"+t.label+(t.count?" <span style=\"background:rgba(196,150,90,.2);border-radius:8px;padding:0 .35rem;font-size:.65rem;margin-left:.2rem\">"+t.count+"</span>":"")+"</button>";
+  });
+  h += "</div>";
+
+  h += "<div id='_rtBody'></div>";
+  pg.innerHTML = h;
+  _rtRenderSubTab();
+}
+
+function _rtSubTab(t){_rt.subTab = t; _rtRenderSubTab();}
+
+function _rtRenderSubTab(){
+  var b = document.getElementById("_rtBody");
+  if(!b) return;
+  if(_rt.subTab === "armar")        _rtRenderArmar(b);
+  else if(_rt.subTab === "reparto") _rtRenderEnReparto(b);
+  else if(_rt.subTab === "misdir")  _rtRenderMisDirecciones(b);
+}
+
+// ── ARMAR RUTA — vista principal con paso 1, 2, 3 ───────────────────
+function _rtRenderArmar(b){
+  var h = "";
+
+  // Stepper visual
+  h += "<div style='display:flex;align-items:center;gap:.3rem;margin-bottom:1rem;padding:.6rem .8rem;background:var(--sur);border:1px solid var(--bd);border-radius:8px;flex-wrap:wrap'>";
+  [
+    {n:1, label:"Seleccionar pedidos"},
+    {n:2, label:"Punto de partida"},
+    {n:3, label:"Confirmar ruta"}
+  ].forEach(function(s, i){
+    var act = _rt.paso >= s.n;
+    h += "<div style='display:flex;align-items:center;gap:.4rem;flex:1;min-width:140px'>";
+    h += "<div style='width:24px;height:24px;border-radius:50%;background:"+(act?"var(--acc)":"var(--sur2)")+";color:"+(act?"#fff":"var(--tx3)")+";display:flex;align-items:center;justify-content:center;font-size:.72rem;font-weight:700;flex-shrink:0'>"+s.n+"</div>";
+    h += "<div style='font-size:.74rem;color:"+(act?"var(--tx)":"var(--tx3)")+";font-weight:"+(act?"600":"400")+"'>"+s.label+"</div>";
+    h += "</div>";
+    if(i<2) h += "<div style='flex-shrink:0;color:var(--tx3)'>→</div>";
+  });
+  h += "</div>";
+
+  if(_rt.paso === 1){
+    h += _rtRenderPaso1Pedidos();
+  } else if(_rt.paso === 2){
+    h += _rtRenderPaso2Partida();
+  } else if(_rt.paso === 3){
+    h += _rtRenderPaso3Confirmar();
+  }
+
+  b.innerHTML = h;
+
+  // Hooks post-render
+  if(_rt.paso === 3){
+    setTimeout(_rtInicializarMapaRuta, 100);
+  }
+}
+
+// ── PASO 1: seleccionar pedidos ─────────────────────────────────────
+function _rtRenderPaso1Pedidos(){
+  var disp = _rt.pedidosDisponibles;
+  if(!disp.length){
+    return "<div class='empty' style='padding:2.5rem 1rem;text-align:center'>"+
+      "<div style='font-size:2.5rem;margin-bottom:.5rem;opacity:.5'>📭</div>"+
+      "<div style='font-weight:600;font-size:.9rem;color:var(--tx);margin-bottom:.3rem'>No hay pedidos para repartir</div>"+
+      "<div style='font-size:.78rem;color:var(--tx3);max-width:380px;margin:0 auto'>Acá aparecen tus pedidos confirmados con dirección de entrega que aún no fueron despachados.</div>"+
+      "</div>";
+  }
+
+  var h = "";
+  h += "<div style='font-size:.78rem;color:var(--tx2);margin-bottom:.6rem'>Marcá los pedidos que vas a repartir hoy:</div>";
+
+  // Lista con checkboxes
+  h += "<div style='display:flex;flex-direction:column;gap:.5rem;margin-bottom:1rem'>";
+  disp.forEach(function(p){
+    var sel = _rt.pedidosSeleccionados.indexOf(p.id) >= 0;
+    var modoIcon = p.modo_entrega === "correo" ? "📦" : "🚚";
+    h += "<label style='display:flex;align-items:flex-start;gap:.55rem;background:"+(sel?"rgba(196,150,90,.07)":"var(--sur)")+";border:1px solid "+(sel?"var(--acc)":"var(--bd)")+";border-radius:8px;padding:.7rem .8rem;cursor:pointer;transition:border-color .15s'>";
+    h += "<input type='checkbox' "+(sel?"checked":"")+" onchange='_rtToggleSel("+p.id+",this.checked)' style='width:18px;height:18px;cursor:pointer;flex-shrink:0;margin-top:.15rem;accent-color:var(--acc)'>";
+    h += "<div style='flex:1;min-width:0'>";
+    h += "<div style='display:flex;justify-content:space-between;align-items:flex-start;gap:.5rem;margin-bottom:.2rem'>";
+    h += "<div style='font-size:.84rem;font-weight:600;color:var(--tx)'>"+modoIcon+" "+(p.nro_orden||"#"+p.id)+"</div>";
+    h += "<div style='font-size:.85rem;font-weight:700;color:var(--acc);flex-shrink:0'>"+fmt(p.total||0)+"</div>";
+    h += "</div>";
+    h += "<div id='_rtCli"+p.id+"' style='font-size:.72rem;color:var(--tx3)'>Cargando cliente...</div>";
+    h += "<div id='_rtDir"+p.id+"' style='font-size:.7rem;color:var(--tx2);margin-top:.15rem'>Cargando dirección...</div>";
+    if(p.distancia_km) h += "<div style='font-size:.65rem;color:var(--tx3);margin-top:.2rem'>📏 "+p.distancia_km+" km del depósito</div>";
+    h += "</div>";
+    h += "</label>";
+  });
+  h += "</div>";
+
+  // Resumen y botón siguiente
+  var totSel = _rt.pedidosSeleccionados.length;
+  h += "<div style='position:sticky;bottom:0;background:var(--bg-card,var(--sur));border:1px solid var(--bd);border-radius:8px;padding:.7rem .9rem;display:flex;justify-content:space-between;align-items:center;gap:.5rem;flex-wrap:wrap;box-shadow:0 -4px 12px rgba(0,0,0,.05)'>";
+  h += "<div style='font-size:.82rem'><b>"+totSel+"</b> pedido"+(totSel===1?"":"s")+" seleccionado"+(totSel===1?"":"s")+"</div>";
+  h += "<button class='btn btn-a' "+(totSel===0?"disabled style='opacity:.5;cursor:not-allowed'":"")+" onclick='_rtIrAPaso(2)'>Siguiente: Punto de partida →</button>";
+  h += "</div>";
+
+  // Cargar nombres de clientes y direcciones después del render
+  setTimeout(function(){
+    disp.forEach(function(p){_rtCargarDetallePedido(p);});
+  }, 50);
+
+  return h;
+}
+
+function _rtCargarDetallePedido(p){
+  // Cliente
+  if(p.cliente_id){
+    apiGet("clientes","select=nombre,apellido,telefono_principal&id=eq."+p.cliente_id+"&limit=1").then(function(rows){
+      var c = rows && rows[0];
+      var el = document.getElementById("_rtCli"+p.id);
+      if(el && c){
+        var nom = ((c.nombre||"")+" "+(c.apellido||"")).trim() || "Cliente #"+p.cliente_id;
+        el.innerHTML = "👤 "+nom+(c.telefono_principal?" · "+c.telefono_principal:"");
+      }
+    }).catch(function(){});
+  }
+  // Dirección
+  if(p.direccion_entrega_id){
+    apiGet("clientes_direcciones","select=etiqueta,direccion_completa,referencias,lat,lng&id=eq."+p.direccion_entrega_id+"&limit=1").then(function(rows){
+      var d = rows && rows[0];
+      var el = document.getElementById("_rtDir"+p.id);
+      if(el && d){
+        // Guardar coordenadas en el pedido para usarlas al armar la ruta
+        var pIdx = _rt.pedidosDisponibles.findIndex(function(x){return x.id===p.id;});
+        if(pIdx>=0){_rt.pedidosDisponibles[pIdx]._dir = d;}
+        var dir = d.direccion_completa || "Sin dirección";
+        el.innerHTML = "📍 "+dir+(d.referencias?" <i style='color:var(--tx3)'>(\""+d.referencias+"\")</i>":"");
+      }
+    }).catch(function(){});
+  }
+}
+
+function _rtToggleSel(pedId, checked){
+  if(checked){
+    if(_rt.pedidosSeleccionados.indexOf(pedId)<0) _rt.pedidosSeleccionados.push(pedId);
+  } else {
+    _rt.pedidosSeleccionados = _rt.pedidosSeleccionados.filter(function(x){return x!==pedId;});
+  }
+  _rtRenderSubTab();
+}
+
+function _rtIrAPaso(n){
+  if(n===2 && _rt.pedidosSeleccionados.length===0){toast("Seleccioná al menos un pedido","twarn");return;}
+  if(n===3 && !_rt.puntoPartida){toast("Elegí un punto de partida","twarn");return;}
+  _rt.paso = n;
+  _rtRenderSubTab();
+}
+
+// ── PASO 2: punto de partida ─────────────────────────────────────────
+function _rtRenderPaso2Partida(){
+  var h = "";
+  h += "<div style='font-size:.78rem;color:var(--tx2);margin-bottom:.7rem'>Elegí desde dónde vas a salir:</div>";
+  h += "<div style='display:flex;flex-direction:column;gap:.5rem;margin-bottom:1rem'>";
+
+  // Opción A: Ubicación actual del navegador (GPS)
+  var actSel = _rt.puntoPartida && _rt.puntoPartida.tipo === "actual";
+  h += "<button onclick='_rtUsarUbicacionActual()' style='display:flex;align-items:center;gap:.7rem;background:"+(actSel?"rgba(196,150,90,.07)":"var(--sur)")+";border:1px solid "+(actSel?"var(--acc)":"var(--bd)")+";border-radius:8px;padding:.75rem .85rem;cursor:pointer;text-align:left;font-family:inherit;color:var(--tx)'>";
+  h += "<div style='font-size:1.4rem'>📡</div>";
+  h += "<div style='flex:1'>";
+  h += "<div style='font-size:.85rem;font-weight:600'>Usar mi ubicación actual</div>";
+  h += "<div style='font-size:.7rem;color:var(--tx3);margin-top:.15rem'>"+(actSel?"✓ "+_rt.puntoPartida.label:"El navegador te va a pedir permiso de GPS")+"</div>";
+  h += "</div>";
+  h += "</button>";
+
+  // Opción B: Mis direcciones guardadas
+  if(_rt.vendedorDirs.length){
+    h += "<div style='font-size:.66rem;color:var(--tx3);text-transform:uppercase;font-weight:600;margin-top:.4rem'>O usar una dirección guardada</div>";
+    _rt.vendedorDirs.forEach(function(d){
+      var sel = _rt.puntoPartida && _rt.puntoPartida.tipo === "guardada" && _rt.puntoPartida.id === d.id;
+      h += "<button onclick='_rtUsarDireccionGuardada("+d.id+")' style='display:flex;align-items:center;gap:.7rem;background:"+(sel?"rgba(196,150,90,.07)":"var(--sur)")+";border:1px solid "+(sel?"var(--acc)":"var(--bd)")+";border-radius:8px;padding:.7rem .85rem;cursor:pointer;text-align:left;font-family:inherit;color:var(--tx)'>";
+      h += "<div style='font-size:1.4rem'>📍</div>";
+      h += "<div style='flex:1;min-width:0'>";
+      h += "<div style='font-size:.85rem;font-weight:600'>"+(_escNomJS?_escNomJS(d.etiqueta):d.etiqueta)+(d.predeterminada?" <span style=\"font-size:.6rem;color:var(--acc);background:rgba(196,150,90,.15);padding:.05rem .35rem;border-radius:4px;margin-left:.3rem\">PREDETERMINADA</span>":"")+"</div>";
+      h += "<div style='font-size:.7rem;color:var(--tx3);margin-top:.15rem;overflow:hidden;text-overflow:ellipsis;white-space:nowrap'>"+(d.direccion_completa||"")+"</div>";
+      h += "</div>";
+      h += "</button>";
+    });
+  }
+
+  // Opción C: Buscar otra dirección
+  h += "<div style='font-size:.66rem;color:var(--tx3);text-transform:uppercase;font-weight:600;margin-top:.4rem'>O buscar otra dirección</div>";
+  h += "<button onclick='_rtAbrirBuscarPartida()' style='display:flex;align-items:center;gap:.7rem;background:transparent;border:1px dashed var(--bd);border-radius:8px;padding:.75rem .85rem;cursor:pointer;text-align:left;font-family:inherit;color:var(--tx2)'>";
+  h += "<div style='font-size:1.4rem'>🔍</div>";
+  h += "<div style='flex:1'><div style='font-size:.82rem'>Buscar dirección en Google Maps</div></div>";
+  h += "</button>";
+
+  // Botón guardar como dirección personal
+  h += "<button onclick='_rtSubTab(\"misdir\")' style='background:transparent;border:none;color:var(--acc);font-size:.72rem;cursor:pointer;text-decoration:underline;padding:.3rem;margin-top:.3rem;text-align:left'>Gestionar mis direcciones guardadas →</button>";
+
+  h += "</div>";
+
+  // Footer con botones nav
+  h += "<div style='position:sticky;bottom:0;background:var(--bg-card,var(--sur));border:1px solid var(--bd);border-radius:8px;padding:.7rem .9rem;display:flex;justify-content:space-between;align-items:center;gap:.5rem'>";
+  h += "<button class='btn btn-g' onclick='_rtIrAPaso(1)'>← Atrás</button>";
+  h += "<button class='btn btn-a' "+(!_rt.puntoPartida?"disabled style='opacity:.5;cursor:not-allowed'":"")+" onclick='_rtIrAPaso(3)'>Siguiente: Calcular ruta →</button>";
+  h += "</div>";
+
+  return h;
+}
+
+function _rtUsarUbicacionActual(){
+  if(!navigator.geolocation){toast("Tu navegador no soporta geolocalización","terr");return;}
+  toast("Pidiendo permiso de GPS...","twarn");
+  navigator.geolocation.getCurrentPosition(function(pos){
+    _rt.puntoPartida = {
+      tipo: "actual",
+      lat: pos.coords.latitude,
+      lng: pos.coords.longitude,
+      label: "Mi ubicación actual"
+    };
+    toast("Ubicación obtenida ✓","tok");
+    _rtRenderSubTab();
+  }, function(err){
+    console.error("[belle] geolocation error:",err);
+    toast(err.code===1?"Negaste el permiso. Probá otra opción.":"No se pudo obtener tu ubicación","terr");
+  }, {enableHighAccuracy:true, timeout:10000});
+}
+
+function _rtUsarDireccionGuardada(id){
+  var d = _rt.vendedorDirs.find(function(x){return x.id===id;});
+  if(!d || d.lat==null || d.lng==null){toast("Esa dirección no tiene coordenadas","twarn");return;}
+  _rt.puntoPartida = {
+    tipo:"guardada", id:d.id,
+    lat:d.lat, lng:d.lng,
+    label:d.etiqueta+" — "+(d.direccion_completa||"")
+  };
+  _rtRenderSubTab();
+}
+
+function _rtAbrirBuscarPartida(){
+  if(!window.google || !window.google.maps){toast("Google Maps cargando, esperá un momento","twarn");return;}
+  var mo = document.createElement("div");mo.className="mo open";mo.id="_rtMoBuscarPartida";
+  mo.style.zIndex="99999";
+  var h = "<div class='md' style='max-width:480px;width:95%;max-height:80vh;display:flex;flex-direction:column'>";
+  h += "<div class='mh'><div class='mtt'>Buscar punto de partida</div>";
+  h += "<button class='btn btn-g xb' onclick='document.getElementById(\"_rtMoBuscarPartida\").remove()'>✕</button></div>";
+  h += "<div class='mb' style='display:flex;flex-direction:column;gap:.6rem'>";
+  h += "<div style='display:flex;gap:.4rem'>";
+  h += "<input type='text' id='_rtBuscarPartidaInp' placeholder='Calle número, ciudad...' style='flex:1;padding:.5rem .7rem;border:1px solid var(--bd);border-radius:7px;font-size:.85rem;background:var(--sur2);color:var(--tx);font-family:inherit' onkeydown='if(event.key===&quot;Enter&quot;){event.preventDefault();_rtBuscarPartidaGo();}'>";
+  h += "<button class='btn btn-a' onclick='_rtBuscarPartidaGo()'>Buscar</button>";
+  h += "</div>";
+  h += "<div id='_rtBuscarPartidaResult'></div>";
+  h += "</div>";
+  h += "</div>";
+  mo.innerHTML = h;
+  document.body.appendChild(mo);
+  mo.addEventListener("click",function(e){if(e.target===mo)mo.remove();});
+  setTimeout(function(){var i=document.getElementById("_rtBuscarPartidaInp");if(i)i.focus();},100);
+}
+
+function _rtBuscarPartidaGo(){
+  var inp = document.getElementById("_rtBuscarPartidaInp");
+  var q = (inp&&inp.value||"").trim();
+  if(!q){toast("Escribí una dirección","twarn");return;}
+  var res = document.getElementById("_rtBuscarPartidaResult");
+  if(res) res.innerHTML = "<div class='loading'><div class='spin'></div></div>";
+  if(!_rt.geocoder) _rt.geocoder = new google.maps.Geocoder();
+  _rt.geocoder.geocode({address:q, region:"AR"}, function(results, status){
+    if(status==="OK" && results && results[0]){
+      var r = results[0];
+      _rt.puntoPartida = {
+        tipo:"buscada",
+        lat: r.geometry.location.lat(),
+        lng: r.geometry.location.lng(),
+        label: r.formatted_address
+      };
+      var mo = document.getElementById("_rtMoBuscarPartida");if(mo)mo.remove();
+      toast("Punto de partida fijado","tok");
+      _rtRenderSubTab();
+    } else if(status==="ZERO_RESULTS"){
+      if(res) res.innerHTML = "<div style='color:var(--yel);text-align:center;padding:.8rem;font-size:.78rem'>Sin resultados. Probá con más detalles.</div>";
+    } else {
+      if(res) res.innerHTML = "<div style='color:var(--red);text-align:center;padding:.8rem;font-size:.78rem'>Error: "+status+"</div>";
+    }
+  });
+}
+
+// ── PASO 3: ruta calculada en mapa + reordenable ─────────────────────
+function _rtRenderPaso3Confirmar(){
+  var h = "";
+  h += "<div style='font-size:.78rem;color:var(--tx2);margin-bottom:.6rem'>Punto de partida: <b style='color:var(--tx)'>"+(_rt.puntoPartida?_rt.puntoPartida.label:"—")+"</b></div>";
+  // Mapa
+  h += "<div id='_rtMapa' style='width:100%;height:340px;border-radius:9px;border:1px solid var(--bd);background:var(--sur2);margin-bottom:.7rem'></div>";
+  // Resumen
+  h += "<div id='_rtResumen' style='background:var(--sur);border:1px solid var(--bd);border-radius:8px;padding:.6rem .8rem;margin-bottom:.7rem;font-size:.78rem'>Calculando ruta óptima...</div>";
+  // Lista reordenable
+  h += "<div style='font-size:.7rem;color:var(--tx3);text-transform:uppercase;font-weight:600;margin-bottom:.4rem'>Orden de entrega <span style='font-weight:400;text-transform:none;color:var(--tx3)'>(arrastrá ↕ para reordenar)</span></div>";
+  h += "<div id='_rtListaOrden' style='display:flex;flex-direction:column;gap:.4rem;margin-bottom:1rem'></div>";
+
+  // Botones
+  h += "<div style='position:sticky;bottom:0;background:var(--bg-card,var(--sur));border:1px solid var(--bd);border-radius:8px;padding:.7rem .9rem;display:flex;justify-content:space-between;align-items:center;gap:.5rem;flex-wrap:wrap'>";
+  h += "<button class='btn btn-g' onclick='_rtIrAPaso(2)'>← Atrás</button>";
+  h += "<button class='btn btn-a' style='background:#5a8a4a;border-color:#5a8a4a' onclick='_rtConfirmarRuta()'>✅ Confirmar ruta y empezar reparto</button>";
+  h += "</div>";
+  return h;
+}
+
+function _rtInicializarMapaRuta(){
+  var mapEl = document.getElementById("_rtMapa");
+  if(!mapEl || !window.google || !window.google.maps){
+    if(mapEl) mapEl.innerHTML = "<div style='display:flex;align-items:center;justify-content:center;height:100%;color:var(--tx3)'>Cargando mapa...</div>";
+    setTimeout(_rtInicializarMapaRuta, 500);
+    return;
+  }
+
+  _rt.map = new google.maps.Map(mapEl, {
+    center: {lat:_rt.puntoPartida.lat, lng:_rt.puntoPartida.lng},
+    zoom: 12,
+    streetViewControl: false,
+    mapTypeControl: false,
+    fullscreenControl: true,
+    gestureHandling: "greedy"
+  });
+
+  _rt.directionsService = new google.maps.DirectionsService();
+  _rt.directionsRenderer = new google.maps.DirectionsRenderer({
+    map: _rt.map,
+    suppressMarkers: false,
+    polylineOptions: {strokeColor: "#c4965a", strokeWeight: 5, strokeOpacity: .85}
+  });
+
+  // Calcular ruta óptima
+  _rtCalcularRutaOptima();
+}
+
+// Calcula la ruta óptima usando waypoints con optimizeWaypoints=true
+// Esto usa el algoritmo de Google internamente (TSP).
+function _rtCalcularRutaOptima(){
+  var pedidosSel = _rt.pedidosDisponibles.filter(function(p){return _rt.pedidosSeleccionados.indexOf(p.id)>=0;});
+  if(!pedidosSel.length){
+    var r = document.getElementById("_rtResumen");
+    if(r) r.innerHTML = "<div style='color:var(--red)'>No hay pedidos seleccionados</div>";
+    return;
+  }
+  // Validar que todos tengan coordenadas
+  var sinCoords = [];
+  pedidosSel.forEach(function(p){
+    if(!p._dir || p._dir.lat==null || p._dir.lng==null){
+      sinCoords.push(p.nro_orden||"#"+p.id);
+    }
+  });
+  if(sinCoords.length){
+    var r = document.getElementById("_rtResumen");
+    if(r) r.innerHTML = "<div style='color:var(--red);font-weight:600'>Estos pedidos no tienen coordenadas y no se pueden incluir: "+sinCoords.join(", ")+"</div>";
+  }
+  var pedidosOK = pedidosSel.filter(function(p){return p._dir && p._dir.lat!=null && p._dir.lng!=null;});
+  if(!pedidosOK.length) return;
+
+  // El último pedido será el destino, los demás waypoints (a optimizar)
+  // Para mejor optimización, hacemos: origin=partida, waypoints=todos, destination=último,
+  // pero con optimizeWaypoints=true Google reordena los waypoints.
+  // Truco: ponemos como destination el mismo origin (vuelta a base) si querés round-trip.
+  // Por ahora: destination = último pedido.
+  var origin = {lat:_rt.puntoPartida.lat, lng:_rt.puntoPartida.lng};
+  var destinos = pedidosOK.slice(0, -1).map(function(p){return {location: {lat:p._dir.lat, lng:p._dir.lng}, stopover:true};});
+  var destFinal = pedidosOK[pedidosOK.length-1];
+
+  var req = {
+    origin: origin,
+    destination: {lat:destFinal._dir.lat, lng:destFinal._dir.lng},
+    waypoints: destinos,
+    optimizeWaypoints: true,
+    travelMode: google.maps.TravelMode.DRIVING,
+    region: "AR"
+  };
+
+  _rt.directionsService.route(req, function(result, status){
+    if(status === "OK"){
+      _rt.directionsRenderer.setDirections(result);
+      // Reordenar pedidos según el orden óptimo de Google
+      var orden = result.routes[0].waypoint_order || [];
+      // El último pedido (destFinal) va al final siempre
+      var pedidosOrdenados = orden.map(function(idx){return pedidosOK[idx];});
+      pedidosOrdenados.push(destFinal);
+      _rt.pedidosOrdenados = pedidosOrdenados;
+      _rt.rutaResult = result;
+
+      // Calcular totales
+      var legs = result.routes[0].legs || [];
+      var distTotal = 0, tiempoTotal = 0;
+      legs.forEach(function(l){distTotal += l.distance.value; tiempoTotal += l.duration.value;});
+      var distKm = (distTotal/1000).toFixed(1);
+      var minutos = Math.round(tiempoTotal/60);
+      var horas = Math.floor(minutos/60);
+      var mins = minutos % 60;
+      var tiempoStr = horas?(horas+"h "+mins+"min"):(mins+" min");
+
+      var r = document.getElementById("_rtResumen");
+      if(r){
+        r.innerHTML = "<div style='display:flex;gap:1rem;flex-wrap:wrap;align-items:center'>"+
+          "<div><span style='color:var(--tx3);font-size:.7rem'>Pedidos:</span> <b>"+pedidosOrdenados.length+"</b></div>"+
+          "<div><span style='color:var(--tx3);font-size:.7rem'>Distancia:</span> <b>"+distKm+" km</b></div>"+
+          "<div><span style='color:var(--tx3);font-size:.7rem'>Tiempo estimado:</span> <b>"+tiempoStr+"</b></div>"+
+          "<div style='margin-left:auto'><span style='font-size:.66rem;color:var(--green)'>✓ Orden óptimo calculado</span></div>"+
+          "</div>";
+      }
+      _rtRenderListaOrdenada();
+    } else {
+      console.error("[belle] DirectionsService error:",status);
+      var r = document.getElementById("_rtResumen");
+      if(r) r.innerHTML = "<div style='color:var(--red)'>Error al calcular ruta: "+status+(status==="REQUEST_DENIED"?" — ¿activaste Directions API?":"")+"</div>";
+    }
+  });
+}
+
+// Lista de pedidos en el orden actual, con drag-and-drop
+function _rtRenderListaOrdenada(){
+  var box = document.getElementById("_rtListaOrden");
+  if(!box || !_rt.pedidosOrdenados) return;
+  var h = "";
+  _rt.pedidosOrdenados.forEach(function(p, idx){
+    var nom = p._cliNom || ("Cliente #"+p.cliente_id);
+    var dir = p._dir ? (p._dir.direccion_completa || "") : "";
+    h += "<div draggable='true' data-pedid='"+p.id+"' data-idx='"+idx+"' ondragstart='_rtDragStart(event)' ondragover='_rtDragOver(event)' ondrop='_rtDrop(event)' ondragend='_rtDragEnd(event)' style='background:var(--sur);border:1px solid var(--bd);border-radius:7px;padding:.55rem .7rem;display:flex;align-items:center;gap:.6rem;cursor:move'>";
+    h += "<div style='width:28px;height:28px;border-radius:50%;background:var(--acc);color:#fff;display:flex;align-items:center;justify-content:center;font-size:.78rem;font-weight:700;flex-shrink:0'>"+(idx+1)+"</div>";
+    h += "<div style='flex:1;min-width:0'>";
+    h += "<div style='font-size:.8rem;font-weight:600;color:var(--tx)'>"+(p.nro_orden||"#"+p.id)+" · "+fmt(p.total||0)+"</div>";
+    h += "<div style='font-size:.68rem;color:var(--tx3);overflow:hidden;text-overflow:ellipsis;white-space:nowrap'>"+dir+"</div>";
+    h += "</div>";
+    h += "<div style='color:var(--tx3);font-size:1.1rem;flex-shrink:0;cursor:grab'>≡</div>";
+    h += "</div>";
+  });
+  box.innerHTML = h;
+}
+
+// Drag and drop simple para reordenar
+var _rtDragIdx = null;
+function _rtDragStart(e){
+  _rtDragIdx = parseInt(e.currentTarget.dataset.idx);
+  e.currentTarget.style.opacity = "0.4";
+  e.dataTransfer.effectAllowed = "move";
+}
+function _rtDragOver(e){e.preventDefault();e.dataTransfer.dropEffect="move";return false;}
+function _rtDrop(e){
+  e.preventDefault();
+  var dropIdx = parseInt(e.currentTarget.dataset.idx);
+  if(_rtDragIdx == null || _rtDragIdx === dropIdx) return;
+  // Reordenar array
+  var moved = _rt.pedidosOrdenados.splice(_rtDragIdx, 1)[0];
+  _rt.pedidosOrdenados.splice(dropIdx, 0, moved);
+  _rtRenderListaOrdenada();
+  // Recalcular ruta visual con el nuevo orden (sin optimizar)
+  _rtRedibujarRuta();
+}
+function _rtDragEnd(e){e.currentTarget.style.opacity="";_rtDragIdx=null;}
+
+// Redibujar ruta con orden manual (sin optimizar)
+function _rtRedibujarRuta(){
+  if(!_rt.directionsService || !_rt.pedidosOrdenados || !_rt.pedidosOrdenados.length) return;
+  var origin = {lat:_rt.puntoPartida.lat, lng:_rt.puntoPartida.lng};
+  var puntos = _rt.pedidosOrdenados.map(function(p){return {lat:p._dir.lat, lng:p._dir.lng};});
+  var destFinal = puntos[puntos.length-1];
+  var waypoints = puntos.slice(0,-1).map(function(p){return {location:p, stopover:true};});
+  _rt.directionsService.route({
+    origin: origin,
+    destination: destFinal,
+    waypoints: waypoints,
+    optimizeWaypoints: false,
+    travelMode: google.maps.TravelMode.DRIVING
+  }, function(result, status){
+    if(status==="OK"){
+      _rt.directionsRenderer.setDirections(result);
+      var legs = result.routes[0].legs || [];
+      var distTotal = 0, tiempoTotal = 0;
+      legs.forEach(function(l){distTotal += l.distance.value; tiempoTotal += l.duration.value;});
+      var distKm = (distTotal/1000).toFixed(1);
+      var minutos = Math.round(tiempoTotal/60);
+      var horas = Math.floor(minutos/60);
+      var mins = minutos%60;
+      var tiempoStr = horas?(horas+"h "+mins+"min"):(mins+" min");
+      var r = document.getElementById("_rtResumen");
+      if(r){
+        r.innerHTML = "<div style='display:flex;gap:1rem;flex-wrap:wrap;align-items:center'>"+
+          "<div><span style='color:var(--tx3);font-size:.7rem'>Pedidos:</span> <b>"+_rt.pedidosOrdenados.length+"</b></div>"+
+          "<div><span style='color:var(--tx3);font-size:.7rem'>Distancia:</span> <b>"+distKm+" km</b></div>"+
+          "<div><span style='color:var(--tx3);font-size:.7rem'>Tiempo:</span> <b>"+tiempoStr+"</b></div>"+
+          "<div style='margin-left:auto'><span style='font-size:.66rem;color:var(--yel)'>Orden manual</span></div>"+
+          "</div>";
+      }
+    }
+  });
+}
+
+// Confirmar la ruta: marcar pedidos como en_reparto + log + abrir Maps con la ruta
+function _rtConfirmarRuta(){
+  if(!_rt.pedidosOrdenados || !_rt.pedidosOrdenados.length){toast("No hay ruta calculada","twarn");return;}
+  if(!confirm("Confirmar ruta de "+_rt.pedidosOrdenados.length+" pedidos? Pasarán a estado \"En reparto\" y los clientes lo verán en su panel.")) return;
+
+  var ahora = new Date().toISOString();
+  var promesas = [];
+  _rt.pedidosOrdenados.forEach(function(p, idx){
+    promesas.push(
+      apiPatch("pedidos_catalogo", {
+        estado_envio: "en_reparto",
+        reparto_at: ahora,
+        reparto_orden: idx + 1
+      }, "id=eq."+p.id).then(function(){
+        // Log del cambio
+        return apiPost("pedidos_estados_log", {
+          pedido_id: p.id,
+          pedido_tabla: "pedidos_catalogo",
+          estado: "en_reparto",
+          nota: "Salió en reparto (ruta de "+_rt.pedidosOrdenados.length+" pedidos, posición "+(idx+1)+")",
+          usuario: VENDEDOR_NOMBRE
+        }).catch(function(e){console.error("[belle] error silencioso log:",e);});
+      })
+    );
+  });
+
+  Promise.all(promesas).then(function(){
+    toast("Ruta confirmada — "+_rt.pedidosOrdenados.length+" pedidos en reparto","tok");
+    // Abrir Google Maps en una pestaña nueva con la ruta navegable
+    _rtAbrirEnGoogleMaps();
+    // Reset y volver
+    _rt.pedidosSeleccionados = [];
+    _rt.puntoPartida = null;
+    _rt.pedidosOrdenados = null;
+    _rt.paso = 1;
+    _rt.subTab = "reparto";
+    loadRutas();
+  }).catch(function(e){
+    console.error("[belle] _rtConfirmarRuta error:",e);
+    toast("Error al confirmar ruta","terr");
+  });
+}
+
+// Abre Google Maps con la ruta navegable (la app del vendedor lo lleva al Maps de su celular si está en mobile)
+function _rtAbrirEnGoogleMaps(){
+  if(!_rt.pedidosOrdenados || !_rt.puntoPartida) return;
+  var url = "https://www.google.com/maps/dir/?api=1";
+  url += "&origin="+_rt.puntoPartida.lat+","+_rt.puntoPartida.lng;
+  var dest = _rt.pedidosOrdenados[_rt.pedidosOrdenados.length-1];
+  url += "&destination="+dest._dir.lat+","+dest._dir.lng;
+  if(_rt.pedidosOrdenados.length > 1){
+    var wps = _rt.pedidosOrdenados.slice(0,-1).map(function(p){return p._dir.lat+","+p._dir.lng;}).join("|");
+    url += "&waypoints="+encodeURIComponent(wps);
+  }
+  url += "&travelmode=driving";
+  window.open(url, "_blank");
+}
+
+// ── SUB-TAB: EN REPARTO ───────────────────────────────────────────────
+function _rtRenderEnReparto(b){
+  var lista = _rt.pedidosEnReparto || [];
+  if(!lista.length){
+    b.innerHTML = "<div class='empty' style='padding:2.5rem 1rem;text-align:center'>"+
+      "<div style='font-size:2.5rem;margin-bottom:.5rem;opacity:.5'>🚚</div>"+
+      "<div style='font-weight:600;font-size:.9rem;color:var(--tx);margin-bottom:.3rem'>No hay pedidos en reparto</div>"+
+      "<div style='font-size:.78rem;color:var(--tx3)'>Los pedidos que confirmes una ruta van a aparecer acá hasta que los marques como entregados.</div>"+
+      "</div>";
+    return;
+  }
+  var h = "<div style='font-size:.78rem;color:var(--tx2);margin-bottom:.7rem'>Pedidos que estás repartiendo ahora:</div>";
+  h += "<div style='display:flex;flex-direction:column;gap:.5rem'>";
+  lista.forEach(function(p){
+    h += "<div style='background:var(--sur);border:1px solid var(--bd);border-radius:8px;padding:.7rem .8rem'>";
+    h += "<div style='display:flex;justify-content:space-between;align-items:center;gap:.5rem;margin-bottom:.3rem'>";
+    h += "<div style='font-size:.85rem;font-weight:600;color:var(--tx)'>🚚 "+(p.nro_orden||"#"+p.id)+"</div>";
+    h += "<div style='font-size:.85rem;font-weight:700;color:var(--acc)'>"+fmt(p.total||0)+"</div>";
+    h += "</div>";
+    h += "<div style='display:flex;gap:.4rem;margin-top:.4rem;flex-wrap:wrap'>";
+    h += "<button class='btn btn-a' style='font-size:.74rem;padding:.35rem .7rem;background:#5a8a4a;border-color:#5a8a4a' onclick='_rtMarcarEntregado("+p.id+")'>✓ Marcar entregado</button>";
+    h += "<button class='btn btn-g' style='font-size:.74rem;padding:.35rem .7rem' onclick='_gestionarPedido(\"web\","+p.id+")'>Gestionar</button>";
+    h += "</div>";
+    h += "</div>";
+  });
+  h += "</div>";
+  b.innerHTML = h;
+}
+
+function _rtMarcarEntregado(pedId){
+  if(!confirm("Marcar este pedido como entregado?")) return;
+  apiPatch("pedidos_catalogo",{estado_envio:"entregado",entregado_at:new Date().toISOString()},"id=eq."+pedId).then(function(){
+    return apiPost("pedidos_estados_log",{
+      pedido_id: pedId,
+      pedido_tabla: "pedidos_catalogo",
+      estado: "entregado",
+      nota: "Entregado por "+VENDEDOR_NOMBRE,
+      usuario: VENDEDOR_NOMBRE
+    }).catch(function(e){console.error("[belle] error silencioso:",e);});
+  }).then(function(){
+    toast("Pedido entregado ✓","tok");
+    loadRutas();
+  }).catch(function(e){
+    console.error("[belle] _rtMarcarEntregado:",e);
+    toast("Error","terr");
+  });
+}
+
+// ── SUB-TAB: MIS DIRECCIONES ─────────────────────────────────────────
+function _rtRenderMisDirecciones(b){
+  var dirs = _rt.vendedorDirs;
+  var h = "";
+  h += "<div style='font-size:.78rem;color:var(--tx2);margin-bottom:.7rem'>Direcciones que usás como punto de partida (ej: tu casa, el depósito, etc):</div>";
+  h += "<button class='btn btn-a' style='margin-bottom:.8rem' onclick='_rtAbrirAddDir(null)'>+ Agregar dirección</button>";
+  if(!dirs.length){
+    h += "<div class='empty'>Sin direcciones guardadas</div>";
+    b.innerHTML = h;return;
+  }
+  h += "<div style='display:flex;flex-direction:column;gap:.5rem'>";
+  dirs.forEach(function(d){
+    h += "<div style='background:var(--sur);border:1px solid "+(d.predeterminada?"var(--acc)":"var(--bd)")+";border-radius:8px;padding:.7rem .85rem'>";
+    h += "<div style='display:flex;justify-content:space-between;align-items:flex-start;gap:.5rem;margin-bottom:.3rem'>";
+    h += "<div style='font-size:.86rem;font-weight:600;color:var(--tx)'>"+(_escNomJS?_escNomJS(d.etiqueta):d.etiqueta)+(d.predeterminada?" <span style=\"font-size:.6rem;color:var(--acc);background:rgba(196,150,90,.15);padding:.05rem .35rem;border-radius:4px;margin-left:.3rem\">PREDETERMINADA</span>":"")+"</div>";
+    h += "</div>";
+    h += "<div style='font-size:.74rem;color:var(--tx2);line-height:1.4'>"+(d.direccion_completa||"")+"</div>";
+    h += "<div style='display:flex;gap:.4rem;margin-top:.5rem;flex-wrap:wrap'>";
+    if(!d.predeterminada) h += "<button class='btn btn-g' style='font-size:.7rem;padding:.3rem .65rem' onclick='_rtMarcarPredet("+d.id+")'>★ Marcar predeterminada</button>";
+    h += "<button class='btn btn-g' style='font-size:.7rem;padding:.3rem .65rem' onclick='_rtAbrirAddDir("+d.id+")'>✎ Editar</button>";
+    h += "<button class='btn btn-g' style='font-size:.7rem;padding:.3rem .65rem;color:var(--red);border-color:var(--red)' onclick='_rtBorrarDir("+d.id+")'>✕ Eliminar</button>";
+    h += "</div>";
+    h += "</div>";
+  });
+  h += "</div>";
+  b.innerHTML = h;
+}
+
+function _rtAbrirAddDir(id){
+  var d = id ? _rt.vendedorDirs.find(function(x){return x.id===id;}) : null;
+  var mo = document.createElement("div");mo.className="mo open";mo.id="_rtMoAddDir";
+  mo.style.zIndex="99999";
+  var h = "<div class='md' style='max-width:560px;width:95%;max-height:90vh;display:flex;flex-direction:column'>";
+  h += "<div class='mh'><div class='mtt'>"+(d?"Editar":"Agregar")+" dirección</div>";
+  h += "<button class='btn btn-g xb' onclick='document.getElementById(\"_rtMoAddDir\").remove()'>✕</button></div>";
+  h += "<div class='mb' style='display:flex;flex-direction:column;gap:.55rem'>";
+  h += "<div style='background:var(--sur2);border:1px solid var(--bd);border-radius:8px;padding:.55rem .7rem'>";
+  h += "<div style='font-size:.66rem;color:var(--tx3);text-transform:uppercase;font-weight:600;margin-bottom:.3rem'>🔍 Buscar en Google Maps</div>";
+  h += "<div style='display:flex;gap:.4rem'>";
+  h += "<input type='text' id='_rtAddDirSearch' placeholder='Calle número, ciudad...' style='flex:1;padding:.45rem .6rem;border:1px solid var(--bd);border-radius:7px;font-size:.84rem;background:var(--sur);color:var(--tx);font-family:inherit' onkeydown='if(event.key===&quot;Enter&quot;){event.preventDefault();_rtAddDirBuscar();}'>";
+  h += "<button class='btn btn-a' onclick='_rtAddDirBuscar()' style='padding:.4rem .8rem'>Buscar</button>";
+  h += "</div>";
+  h += "</div>";
+  h += "<div id='_rtAddDirMap' style='width:100%;height:200px;border-radius:8px;border:1px solid var(--bd);background:var(--sur2)'></div>";
+  h += "<div><label style='font-size:.66rem;color:var(--tx3);text-transform:uppercase;font-weight:600'>Etiqueta *</label>";
+  h += "<input type='text' id='_rtAddDirEtiq' placeholder='Casa, Depósito, etc' value='"+(d?(_escNomJS?_escNomJS(d.etiqueta):d.etiqueta):"")+"' style='width:100%;padding:.45rem .6rem;border:1px solid var(--bd);border-radius:7px;font-size:.84rem;background:var(--sur2);color:var(--tx);margin-top:.2rem;box-sizing:border-box;font-family:inherit'></div>";
+  h += "<div><label style='font-size:.66rem;color:var(--tx3);text-transform:uppercase;font-weight:600'>Dirección completa *</label>";
+  h += "<input type='text' id='_rtAddDirCompleta' value='"+(d?(_escNomJS?_escNomJS(d.direccion_completa||""):(d.direccion_completa||"")):"")+"' readonly style='width:100%;padding:.45rem .6rem;border:1px solid var(--bd);border-radius:7px;font-size:.84rem;background:var(--sur2);color:var(--tx2);margin-top:.2rem;box-sizing:border-box;font-family:inherit'></div>";
+  h += "<label style='display:flex;align-items:center;gap:.5rem;font-size:.78rem;cursor:pointer'><input type='checkbox' id='_rtAddDirPredet' "+(d&&d.predeterminada?"checked":"")+"> Marcar como predeterminada</label>";
+  h += "<div style='display:flex;gap:.5rem;justify-content:flex-end;margin-top:.4rem'>";
+  h += "<button class='btn btn-g' onclick='document.getElementById(\"_rtMoAddDir\").remove()'>Cancelar</button>";
+  h += "<button class='btn btn-a' onclick='_rtGuardarDir("+(id||"null")+")'>Guardar</button>";
+  h += "</div>";
+  h += "</div></div>";
+  mo.innerHTML = h;
+  document.body.appendChild(mo);
+  mo.addEventListener("click",function(e){if(e.target===mo)mo.remove();});
+
+  // Inicializar mini mapa
+  setTimeout(function(){
+    var mapEl = document.getElementById("_rtAddDirMap");
+    if(!mapEl||!window.google||!window.google.maps) return;
+    var initial = d && d.lat ? {lat:d.lat,lng:d.lng} : {lat:-31.4201,lng:-64.1888};
+    _rtAddDir = {map: new google.maps.Map(mapEl,{center:initial,zoom:d?16:11,streetViewControl:false,fullscreenControl:false,mapTypeControl:false,gestureHandling:"greedy"}), pos:d?{lat:d.lat,lng:d.lng}:null, completa:d?d.direccion_completa:""};
+    _rtAddDir.marker = new google.maps.Marker({map:_rtAddDir.map,position:initial,draggable:true});
+    _rtAddDir.marker.addListener("dragend",function(){
+      var p=_rtAddDir.marker.getPosition();
+      _rtAddDir.pos = {lat:p.lat(),lng:p.lng()};
+      _rtAddDirReverse(_rtAddDir.pos);
+    });
+    // Autocomplete del input search
+    var inp=document.getElementById("_rtAddDirSearch");
+    if(inp && google.maps.places && google.maps.places.Autocomplete){
+      try {
+        var ac = new google.maps.places.Autocomplete(inp,{fields:["formatted_address","geometry"],types:["address"]});
+        ac.addListener("place_changed",function(){
+          var p = ac.getPlace();
+          if(p && p.geometry && p.geometry.location){
+            var loc = p.geometry.location;
+            _rtAddDir.pos = {lat:loc.lat(),lng:loc.lng()};
+            _rtAddDir.completa = p.formatted_address || "";
+            _rtAddDir.map.setCenter(_rtAddDir.pos);
+            _rtAddDir.map.setZoom(17);
+            _rtAddDir.marker.setPosition(_rtAddDir.pos);
+            var inpC=document.getElementById("_rtAddDirCompleta");if(inpC)inpC.value=_rtAddDir.completa;
+          }
+        });
+      } catch(e){console.error("[belle] _rtAddDir autocomplete:",e);}
+    }
+  }, 80);
+}
+
+var _rtAddDir = null;
+
+function _rtAddDirBuscar(){
+  var inp=document.getElementById("_rtAddDirSearch");
+  var q=(inp&&inp.value||"").trim();
+  if(!q){toast("Escribí una dirección","twarn");return;}
+  if(!window.google||!window.google.maps)return;
+  if(!_rt.geocoder) _rt.geocoder = new google.maps.Geocoder();
+  _rt.geocoder.geocode({address:q,region:"AR"},function(res,status){
+    if(status==="OK"&&res&&res[0]){
+      var r=res[0];
+      _rtAddDir.pos = {lat:r.geometry.location.lat(),lng:r.geometry.location.lng()};
+      _rtAddDir.completa = r.formatted_address || "";
+      _rtAddDir.map.setCenter(_rtAddDir.pos);
+      _rtAddDir.map.setZoom(17);
+      _rtAddDir.marker.setPosition(_rtAddDir.pos);
+      var inpC=document.getElementById("_rtAddDirCompleta");if(inpC)inpC.value=_rtAddDir.completa;
+    } else toast("No se encontró","twarn");
+  });
+}
+
+function _rtAddDirReverse(pos){
+  if(!_rt.geocoder) _rt.geocoder = new google.maps.Geocoder();
+  _rt.geocoder.geocode({location:pos},function(res,status){
+    if(status==="OK"&&res&&res[0]){
+      _rtAddDir.completa = res[0].formatted_address || "";
+      var inpC=document.getElementById("_rtAddDirCompleta");if(inpC)inpC.value=_rtAddDir.completa;
+    }
+  });
+}
+
+function _rtGuardarDir(id){
+  var etiq=(document.getElementById("_rtAddDirEtiq")||{value:""}).value.trim();
+  var completa=(document.getElementById("_rtAddDirCompleta")||{value:""}).value.trim();
+  var predet=(document.getElementById("_rtAddDirPredet")||{checked:false}).checked;
+  if(!etiq){toast("Falta la etiqueta","twarn");return;}
+  if(!completa||!_rtAddDir||!_rtAddDir.pos){toast("Buscá una dirección en el mapa","twarn");return;}
+
+  var data = {
+    vendedor_id: VENDEDOR_ID,
+    etiqueta: etiq,
+    direccion_completa: completa,
+    lat: _rtAddDir.pos.lat,
+    lng: _rtAddDir.pos.lng,
+    predeterminada: predet,
+    updated_at: new Date().toISOString()
+  };
+
+  // Si va a ser predeterminada, primero desmarcar las otras
+  var prep = predet
+    ? apiPatch("vendedores_direcciones",{predeterminada:false},"vendedor_id=eq."+VENDEDOR_ID)
+    : Promise.resolve();
+
+  prep.then(function(){
+    if(id){
+      return apiPatch("vendedores_direcciones",data,"id=eq."+id);
+    } else {
+      return apiPost("vendedores_direcciones",data);
+    }
+  }).then(function(){
+    toast("Dirección guardada","tok");
+    var mo=document.getElementById("_rtMoAddDir");if(mo)mo.remove();
+    loadRutas();
+  }).catch(function(e){
+    console.error("[belle] _rtGuardarDir:",e);
+    toast("Error al guardar","terr");
+  });
+}
+
+function _rtMarcarPredet(id){
+  apiPatch("vendedores_direcciones",{predeterminada:false},"vendedor_id=eq."+VENDEDOR_ID).then(function(){
+    return apiPatch("vendedores_direcciones",{predeterminada:true},"id=eq."+id);
+  }).then(function(){
+    toast("Predeterminada actualizada","tok");loadRutas();
+  }).catch(function(e){console.error("[belle] _rtMarcarPredet:",e);toast("Error","terr");});
+}
+
+function _rtBorrarDir(id){
+  if(!confirm("Eliminar esta dirección?"))return;
+  apiDelete("vendedores_direcciones","id=eq."+id).then(function(){
+    toast("Eliminada","tok");loadRutas();
+  }).catch(function(e){console.error("[belle] _rtBorrarDir:",e);toast("Error","terr");});
+}
+
 </script>
+<!-- Google Maps JavaScript API + Places + Directions + Geometry (FASE B - Rutas) -->
+<script src="https://maps.googleapis.com/maps/api/js?key=AIzaSyDNoIeGswrjA2FcL2G4ZUPi6iu5Wzf68cY&libraries=places,geometry&loading=async&language=es&region=AR" async defer></script>
 </head>
 <body>
 
@@ -8987,6 +9830,7 @@ function _loadObjetivosVendedor(){
     <div class="tab" onclick="navTo('clientes-vend',this)">Mis Clientes</div>
     <div class="tab act" onclick="navTo('catalogo',this)">Catalogo</div>
     <div class="tab" onclick="navTo('pedidos-web',this)">Pedidos<span class="dot" id="dotPedidos"></span></div>
+    <div class="tab" onclick="navTo('rutas',this)">Rutas<span class="dot" id="dotRutas"></span></div>
     <div class="tab" onclick="navTo('transferidas',this)">Transferidas<span class="dot" id="dotTransf"></span></div>
     <div class="tab" onclick="navTo('historial',this)">Historial</div>
     <div class="tab" onclick="navTo('movimientos',this)">Movimientos</div>
@@ -9004,6 +9848,7 @@ function _loadObjetivosVendedor(){
     <div class="page" id="pg-clientes-vend"></div>
     <div class="page act" id="pg-catalogo"></div>
     <div class="page" id="pg-pedidos-web"></div>
+    <div class="page" id="pg-rutas" style="padding:.9rem 1rem"></div>
     <div class="page" id="pg-transferidas"></div>
     <div class="page" id="pg-historial"></div>
     <div class="page" id="pg-movimientos"></div>
