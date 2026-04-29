@@ -1662,7 +1662,7 @@ function _guardarNuevoCliente(){
 // ── Ficha del cliente con datos editables y toggle CC ──
 function abrirFichaCliente(clienteId){
   var mo=document.createElement("div");mo.className="mo open";mo.id="_moFichaCliente";
-  mo.style.zIndex="99999";
+  mo.style.zIndex="9999";
   var h="<div class='md' style='max-width:520px;width:95%;max-height:90vh;display:flex;flex-direction:column'>";
   h+="<div class='mh'><div class='mtt'>👤 Ficha cliente</div>";
   h+="<button class='btn btn-g xb' onclick='document.getElementById(\"_moFichaCliente\").remove()'>✕</button></div>";
@@ -1827,6 +1827,49 @@ function _guardarFichaCliente(clienteId){
 
 // ── Cargar pedido a cliente (abre modal con catálogo simplificado) ──
 function vcCargarPedido(clienteId, clienteNombre, listaPre){
+  // Nuevo flujo: en lugar de un modal aparte, asignamos el cliente al carrito normal
+  // y abrimos el catálogo (drawer del carrito). El vendedor agrega productos como siempre
+  // y al confirmar el pedido queda asignado a este cliente.
+  apiGet("clientes","select=id,nombre,apellido,telefono_principal,cuenta_corriente_habilitada&id=eq."+clienteId+"&limit=1").then(function(rows){
+    var c = rows && rows[0];
+    if(!c){ toast("Cliente no encontrado","terr"); return; }
+    // Si ya hay un cliente distinto en el carrito, avisar
+    if(_carritoCliente && _carritoCliente.id && _carritoCliente.id !== c.id){
+      if(!confirm("Ya hay otro cliente asignado al carrito ("+(_carritoCliente.nombre||"")+"). ¿Reemplazar por "+(c.nombre||"")+"?")) return;
+    }
+    _carritoCliente = {
+      id: c.id, nombre: c.nombre, apellido: c.apellido,
+      telefono: c.telefono_principal,
+      cuenta_corriente_habilitada: c.cuenta_corriente_habilitada,
+      es_cc: false
+    };
+    // Cerrar la ficha si está abierta
+    var fichaMo = document.getElementById("_moFichaCliente");
+    if(fichaMo) fichaMo.remove();
+    // Actualizar UI del drawer si hay
+    var info = document.getElementById("drawerClienteInfo");
+    if(info) info.innerHTML = "<span style='font-weight:600;color:var(--tx)'>"+(c.nombre||"")+" "+(c.apellido||"")+"</span> <span style='color:var(--tx3);font-size:.7rem'>#"+c.id+"</span>";
+    var ccToggle = document.getElementById("drawerCCToggle");
+    if(ccToggle) ccToggle.style.display = c.cuenta_corriente_habilitada ? "" : "none";
+    var ccCheck = document.getElementById("drawerEsCC");
+    if(ccCheck) ccCheck.checked = false;
+    // Toast informativo y volver al catálogo
+    toast((c.nombre||"")+" asignado — agregá productos al carrito","tok");
+    // Si la pestaña actual no es la de catálogo, ir ahí (con el elemento del tab)
+    if(typeof navTo === "function"){
+      try {
+        var tabCat = document.querySelector('.tab[onclick*="catalogo"]');
+        navTo("catalogo", tabCat);
+      } catch(e){ console.error("[belle] vcCargarPedido navTo error:",e); }
+    }
+  }).catch(function(e){
+    console.error("[belle] vcCargarPedido (nuevo flow) error:",e);
+    toast("Error al asignar cliente","terr");
+  });
+}
+
+// Función vieja del modal-pedido — ya no se usa pero la dejo por si algo la invoca
+function _vcCargarPedidoModalViejo(clienteId, clienteNombre, listaPre){
   var mo=document.createElement("div");mo.className="mo open";mo.id="_moVcPedido";
   var segKey={minorista:"precio_min_ars",mayorista:"precio_may_ars",mayorista_vip:"precio_may_ars"}[listaPre]||"precio_min_ars";
   var segLabel={minorista:"Minorista",mayorista:"Mayorista",mayorista_vip:"VIP"}[listaPre]||"Minorista";
@@ -2046,6 +2089,7 @@ function vcVerHistorial(clienteId, clienteNombre){
 // ── Ver cuenta corriente del cliente ──────────────────────────
 function vcVerCC(clienteId, clienteNombre){
   var mo=document.createElement("div");mo.className="mo open";mo.id="_moVcCC";
+    mo.style.zIndex="99999";
   mo.innerHTML="<div class='md' style='max-width:520px;width:95%;max-height:85vh;display:flex;flex-direction:column'>"+
     "<div class='mh'><div class='mtt'>💳 CC — "+(clienteNombre||"Cliente")+"</div>"+
     "<button class='btn btn-g xb' onclick='document.getElementById(\"_moVcCC\").remove()'>✕</button></div>"+
@@ -2146,7 +2190,7 @@ function abrirBuscadorClienteParaPedido(pedId,clienteActualId){
 // UI compartida del modal buscador
 function _abrirBuscadorClienteUI(titulo,mostrarQuitar){
   var mo=document.createElement("div");mo.className="mo open";mo.id="_moBuscarCliente";
-  mo.style.zIndex="99999"; // por si está sobre otro modal
+  mo.style.zIndex="999999"; // por si está sobre otro modal
   mo.innerHTML="<div class='md' style='max-width:460px;width:95%'>"+
     "<div class='mh'><div class='mtt'>"+titulo+"</div>"+
     "<button class='btn btn-g xb' onclick='document.getElementById(\"_moBuscarCliente\").remove()'>✕</button></div>"+
@@ -10449,7 +10493,25 @@ function _vcPuedeOperarCliente(cliente){
 // ════════════════════════════════════════════════════════════════════
 // MODAL: Registrar pago FIFO
 // ════════════════════════════════════════════════════════════════════
+
+// Cerrar un modal hijo y reabrir la ficha del cliente si estaba abierta antes
+function _vcCerrarYReabrirFicha(modalId){
+  var _m = document.getElementById(modalId);
+  if(_m) _m.remove();
+  if(window._vcFichaPrevId && typeof abrirFichaCliente === "function"){
+    var id = window._vcFichaPrevId;
+    window._vcFichaPrevId = null;
+    setTimeout(function(){ abrirFichaCliente(id); }, 50);
+  }
+}
+
 function vcAbrirRegistrarPagoFIFO(clienteId, clienteNombre){
+  // Cerrar la ficha del cliente si está abierta y guardar referencia para reabrirla luego
+  var _fichaPrev = document.getElementById("_moFichaCliente");
+  if(_fichaPrev){
+    window._vcFichaPrevId = clienteId;
+    _fichaPrev.remove();
+  }
   // Cargar pedidos activos del cliente para mostrar a qué se va a aplicar
   Promise.all([
     apiGet("clientes","select=*&id=eq."+clienteId+"&limit=1"),
@@ -10474,11 +10536,12 @@ function vcAbrirRegistrarPagoFIFO(clienteId, clienteNombre){
 
     var mo = document.createElement("div");
     mo.className = "mo open"; mo.id = "_moVcPagoFIFO";
+    mo.style.zIndex="999999";
     var nombre = clienteNombre || ((c.nombre||"")+" "+(c.apellido||"")).trim() || "Cliente";
 
     var h = "<div class='md' style='max-width:560px;width:95%;max-height:90vh;display:flex;flex-direction:column'>";
     h += "<div class='mh'><div class='mtt'>&#128176; Registrar pago — "+_vcEsc(nombre)+"</div>";
-    h += "<button class='btn btn-g xb' onclick='var _m=document.getElementById(\"_moVcPagoFIFO\");if(_m)_m.remove()'>&#x2715;</button></div>";
+    h += "<button class='btn btn-g xb' onclick='_vcCerrarYReabrirFicha(\"_moVcPagoFIFO\")'>&#x2715;</button></div>";
     h += "<div class='mb' style='overflow-y:auto;flex:1;display:flex;flex-direction:column;gap:.7rem'>";
 
     if(!pendientes.length){
@@ -10541,7 +10604,7 @@ function vcAbrirRegistrarPagoFIFO(clienteId, clienteNombre){
 
     // Botones
     h += "<div style='display:flex;gap:.5rem;justify-content:flex-end;padding-top:.4rem;border-top:1px solid var(--bd)'>";
-    h += "<button class='btn btn-g' onclick='var _m=document.getElementById(\"_moVcPagoFIFO\");if(_m)_m.remove()'>Cancelar</button>";
+    h += "<button class='btn btn-g' onclick='_vcCerrarYReabrirFicha(\"_moVcPagoFIFO\")'>Cancelar</button>";
     h += "<button class='btn btn-a' id='_vcFIFOBtnConfirmar' onclick='_vcFIFOConfirmarPago("+clienteId+")' disabled>Confirmar pago</button>";
     h += "</div>";
 
@@ -10751,12 +10814,18 @@ function _vcEsc(s){
 
 // Si la ficha del cliente está abierta, refrescarla
 function _vcRecargarFichaSiAbierta(clienteId){
+  // Si la ficha está abierta, refrescarla
   var mo = document.getElementById("_moFichaCliente");
-  if(!mo) return;
-  // Re-abrir la ficha
-  if(typeof abrirFichaCliente === "function"){
+  if(mo && typeof abrirFichaCliente === "function"){
     mo.remove();
     abrirFichaCliente(clienteId);
+    return;
+  }
+  // Si la ficha estaba abierta antes (la cerramos al abrir un modal hijo), reabrirla
+  if(window._vcFichaPrevId && typeof abrirFichaCliente === "function"){
+    var id = window._vcFichaPrevId;
+    window._vcFichaPrevId = null;
+    setTimeout(function(){ abrirFichaCliente(id); }, 50);
   }
 }
 
@@ -10764,6 +10833,12 @@ function _vcRecargarFichaSiAbierta(clienteId){
 // MODAL: Configurar cuota acordada
 // ════════════════════════════════════════════════════════════════════
 function vcAbrirCuotaModal(clienteId, clienteNombre){
+  // Cerrar la ficha del cliente si está abierta y guardar referencia para reabrirla luego
+  var _fichaPrev = document.getElementById("_moFichaCliente");
+  if(_fichaPrev){
+    window._vcFichaPrevId = clienteId;
+    _fichaPrev.remove();
+  }
   apiGet("clientes","select=*&id=eq."+clienteId+"&limit=1").then(function(rows){
     var c = rows&&rows[0] ? rows[0] : null;
     if(!c){ toast("Cliente no encontrado","terr"); return; }
@@ -10772,11 +10847,12 @@ function vcAbrirCuotaModal(clienteId, clienteNombre){
 
     var mo = document.createElement("div");
     mo.className = "mo open"; mo.id = "_moVcCuota";
+    mo.style.zIndex="999999";
     var hayCuota = c.cuota_proxima_monto && c.cuota_proxima_fecha;
 
     var h = "<div class='md' style='max-width:480px;width:95%;max-height:90vh;display:flex;flex-direction:column'>";
     h += "<div class='mh'><div class='mtt'>&#128197; Cuota acordada — "+_vcEsc(nombre)+"</div>";
-    h += "<button class='btn btn-g xb' onclick='var _m=document.getElementById(\"_moVcCuota\");if(_m)_m.remove()'>&#x2715;</button></div>";
+    h += "<button class='btn btn-g xb' onclick='_vcCerrarYReabrirFicha(\"_moVcCuota\")'>&#x2715;</button></div>";
     h += "<div class='mb' style='overflow-y:auto;flex:1'>";
 
     h += "<div style='font-size:.78rem;color:var(--tx2);margin-bottom:.7rem;line-height:1.4'>Configurá una cuota que el cliente se comprometió a pagar. Si no la abona dentro de los días de gracia, se bloquea automáticamente para nuevos pedidos.</div>";
@@ -10798,7 +10874,7 @@ function vcAbrirCuotaModal(clienteId, clienteNombre){
       h += "<button class='btn btn-g' style='color:var(--red);border-color:var(--red)' onclick='_vcLimpiarCuota("+clienteId+")'>&#128465; Quitar cuota</button>";
     }
     h += "<div style='flex:1'></div>";
-    h += "<button class='btn btn-g' onclick='var _m=document.getElementById(\"_moVcCuota\");if(_m)_m.remove()'>Cancelar</button>";
+    h += "<button class='btn btn-g' onclick='_vcCerrarYReabrirFicha(\"_moVcCuota\")'>Cancelar</button>";
     h += "<button class='btn btn-a' onclick='_vcGuardarCuota("+clienteId+")'>Guardar cuota</button>";
     h += "</div>";
 
@@ -10855,6 +10931,12 @@ function _vcLimpiarCuota(clienteId){
 // MODAL: Asignar límite de crédito
 // ════════════════════════════════════════════════════════════════════
 function vcAbrirCreditoModal(clienteId, clienteNombre){
+  // Cerrar la ficha del cliente si está abierta y guardar referencia para reabrirla luego
+  var _fichaPrev = document.getElementById("_moFichaCliente");
+  if(_fichaPrev){
+    window._vcFichaPrevId = clienteId;
+    _fichaPrev.remove();
+  }
   apiGet("clientes","select=*&id=eq."+clienteId+"&limit=1").then(function(rows){
     var c = rows&&rows[0] ? rows[0] : null;
     if(!c){ toast("Cliente no encontrado","terr"); return; }
@@ -10864,16 +10946,17 @@ function vcAbrirCreditoModal(clienteId, clienteNombre){
     var mo = document.createElement("div");
     mo.className = "mo open"; mo.id = "_moVcCredito";
 
+    mo.style.zIndex="99999";
     var h = "<div class='md' style='max-width:440px;width:95%;display:flex;flex-direction:column'>";
     h += "<div class='mh'><div class='mtt'>&#128081; Crédito asignado — "+_vcEsc(nombre)+"</div>";
-    h += "<button class='btn btn-g xb' onclick='var _m=document.getElementById(\"_moVcCredito\");if(_m)_m.remove()'>&#x2715;</button></div>";
+    h += "<button class='btn btn-g xb' onclick='_vcCerrarYReabrirFicha(\"_moVcCredito\")'>&#x2715;</button></div>";
     h += "<div class='mb'>";
     h += "<div style='font-size:.78rem;color:var(--tx2);margin-bottom:.7rem;line-height:1.4'>Establecé el monto máximo de crédito que la empresa le otorga. El cliente lo verá como su línea de crédito disponible.</div>";
     h += "<label style='font-size:.66rem;color:var(--tx3);text-transform:uppercase;font-weight:600'>Crédito total ($)</label>";
     h += "<input type='number' id='_vcCreditoMonto' step='1000' min='0' value='"+(c.limite_credito||0)+"' style='width:100%;padding:.6rem .7rem;border:1px solid var(--bd);border-radius:6px;font-size:1.05rem;font-weight:600;background:var(--sur2);color:var(--tx);margin-top:.2rem'>";
     h += "<div style='font-size:.62rem;color:var(--tx3);margin-top:.2rem'>Poné 0 para quitar el límite asignado</div>";
     h += "<div style='display:flex;gap:.5rem;justify-content:flex-end;padding-top:.8rem;margin-top:.8rem;border-top:1px solid var(--bd)'>";
-    h += "<button class='btn btn-g' onclick='var _m=document.getElementById(\"_moVcCredito\");if(_m)_m.remove()'>Cancelar</button>";
+    h += "<button class='btn btn-g' onclick='_vcCerrarYReabrirFicha(\"_moVcCredito\")'>Cancelar</button>";
     h += "<button class='btn btn-a' onclick='_vcGuardarCredito("+clienteId+")'>Guardar</button>";
     h += "</div></div></div>";
     mo.innerHTML = h;
