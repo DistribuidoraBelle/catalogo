@@ -2090,24 +2090,14 @@ function vcVerHistorial(clienteId, clienteNombre){
 function vcVerCC(clienteId, clienteNombre){
   var mo=document.createElement("div");mo.className="mo open";mo.id="_moVcCC";
     mo.style.zIndex="99999";
-  mo.innerHTML="<div class='md' style='max-width:540px;width:95%;max-height:88vh;display:flex;flex-direction:column'>"+
+  mo.innerHTML="<div class='md' style='max-width:560px;width:95%;max-height:90vh;display:flex;flex-direction:column'>"+
     "<div class='mh'><div class='mtt'>💳 CC — "+(clienteNombre||"Cliente")+"</div>"+
     "<button class='btn btn-g xb' onclick='document.getElementById(\"_moVcCC\").remove()'>✕</button></div>"+
-    "<div class='mb' style='overflow-y:auto;flex:1'>"+
-      // Contenedor que se rellena con resumen + movimientos (lo mismo que ve el cliente)
+    "<div class='mb' style='overflow-y:auto;flex:1;display:flex;flex-direction:column;gap:.7rem'>"+
+      // Resumen del cliente (igual que el cliente ve en su panel)
       "<div id='_vcCCContenido'><div class='loading'><div class='spin'></div></div></div>"+
-      // Formulario FIJO de registrar pago — NO se borra al recargar
-      "<div style='margin-top:1rem;padding-top:.8rem;border-top:1px solid var(--bd)'>"+
-        "<div style='font-size:.78rem;font-weight:600;margin-bottom:.4rem;color:var(--tx)'>Registrar pago</div>"+
-        "<div style='display:flex;gap:.4rem;flex-wrap:wrap'>"+
-          "<input type='number' id='_vcCCMonto' placeholder='Monto $' style='flex:1;min-width:100px;padding:.4rem .6rem;border:1px solid var(--bd);border-radius:6px;font-size:.82rem;background:var(--sur2);color:var(--tx)'>"+
-          "<select id='_vcCCForma' style='padding:.4rem .6rem;border:1px solid var(--bd);border-radius:6px;font-size:.82rem;background:var(--sur2);color:var(--tx)'>"+
-            "<option value='efectivo'>Efectivo</option><option value='transferencia'>Transferencia</option><option value='tarjeta'>Tarjeta</option>"+
-          "</select>"+
-          "<button class='btn btn-a' style='font-size:.78rem' onclick='_vcRegistrarPago("+clienteId+")'>Registrar</button>"+
-        "</div>"+
-        "<div style='font-size:.6rem;color:var(--tx3);margin-top:.3rem;font-style:italic'>Tip: para pagos FIFO con vista previa, usá el botón \"Registrar pago\" del bloque CC en la ficha del cliente.</div>"+
-      "</div>"+
+      // Sección FIFO completa (pedidos pendientes + monto + preview + confirmar)
+      "<div id='_vcCCFIFOSection' style='display:none'></div>"+
     "</div></div>";
   document.body.appendChild(mo);
   // Cargar todo: cliente entero, pedidos activos, pagos nuevos, movimientos viejos
@@ -2298,6 +2288,93 @@ function vcVerCC(clienteId, clienteNombre){
     }
 
     el.innerHTML = h;
+
+    // ════════════════════════════════════════════════════════════════
+    // SECCIÓN FIFO — registrar pago con preview en vivo (igual que el modal "Registrar pago")
+    // ════════════════════════════════════════════════════════════════
+    var fifoSection = document.getElementById("_vcCCFIFOSection");
+    if(!fifoSection) return;
+
+    // Solo el vendedor asignado (o sin asignar) puede registrar pagos
+    var puedeRegistrar = (typeof _vcPuedeOperarCliente === "function") ? _vcPuedeOperarCliente(c) : true;
+    if(!puedeRegistrar){
+      fifoSection.style.display = "";
+      fifoSection.innerHTML = "<div style='background:var(--sur2);border:1px dashed var(--bd);border-radius:8px;padding:.7rem .9rem;text-align:center;font-size:.74rem;color:var(--tx3)'>Solo el vendedor asignado puede registrar pagos a este cliente.</div>";
+      return;
+    }
+
+    // Filtrar pedidos con saldo pendiente (no cancelados, no cobrados completos)
+    var pendientesFIFO = pedidos.filter(function(p){
+      var saldo = (parseFloat(p.total)||0) - (parseFloat(p.cobrado_total)||0);
+      return saldo > 0.01;
+    });
+    var totalPendienteFIFO = pendientesFIFO.reduce(function(s,p){
+      return s + ((parseFloat(p.total)||0) - (parseFloat(p.cobrado_total)||0));
+    }, 0);
+
+    // Guardar para que _vcFIFOActualizarPreview y _vcFIFOConfirmarPago funcionen
+    window._vcFIFOPendientes = pendientesFIFO;
+    window._vcFIFOClienteData = c;
+
+    var hf = "";
+    hf += "<div style='border-top:1px solid var(--bd);padding-top:.85rem;display:flex;flex-direction:column;gap:.7rem'>";
+    hf += "<div style='font-size:.78rem;font-weight:700;color:var(--tx);text-transform:uppercase;letter-spacing:.04em'>&#128176; Registrar pago</div>";
+
+    // Listado de pedidos pendientes (si hay)
+    if(!pendientesFIFO.length){
+      hf += "<div style='background:rgba(76,175,130,.1);border:1px solid rgba(76,175,130,.3);border-radius:8px;padding:.7rem;text-align:center'>";
+      hf += "<div style='font-size:.82rem;color:var(--green);font-weight:600'>&#10003; Cliente al día</div>";
+      hf += "<div style='font-size:.7rem;color:var(--tx3);margin-top:.2rem'>No hay pedidos pendientes. Si igual paga, queda como saldo a favor.</div>";
+      hf += "</div>";
+    } else {
+      hf += "<div style='background:var(--sur2);border-radius:8px;padding:.55rem .75rem'>";
+      hf += "<div style='font-size:.68rem;color:var(--tx3);text-transform:uppercase;font-weight:600;margin-bottom:.35rem'>Pedidos pendientes ("+pendientesFIFO.length+")</div>";
+      hf += "<div style='font-size:.64rem;color:var(--tx3);margin-bottom:.45rem'>Aplicación FIFO: el más viejo primero</div>";
+      pendientesFIFO.forEach(function(p, i){
+        var saldoPed = (parseFloat(p.total)||0) - (parseFloat(p.cobrado_total)||0);
+        var fechaPed = new Date(p.created_at).toLocaleDateString("es-AR",{day:"2-digit",month:"2-digit",year:"2-digit"});
+        hf += "<div style='display:flex;justify-content:space-between;padding:.28rem 0;border-bottom:1px solid var(--bd);font-size:.76rem'>";
+        hf += "<div><span style='color:var(--tx3);font-size:.64rem'>"+(i+1)+".</span> <b>"+(p.nro_orden||"#"+p.id)+"</b> <span style='color:var(--tx3);font-size:.68rem'>"+fechaPed+"</span></div>";
+        hf += "<div style='text-align:right'>";
+        hf += "<div style='font-weight:600'>"+fmt(saldoPed)+"</div>";
+        if(parseFloat(p.cobrado_total)>0){
+          hf += "<div style='font-size:.6rem;color:var(--tx3)'>de "+fmt(p.total)+"</div>";
+        }
+        hf += "</div></div>";
+      });
+      hf += "<div style='display:flex;justify-content:space-between;padding-top:.45rem;margin-top:.3rem;border-top:1px solid var(--bd);font-size:.82rem;font-weight:700'>";
+      hf += "<span>Total adeudado:</span><span style='color:var(--red)'>"+fmt(totalPendienteFIFO)+"</span>";
+      hf += "</div></div>";
+    }
+
+    // Form de pago (mismos IDs que el modal Registrar pago para reusar funciones)
+    hf += "<div style='background:var(--sur);border:1px solid var(--bd);border-radius:8px;padding:.65rem .8rem'>";
+    hf += "<div style='font-size:.68rem;color:var(--tx3);text-transform:uppercase;font-weight:600;margin-bottom:.45rem'>Datos del pago</div>";
+    hf += "<div style='display:grid;grid-template-columns:2fr 1fr;gap:.5rem;margin-bottom:.45rem'>";
+    hf += "<div><label style='font-size:.64rem;color:var(--tx3);text-transform:uppercase;font-weight:600'>Monto $ *</label>";
+    hf += "<input type='number' id='_vcFIFOMonto' step='1' min='1' oninput='_vcFIFOActualizarPreview("+clienteId+")' placeholder='0' style='width:100%;padding:.45rem .65rem;border:1px solid var(--bd);border-radius:6px;font-size:.95rem;font-weight:600;background:var(--sur2);color:var(--tx);margin-top:.2rem'></div>";
+    hf += "<div><label style='font-size:.64rem;color:var(--tx3);text-transform:uppercase;font-weight:600'>Forma</label>";
+    hf += "<select id='_vcFIFOForma' style='width:100%;padding:.45rem .5rem;border:1px solid var(--bd);border-radius:6px;font-size:.82rem;background:var(--sur2);color:var(--tx);margin-top:.2rem'>";
+    hf += "<option value='efectivo'>Efectivo</option><option value='transferencia'>Transferencia</option><option value='tarjeta'>Tarjeta</option><option value='otro'>Otro</option>";
+    hf += "</select></div></div>";
+    hf += "<div style='margin-bottom:.45rem'><label style='font-size:.64rem;color:var(--tx3);text-transform:uppercase;font-weight:600'>Fecha</label>";
+    hf += "<input type='date' id='_vcFIFOFecha' value='"+new Date().toISOString().slice(0,10)+"' style='width:100%;padding:.45rem .65rem;border:1px solid var(--bd);border-radius:6px;font-size:.82rem;background:var(--sur2);color:var(--tx);margin-top:.2rem'></div>";
+    hf += "<div><label style='font-size:.64rem;color:var(--tx3);text-transform:uppercase;font-weight:600'>Nota (opcional)</label>";
+    hf += "<input type='text' id='_vcFIFONota' placeholder='Ej: pago parcial primera semana' style='width:100%;padding:.45rem .65rem;border:1px solid var(--bd);border-radius:6px;font-size:.82rem;background:var(--sur2);color:var(--tx);margin-top:.2rem'></div>";
+    hf += "</div>";
+
+    // Preview FIFO en vivo (lo llena _vcFIFOActualizarPreview)
+    hf += "<div id='_vcFIFOPreview' style='display:none'></div>";
+
+    // Botón confirmar
+    hf += "<div style='display:flex;gap:.5rem;justify-content:flex-end'>";
+    hf += "<button class='btn btn-a' id='_vcFIFOBtnConfirmar' onclick='_vcFIFOConfirmarPago("+clienteId+")' disabled>Confirmar pago</button>";
+    hf += "</div>";
+
+    hf += "</div>"; // fin sección FIFO
+
+    fifoSection.style.display = "";
+    fifoSection.innerHTML = hf;
   }).catch(function(e){
     console.error("[belle] vcVerCC error:",e);
     var el=document.getElementById("_vcCCContenido");
@@ -10825,7 +10902,7 @@ function _vcFIFOActualizarPreview(clienteId){
   });
   var saldoAFavor = restante > 0.01 ? restante : 0;
 
-  var h = "<div style='background:linear-gradient(135deg,#fdf8f0,#faf5ec);border:1px solid var(--acc);border-radius:8px;padding:.6rem .8rem'>";
+  var h = "<div style='background:rgba(196,150,90,.08);border:1px solid var(--acc);border-radius:8px;padding:.6rem .8rem'>";
   h += "<div style='font-size:.7rem;color:var(--acc);text-transform:uppercase;font-weight:700;margin-bottom:.4rem'>Vista previa</div>";
 
   if(!aplicaciones.length){
@@ -10834,7 +10911,7 @@ function _vcFIFOActualizarPreview(clienteId){
     h += "<div style='font-size:.74rem;color:var(--tx2);margin-bottom:.45rem'>Se aplicarán <b>"+fmt(monto)+"</b> así:</div>";
     aplicaciones.forEach(function(a){
       var p = a.pedido;
-      h += "<div style='display:flex;justify-content:space-between;padding:.3rem .4rem;background:#fff;border-radius:5px;margin-bottom:.25rem;font-size:.78rem'>";
+      h += "<div style='display:flex;justify-content:space-between;padding:.35rem .55rem;background:var(--sur);border:1px solid var(--bd);border-radius:5px;margin-bottom:.25rem;font-size:.78rem'>";
       h += "<div><b>"+(p.nro_orden||"#"+p.id)+"</b>"+(a.cubre?" <span style='color:var(--green);font-size:.66rem;font-weight:700'>✓ se completa</span>":"")+"</div>";
       h += "<div style='font-weight:600;color:"+(a.cubre?"var(--green)":"var(--acc)")+"'>"+fmt(a.aplica)+"</div>";
       h += "</div>";
@@ -10971,8 +11048,26 @@ function _vcFIFOConfirmarPago(clienteId){
       resumen += " · "+fmt(window._vcFIFOSaldoFavor)+" a favor";
     }
     toast(resumen, "tok");
+    // Si veníamos desde el modal "Registrar pago" de la ficha, cerrarlo
     var mo = document.getElementById("_moVcPagoFIFO");
     if(mo) mo.remove();
+    // Si veníamos desde el modal CC (botón CC de la lista), cerrarlo y reabrirlo refrescado
+    var moCC = document.getElementById("_moVcCC");
+    if(moCC){
+      var nombrePrev = "";
+      var titEl = moCC.querySelector(".mtt");
+      if(titEl){
+        var txt = titEl.textContent || "";
+        // El título es "💳 CC — NOMBRE", extraer el nombre
+        var idx = txt.indexOf("—");
+        if(idx >= 0) nombrePrev = txt.substring(idx+1).trim();
+      }
+      moCC.remove();
+      // Reabrir modal CC con datos frescos
+      setTimeout(function(){
+        if(typeof vcVerCC === "function") vcVerCC(clienteId, nombrePrev);
+      }, 50);
+    }
     // Refrescar vistas
     if(typeof loadClientesVendedor === "function") loadClientesVendedor();
     if(typeof _vcRecargarFichaSiAbierta === "function") _vcRecargarFichaSiAbierta(clienteId);
