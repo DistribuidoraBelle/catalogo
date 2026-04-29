@@ -8296,11 +8296,43 @@ function verClienteFicha(id){
     h+="<div style='font-size:.66rem;color:var(--tx3);text-transform:uppercase;font-weight:600'>"+saldoLabel+"</div>";
     h+="<div style='font-size:1.05rem;font-weight:700;color:"+saldoColor+"'>"+fmt(Math.abs(saldoNum))+"</div>";
     h+="</div>";
-    h+="<button class='btn btn-g' style='font-size:.74rem;padding:.4rem .7rem' onclick='_adminVerCC("+c.id+",&#39;"+_adminEscNomJS(nombre)+"&#39;)'>Ver movimientos</button>";
     h+="</div>";
+
+    // Cuota acordada (info)
+    if(c.cuota_proxima_monto && c.cuota_proxima_fecha){
+      var _cQa = parseFloat(c.cuota_proxima_monto)||0;
+      var _cGa = parseInt(c.cuota_proxima_dias_gracia)||0;
+      var _hoyVa = new Date(); _hoyVa.setHours(0,0,0,0);
+      var _fcFa = new Date(c.cuota_proxima_fecha+"T00:00:00");
+      var _fcLima = new Date(_fcFa); _fcLima.setDate(_fcLima.getDate()+_cGa);
+      var _venca = _hoyVa > _fcLima;
+      h+="<div style='background:"+(_venca?"rgba(232,160,40,.12)":"rgba(196,150,90,.06)")+";border:1px solid "+(_venca?"var(--yel)":"rgba(196,150,90,.3)")+";border-radius:6px;padding:.45rem .6rem;margin-bottom:.5rem;font-size:.74rem'>";
+      h+="<div><span style='color:var(--tx3);font-size:.62rem;text-transform:uppercase;font-weight:600'>📅 Cuota acordada"+(_venca?" — VENCIDA":"")+"</span><div><b>"+fmt(_cQa)+"</b> · "+_admFmtFechaCorta(c.cuota_proxima_fecha)+(_cGa>0?" +"+_cGa+"d":"")+"</div></div>";
+      h+="</div>";
+    }
+
+    // Bloqueo (info)
+    if(c.bloqueado){
+      h+="<div style='background:rgba(220,80,80,.1);border:1px solid var(--red);border-radius:6px;padding:.45rem .6rem;margin-bottom:.5rem;font-size:.74rem;color:var(--red)'>";
+      h+="🚫 <b>Cliente BLOQUEADO</b>"+(c.bloqueado_motivo?" — "+c.bloqueado_motivo:"");
+      h+="</div>";
+    }
+
+    // Botones de acción CC (super poderes admin)
+    h+="<div style='display:flex;gap:.4rem;flex-wrap:wrap;margin-bottom:.5rem'>";
+    h+="<button class='btn btn-a' style='font-size:.72rem;padding:.4rem .65rem' onclick='admAbrirRegistrarPagoFIFO("+c.id+",&#39;"+_adminEscNomJS(nombre)+"&#39;)'>💰 Registrar pago</button>";
+    h+="<button class='btn btn-g' style='font-size:.72rem;padding:.4rem .65rem' onclick='admAbrirCuotaModal("+c.id+",&#39;"+_adminEscNomJS(nombre)+"&#39;)'>📅 Cuota</button>";
+    h+="<button class='btn btn-g' style='font-size:.72rem;padding:.4rem .65rem' onclick='_adminVerCC("+c.id+",&#39;"+_adminEscNomJS(nombre)+"&#39;)'>📋 Movimientos</button>";
+    if(c.bloqueado){
+      h+="<button class='btn btn-g' style='font-size:.72rem;padding:.4rem .65rem;color:var(--green);border-color:var(--green)' onclick='admDesbloquearCliente("+c.id+")'>✓ Desbloquear</button>";
+    } else {
+      h+="<button class='btn btn-g' style='font-size:.72rem;padding:.4rem .65rem;color:var(--red);border-color:var(--red)' onclick='admBloquearCliente("+c.id+")'>🚫 Bloquear</button>";
+    }
+    h+="</div>";
+
     h+="<div><label style='"+labelStyle+"'>Límite de crédito ($)</label>";
     h+="<input type='number' id='_cfLim' value='"+(c.limite_credito||0)+"' style='"+inputStyle+"' placeholder='0'>";
-    h+="<div style='font-size:.6rem;color:var(--tx3);margin-top:.15rem'>Tope máximo de deuda permitido</div></div>";
+    h+="<div style='font-size:.6rem;color:var(--tx3);margin-top:.15rem'>Tope máximo de crédito asignado al cliente</div></div>";
     h+="</div>";
     h+="</div>";
 
@@ -8429,6 +8461,375 @@ function _eliminarClienteAdmin(id){
     });
   }).catch(function(e){console.error("[belle] _eliminarClienteAdmin pre-check error:",e);toast("Error al verificar pedidos","terr");});
 }
+
+
+// ════════════════════════════════════════════════════════════════════
+// SISTEMA CC FIFO — versión ADMIN (belle.html)
+// Mismas funciones que en ventas.html pero sin restricciones de vendedor.
+// Usa el mismo nombre de funciones globales (admXxx) para evitar colisiones.
+// ════════════════════════════════════════════════════════════════════
+
+function _admFmtFechaCorta(iso){
+  if(!iso) return "—";
+  try{
+    var d;
+    if(typeof iso === "string" && /^\d{4}-\d{2}-\d{2}$/.test(iso)){
+      var p = iso.split("-");
+      d = new Date(parseInt(p[0],10), parseInt(p[1],10)-1, parseInt(p[2],10));
+    } else { d = new Date(iso); }
+    return d.toLocaleDateString("es-AR",{day:"2-digit",month:"2-digit",year:"2-digit"});
+  } catch(e){ return "—"; }
+}
+
+function _admEsc(s){
+  return String(s==null?"":s).replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;").replace(/"/g,"&quot;").replace(/'/g,"&#39;");
+}
+
+// ────────────────────────────── Modal: Registrar pago FIFO (admin) ──────────────────────────────
+function admAbrirRegistrarPagoFIFO(clienteId, clienteNombre){
+  Promise.all([
+    apiGet("clientes","select=*&id=eq."+clienteId+"&limit=1"),
+    apiGet("pedidos_catalogo","select=id,nro_orden,total,cobrado_total,estado,created_at&cliente_id=eq."+clienteId+"&estado=neq.cancelado&estado=neq.cobrado&order=created_at.asc")
+  ]).then(function(res){
+    var c = (res[0]&&res[0][0]) || null;
+    var pedidos = Array.isArray(res[1]) ? res[1] : [];
+    if(!c){ toast("Cliente no encontrado","terr"); return; }
+
+    var pendientes = pedidos.filter(function(p){
+      var saldo = (parseFloat(p.total)||0) - (parseFloat(p.cobrado_total)||0);
+      return saldo > 0.01;
+    });
+    var totalPendiente = pendientes.reduce(function(s,p){
+      return s + ((parseFloat(p.total)||0) - (parseFloat(p.cobrado_total)||0));
+    }, 0);
+
+    var mo = document.createElement("div");
+    mo.className = "mo open"; mo.id = "_moAdmPagoFIFO";
+    var nombre = clienteNombre || ((c.nombre||"")+" "+(c.apellido||"")).trim() || "Cliente";
+
+    var h = "<div class='md' style='max-width:560px;width:95%;max-height:90vh;display:flex;flex-direction:column'>";
+    h += "<div class='mh'><div class='mtt'>&#128176; Registrar pago — "+_admEsc(nombre)+"</div>";
+    h += "<button class='btn btn-g xb' onclick='var _m=document.getElementById(\"_moAdmPagoFIFO\");if(_m)_m.remove()'>&#x2715;</button></div>";
+    h += "<div class='mb' style='overflow-y:auto;flex:1;display:flex;flex-direction:column;gap:.7rem'>";
+
+    if(!pendientes.length){
+      h += "<div style='background:rgba(76,175,130,.1);border:1px solid rgba(76,175,130,.3);border-radius:8px;padding:.8rem;text-align:center'>";
+      h += "<div style='font-size:.85rem;color:var(--green);font-weight:600'>&#10003; Cliente al día</div>";
+      h += "<div style='font-size:.72rem;color:var(--tx3);margin-top:.2rem'>No hay pedidos pendientes de pago.</div>";
+      h += "</div>";
+      h += "<div style='font-size:.78rem;color:var(--tx2);text-align:center;padding:.5rem'>Si el cliente igual te paga, el monto va a quedar como saldo a favor.</div>";
+    } else {
+      h += "<div style='background:var(--sur2);border-radius:8px;padding:.6rem .8rem'>";
+      h += "<div style='font-size:.7rem;color:var(--tx3);text-transform:uppercase;font-weight:600;margin-bottom:.4rem'>Pedidos pendientes ("+pendientes.length+")</div>";
+      h += "<div style='font-size:.66rem;color:var(--tx3);margin-bottom:.5rem'>Aplicación FIFO: el más viejo primero</div>";
+      pendientes.forEach(function(p, i){
+        var saldo = (parseFloat(p.total)||0) - (parseFloat(p.cobrado_total)||0);
+        var fecha = new Date(p.created_at).toLocaleDateString("es-AR",{day:"2-digit",month:"2-digit",year:"2-digit"});
+        h += "<div style='display:flex;justify-content:space-between;padding:.3rem 0;border-bottom:1px solid var(--bd);font-size:.78rem'>";
+        h += "<div><span style='color:var(--tx3);font-size:.66rem'>"+(i+1)+".</span> <b>"+(p.nro_orden||"#"+p.id)+"</b> <span style='color:var(--tx3);font-size:.7rem'>"+fecha+"</span></div>";
+        h += "<div style='text-align:right'><div style='font-weight:600'>"+fmt(saldo)+"</div>";
+        if(parseFloat(p.cobrado_total)>0){ h += "<div style='font-size:.62rem;color:var(--tx3)'>de "+fmt(p.total)+"</div>"; }
+        h += "</div></div>";
+      });
+      h += "<div style='display:flex;justify-content:space-between;padding-top:.5rem;margin-top:.3rem;border-top:1px solid var(--bd);font-size:.85rem;font-weight:700'>";
+      h += "<span>Total adeudado:</span><span style='color:var(--red)'>"+fmt(totalPendiente)+"</span>";
+      h += "</div></div>";
+    }
+
+    var saldoFavorPrevio = parseFloat(c.saldo_cc)||0;
+    if(saldoFavorPrevio > 0.01){
+      h += "<div style='background:rgba(76,175,130,.1);border:1px solid rgba(76,175,130,.3);border-radius:7px;padding:.5rem .7rem;font-size:.75rem'>";
+      h += "El cliente tiene <b style='color:var(--green)'>"+fmt(saldoFavorPrevio)+"</b> a favor.";
+      h += "</div>";
+    }
+
+    h += "<div style='background:var(--sur);border:1px solid var(--bd);border-radius:8px;padding:.7rem .85rem'>";
+    h += "<div style='font-size:.7rem;color:var(--tx3);text-transform:uppercase;font-weight:600;margin-bottom:.5rem'>Datos del pago</div>";
+    h += "<div style='display:grid;grid-template-columns:2fr 1fr;gap:.5rem;margin-bottom:.5rem'>";
+    h += "<div><label style='font-size:.66rem;color:var(--tx3);text-transform:uppercase;font-weight:600'>Monto $ *</label>";
+    h += "<input type='number' id='_admFIFOMonto' step='1' min='1' oninput='_admFIFOActualizarPreview("+clienteId+")' placeholder='0' style='width:100%;padding:.5rem .7rem;border:1px solid var(--bd);border-radius:6px;font-size:1rem;font-weight:600;background:var(--sur2);color:var(--tx);margin-top:.2rem'></div>";
+    h += "<div><label style='font-size:.66rem;color:var(--tx3);text-transform:uppercase;font-weight:600'>Forma</label>";
+    h += "<select id='_admFIFOForma' style='width:100%;padding:.5rem .5rem;border:1px solid var(--bd);border-radius:6px;font-size:.85rem;background:var(--sur2);color:var(--tx);margin-top:.2rem'>";
+    h += "<option value='efectivo'>Efectivo</option><option value='transferencia'>Transferencia</option><option value='tarjeta'>Tarjeta</option><option value='otro'>Otro</option>";
+    h += "</select></div></div>";
+    h += "<div style='margin-bottom:.5rem'><label style='font-size:.66rem;color:var(--tx3);text-transform:uppercase;font-weight:600'>Fecha</label>";
+    h += "<input type='date' id='_admFIFOFecha' value='"+new Date().toISOString().slice(0,10)+"' style='width:100%;padding:.5rem .7rem;border:1px solid var(--bd);border-radius:6px;font-size:.85rem;background:var(--sur2);color:var(--tx);margin-top:.2rem'></div>";
+    h += "<div><label style='font-size:.66rem;color:var(--tx3);text-transform:uppercase;font-weight:600'>Nota (opcional)</label>";
+    h += "<input type='text' id='_admFIFONota' style='width:100%;padding:.5rem .7rem;border:1px solid var(--bd);border-radius:6px;font-size:.85rem;background:var(--sur2);color:var(--tx);margin-top:.2rem'></div>";
+    h += "</div>";
+
+    h += "<div id='_admFIFOPreview' style='display:none'></div>";
+
+    h += "<div style='display:flex;gap:.5rem;justify-content:flex-end;padding-top:.4rem;border-top:1px solid var(--bd)'>";
+    h += "<button class='btn btn-g' onclick='var _m=document.getElementById(\"_moAdmPagoFIFO\");if(_m)_m.remove()'>Cancelar</button>";
+    h += "<button class='btn btn-a' id='_admFIFOBtnConfirmar' onclick='_admFIFOConfirmarPago("+clienteId+")' disabled>Confirmar pago</button>";
+    h += "</div></div></div>";
+
+    mo.innerHTML = h;
+    document.body.appendChild(mo);
+    window._admFIFOPendientes = pendientes;
+    window._admFIFOClienteData = c;
+    setTimeout(function(){ var el=document.getElementById("_admFIFOMonto"); if(el)el.focus(); },150);
+  }).catch(function(e){
+    console.error("[belle] admAbrirRegistrarPagoFIFO error:",e); toast("Error al cargar datos","terr");
+  });
+}
+
+function _admFIFOActualizarPreview(clienteId){
+  var monto = parseFloat((document.getElementById("_admFIFOMonto")||{value:""}).value)||0;
+  var box = document.getElementById("_admFIFOPreview");
+  var btn = document.getElementById("_admFIFOBtnConfirmar");
+  if(!box) return;
+  if(monto <= 0){ box.style.display = "none"; if(btn) btn.disabled = true; return; }
+  var pendientes = window._admFIFOPendientes || [];
+  var restante = monto;
+  var aplicaciones = [];
+  pendientes.forEach(function(p){
+    if(restante <= 0.01) return;
+    var saldo = (parseFloat(p.total)||0) - (parseFloat(p.cobrado_total)||0);
+    if(saldo <= 0.01) return;
+    var aplica = Math.min(restante, saldo);
+    aplicaciones.push({ pedido: p, aplica: aplica, cubre: aplica >= saldo - 0.01 });
+    restante -= aplica;
+  });
+  var saldoAFavor = restante > 0.01 ? restante : 0;
+
+  var h = "<div style='background:linear-gradient(135deg,#fdf8f0,#faf5ec);border:1px solid var(--acc);border-radius:8px;padding:.6rem .8rem'>";
+  h += "<div style='font-size:.7rem;color:var(--acc);text-transform:uppercase;font-weight:700;margin-bottom:.4rem'>Vista previa</div>";
+  if(!aplicaciones.length){
+    h += "<div style='font-size:.8rem;color:var(--tx)'>Los <b>"+fmt(monto)+"</b> quedarán como <b style='color:var(--green)'>saldo a favor</b>.</div>";
+  } else {
+    h += "<div style='font-size:.74rem;color:var(--tx2);margin-bottom:.45rem'>Se aplicarán <b>"+fmt(monto)+"</b> así:</div>";
+    aplicaciones.forEach(function(a){
+      var p = a.pedido;
+      h += "<div style='display:flex;justify-content:space-between;padding:.3rem .4rem;background:#fff;border-radius:5px;margin-bottom:.25rem;font-size:.78rem'>";
+      h += "<div><b>"+(p.nro_orden||"#"+p.id)+"</b>"+(a.cubre?" <span style='color:var(--green);font-size:.66rem;font-weight:700'>✓ se completa</span>":"")+"</div>";
+      h += "<div style='font-weight:600;color:"+(a.cubre?"var(--green)":"var(--acc)")+"'>"+fmt(a.aplica)+"</div></div>";
+    });
+    if(saldoAFavor > 0.01){
+      h += "<div style='display:flex;justify-content:space-between;padding:.35rem .4rem;background:rgba(76,175,130,.15);border-radius:5px;margin-top:.3rem;font-size:.78rem'>";
+      h += "<div><b style='color:var(--green)'>Saldo a favor</b></div>";
+      h += "<div style='font-weight:700;color:var(--green)'>"+fmt(saldoAFavor)+"</div></div>";
+    }
+  }
+  h += "</div>";
+  box.innerHTML = h; box.style.display = "";
+  if(btn) btn.disabled = false;
+  window._admFIFOAplicaciones = aplicaciones;
+  window._admFIFOSaldoFavor = saldoAFavor;
+}
+
+function _admFIFOConfirmarPago(clienteId){
+  var monto = parseFloat((document.getElementById("_admFIFOMonto")||{value:""}).value)||0;
+  if(monto <= 0){ toast("Ingresá un monto","twarn"); return; }
+  var forma = (document.getElementById("_admFIFOForma")||{value:"efectivo"}).value;
+  var fecha = (document.getElementById("_admFIFOFecha")||{value:""}).value || new Date().toISOString().slice(0,10);
+  var nota = (document.getElementById("_admFIFONota")||{value:""}).value.trim() || null;
+  var aplicaciones = window._admFIFOAplicaciones || [];
+  var saldoFavor = window._admFIFOSaldoFavor || 0;
+
+  var btn = document.getElementById("_admFIFOBtnConfirmar");
+  if(btn){ btn.disabled = true; btn.textContent = "Procesando..."; }
+
+  apiPost("cc_pagos", {
+    cliente_id: clienteId,
+    monto: monto, forma_pago: forma, fecha: fecha,
+    vendedor_id: null,
+    registrado_por: "admin",
+    nota: nota,
+    saldo_a_favor: saldoFavor
+  }).then(function(rows){
+    var pago = Array.isArray(rows)&&rows.length ? rows[0] : null;
+    if(!pago || !pago.id){
+      return apiGet("cc_pagos","select=id&cliente_id=eq."+clienteId+"&order=created_at.desc&limit=1")
+        .then(function(rows2){ return rows2&&rows2[0] ? rows2[0] : null; });
+    }
+    return pago;
+  }).then(function(pago){
+    if(!pago){ throw new Error("No se pudo registrar el pago"); }
+    var chain = Promise.resolve();
+    var pedidosCobrados = [];
+    aplicaciones.forEach(function(a){
+      chain = chain.then(function(){
+        return apiPost("cc_pagos_aplicaciones", {
+          pago_id: pago.id, pedido_id: a.pedido.id,
+          monto_aplicado: a.aplica, cubrio_pedido_completo: a.cubre
+        });
+      }).then(function(){
+        return apiGet("pedidos_catalogo","select=id,cobrado_total,total,estado&id=eq."+a.pedido.id+"&limit=1").then(function(rows){
+          if(!rows||!rows[0]) return null;
+          var fresh = rows[0];
+          var nuevoCobrado = (parseFloat(fresh.cobrado_total)||0) + a.aplica;
+          var totalPed = parseFloat(fresh.total)||0;
+          var quedaCompleto = nuevoCobrado >= totalPed - 0.01;
+          var patch = { cobrado_total: nuevoCobrado };
+          if(quedaCompleto){
+            patch.estado = "cobrado";
+            patch.cobrado_at = new Date().toISOString();
+            pedidosCobrados.push(a.pedido);
+          } else if(fresh.estado !== "cobrado_parcial"){
+            patch.estado = "cobrado_parcial";
+          }
+          return apiPatch("pedidos_catalogo", patch, "id=eq."+a.pedido.id);
+        });
+      });
+    });
+
+    chain = chain.then(function(){
+      var stockChain = Promise.resolve();
+      pedidosCobrados.forEach(function(p){
+        stockChain = stockChain.then(function(){
+          return apiGet("pedidos_catalogo_items","select=producto_id,qty&pedido_id=eq."+p.id);
+        }).then(function(items){
+          if(!Array.isArray(items)||!items.length) return;
+          var c2 = Promise.resolve();
+          items.forEach(function(it){
+            if(!it.producto_id || !it.qty) return;
+            c2 = c2.then(function(){
+              return patchStockFresco(it.producto_id, {reserva:-it.qty, vendido_david:+it.qty}, "Cobro CC FIFO admin pedido "+(p.nro_orden||"#"+p.id));
+            });
+          });
+          return c2;
+        });
+      });
+      return stockChain;
+    });
+
+    if(saldoFavor > 0.01){
+      chain = chain.then(function(){
+        return apiGet("clientes","select=saldo_cc&id=eq."+clienteId+"&limit=1");
+      }).then(function(rows){
+        if(!rows||!rows[0]) return null;
+        var actual = parseFloat(rows[0].saldo_cc)||0;
+        var nuevo = actual + saldoFavor;
+        return apiPatch("clientes", {saldo_cc: nuevo}, "id=eq."+clienteId);
+      });
+    }
+    return chain;
+  }).then(function(){
+    var resumen = "Pago de "+fmt(monto)+" registrado";
+    if(window._admFIFOSaldoFavor > 0.01){ resumen += " · "+fmt(window._admFIFOSaldoFavor)+" a favor"; }
+    toast(resumen, "tok");
+    var mo = document.getElementById("_moAdmPagoFIFO"); if(mo) mo.remove();
+    if(typeof loadClientes === "function") loadClientes();
+    var fichaMo = document.getElementById("_moClienteFicha");
+    if(fichaMo){ fichaMo.remove(); if(typeof verClienteFicha === "function") verClienteFicha(clienteId); }
+  }).catch(function(e){
+    console.error("[belle] _admFIFOConfirmarPago error:",e);
+    toast("Error al registrar el pago","terr");
+    if(btn){ btn.disabled = false; btn.textContent = "Confirmar pago"; }
+  });
+}
+
+// ────────────── Modal: Cuota acordada (admin) ──────────────
+function admAbrirCuotaModal(clienteId, clienteNombre){
+  apiGet("clientes","select=*&id=eq."+clienteId+"&limit=1").then(function(rows){
+    var c = rows&&rows[0] ? rows[0] : null;
+    if(!c){ toast("Cliente no encontrado","terr"); return; }
+    var nombre = clienteNombre || ((c.nombre||"")+" "+(c.apellido||"")).trim() || "Cliente";
+    var hayCuota = c.cuota_proxima_monto && c.cuota_proxima_fecha;
+
+    var mo = document.createElement("div");
+    mo.className = "mo open"; mo.id = "_moAdmCuota";
+    var h = "<div class='md' style='max-width:480px;width:95%;display:flex;flex-direction:column'>";
+    h += "<div class='mh'><div class='mtt'>&#128197; Cuota acordada — "+_admEsc(nombre)+"</div>";
+    h += "<button class='btn btn-g xb' onclick='var _m=document.getElementById(\"_moAdmCuota\");if(_m)_m.remove()'>&#x2715;</button></div>";
+    h += "<div class='mb'>";
+    h += "<div style='font-size:.78rem;color:var(--tx2);margin-bottom:.7rem;line-height:1.4'>Configurá una cuota que el cliente se comprometió a pagar.</div>";
+    h += "<div style='display:flex;flex-direction:column;gap:.5rem'>";
+    h += "<div><label style='font-size:.66rem;color:var(--tx3);text-transform:uppercase;font-weight:600'>Monto $ *</label>";
+    h += "<input type='number' id='_admCuotaMonto' step='1' min='0' value='"+(c.cuota_proxima_monto||"")+"' style='width:100%;padding:.5rem .7rem;border:1px solid var(--bd);border-radius:6px;font-size:.92rem;background:var(--sur2);color:var(--tx);margin-top:.2rem'></div>";
+    h += "<div><label style='font-size:.66rem;color:var(--tx3);text-transform:uppercase;font-weight:600'>Fecha de pago *</label>";
+    h += "<input type='date' id='_admCuotaFecha' value='"+(c.cuota_proxima_fecha||"")+"' style='width:100%;padding:.5rem .7rem;border:1px solid var(--bd);border-radius:6px;font-size:.85rem;background:var(--sur2);color:var(--tx);margin-top:.2rem'></div>";
+    h += "<div><label style='font-size:.66rem;color:var(--tx3);text-transform:uppercase;font-weight:600'>Días de gracia</label>";
+    h += "<input type='number' id='_admCuotaGracia' min='0' max='30' value='"+(c.cuota_proxima_dias_gracia||0)+"' style='width:100%;padding:.5rem .7rem;border:1px solid var(--bd);border-radius:6px;font-size:.85rem;background:var(--sur2);color:var(--tx);margin-top:.2rem'></div>";
+    h += "<div><label style='font-size:.66rem;color:var(--tx3);text-transform:uppercase;font-weight:600'>Nota</label>";
+    h += "<input type='text' id='_admCuotaNota' value='"+_admEsc(c.cuota_proxima_nota||"")+"' style='width:100%;padding:.5rem .7rem;border:1px solid var(--bd);border-radius:6px;font-size:.85rem;background:var(--sur2);color:var(--tx);margin-top:.2rem'></div>";
+    h += "</div>";
+    h += "<div style='display:flex;gap:.5rem;justify-content:flex-end;padding-top:.8rem;margin-top:.8rem;border-top:1px solid var(--bd)'>";
+    if(hayCuota){
+      h += "<button class='btn btn-g' style='color:var(--red);border-color:var(--red)' onclick='_admLimpiarCuota("+clienteId+")'>&#128465; Quitar</button>";
+    }
+    h += "<div style='flex:1'></div>";
+    h += "<button class='btn btn-g' onclick='var _m=document.getElementById(\"_moAdmCuota\");if(_m)_m.remove()'>Cancelar</button>";
+    h += "<button class='btn btn-a' onclick='_admGuardarCuota("+clienteId+")'>Guardar</button>";
+    h += "</div></div></div>";
+    mo.innerHTML = h;
+    document.body.appendChild(mo);
+  }).catch(function(e){
+    console.error("[belle] admAbrirCuotaModal error:",e); toast("Error al cargar cliente","terr");
+  });
+}
+
+function _admGuardarCuota(clienteId){
+  var monto = parseFloat((document.getElementById("_admCuotaMonto")||{value:""}).value)||0;
+  var fecha = (document.getElementById("_admCuotaFecha")||{value:""}).value;
+  var gracia = parseInt((document.getElementById("_admCuotaGracia")||{value:"0"}).value)||0;
+  var nota = (document.getElementById("_admCuotaNota")||{value:""}).value.trim()||null;
+  if(monto <= 0){ toast("Ingresá un monto válido","twarn"); return; }
+  if(!fecha){ toast("Ingresá la fecha","twarn"); return; }
+  apiPatch("clientes",{
+    cuota_proxima_monto: monto, cuota_proxima_fecha: fecha,
+    cuota_proxima_dias_gracia: gracia, cuota_proxima_nota: nota
+  },"id=eq."+clienteId).then(function(){
+    toast("Cuota configurada","tok");
+    var mo = document.getElementById("_moAdmCuota"); if(mo) mo.remove();
+    if(typeof loadClientes === "function") loadClientes();
+    var fichaMo = document.getElementById("_moClienteFicha");
+    if(fichaMo){ fichaMo.remove(); if(typeof verClienteFicha === "function") verClienteFicha(clienteId); }
+  }).catch(function(e){
+    console.error("[belle] _admGuardarCuota error:",e); toast("Error al guardar","terr");
+  });
+}
+
+function _admLimpiarCuota(clienteId){
+  if(!confirm("¿Quitar la cuota acordada?")) return;
+  apiPatch("clientes",{
+    cuota_proxima_monto: null, cuota_proxima_fecha: null,
+    cuota_proxima_dias_gracia: 0, cuota_proxima_nota: null,
+    bloqueado: false, bloqueado_motivo: null
+  },"id=eq."+clienteId).then(function(){
+    toast("Cuota eliminada y cliente desbloqueado","tok");
+    var mo = document.getElementById("_moAdmCuota"); if(mo) mo.remove();
+    if(typeof loadClientes === "function") loadClientes();
+    var fichaMo = document.getElementById("_moClienteFicha");
+    if(fichaMo){ fichaMo.remove(); if(typeof verClienteFicha === "function") verClienteFicha(clienteId); }
+  }).catch(function(e){
+    console.error("[belle] _admLimpiarCuota error:",e); toast("Error al limpiar","terr");
+  });
+}
+
+// ────────────── Bloquear/Desbloquear (admin) ──────────────
+function admDesbloquearCliente(clienteId){
+  if(!confirm("¿Desbloquear este cliente?")) return;
+  apiPatch("clientes",{bloqueado:false, bloqueado_motivo:null},"id=eq."+clienteId).then(function(){
+    toast("Cliente desbloqueado","tok");
+    if(typeof loadClientes === "function") loadClientes();
+    var fichaMo = document.getElementById("_moClienteFicha");
+    if(fichaMo){ fichaMo.remove(); if(typeof verClienteFicha === "function") verClienteFicha(clienteId); }
+  }).catch(function(e){
+    console.error("[belle] admDesbloquearCliente error:",e); toast("Error","terr");
+  });
+}
+
+function admBloquearCliente(clienteId){
+  var motivo = prompt("Motivo del bloqueo:", "Mora en el pago acordado");
+  if(!motivo) return;
+  apiPatch("clientes",{
+    bloqueado: true, bloqueado_motivo: motivo,
+    bloqueado_at: new Date().toISOString()
+  },"id=eq."+clienteId).then(function(){
+    toast("Cliente bloqueado","twarn");
+    if(typeof loadClientes === "function") loadClientes();
+    var fichaMo = document.getElementById("_moClienteFicha");
+    if(fichaMo){ fichaMo.remove(); if(typeof verClienteFicha === "function") verClienteFicha(clienteId); }
+  }).catch(function(e){
+    console.error("[belle] admBloquearCliente error:",e); toast("Error","terr");
+  });
+}
+
+// FIN sistema CC FIFO admin ════════════════════════════════════════════════
+
 
 // Crear nuevo cliente desde admin
 function abrirCrearClienteAdmin(){

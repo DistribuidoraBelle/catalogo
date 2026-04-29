@@ -1933,6 +1933,25 @@ function sendWA(){
     return;
   }
 
+  // ─── Validación de bloqueo / cuota vencida ───
+  // Si el cliente está bloqueado o tiene cuota vencida (pasó la fecha + días de gracia),
+  // no se le permite hacer pedidos hasta regularizar.
+  if(_catCliente.bloqueado){
+    _catToast("Tu cuenta está bloqueada para nuevos pedidos. Contactá a tu vendedor.","twarn");
+    return;
+  }
+  // Detectar cuota vencida
+  if(_catCliente.cuota_proxima_monto && _catCliente.cuota_proxima_fecha){
+    var cuotaG = parseInt(_catCliente.cuota_proxima_dias_gracia)||0;
+    var hoy_v = new Date(); hoy_v.setHours(0,0,0,0);
+    var fechaC = new Date(_catCliente.cuota_proxima_fecha+"T00:00:00");
+    var fechaLim = new Date(fechaC); fechaLim.setDate(fechaLim.getDate() + cuotaG);
+    if(hoy_v > fechaLim){
+      _catToast("Tu cuota acordada venció. Abonala antes de hacer un nuevo pedido.","twarn");
+      return;
+    }
+  }
+
   // Hay sesión: chequear que tenga al menos una dirección
   apiGet("clientes_direcciones","select=*&cliente_id=eq."+_catCliente.id+"&order=es_principal.desc,created_at.desc").then(function(rows){
     var dirs = Array.isArray(rows) ? rows : [];
@@ -5163,20 +5182,37 @@ function _catFmtFecha(iso, conHora){
   } catch(e){ return "—"; }
 }
 
+// Formato corto sin hora — útil para fechas tipo cuota/fecha próxima.
+// Acepta tanto "YYYY-MM-DD" (date pura) como ISO con hora.
+function _catFmtFechaCorta(iso){
+  if(!iso) return "—";
+  try {
+    var d;
+    // Si es solo fecha (sin "T") interpretar en local para evitar shift de zona
+    if(typeof iso === "string" && /^\d{4}-\d{2}-\d{2}$/.test(iso)){
+      var p = iso.split("-");
+      d = new Date(parseInt(p[0],10), parseInt(p[1],10)-1, parseInt(p[2],10));
+    } else {
+      d = new Date(iso);
+    }
+    return d.toLocaleDateString("es-AR", {day:"2-digit",month:"2-digit",year:"2-digit"});
+  } catch(e){ return "—"; }
+}
+
 // Tab Mis Pedidos
 function _catRenderTabPedidos(box){
   if(!_catCliente){box.innerHTML = "<div class='empty'>Sin datos</div>";return;}
   box.innerHTML = "<div style='text-align:center;padding:2rem 1rem;color:var(--mid);font-size:.85rem'>"+
     "<div class='cat-spin' style='margin-bottom:.6rem'></div>Cargando tus pedidos...</div>";
 
-  // Cargar pedidos + (si tiene CC) movimientos
+  // Cargar pedidos + (si tiene CC) últimos pagos del nuevo sistema
   var promesas = [
     apiGet("pedidos_catalogo","select=*&cliente_id=eq."+_catCliente.id+"&order=created_at.desc&limit=100")
   ];
   if(_catCliente.cuenta_corriente_habilitada){
     promesas.push(
-      apiGet("cuenta_corriente_movimientos","select=*&cliente_id=eq."+_catCliente.id+"&order=created_at.desc&limit=20")
-        .catch(function(e){console.error("[belle-cat] CC movs error:",e); return [];})
+      apiGet("cc_pagos","select=*&cliente_id=eq."+_catCliente.id+"&order=fecha.desc,created_at.desc&limit=10")
+        .catch(function(e){console.error("[belle-cat] cc_pagos error:",e); return [];})
     );
   } else {
     promesas.push(Promise.resolve([]));
@@ -5184,58 +5220,196 @@ function _catRenderTabPedidos(box){
 
   Promise.all(promesas).then(function(res){
     var pedidos = Array.isArray(res[0]) ? res[0] : [];
-    var movs = Array.isArray(res[1]) ? res[1] : [];
+    var pagos   = Array.isArray(res[1]) ? res[1] : [];
 
-    // Filtrar pedidos ACTIVOS (no cobrados completos, no entregados, no cancelados)
+    // Filtrar pedidos ACTIVOS (no cobrados completos, no cancelados)
     // El cliente NO ve cancelados — esos solo los ven admin/vendedor.
     // "cobrado_parcial" SÍ aparece (es CC en marcha).
     var activos = pedidos.filter(function(p){
       if(p.estado === "cancelado") return false;
-      if(p.estado === "cobrado" && p.estado_envio === "entregado") return false;
       if(p.estado === "cobrado") return false; // pago completo → va a "Mis compras"
       return true;
     });
 
     var h = "";
 
-    // ── BLOQUE CUENTA CORRIENTE arriba (si está habilitada) ──
+    // ─── BLOQUE CUENTA CORRIENTE (sistema nuevo: 3 recuadros) ───────────
     if(_catCliente.cuenta_corriente_habilitada){
-      var saldo = _catCliente.saldo_cc || 0;
-      var saldoColor = saldo < -0.01 ? "#c5443a" : (saldo > 0.01 ? "#5a8a4a" : "#7a7a7a");
-      var saldoLabel = saldo < -0.01 ? "Tenés deuda" : (saldo > 0.01 ? "A tu favor" : "Sin saldo");
-      h += "<div style='background:linear-gradient(135deg, #fdf8f0, #faf5ec);border:1px solid #e8d9bf;border-radius:10px;padding:.85rem 1rem;margin-bottom:1rem'>";
-      h += "<div style='display:flex;justify-content:space-between;align-items:center;gap:.5rem;margin-bottom:.3rem'>";
-      h += "<div style='font-size:.7rem;color:var(--mid);text-transform:uppercase;font-weight:700;letter-spacing:.05em'>&#128179; Cuenta Corriente</div>";
-      h += "<div style='font-size:.66rem;color:"+saldoColor+";font-weight:600'>"+saldoLabel+"</div>";
-      h += "</div>";
-      h += "<div style='font-size:1.4rem;font-weight:800;color:"+saldoColor+";margin-bottom:.4rem'>"+_catFmtMoney(Math.abs(saldo))+"</div>";
+      // Cálculos basados en pedidos activos
+      var totalActivos = 0;
+      var totalCobrado = 0;
+      activos.forEach(function(p){
+        totalActivos += parseFloat(p.total) || 0;
+        totalCobrado += parseFloat(p.cobrado_total) || 0;
+      });
+      var saldoAbonar = totalActivos - totalCobrado;
+      // Saldo a favor del cliente (si pagó de más)
+      var saldoFavor = parseFloat(_catCliente.saldo_cc) || 0;
+      if(saldoFavor < 0) saldoFavor = 0; // ignorar deudas viejas, sólo nos importa el "a favor"
 
-      // Movimientos recientes (max 5 visibles, el resto desplegable)
-      if(movs.length){
-        h += "<div style='border-top:1px solid #e8d9bf;padding-top:.5rem;margin-top:.3rem'>";
-        h += "<div style='font-size:.66rem;color:var(--mid);text-transform:uppercase;font-weight:600;margin-bottom:.4rem'>Movimientos recientes</div>";
-        var ver = movs.slice(0, 5);
-        ver.forEach(function(m){
-          var monto = parseFloat(m.monto || 0);
-          var es = monto >= 0 ? "deuda" : "pago";
-          var color = es === "pago" ? "#5a8a4a" : "#c5443a";
-          var signo = es === "pago" ? "−" : "+";
-          var f = _catFmtFecha(m.created_at, false);
-          h += "<div style='display:flex;justify-content:space-between;align-items:flex-start;gap:.5rem;padding:.35rem 0;border-bottom:1px solid #f5f0e8;font-size:.76rem'>";
-          h += "<div style='min-width:0;flex:1'>";
-          h += "<div style='color:var(--dark)'>"+_catEsc(m.descripcion || m.tipo || "Movimiento")+"</div>";
-          h += "<div style='font-size:.66rem;color:var(--mid);margin-top:.1rem'>"+f+"</div>";
-          h += "</div>";
-          h += "<div style='font-weight:700;color:"+color+";flex-shrink:0'>"+signo+_catFmtMoney(Math.abs(monto))+"</div>";
-          h += "</div>";
-        });
-        if(movs.length > 5){
-          h += "<div style='font-size:.7rem;color:var(--mid);text-align:center;padding-top:.4rem'>Y "+(movs.length-5)+" movimiento(s) más...</div>";
+      // Crédito
+      var creditoTotal = parseFloat(_catCliente.limite_credito) || 0;
+      var creditoUsado = saldoAbonar; // lo que debe es lo que está "usando"
+      var creditoDispon = creditoTotal - creditoUsado;
+
+      // Cuota próxima
+      var cuotaMonto = parseFloat(_catCliente.cuota_proxima_monto) || 0;
+      var cuotaFecha = _catCliente.cuota_proxima_fecha;
+      var cuotaGracia = parseInt(_catCliente.cuota_proxima_dias_gracia) || 0;
+      var cuotaNota = _catCliente.cuota_proxima_nota || "";
+
+      // Detectar si la cuota está vencida (incluyendo días de gracia)
+      var cuotaVencida = false;
+      var diasParaCuota = null;
+      if(cuotaMonto > 0 && cuotaFecha){
+        var hoy = new Date(); hoy.setHours(0,0,0,0);
+        var fechaCuota = new Date(cuotaFecha+"T00:00:00");
+        var fechaLimite = new Date(fechaCuota); fechaLimite.setDate(fechaLimite.getDate() + cuotaGracia);
+        diasParaCuota = Math.floor((fechaLimite - hoy) / 86400000);
+        if(diasParaCuota < 0) cuotaVencida = true;
+      }
+
+      // ── Cartel BLOQUEADO arriba si corresponde (amarillo según pedido del usuario) ──
+      if(_catCliente.bloqueado){
+        h += "<div style='background:linear-gradient(135deg, #fef9e8, #fcf2d5);border:2px solid #d4a830;border-radius:10px;padding:.9rem 1rem;margin-bottom:1rem'>";
+        h += "<div style='display:flex;align-items:flex-start;gap:.6rem'>";
+        h += "<div style='font-size:1.5rem;flex-shrink:0'>&#9888;</div>";
+        h += "<div style='flex:1'>";
+        h += "<div style='font-size:.88rem;font-weight:700;color:#7a5a1a;margin-bottom:.2rem'>Cuenta bloqueada para nuevos pedidos</div>";
+        h += "<div style='font-size:.75rem;color:#7a5a1a;line-height:1.4'>"+_catEsc(_catCliente.bloqueado_motivo || "Para volver a hacer pedidos, abonar el saldo de la cuota acordada. Contactá a tu vendedor.")+"</div>";
+        h += "</div></div></div>";
+      } else if(cuotaVencida){
+        // Si tiene cuota vencida pero todavía no fue marcado como bloqueado, avisar (amarillo)
+        h += "<div style='background:linear-gradient(135deg, #fef9e8, #fcf2d5);border:2px solid #d4a830;border-radius:10px;padding:.9rem 1rem;margin-bottom:1rem'>";
+        h += "<div style='display:flex;align-items:flex-start;gap:.6rem'>";
+        h += "<div style='font-size:1.5rem;flex-shrink:0'>&#9888;</div>";
+        h += "<div style='flex:1'>";
+        h += "<div style='font-size:.88rem;font-weight:700;color:#7a5a1a;margin-bottom:.2rem'>Tu cuota acordada venció</div>";
+        h += "<div style='font-size:.75rem;color:#7a5a1a;line-height:1.4'>Debes abonar "+_catFmtMoney(cuotaMonto)+" (vencía el "+_catFmtFechaCorta(cuotaFecha)+(cuotaGracia>0?" + "+cuotaGracia+" día"+(cuotaGracia>1?"s":"")+" de gracia":"")+") antes de hacer un nuevo pedido.</div>";
+        h += "</div></div></div>";
+      }
+
+      // ── 3 RECUADROS principales ──
+      h += "<div style='background:linear-gradient(135deg, #fdf8f0, #faf5ec);border:1px solid #e8d9bf;border-radius:10px;padding:.9rem 1rem;margin-bottom:1rem'>";
+      h += "<div style='font-size:.7rem;color:var(--mid);text-transform:uppercase;font-weight:700;letter-spacing:.05em;margin-bottom:.7rem'>&#128179; Mi Cuenta Corriente</div>";
+
+      // ─── ORDEN VERTICAL: Crédito total → Crédito disponible → Total pedidos → Saldo → Cuota ───
+
+      // 1) CRÉDITO TOTAL (lo que la empresa le asigna)
+      if(creditoTotal > 0){
+        h += "<div style='background:#fff;border:1px solid #e8d9bf;border-radius:8px;padding:.55rem .75rem;margin-bottom:.4rem'>";
+        h += "<div style='display:flex;justify-content:space-between;align-items:center;gap:.5rem'>";
+        h += "<div>";
+        h += "<div style='font-size:.6rem;color:var(--mid);text-transform:uppercase;font-weight:600;letter-spacing:.04em'>&#128081; Crédito total</div>";
+        h += "<div style='font-size:.6rem;color:var(--mid);margin-top:.1rem'>Asignado por la empresa</div>";
+        h += "</div>";
+        h += "<div style='font-size:1.1rem;font-weight:800;color:var(--dark)'>"+_catFmtMoney(creditoTotal)+"</div>";
+        h += "</div></div>";
+
+        // 2) CRÉDITO DISPONIBLE (un pelín separado abajo, con barra)
+        var pctUsado = creditoTotal > 0 ? Math.min(100, Math.max(0, (creditoUsado/creditoTotal)*100)) : 0;
+        var colorBarra = pctUsado >= 100 ? "#c5443a" : (pctUsado >= 80 ? "#d4a830" : "#5a8a4a");
+        h += "<div style='background:#fff;border:1px solid "+(creditoDispon<=0?"#c5443a":"#e8d9bf")+";border-radius:8px;padding:.55rem .75rem;margin-bottom:.85rem'>";
+        h += "<div style='display:flex;justify-content:space-between;align-items:center;gap:.5rem;margin-bottom:.4rem'>";
+        h += "<div>";
+        h += "<div style='font-size:.6rem;color:var(--mid);text-transform:uppercase;font-weight:600;letter-spacing:.04em'>&#9989; Crédito disponible</div>";
+        h += "<div style='font-size:.6rem;color:var(--mid);margin-top:.1rem'>Total menos pedidos en curso</div>";
+        h += "</div>";
+        h += "<div style='font-size:1.1rem;font-weight:800;color:"+(creditoDispon>0?"#5a8a4a":"#c5443a")+"'>"+_catFmtMoney(Math.max(0,creditoDispon))+"</div>";
+        h += "</div>";
+        // Barra de progreso
+        h += "<div style='background:#f0e6d3;height:7px;border-radius:4px;overflow:hidden'>";
+        h += "<div style='background:"+colorBarra+";height:100%;width:"+pctUsado+"%;transition:width .3s'></div>";
+        h += "</div>";
+        h += "</div>";
+      }
+
+      // 3) TOTAL DINERO PEDIDOS (suma pedidos activos)
+      h += "<div style='background:#fff;border:1px solid #e8d9bf;border-radius:8px;padding:.55rem .75rem;margin-bottom:.4rem'>";
+      h += "<div style='display:flex;justify-content:space-between;align-items:center;gap:.5rem'>";
+      h += "<div>";
+      h += "<div style='font-size:.6rem;color:var(--mid);text-transform:uppercase;font-weight:600;letter-spacing:.04em'>&#128230; Total dinero pedidos</div>";
+      h += "<div style='font-size:.6rem;color:var(--mid);margin-top:.1rem'>"+activos.length+" pedido"+(activos.length===1?"":"s")+" activo"+(activos.length===1?"":"s")+"</div>";
+      h += "</div>";
+      h += "<div style='font-size:1.1rem;font-weight:800;color:var(--dark)'>"+_catFmtMoney(totalActivos)+"</div>";
+      h += "</div></div>";
+
+      // 4) SALDO (deuda después de pagos)
+      h += "<div style='background:#fff;border:1px solid "+(saldoAbonar>0.01?"#c4965a":"#a8d4a0")+";border-radius:8px;padding:.55rem .75rem;margin-bottom:.85rem'>";
+      h += "<div style='display:flex;justify-content:space-between;align-items:center;gap:.5rem'>";
+      h += "<div>";
+      h += "<div style='font-size:.6rem;color:var(--mid);text-transform:uppercase;font-weight:600;letter-spacing:.04em'>&#128176; Saldo a abonar</div>";
+      h += "<div style='font-size:.6rem;color:var(--mid);margin-top:.1rem'>"+(totalCobrado>0?"Pagado: "+_catFmtMoney(totalCobrado):(saldoAbonar<=0.01?"Al día ✓":"Sin pagos aún"))+"</div>";
+      h += "</div>";
+      h += "<div style='font-size:1.1rem;font-weight:800;color:"+(saldoAbonar>0.01?"#c5443a":"#5a8a4a")+"'>"+_catFmtMoney(saldoAbonar)+"</div>";
+      h += "</div></div>";
+
+      // 5) CUOTA (si hay una asignada con fecha)
+      if(cuotaMonto > 0 && cuotaFecha){
+        var bgCuota, bordeCuota, txtCuota;
+        if(cuotaVencida){
+          bgCuota = "#fef9e8"; bordeCuota = "#d4a830"; txtCuota = "#7a5a1a"; // AMARILLO según pedido del usuario
+        } else if(diasParaCuota !== null && diasParaCuota <= 3){
+          bgCuota = "#fef9e8"; bordeCuota = "#d4a830"; txtCuota = "#7a5a1a";
+        } else {
+          bgCuota = "#fff"; bordeCuota = "#e8d9bf"; txtCuota = "var(--dark)";
+        }
+        h += "<div style='background:"+bgCuota+";border:1px solid "+bordeCuota+";border-radius:8px;padding:.55rem .75rem;margin-bottom:.6rem'>";
+        h += "<div style='display:flex;justify-content:space-between;align-items:flex-start;gap:.5rem'>";
+        h += "<div style='flex:1;min-width:0'>";
+        h += "<div style='font-size:.6rem;color:"+txtCuota+";text-transform:uppercase;font-weight:600;letter-spacing:.04em'>&#128197; Cuota acordada</div>";
+        h += "<div style='font-size:.95rem;font-weight:700;color:"+txtCuota+";margin-top:.15rem'>"+_catFmtMoney(cuotaMonto)+" — "+_catFmtFechaCorta(cuotaFecha)+"</div>";
+        if(cuotaNota) h += "<div style='font-size:.66rem;color:var(--mid);margin-top:.15rem;font-style:italic'>"+_catEsc(cuotaNota)+"</div>";
+        h += "</div>";
+        // Estado a la derecha
+        h += "<div style='text-align:right;flex-shrink:0'>";
+        if(cuotaVencida){
+          h += "<div style='font-size:.66rem;font-weight:700;color:#c4965a'>VENCIDO</div>";
+        } else if(diasParaCuota === 0){
+          h += "<div style='font-size:.66rem;font-weight:700;color:#d4a830'>HOY</div>";
+        } else if(diasParaCuota === 1){
+          h += "<div style='font-size:.66rem;font-weight:700;color:#d4a830'>MAÑANA</div>";
+        } else if(diasParaCuota !== null && diasParaCuota > 0){
+          h += "<div style='font-size:.66rem;font-weight:600;color:var(--mid)'>en "+diasParaCuota+" día"+(diasParaCuota===1?"":"s")+"</div>";
+        }
+        if(cuotaGracia > 0 && !cuotaVencida){
+          h += "<div style='font-size:.58rem;color:var(--mid);margin-top:.1rem'>+"+cuotaGracia+"d gracia</div>";
         }
         h += "</div>";
-      } else {
-        h += "<div style='font-size:.72rem;color:var(--mid);font-style:italic'>Sin movimientos todavía</div>";
+        h += "</div>";
+        h += "</div>";
       }
+
+      // Saldo a favor (si pagó de más)
+      if(saldoFavor > 0.01){
+        h += "<div style='background:#e8f5e0;border:1px solid #b8d8a8;border-radius:8px;padding:.5rem .75rem;margin-bottom:.6rem;display:flex;justify-content:space-between;align-items:center;gap:.5rem'>";
+        h += "<div>";
+        h += "<div style='font-size:.66rem;color:#3a6f2a;text-transform:uppercase;font-weight:600'>&#10003; A tu favor</div>";
+        h += "<div style='font-size:.6rem;color:var(--mid)'>Se aplicará a tus próximos pedidos</div>";
+        h += "</div>";
+        h += "<div style='font-size:1rem;font-weight:700;color:#3a6f2a'>"+_catFmtMoney(saldoFavor)+"</div>";
+        h += "</div>";
+      }
+
+      // Últimos pagos (max 3)
+      if(pagos.length){
+        h += "<div style='border-top:1px solid #e8d9bf;padding-top:.55rem;margin-top:.5rem'>";
+        h += "<div style='font-size:.62rem;color:var(--mid);text-transform:uppercase;font-weight:600;margin-bottom:.35rem'>Últimos pagos</div>";
+        pagos.slice(0, 3).forEach(function(p){
+          var monto = parseFloat(p.monto) || 0;
+          var f = _catFmtFechaCorta(p.fecha || p.created_at);
+          var forma = p.forma_pago || "efectivo";
+          h += "<div style='display:flex;justify-content:space-between;align-items:center;gap:.5rem;padding:.3rem 0;font-size:.74rem'>";
+          h += "<div style='min-width:0;flex:1'>";
+          h += "<div style='color:var(--dark)'>"+_catEsc(forma.charAt(0).toUpperCase()+forma.slice(1))+(p.nota?" — "+_catEsc(p.nota):"")+"</div>";
+          h += "<div style='font-size:.62rem;color:var(--mid)'>"+f+"</div>";
+          h += "</div>";
+          h += "<div style='font-weight:700;color:#5a8a4a;flex-shrink:0'>+"+_catFmtMoney(monto)+"</div>";
+          h += "</div>";
+        });
+        h += "</div>";
+      }
+
       h += "</div>";
     }
 
