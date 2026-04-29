@@ -1952,15 +1952,40 @@ function sendWA(){
     }
   }
 
-  // Hay sesión: chequear que tenga al menos una dirección
+  // Hay sesión: chequear que tenga al menos una dirección Y un teléfono
   apiGet("clientes_direcciones","select=*&cliente_id=eq."+_catCliente.id+"&order=es_principal.desc,created_at.desc").then(function(rows){
     var dirs = Array.isArray(rows) ? rows : [];
+    var tieneTelefono = !!(_catCliente.telefono_principal && String(_catCliente.telefono_principal).trim());
+
     if(!dirs.length){
-      // No tiene ninguna dirección: forzar a crear una antes de continuar
-      _catToast("Necesitás cargar tu dirección antes de hacer un pedido","twarn");
-      _catNuevaDir();
+      // No tiene dirección: forzar a crearla. Si tampoco tiene teléfono, pedir ambos en el mismo modal.
+      if(!tieneTelefono){
+        _catToast("Necesitamos tu teléfono y dirección para procesar el pedido","twarn");
+      } else {
+        _catToast("Necesitás cargar tu dirección antes de hacer un pedido","twarn");
+      }
+      _catNuevaDir({
+        titulo: !tieneTelefono ? "Completá tus datos" : "Agregar dirección",
+        pedirTelefono: !tieneTelefono,
+        onComplete: function(){
+          // Después de guardar, reintenta el pedido
+          setTimeout(function(){ sendWA(); }, 200);
+        }
+      });
       return;
     }
+
+    if(!tieneTelefono){
+      // Tiene dirección pero no teléfono: pedir solo el teléfono.
+      // Reusamos el mismo modal de dirección con pedirTelefono=true; pero como ya tiene una dirección,
+      // mejor pedirlo aparte de forma simple.
+      _catPedirTelefono(function(){
+        // Después de guardar el teléfono, reintenta el pedido
+        setTimeout(function(){ sendWA(); }, 200);
+      });
+      return;
+    }
+
     // Si tiene UNA sola → usarla directamente, no preguntar
     if(dirs.length === 1){
       _continuarSendWA(dirs[0]);
@@ -1971,6 +1996,61 @@ function sendWA(){
   }).catch(function(e){
     console.error("[belle-cat] sendWA error cargando direcciones:",e);
     _catToast("Error al cargar tus direcciones","terr");
+  });
+}
+
+// Modal SIMPLE solo para pedir teléfono (cuando ya tiene dirección)
+function _catPedirTelefono(onSaved){
+  var mo = document.createElement("div");
+  mo.id = "_catMoTelefono";
+  mo.style.cssText = "position:fixed;inset:0;background:rgba(20,15,8,.75);z-index:1400;display:flex;align-items:center;justify-content:center;padding:1rem";
+  mo.innerHTML = "<div style='background:#fff;border-radius:14px;max-width:420px;width:100%;padding:1.4rem;box-shadow:0 8px 40px rgba(0,0,0,.3)'>"+
+    "<div style='font-size:2rem;margin-bottom:.4rem;text-align:center'>&#128241;</div>"+
+    "<div style='font-size:1rem;font-weight:700;color:var(--dark);margin-bottom:.4rem;text-align:center'>Necesitamos tu teléfono</div>"+
+    "<div style='font-size:.82rem;color:var(--mid);margin-bottom:1rem;line-height:1.4;text-align:center'>Para contactarte sobre tu pedido. 10 dígitos, sin 0 ni 15.</div>"+
+    "<input type='tel' id='_catTelInput' inputmode='numeric' placeholder='Ej: 3515121193' style='width:100%;padding:.7rem .8rem;border:2px solid #d4ba8a;border-radius:8px;font-size:1rem;background:#fff;color:var(--dark);box-sizing:border-box;font-family:inherit;outline:none;margin-bottom:.8rem'>"+
+    "<div style='display:flex;gap:.5rem'>"+
+    "<button onclick='var _m=document.getElementById(\"_catMoTelefono\");if(_m)_m.remove()' style='flex:1;background:transparent;color:var(--mid);border:1px solid #e8d9bf;padding:.65rem;border-radius:8px;font-size:.88rem;cursor:pointer'>Cancelar</button>"+
+    "<button onclick='_catGuardarTelefono()' style='flex:1;background:var(--accent);color:#fff;border:none;padding:.65rem;border-radius:8px;font-size:.88rem;font-weight:600;cursor:pointer'>Guardar</button>"+
+    "</div>"+
+    "</div>";
+  document.body.appendChild(mo);
+  // Guardar callback global (lo lee _catGuardarTelefono)
+  window._catTelOnSaved = onSaved || null;
+  setTimeout(function(){
+    var inp = document.getElementById("_catTelInput");
+    if(inp) inp.focus();
+  }, 100);
+}
+
+function _catGuardarTelefono(){
+  var inp = document.getElementById("_catTelInput");
+  if(!inp || !_catCliente) return;
+  var raw = inp.value.trim();
+  var d = raw.replace(/\D/g,"");
+  // Sacar 0 y 15 si los puso
+  if(d.length === 11 && d.charAt(0) === "0") d = d.substring(1);
+  if(d.length === 12 && d.substring(3,5) === "15") d = d.substring(0,3) + d.substring(5);
+  if(d.length === 11 && d.substring(2,4) === "15") d = d.substring(0,2) + d.substring(4);
+  if(d.length !== 10){
+    _catToast("El teléfono debe tener 10 dígitos (ej: 3515121193, sin 0 ni 15)","twarn"); return;
+  }
+  fetch(SB_URL+"/rest/v1/clientes?id=eq."+_catCliente.id, {
+    method: "PATCH",
+    headers:{"Content-Type":"application/json","apikey":SB_KEY,"Authorization":"Bearer "+SB_KEY,"Prefer":"return=minimal"},
+    body: JSON.stringify({telefono_principal: d, updated_at: new Date().toISOString()})
+  }).then(function(r){
+    if(!r.ok) throw new Error("HTTP "+r.status);
+    _catCliente.telefono_principal = d;
+    _catToast("Teléfono guardado","tok");
+    var mo = document.getElementById("_catMoTelefono");
+    if(mo) mo.remove();
+    var cb = window._catTelOnSaved;
+    window._catTelOnSaved = null;
+    if(typeof cb === "function") cb();
+  }).catch(function(e){
+    console.error("[belle-cat] _catGuardarTelefono error:",e);
+    _catToast("Error al guardar el teléfono","terr");
   });
 }
 
@@ -5816,6 +5896,7 @@ function _catAbrirSelectorDomicilio(opts){
   var titulo = opts.titulo || "Agregar dirección";
   var direccionExistente = opts.direccion || null;
   _catDir.cb = opts.cb || function(){};
+  _catDir.pedirTelefono = !!opts.pedirTelefono; // Nuevo: si true, muestra campo de teléfono y lo valida
   _catDir.pos = direccionExistente && direccionExistente.lat ? {lat: direccionExistente.lat, lng: direccionExistente.lng} : null;
   _catDir.componentes = direccionExistente ? {
     calle: direccionExistente.calle || "",
@@ -5883,6 +5964,17 @@ function _catRenderSelectorDirUI(){
   var c = _catDir.componentes || {};
 
   var h = "";
+
+  // ─── Campo TELÉFONO (solo si se pidió explícitamente, ej: cliente Google sin tel cargado) ───
+  if(_catDir.pedirTelefono){
+    h += "<div style='background:rgba(196,150,90,.08);border:2px solid var(--accent);border-radius:10px;padding:.7rem .8rem;margin-bottom:.8rem'>";
+    h += "<div style='font-size:.7rem;color:var(--accent);text-transform:uppercase;font-weight:700;letter-spacing:.05em;margin-bottom:.3rem;display:flex;align-items:center;gap:.4rem'>";
+    h += "<span style='font-size:1rem'>&#128241;</span> Teléfono de contacto";
+    h += "</div>";
+    h += "<input type='tel' id='_catDirTelefono' inputmode='numeric' placeholder='Ej: 3515121193 (10 dígitos, sin 0 ni 15)' style='width:100%;padding:.55rem .75rem;border:1px solid #d4ba8a;border-radius:7px;font-size:.92rem;background:#fff;color:var(--dark);box-sizing:border-box;font-family:inherit;outline:none'>";
+    h += "<div style='font-size:.66rem;color:var(--mid);margin-top:.35rem'>Lo necesitamos para contactarte sobre tu pedido. 10 dígitos, sin 0 ni 15.</div>";
+    h += "</div>";
+  }
 
   // Buscador prominente con autocomplete + fallback con botón
   h += "<div style='background:linear-gradient(135deg, #fdf8f0, #faf5ec);border:2px solid var(--accent);border-radius:10px;padding:.7rem .8rem;margin-bottom:.8rem'>";
@@ -6149,6 +6241,30 @@ function _catRecolectarDir(){
   var piso = (document.getElementById("_catDirPiso")||{value:""}).value.trim();
   var ref = (document.getElementById("_catDirRef")||{value:""}).value.trim();
 
+  // ─── Si se pidió teléfono, validarlo (formato argentino: 10 dígitos sin 0 ni 15) ───
+  var telefono = null;
+  if(_catDir.pedirTelefono){
+    var telRaw = (document.getElementById("_catDirTelefono")||{value:""}).value.trim();
+    var telDigits = telRaw.replace(/\D/g,"");
+    if(!telDigits){
+      _catToast("Ingresá tu teléfono","twarn"); return null;
+    }
+    // Sacar el 0 inicial si lo puso por costumbre (ej: 0351...)
+    if(telDigits.length === 11 && telDigits.charAt(0) === "0") telDigits = telDigits.substring(1);
+    // Sacar el 15 después del código de área (ej: 3515 + 15 + nro → 11 dígitos)
+    if(telDigits.length === 12 && telDigits.substring(3,5) === "15"){
+      telDigits = telDigits.substring(0,3) + telDigits.substring(5);
+    }
+    if(telDigits.length === 11 && telDigits.substring(2,4) === "15"){
+      // ej: 35 + 15 + 12345678 → quitar 15
+      telDigits = telDigits.substring(0,2) + telDigits.substring(4);
+    }
+    if(telDigits.length !== 10){
+      _catToast("El teléfono debe tener 10 dígitos (ej: 3515121193, sin 0 ni 15)","twarn"); return null;
+    }
+    telefono = telDigits;
+  }
+
   // Validaciones
   if(!etiqueta){_catToast("Ingresá una etiqueta (Casa, Trabajo...)","twarn");return null;}
   if(!calle){_catToast("Falta la calle","twarn");return null;}
@@ -6162,7 +6278,7 @@ function _catRecolectarDir(){
   // Devolvemos los datos con los nombres reales de las columnas en la BD:
   //  - "localidad" (no "ciudad")
   //  - "es_principal" (no "principal", aunque la BD también tiene "principal" como columna extra; usamos la oficial)
-  return {
+  var datos = {
     etiqueta: etiqueta,
     calle: calle,
     numero: numero,
@@ -6179,6 +6295,11 @@ function _catRecolectarDir(){
     modo_entrega: _catDir.modoEntrega,
     referencias: ref || null
   };
+  // Si capturamos teléfono, lo agregamos como propiedad especial (no es de la dirección, va al cliente)
+  if(telefono){
+    datos.__telefono_cliente = telefono;
+  }
+  return datos;
 }
 
 // ── TAB DIRECCIONES del panel del cliente ────────────────────────────
@@ -6246,19 +6367,40 @@ function _catCardDireccion(d){
   return h;
 }
 
-function _catNuevaDir(){
+function _catNuevaDir(opts){
+  opts = opts || {};
+  // pedirTelefono: si true, el modal incluye campo teléfono y lo guardamos en clientes.telefono_principal
   _catAbrirSelectorDomicilio({
-    titulo: "Agregar dirección",
+    titulo: opts.titulo || "Agregar dirección",
+    pedirTelefono: !!opts.pedirTelefono,
     cb: function(datos){
       if(!datos || !_catCliente) return;
+      // Si vino teléfono dentro de los datos, lo separamos y actualizamos el cliente
+      var telefonoNuevo = datos.__telefono_cliente || null;
+      if(telefonoNuevo) delete datos.__telefono_cliente;
       datos.cliente_id = _catCliente.id;
       // Si es la primera dirección, marcarla principal
       apiGet("clientes_direcciones","select=id&cliente_id=eq."+_catCliente.id+"&limit=1").then(function(prev){
         if(!prev || !prev.length) datos.es_principal = true;
-        return apiPost("clientes_direcciones", datos).then(function(){
-          _catToast("Dirección guardada","tok");
-          _catRenderTab();
-        });
+        return apiPost("clientes_direcciones", datos);
+      }).then(function(){
+        // Si capturamos teléfono nuevo, guardarlo en el cliente
+        if(telefonoNuevo){
+          return fetch(SB_URL+"/rest/v1/clientes?id=eq."+_catCliente.id, {
+            method: "PATCH",
+            headers:{"Content-Type":"application/json","apikey":SB_KEY,"Authorization":"Bearer "+SB_KEY,"Prefer":"return=minimal"},
+            body: JSON.stringify({telefono_principal: telefonoNuevo, updated_at: new Date().toISOString()})
+          }).then(function(r){
+            if(!r.ok) throw new Error("HTTP "+r.status);
+            // Actualizar el objeto cliente local
+            _catCliente.telefono_principal = telefonoNuevo;
+          });
+        }
+      }).then(function(){
+        _catToast("Datos guardados","tok");
+        _catRenderTab();
+        // Si había callback externo (ej: continuación de un pedido), invocarlo
+        if(typeof opts.onComplete === "function") opts.onComplete();
       }).catch(function(e){
         console.error("[belle-cat] _catNuevaDir error:",e);
         _catToast("Error al guardar","terr");
