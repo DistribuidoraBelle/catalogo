@@ -2090,13 +2090,13 @@ function vcVerHistorial(clienteId, clienteNombre){
 function vcVerCC(clienteId, clienteNombre){
   var mo=document.createElement("div");mo.className="mo open";mo.id="_moVcCC";
     mo.style.zIndex="99999";
-  mo.innerHTML="<div class='md' style='max-width:520px;width:95%;max-height:85vh;display:flex;flex-direction:column'>"+
+  mo.innerHTML="<div class='md' style='max-width:540px;width:95%;max-height:88vh;display:flex;flex-direction:column'>"+
     "<div class='mh'><div class='mtt'>💳 CC — "+(clienteNombre||"Cliente")+"</div>"+
     "<button class='btn btn-g xb' onclick='document.getElementById(\"_moVcCC\").remove()'>✕</button></div>"+
     "<div class='mb' style='overflow-y:auto;flex:1'>"+
-      // Contenedor que se rellena con saldo + movimientos
+      // Contenedor que se rellena con resumen + movimientos (lo mismo que ve el cliente)
       "<div id='_vcCCContenido'><div class='loading'><div class='spin'></div></div></div>"+
-      // Formulario FIJO de registrar pago — NO se borra al recargar movimientos
+      // Formulario FIJO de registrar pago — NO se borra al recargar
       "<div style='margin-top:1rem;padding-top:.8rem;border-top:1px solid var(--bd)'>"+
         "<div style='font-size:.78rem;font-weight:600;margin-bottom:.4rem;color:var(--tx)'>Registrar pago</div>"+
         "<div style='display:flex;gap:.4rem;flex-wrap:wrap'>"+
@@ -2106,44 +2106,202 @@ function vcVerCC(clienteId, clienteNombre){
           "</select>"+
           "<button class='btn btn-a' style='font-size:.78rem' onclick='_vcRegistrarPago("+clienteId+")'>Registrar</button>"+
         "</div>"+
+        "<div style='font-size:.6rem;color:var(--tx3);margin-top:.3rem;font-style:italic'>Tip: para pagos FIFO con vista previa, usá el botón \"Registrar pago\" del bloque CC en la ficha del cliente.</div>"+
       "</div>"+
     "</div></div>";
   document.body.appendChild(mo);
-  // NO cerrar al click-fuera (puede confundirse con interacción dentro del modal)
-  // Cargar movimientos
+  // Cargar todo: cliente entero, pedidos activos, pagos nuevos, movimientos viejos
   Promise.all([
-    apiGet("clientes","select=saldo_cc&id=eq."+clienteId),
-    apiGet("cuenta_corriente_movimientos","select=*&cliente_id=eq."+clienteId+"&order=created_at.desc&limit=20")
+    apiGet("clientes","select=*&id=eq."+clienteId+"&limit=1"),
+    apiGet("pedidos_catalogo","select=id,nro_orden,total,cobrado_total,estado,created_at&cliente_id=eq."+clienteId+"&estado=neq.cancelado&estado=neq.cobrado&order=created_at.asc"),
+    apiGet("cc_pagos","select=*&cliente_id=eq."+clienteId+"&order=fecha.desc,created_at.desc&limit=10").catch(function(){return [];}),
+    apiGet("cuenta_corriente_movimientos","select=*&cliente_id=eq."+clienteId+"&order=created_at.desc&limit=10").catch(function(){return [];})
   ]).then(function(res){
-    var el=document.getElementById("_vcCCContenido");if(!el)return;
-    var saldo=res[0]&&res[0][0]?res[0][0].saldo_cc||0:0;
-    var movs=Array.isArray(res[1])?res[1]:[];
-    var h="<div style='background:var(--sur2);border-radius:8px;padding:.8rem;text-align:center;margin-bottom:.8rem'>";
-    h+="<div style='font-size:.7rem;color:var(--tx3)'>Saldo</div>";
-    if(Math.abs(saldo)<0.01){
-      h+="<div style='font-size:1.5rem;font-weight:700;color:var(--tx2)'>$0</div>";
-      h+="<div style='font-size:.68rem;color:var(--tx3)'>Sin deuda</div></div>";
-    } else {
-      h+="<div style='font-size:1.5rem;font-weight:700;color:"+(saldo>0?"var(--green)":"var(--red)")+"'>$"+Math.round(Math.abs(saldo)).toLocaleString("es-AR")+"</div>";
-      h+="<div style='font-size:.68rem;color:var(--tx3)'>"+(saldo>0?"A favor del cliente":"Deuda del cliente")+"</div></div>";
+    var el=document.getElementById("_vcCCContenido"); if(!el) return;
+    var c = (res[0] && res[0][0]) || null;
+    var pedidos = Array.isArray(res[1]) ? res[1] : [];
+    var pagos   = Array.isArray(res[2]) ? res[2] : [];
+    var movsViejos = Array.isArray(res[3]) ? res[3] : [];
+    if(!c){
+      el.innerHTML="<div style='color:var(--red);padding:1rem;text-align:center'>Cliente no encontrado</div>";
+      return;
     }
-    if(movs.length){
-      h+="<div style='font-size:.72rem;font-weight:600;text-transform:uppercase;color:var(--acc);margin-bottom:.4rem'>Últimos movimientos</div>";
-      movs.forEach(function(m){
-        var esDebito=m.tipo==="cargo"||m.tipo==="concesion";
-        var fecha=new Date(m.created_at).toLocaleDateString("es-AR",{day:"2-digit",month:"2-digit",year:"2-digit"});
-        h+="<div style='display:flex;justify-content:space-between;padding:.4rem .6rem;background:var(--sur2);border-radius:6px;margin-bottom:.3rem;font-size:.78rem'>";
-        h+="<div><div>"+(m.descripcion||m.tipo)+"</div><div style='font-size:.65rem;color:var(--tx3)'>"+fecha+"</div></div>";
-        h+="<div style='font-weight:600;color:"+(esDebito?"var(--red)":"var(--green)")+"'>"+(esDebito?"-":"+")+fmt(Math.abs(m.monto))+"</div></div>";
+
+    // ─── Cálculos (igual que el panel del cliente) ───
+    var totalActivos = 0;
+    var totalCobrado = 0;
+    pedidos.forEach(function(p){
+      totalActivos += parseFloat(p.total) || 0;
+      totalCobrado += parseFloat(p.cobrado_total) || 0;
+    });
+    var saldoAbonar = totalActivos - totalCobrado;
+    var saldoFavor = parseFloat(c.saldo_cc) || 0;
+    if(saldoFavor < 0) saldoFavor = 0;
+    var creditoTotal = parseFloat(c.limite_credito) || 0;
+    var creditoUsado = saldoAbonar;
+    var creditoDispon = creditoTotal - creditoUsado;
+
+    // Cuota próxima
+    var cuotaMonto = parseFloat(c.cuota_proxima_monto) || 0;
+    var cuotaFecha = c.cuota_proxima_fecha;
+    var cuotaGracia = parseInt(c.cuota_proxima_dias_gracia) || 0;
+    var cuotaNota = c.cuota_proxima_nota || "";
+    var cuotaVencida = false;
+    var diasParaCuota = null;
+    if(cuotaMonto > 0 && cuotaFecha){
+      var hoy = new Date(); hoy.setHours(0,0,0,0);
+      var fechaCuota = new Date(cuotaFecha+"T00:00:00");
+      var fechaLimite = new Date(fechaCuota); fechaLimite.setDate(fechaLimite.getDate() + cuotaGracia);
+      diasParaCuota = Math.floor((fechaLimite - hoy) / 86400000);
+      if(diasParaCuota < 0) cuotaVencida = true;
+    }
+
+    // ─── Render ───
+    var h = "";
+
+    // Cartel BLOQUEADO si corresponde (amarillo)
+    if(c.bloqueado){
+      h += "<div style='background:rgba(232,160,40,.12);border:1px solid var(--yel);border-radius:7px;padding:.55rem .7rem;margin-bottom:.7rem;font-size:.78rem;color:var(--yel)'>";
+      h += "&#9888; <b>Cliente BLOQUEADO</b>"+(c.bloqueado_motivo?" — "+_vcEsc(c.bloqueado_motivo):"");
+      h += "</div>";
+    } else if(cuotaVencida){
+      h += "<div style='background:rgba(232,160,40,.12);border:1px solid var(--yel);border-radius:7px;padding:.55rem .7rem;margin-bottom:.7rem;font-size:.78rem;color:var(--yel)'>";
+      h += "&#9888; <b>Cuota vencida</b> — Debía abonar "+fmt(cuotaMonto)+" el "+_vcFmtFechaCorta(cuotaFecha)+(cuotaGracia>0?" (+"+cuotaGracia+"d gracia)":"");
+      h += "</div>";
+    }
+
+    // Recuadros (mismo orden que el cliente: Crédito total → Crédito disponible → Total pedidos → Saldo → Cuota)
+    h += "<div style='background:linear-gradient(135deg, rgba(196,150,90,.06), rgba(196,150,90,.02));border:1px solid rgba(196,150,90,.25);border-radius:9px;padding:.7rem .8rem;margin-bottom:.8rem'>";
+    h += "<div style='font-size:.66rem;color:var(--tx3);text-transform:uppercase;font-weight:700;letter-spacing:.05em;margin-bottom:.55rem'>&#128179; Resumen Cuenta Corriente</div>";
+
+    // 1) CRÉDITO TOTAL
+    if(creditoTotal > 0){
+      h += "<div style='background:var(--sur);border:1px solid var(--bd);border-radius:7px;padding:.45rem .65rem;margin-bottom:.35rem'>";
+      h += "<div style='display:flex;justify-content:space-between;align-items:center;gap:.5rem'>";
+      h += "<div>";
+      h += "<div style='font-size:.6rem;color:var(--tx3);text-transform:uppercase;font-weight:600;letter-spacing:.04em'>&#128081; Crédito total</div>";
+      h += "<div style='font-size:.58rem;color:var(--tx3);margin-top:.05rem'>Asignado por la empresa</div>";
+      h += "</div>";
+      h += "<div style='font-size:1.05rem;font-weight:800;color:var(--tx)'>"+fmt(creditoTotal)+"</div>";
+      h += "</div></div>";
+
+      // 2) CRÉDITO DISPONIBLE
+      var pctUsado = creditoTotal > 0 ? Math.min(100, Math.max(0, (creditoUsado/creditoTotal)*100)) : 0;
+      var colorBarra = pctUsado >= 100 ? "var(--red)" : (pctUsado >= 80 ? "var(--yel)" : "var(--green)");
+      h += "<div style='background:var(--sur);border:1px solid "+(creditoDispon<=0?"var(--red)":"var(--bd)")+";border-radius:7px;padding:.45rem .65rem;margin-bottom:.65rem'>";
+      h += "<div style='display:flex;justify-content:space-between;align-items:center;gap:.5rem;margin-bottom:.3rem'>";
+      h += "<div>";
+      h += "<div style='font-size:.6rem;color:var(--tx3);text-transform:uppercase;font-weight:600;letter-spacing:.04em'>&#9989; Crédito disponible</div>";
+      h += "<div style='font-size:.58rem;color:var(--tx3);margin-top:.05rem'>Total menos pedidos en curso</div>";
+      h += "</div>";
+      h += "<div style='font-size:1.05rem;font-weight:800;color:"+(creditoDispon>0?"var(--green)":"var(--red)")+"'>"+fmt(Math.max(0,creditoDispon))+"</div>";
+      h += "</div>";
+      h += "<div style='background:rgba(255,255,255,.04);height:6px;border-radius:4px;overflow:hidden'>";
+      h += "<div style='background:"+colorBarra+";height:100%;width:"+pctUsado+"%;transition:width .3s'></div>";
+      h += "</div></div>";
+    }
+
+    // 3) TOTAL DINERO PEDIDOS
+    h += "<div style='background:var(--sur);border:1px solid var(--bd);border-radius:7px;padding:.45rem .65rem;margin-bottom:.35rem'>";
+    h += "<div style='display:flex;justify-content:space-between;align-items:center;gap:.5rem'>";
+    h += "<div>";
+    h += "<div style='font-size:.6rem;color:var(--tx3);text-transform:uppercase;font-weight:600;letter-spacing:.04em'>&#128230; Total dinero pedidos</div>";
+    h += "<div style='font-size:.58rem;color:var(--tx3);margin-top:.05rem'>"+pedidos.length+" pedido"+(pedidos.length===1?"":"s")+" activo"+(pedidos.length===1?"":"s")+"</div>";
+    h += "</div>";
+    h += "<div style='font-size:1.05rem;font-weight:800;color:var(--tx)'>"+fmt(totalActivos)+"</div>";
+    h += "</div></div>";
+
+    // 4) SALDO A ABONAR
+    h += "<div style='background:var(--sur);border:1px solid "+(saldoAbonar>0.01?"rgba(196,150,90,.5)":"rgba(76,175,130,.4)")+";border-radius:7px;padding:.45rem .65rem;margin-bottom:.65rem'>";
+    h += "<div style='display:flex;justify-content:space-between;align-items:center;gap:.5rem'>";
+    h += "<div>";
+    h += "<div style='font-size:.6rem;color:var(--tx3);text-transform:uppercase;font-weight:600;letter-spacing:.04em'>&#128176; Saldo a abonar</div>";
+    h += "<div style='font-size:.58rem;color:var(--tx3);margin-top:.05rem'>"+(totalCobrado>0?"Pagado: "+fmt(totalCobrado):(saldoAbonar<=0.01?"Al día ✓":"Sin pagos aún"))+"</div>";
+    h += "</div>";
+    h += "<div style='font-size:1.05rem;font-weight:800;color:"+(saldoAbonar>0.01?"var(--red)":"var(--green)")+"'>"+fmt(saldoAbonar)+"</div>";
+    h += "</div></div>";
+
+    // 5) CUOTA ACORDADA (si tiene)
+    if(cuotaMonto > 0 && cuotaFecha){
+      var bgC, brC, txC;
+      if(cuotaVencida){
+        bgC = "rgba(232,160,40,.12)"; brC = "var(--yel)"; txC = "var(--yel)";
+      } else if(diasParaCuota !== null && diasParaCuota <= 3){
+        bgC = "rgba(232,160,40,.08)"; brC = "rgba(232,160,40,.4)"; txC = "var(--yel)";
+      } else {
+        bgC = "var(--sur)"; brC = "var(--bd)"; txC = "var(--tx)";
+      }
+      h += "<div style='background:"+bgC+";border:1px solid "+brC+";border-radius:7px;padding:.45rem .65rem'>";
+      h += "<div style='display:flex;justify-content:space-between;align-items:flex-start;gap:.5rem'>";
+      h += "<div style='flex:1;min-width:0'>";
+      h += "<div style='font-size:.6rem;color:"+txC+";text-transform:uppercase;font-weight:600;letter-spacing:.04em'>&#128197; Cuota acordada</div>";
+      h += "<div style='font-size:.92rem;font-weight:700;color:"+txC+";margin-top:.1rem'>"+fmt(cuotaMonto)+" — "+_vcFmtFechaCorta(cuotaFecha)+"</div>";
+      if(cuotaNota) h += "<div style='font-size:.62rem;color:var(--tx3);margin-top:.1rem;font-style:italic'>"+_vcEsc(cuotaNota)+"</div>";
+      h += "</div>";
+      h += "<div style='text-align:right;flex-shrink:0'>";
+      if(cuotaVencida){
+        h += "<div style='font-size:.62rem;font-weight:700;color:var(--yel)'>VENCIDO</div>";
+      } else if(diasParaCuota === 0){
+        h += "<div style='font-size:.62rem;font-weight:700;color:var(--yel)'>HOY</div>";
+      } else if(diasParaCuota === 1){
+        h += "<div style='font-size:.62rem;font-weight:700;color:var(--yel)'>MAÑANA</div>";
+      } else if(diasParaCuota !== null && diasParaCuota > 0){
+        h += "<div style='font-size:.62rem;font-weight:600;color:var(--tx3)'>en "+diasParaCuota+"d</div>";
+      }
+      if(cuotaGracia > 0 && !cuotaVencida){
+        h += "<div style='font-size:.55rem;color:var(--tx3);margin-top:.1rem'>+"+cuotaGracia+"d gracia</div>";
+      }
+      h += "</div>";
+      h += "</div></div>";
+    }
+
+    // Saldo a favor (si pagó de más)
+    if(saldoFavor > 0.01){
+      h += "<div style='background:rgba(76,175,130,.12);border:1px solid rgba(76,175,130,.4);border-radius:7px;padding:.45rem .65rem;margin-top:.45rem;display:flex;justify-content:space-between;align-items:center;gap:.5rem'>";
+      h += "<div>";
+      h += "<div style='font-size:.6rem;color:var(--green);text-transform:uppercase;font-weight:600'>&#10003; A favor del cliente</div>";
+      h += "<div style='font-size:.58rem;color:var(--tx3)'>Aplicable a futuros pedidos</div>";
+      h += "</div>";
+      h += "<div style='font-size:.95rem;font-weight:700;color:var(--green)'>"+fmt(saldoFavor)+"</div>";
+      h += "</div>";
+    }
+
+    h += "</div>"; // fin caja resumen
+
+    // ─── Lista de últimos pagos (sistema nuevo cc_pagos) ───
+    if(pagos.length){
+      h += "<div style='font-size:.7rem;color:var(--tx3);text-transform:uppercase;font-weight:600;margin-bottom:.4rem'>Últimos pagos</div>";
+      pagos.slice(0,5).forEach(function(p){
+        var monto = parseFloat(p.monto)||0;
+        var fecha = _vcFmtFechaCorta(p.fecha || p.created_at);
+        var forma = p.forma_pago || "efectivo";
+        h += "<div style='display:flex;justify-content:space-between;padding:.35rem .55rem;background:var(--sur);border:1px solid var(--bd);border-radius:6px;margin-bottom:.3rem;font-size:.76rem'>";
+        h += "<div style='min-width:0;flex:1'>";
+        h += "<div style='color:var(--tx)'>"+_vcEsc(forma.charAt(0).toUpperCase()+forma.slice(1))+(p.nota?" — "+_vcEsc(p.nota):"")+"</div>";
+        h += "<div style='font-size:.62rem;color:var(--tx3);margin-top:.05rem'>"+fecha+" · Por "+_vcEsc(p.registrado_por||"—")+"</div>";
+        h += "</div>";
+        h += "<div style='font-weight:700;color:var(--green);flex-shrink:0'>+"+fmt(monto)+"</div>";
+        h += "</div>";
+      });
+    } else if(movsViejos.length){
+      // Fallback: mostrar movimientos viejos si no hay pagos nuevos
+      h += "<div style='font-size:.7rem;color:var(--tx3);text-transform:uppercase;font-weight:600;margin-bottom:.4rem'>Movimientos (sistema anterior)</div>";
+      movsViejos.slice(0,5).forEach(function(m){
+        var esDebito = m.tipo === "cargo" || m.tipo === "concesion";
+        var fecha = new Date(m.created_at).toLocaleDateString("es-AR",{day:"2-digit",month:"2-digit",year:"2-digit"});
+        h += "<div style='display:flex;justify-content:space-between;padding:.35rem .55rem;background:var(--sur);border:1px solid var(--bd);border-radius:6px;margin-bottom:.3rem;font-size:.76rem'>";
+        h += "<div><div>"+_vcEsc(m.descripcion||m.tipo)+"</div><div style='font-size:.62rem;color:var(--tx3)'>"+fecha+"</div></div>";
+        h += "<div style='font-weight:700;color:"+(esDebito?"var(--red)":"var(--green)")+"'>"+(esDebito?"-":"+")+fmt(Math.abs(m.monto))+"</div></div>";
       });
     } else {
-      h+="<div style='text-align:center;padding:1rem;color:var(--tx3);font-size:.78rem;font-style:italic'>Aún no hay movimientos</div>";
+      h += "<div style='text-align:center;padding:.8rem;color:var(--tx3);font-size:.76rem;font-style:italic'>Aún no hay pagos registrados</div>";
     }
-    el.innerHTML=h;
+
+    el.innerHTML = h;
   }).catch(function(e){
     console.error("[belle] vcVerCC error:",e);
     var el=document.getElementById("_vcCCContenido");
-    if(el) el.innerHTML="<div style='color:var(--red);padding:1rem;text-align:center'>Error al cargar movimientos</div>";
+    if(el) el.innerHTML="<div style='color:var(--red);padding:1rem;text-align:center'>Error al cargar la cuenta corriente</div>";
   });
 }
 
