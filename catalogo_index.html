@@ -5607,6 +5607,18 @@ function _catVerPedido(pedId){
     h += "<div style='font-size:.7rem;color:var(--mid);text-transform:uppercase;font-weight:600;margin-bottom:.5rem'>Seguimiento</div>";
     h += _catTimelinePedido(ped, logs);
 
+    // Botón "Necesito ayuda" — abre WhatsApp con mensaje pre-armado
+    var nroOrden = ped.nro_orden || ("#" + ped.id);
+    var msgWA = "Hola, tengo un problema con mi pedido " + nroOrden + ". ¿Me podés ayudar?";
+    var waNum = (typeof waNumber !== "undefined" && waNumber) ? waNumber : (typeof WA_NUMBER !== "undefined" ? WA_NUMBER : "");
+    if(waNum){
+      h += "<div style='margin-top:1.2rem;padding-top:.9rem;border-top:1px solid #f0e6d3;text-align:center'>";
+      h += "<a href='https://wa.me/" + waNum + "?text=" + encodeURIComponent(msgWA) + "' target='_blank' rel='noopener' style='display:inline-flex;align-items:center;gap:.4rem;font-size:.72rem;color:var(--mid);text-decoration:none;padding:.4rem .7rem;border:1px solid #e8d9bf;border-radius:6px;transition:background .15s' onmouseover='this.style.background=\"#faf5ec\"' onmouseout='this.style.background=\"transparent\"'>";
+      h += "&#128172; Necesito ayuda con este pedido";
+      h += "</a>";
+      h += "</div>";
+    }
+
     body.innerHTML = h;
   }).catch(function(e){
     console.error("[belle-cat] _catVerPedido error:",e);
@@ -5620,53 +5632,123 @@ function _catCerrarPedido(){
   if(mo) mo.remove();
 }
 
-// Timeline visual de estados del pedido
+// Timeline visual del pedido — etapas FIJAS según estado real
 function _catTimelinePedido(ped, logs){
-  // Eventos a mostrar al cliente (filtramos los internos como cliente_asignado, asignado, etc)
-  var eventosVisibles = {
-    "creado":           {label:"Pedido recibido", icon:"&#128230;", color:"#a08c6a"},
-    "reservado":        {label:"Confirmado y reservado", icon:"&check;", color:"#7a9eb8"},
-    "en_preparacion":   {label:"En preparación", icon:"&#127922;", color:"#c4965a"},
-    "en_reparto":       {label:"En reparto", icon:"&#128666;", color:"#4a8ac5"},
-    "entregado":        {label:"Entregado", icon:"&check;", color:"#5a8a4a"},
-    "cobrado":          {label:"Pagado", icon:"&#128181;", color:"#5a8a4a"},
-    "cobrado_parcial":  {label:"Pago parcial recibido", icon:"&#128181;", color:"#7a9eb8"},
-    "cancelado":        {label:"Cancelado", icon:"&times;", color:"#c5443a"}
-  };
+  // Etapas fijas que el cliente ve. Cada etapa puede estar:
+  //  - "pendiente" (gris, no llegó todavía)
+  //  - "actual"    (dorado, etapa actual del pedido)
+  //  - "completado" (verde, ya pasó)
+  // El estado del pedido determina hasta dónde llegamos.
+  // Si está cancelado, lo mostramos al final con su propia etapa.
 
-  // Construir lista de eventos cronológicamente
-  var eventos = [];
-  // 1) Siempre el "Pedido recibido" al inicio (a partir de created_at)
-  eventos.push({key:"creado", fecha: ped.created_at});
-  // 2) Recorrer logs y agregar los que estén en eventosVisibles
-  logs.forEach(function(l){
-    if(eventosVisibles[l.estado]){
-      eventos.push({key: l.estado, fecha: l.created_at, nota: l.nota});
-    }
-  });
+  var estado = (ped.estado || "pendiente").toLowerCase();
+  var estadoEnvio = (ped.estado_envio || "").toLowerCase();
+  var cancelado = estado === "cancelado";
 
-  if(!eventos.length){
-    return "<div style='font-size:.78rem;color:var(--mid)'>Sin actualizaciones aún</div>";
+  // Mapeo: ¿qué etapa está completada según el estado?
+  // Etapas (en orden):
+  //   1. recibido       → cuando admin/vendedor lo confirma (estado pasa a "reservado")
+  //   2. preparando     → cuando hay pago registrado (cobrado_parcial o cobrado_total > 0)
+  //   3. en_reparto     → cuando se asigna a una ruta (estado_envio = "en_reparto")
+  //   4. cobrado        → cuando el pedido está totalmente pagado (estado = "cobrado")
+  // Mientras está en "pendiente": ninguna etapa marcada como completa, todas pendientes.
+
+  // Determinar progreso real (índice de la última etapa completada)
+  var idxCompletado = -1; // -1 = nada completado, todas grises
+
+  // Etapa 1: Pedido recibido — solo si admin/vendedor confirmó
+  if(estado === "reservado" || estado === "cobrado_parcial" || estado === "cobrado" || estadoEnvio === "en_preparacion" || estadoEnvio === "en_reparto" || estadoEnvio === "entregado"){
+    idxCompletado = 0;
+  }
+  // Etapa 2: Preparando pedido — cuando hay pago registrado
+  var hayPago = (parseFloat(ped.cobrado_total)||0) > 0 || (parseFloat(ped.cobrado_parcial)||0) > 0;
+  if(hayPago || estado === "cobrado_parcial" || estado === "cobrado" || estadoEnvio === "en_preparacion" || estadoEnvio === "en_reparto" || estadoEnvio === "entregado"){
+    idxCompletado = Math.max(idxCompletado, 1);
+  }
+  // Etapa 3: En reparto
+  if(estadoEnvio === "en_reparto" || estadoEnvio === "entregado"){
+    idxCompletado = Math.max(idxCompletado, 2);
+  }
+  // Etapa 4: Cobrado completo
+  if(estado === "cobrado"){
+    idxCompletado = 3;
   }
 
+  // Construir las fechas de cada etapa desde los logs (si existen)
+  var fechasEtapa = {};
+  // Etapa 0 (recibido) → log.estado === "reservado"
+  // Etapa 1 (preparando) → primer registro en cc_pagos del pedido o log.estado === "cobrado_parcial"
+  // Etapa 2 (en_reparto) → log.estado_envio === "en_reparto" o log.estado === "en_reparto"
+  // Etapa 3 (cobrado) → ped.cobrado_at o log.estado === "cobrado"
+  if(Array.isArray(logs)){
+    logs.forEach(function(l){
+      var e = (l.estado||"").toLowerCase();
+      if(e === "reservado" && !fechasEtapa[0]) fechasEtapa[0] = l.created_at;
+      if((e === "cobrado_parcial" || e === "en_preparacion") && !fechasEtapa[1]) fechasEtapa[1] = l.created_at;
+      if((e === "en_reparto") && !fechasEtapa[2]) fechasEtapa[2] = l.created_at;
+      if(e === "cobrado" && !fechasEtapa[3]) fechasEtapa[3] = l.created_at;
+    });
+  }
+  // Fallback: si no hay log de "cobrado", usar ped.cobrado_at
+  if(!fechasEtapa[3] && ped.cobrado_at) fechasEtapa[3] = ped.cobrado_at;
+
+  // Etapas a mostrar
+  var etapas = [
+    {label:"Pedido recibido",   icon:"&#128230;", desc:"Tu pedido fue recibido por nuestro equipo"},
+    {label:"Preparando pedido", icon:"&#127922;", desc:"Estamos preparando tu pedido"},
+    {label:"En reparto",        icon:"&#128666;", desc:"Tu pedido está en camino"},
+    {label:"Pedido cobrado",    icon:"&check;",   desc:"Pedido completado y cobrado"}
+  ];
+
+  // Si está cancelado, mostrar mensaje especial
+  if(cancelado){
+    var h = "<div style='background:#fde8e8;border:1px solid #e8a8a8;border-radius:8px;padding:.7rem .9rem;display:flex;align-items:center;gap:.6rem'>";
+    h += "<div style='font-size:1.4rem'>&#10060;</div>";
+    h += "<div style='flex:1'>";
+    h += "<div style='font-size:.85rem;font-weight:700;color:#9a2a22'>Pedido cancelado</div>";
+    h += "<div style='font-size:.7rem;color:#7a3530;margin-top:.1rem'>Si tenés dudas, contactá a tu vendedor</div>";
+    h += "</div></div>";
+    return h;
+  }
+
+  // Render
   var h = "<div style='position:relative;padding-left:1.4rem'>";
   // Línea vertical
-  h += "<div style='position:absolute;left:.45rem;top:.3rem;bottom:.3rem;width:2px;background:#e8d9bf'></div>";
+  h += "<div style='position:absolute;left:.45rem;top:.5rem;bottom:.5rem;width:2px;background:#e8d9bf'></div>";
 
-  eventos.forEach(function(ev, idx){
-    var meta = eventosVisibles[ev.key] || {label: ev.key, icon:"&bull;", color:"#a08c6a"};
-    var esUltimo = idx === eventos.length - 1;
-    var dotColor = esUltimo ? meta.color : "#c4965a";
-    h += "<div style='position:relative;padding:.3rem 0 .55rem;padding-left:.3rem'>";
-    h += "<div style='position:absolute;left:-1.4rem;top:.45rem;width:14px;height:14px;border-radius:50%;background:"+dotColor+";border:3px solid #fff;box-shadow:0 0 0 1px "+dotColor+"'></div>";
+  etapas.forEach(function(et, idx){
+    // Estado de esta etapa
+    var completado = idx <= idxCompletado;
+    var actual = idx === idxCompletado + 1; // próxima etapa pendiente
+
+    var dotBg, dotBorder, txtColor, descColor;
+    if(completado){
+      dotBg = "#5a8a4a";       // verde
+      dotBorder = "#5a8a4a";
+      txtColor = "var(--dark)";
+      descColor = "var(--mid)";
+    } else if(actual){
+      dotBg = "#c4965a";       // dorado (siguiente)
+      dotBorder = "#c4965a";
+      txtColor = "var(--dark)";
+      descColor = "var(--mid)";
+    } else {
+      dotBg = "#fff";          // pendiente
+      dotBorder = "#d4c4a4";
+      txtColor = "#a08c6a";
+      descColor = "#b8a888";
+    }
+
+    h += "<div style='position:relative;padding:.35rem 0 .6rem;padding-left:.3rem'>";
+    h += "<div style='position:absolute;left:-1.4rem;top:.45rem;width:14px;height:14px;border-radius:50%;background:"+dotBg+";border:3px solid #fff;box-shadow:0 0 0 1.5px "+dotBorder+"'></div>";
     h += "<div style='display:flex;justify-content:space-between;align-items:flex-start;gap:.4rem'>";
     h += "<div style='min-width:0;flex:1'>";
-    h += "<div style='font-size:.8rem;font-weight:600;color:var(--dark)'>"+meta.icon+" "+meta.label+"</div>";
-    if(ev.nota){
-      h += "<div style='font-size:.7rem;color:var(--mid);margin-top:.1rem'>"+_catEsc(ev.nota)+"</div>";
-    }
+    h += "<div style='font-size:.8rem;font-weight:600;color:"+txtColor+"'>"+et.icon+" "+et.label+"</div>";
+    h += "<div style='font-size:.66rem;color:"+descColor+";margin-top:.1rem'>"+et.desc+"</div>";
     h += "</div>";
-    h += "<div style='font-size:.66rem;color:var(--mid);flex-shrink:0;text-align:right'>"+_catFmtFecha(ev.fecha, true)+"</div>";
+    if(completado && fechasEtapa[idx]){
+      h += "<div style='font-size:.62rem;color:var(--mid);flex-shrink:0;text-align:right'>"+_catFmtFecha(fechasEtapa[idx], true)+"</div>";
+    }
     h += "</div>";
     h += "</div>";
   });
