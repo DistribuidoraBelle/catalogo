@@ -1221,12 +1221,21 @@ td{padding:.35rem .5rem;font-size:.78rem;color:var(--tx2);vertical-align:middle;
     <div class="page" id="page-clientes">
       <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:1rem;gap:.5rem;flex-wrap:wrap">
         <div style="font-size:.8rem;color:var(--tx2)">Clientes registrados. Historial de compras y configuración por cliente.</div>
-        <div style="display:flex;gap:.5rem;align-items:center">
+        <div style="display:flex;gap:.5rem;align-items:center;flex-wrap:wrap">
           <button class="btn btn-a" style="padding:.4rem .8rem;font-size:.78rem" onclick="abrirCrearClienteAdmin()">➕ Nuevo cliente</button>
-          <div class="sbox"><span class="sbi">&#128269;</span><input type="text" id="clienteSrch" placeholder="Buscar cliente..." oninput="filterClientes()" style="width:200px"></div>
+          <div class="sbox"><span class="sbi">&#128269;</span><input type="text" id="clienteSrch" placeholder="Buscar nombre, email, tel..." oninput="filterClientes()" style="width:200px"></div>
+          <select id="clienteFiltEst" onchange="filterClientes()" style="padding:.4rem .55rem;border:1px solid var(--bd);border-radius:6px;font-size:.78rem;background:var(--sur2);color:var(--tx)">
+            <option value="">Todos los estados</option>
+            <option value="activo">Activos</option>
+            <option value="suspendido">Suspendidos</option>
+            <option value="pendiente">Pendientes</option>
+          </select>
+          <select id="clienteFiltVend" onchange="filterClientes()" style="padding:.4rem .55rem;border:1px solid var(--bd);border-radius:6px;font-size:.78rem;background:var(--sur2);color:var(--tx)">
+            <option value="">Todos los vendedores</option>
+          </select>
         </div>
       </div>
-      <div id="clientesGrid" style="display:grid;grid-template-columns:repeat(auto-fill,minmax(260px,1fr));gap:.8rem"></div>
+      <div id="clientesGrid" style="display:grid;grid-template-columns:repeat(auto-fill,minmax(280px,1fr));gap:.8rem"></div>
     </div>
 
     <div class="page" id="page-cotiz-historial">
@@ -8004,15 +8013,35 @@ function loadClientes(){
   if(!cont)return;
   cont.innerHTML="<div class='loading'><div class='spin'></div>Cargando clientes...</div>";
   Promise.all([
-    apiGet("clientes","select=*,vendedores(nombre)&order=created_at.desc&limit=500"),
-    apiGet("vendedores","select=id,nombre&activo=is.true")
+    apiGet("clientes","select=*&order=created_at.desc&limit=1000"),
+    apiGet("vendedores","select=id,nombre,activo")
   ]).then(function(res){
     clientesData=Array.isArray(res[0])?res[0]:[];
-    var _vendedores=Array.isArray(res[1])?res[1]:[];
+    window._adminVendedoresCache=Array.isArray(res[1])?res[1]:[];
     renderClientes(clientesData);
     var sel=document.getElementById("clienteFiltVend");
-    if(sel){sel.innerHTML='<option value="">Todos los vendedores</option>'+_vendedores.map(function(v){return'<option value="'+v.id+'">'+v.nombre+'</option>';}).join('');}
-  }).catch(function(){cont.innerHTML="<div class='empty'>Error al cargar clientes</div>";});
+    if(sel){
+      var actual=sel.value||"";
+      var vendActivos=window._adminVendedoresCache.filter(function(v){return v.activo;});
+      sel.innerHTML='<option value="">Todos los vendedores</option><option value="__sin">Sin asignar</option>'+vendActivos.map(function(v){return'<option value="'+v.id+'">'+v.nombre+'</option>';}).join('');
+      sel.value=actual;
+    }
+  }).catch(function(e){
+    console.error("[belle] loadClientes error:",e);
+    cont.innerHTML="<div class='empty'>Error al cargar clientes</div>";
+  });
+}
+
+// Helper escape para HTML dinámico (regla de oro)
+function _adminEscNomJS(s){
+  return String(s||"").replace(/\\/g,"\\\\").replace(/'/g,"&#39;").replace(/"/g,"&quot;");
+}
+
+// Devuelve nombre del vendedor por ID
+function _adminVendedorNombre(id){
+  if(!id) return "Sin asignar";
+  var v=(window._adminVendedoresCache||[]).find(function(x){return x.id===id;});
+  return v?v.nombre:"#"+id;
 }
 
 function filtrarClientes(){
@@ -8020,35 +8049,174 @@ function filtrarClientes(){
   var est=(document.getElementById("clienteFiltEst")||{value:""}).value;
   var vend=(document.getElementById("clienteFiltVend")||{value:""}).value;
   var filtered=clientesData.filter(function(c){
-    if(q&&!((c.nombre||"")+" "+(c.apellido||"")+" "+(c.email||"")+" "+(c.telefono_principal||"")).toLowerCase().includes(q))return false;
+    if(q&&!((c.nombre||"")+" "+(c.apellido||"")+" "+(c.email||"")+" "+(c.telefono_principal||"")+" #"+c.id).toLowerCase().includes(q))return false;
     if(est&&c.estado!==est)return false;
-    if(vend&&String(c.vendedor_asignado_id)!==vend)return false;
+    if(vend==="__sin"){if(c.vendedor_asignado_id)return false;}
+    else if(vend&&String(c.vendedor_asignado_id)!==vend)return false;
     return true;
   });
   renderClientes(filtered);
 }
 
+// Alias por compatibilidad con HTML (oninput="filterClientes()")
+function filterClientes(){return filtrarClientes();}
+
 function renderClientes(clientes){
   var grid=document.getElementById("clientesGrid");if(!grid)return;
-  if(!clientes.length){grid.innerHTML="<div class='empty' style='grid-column:1/-1'>Sin clientes registrados. Los clientes se crean cuando alguien se registra desde el catálogo.</div>";return;}
+  if(!clientes.length){
+    grid.innerHTML="<div class='empty' style='grid-column:1/-1'>Sin clientes que coincidan con los filtros.</div>";
+    return;
+  }
   var estColor={activo:"var(--green)",suspendido:"var(--red)",pendiente:"var(--yel)"};
-  grid.innerHTML=clientes.map(function(c){
-    var nombre=(c.nombre||"")+" "+(c.apellido||"");
-    var ultima=c.ultimo_pedido_at?new Date(c.ultimo_pedido_at).toLocaleDateString("es-AR",{day:"2-digit",month:"2-digit",year:"2-digit"}):"—";
-    var vend=c.vendedores?c.vendedores.nombre:"Sin asignar";
-    var est=c.estado||"activo";
-    return "<div style='background:var(--sur);border:1px solid var(--bd);border-radius:var(--r);padding:.9rem;cursor:pointer' onclick='verClienteFicha("+c.id+")'>"+
-      "<div style='display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:.5rem'>"+
-        "<div style='min-width:0;flex:1'><div style='font-size:.88rem;font-weight:600;color:var(--tx)'>"+nombre+"</div><div style='font-size:.7rem;color:var(--tx3)'>"+(c.email||"—")+"</div></div>"+
-        "<span style='font-size:.62rem;font-weight:600;color:"+estColor[est]+";background:"+estColor[est]+"18;border:1px solid "+estColor[est]+"44;border-radius:10px;padding:.15rem .45rem;flex-shrink:0;margin-left:.4rem'>"+est+"</span>"+
+  var html="";
+  clientes.forEach(function(c){
+    try {
+      var nombre=((c.nombre||"")+" "+(c.apellido||"")).trim()||"(sin nombre)";
+      var nomEsc=_adminEscNomJS(nombre);
+      var est=String(c.estado||"activo").toLowerCase();
+      if(!estColor[est])est="activo";
+      var tel=String(c.telefono_principal||"");
+      var ultima=c.ultimo_pedido_at?new Date(c.ultimo_pedido_at).toLocaleDateString("es-AR",{day:"2-digit",month:"2-digit",year:"2-digit"}):"—";
+      var vendNom=_adminVendedorNombre(c.vendedor_asignado_id);
+      var saldoCC=parseFloat(c.saldo_cc)||0;
+
+      html+="<div style='background:var(--sur);border:1px solid var(--bd);border-radius:var(--r);padding:.9rem'>";
+      // Header con nombre, ID, badges, estado
+      html+="<div style='display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:.5rem;gap:.5rem'>";
+      html+="<div style='flex:1;min-width:0'>";
+      html+="<div style='font-size:.88rem;font-weight:600;color:var(--tx);display:flex;align-items:center;gap:.4rem;flex-wrap:wrap'>";
+      html+="<span>"+nombre+"</span>";
+      html+="<span style='font-size:.65rem;font-weight:500;color:var(--tx3);background:var(--sur2);padding:.1rem .4rem;border-radius:4px'>#"+c.id+"</span>";
+      if(c.cuenta_corriente_habilitada){
+        html+="<span style='font-size:.6rem;color:var(--acc);background:rgba(196,150,90,.12);padding:.05rem .35rem;border-radius:4px;border:1px solid rgba(196,150,90,.3)'>💳 CC</span>";
+      }
+      html+="</div>";
+      // Email + tel
+      if(c.email){
+        html+="<div style='font-size:.7rem;color:var(--tx3);margin-top:.15rem'>"+c.email+"</div>";
+      }
+      if(tel){
+        html+="<a href='https://wa.me/549"+tel.replace(/\D/g,"")+"' target='_blank' style='font-size:.72rem;color:var(--green);text-decoration:none'>📱 "+tel+"</a>";
+      }
+      // Vendedor
+      var vendColor=c.vendedor_asignado_id?"var(--blue)":"var(--yel)";
+      html+="<div style='font-size:.66rem;color:"+vendColor+";margin-top:.2rem'>👤 "+vendNom+"</div>";
+      html+="</div>";
+      html+="<span style='font-size:.62rem;font-weight:600;color:"+estColor[est]+";border:1px solid "+estColor[est]+";border-radius:10px;padding:.15rem .45rem;flex-shrink:0;text-transform:capitalize'>"+est+"</span>";
+      html+="</div>";
+
+      // Info rápida: último pedido + CC
+      html+="<div style='display:grid;grid-template-columns:1fr 1fr;gap:.4rem;margin-bottom:.6rem'>";
+      html+="<div style='background:var(--sur2);border-radius:6px;padding:.35rem .5rem'><div style='font-size:.6rem;color:var(--tx3);text-transform:uppercase'>Último pedido</div><div style='font-size:.75rem;font-weight:600;color:var(--tx)'>"+ultima+"</div></div>";
+      if(c.cuenta_corriente_habilitada){
+        var saldoColor=saldoCC<-0.01?"var(--red)":(saldoCC>0.01?"var(--green)":"var(--tx2)");
+        var saldoTxt=saldoCC<-0.01?"Debe "+fmt(Math.abs(saldoCC)):(saldoCC>0.01?"A favor "+fmt(saldoCC):"Sin deuda");
+        html+="<div style='background:var(--sur2);border-radius:6px;padding:.35rem .5rem'><div style='font-size:.6rem;color:var(--tx3);text-transform:uppercase'>Saldo CC</div><div style='font-size:.75rem;font-weight:600;color:"+saldoColor+"'>"+saldoTxt+"</div></div>";
+      } else {
+        html+="<div style='background:var(--sur2);border-radius:6px;padding:.35rem .5rem;opacity:.5'><div style='font-size:.6rem;color:var(--tx3);text-transform:uppercase'>Cuenta Corriente</div><div style='font-size:.7rem;color:var(--tx3)'>No habilitada</div></div>";
+      }
+      html+="</div>";
+
+      // Botones de acción (admin tiene TODOS los poderes)
+      html+="<div style='display:flex;gap:.4rem;flex-wrap:wrap'>";
+      html+="<button class='btn btn-g' style='font-size:.72rem;padding:.35rem .7rem' onclick='verClienteFicha("+c.id+")'>👤 Ficha</button>";
+      if(tel){
+        html+="<a href='https://wa.me/549"+tel.replace(/\D/g,"")+"' target='_blank' class='btn btn-g' style='font-size:.72rem;padding:.35rem .7rem;text-decoration:none'>💬 WA</a>";
+      }
+      if(c.cuenta_corriente_habilitada){
+        html+="<button class='btn btn-g' style='font-size:.72rem;padding:.35rem .7rem;border-color:var(--acc);color:var(--acc)' onclick='_adminVerCC("+c.id+",&#39;"+nomEsc+"&#39;)'>💳 CC</button>";
+      }
+      html+="<button class='btn btn-g' style='font-size:.72rem;padding:.35rem .7rem;color:var(--red);border-color:var(--red)' onclick='_eliminarClienteAdmin("+c.id+")'>🗑 Eliminar</button>";
+      html+="</div>";
+      html+="</div>";
+    } catch(eRow){
+      console.error("[belle] error renderizando cliente admin",c&&c.id,eRow);
+      html+="<div style='background:var(--sur);border:1px solid var(--red);padding:.7rem;border-radius:7px;margin-bottom:.6rem;font-size:.75rem;color:var(--red)'>Error al mostrar cliente "+(c&&c.id?"#"+c.id:"?")+"</div>";
+    }
+  });
+  grid.innerHTML=html;
+}
+
+// Ver CC desde admin (igual que vendedor pero sin restricciones)
+function _adminVerCC(clienteId, clienteNombre){
+  var mo=document.createElement("div");mo.className="mo open";mo.id="_moAdminCC";
+  mo.innerHTML="<div class='md' style='max-width:520px;width:95%;max-height:85vh;display:flex;flex-direction:column'>"+
+    "<div class='mh'><div class='mtt'>💳 CC — "+(clienteNombre||"Cliente")+"</div>"+
+    "<button class='btn btn-g xb' onclick='var _m=document.getElementById(\"_moAdminCC\");if(_m)_m.remove()'>✕</button></div>"+
+    "<div class='mb' style='overflow-y:auto;flex:1'>"+
+      "<div id='_adminCCContenido'><div class='loading'><div class='spin'></div></div></div>"+
+      "<div style='margin-top:1rem;padding-top:.8rem;border-top:1px solid var(--bd)'>"+
+        "<div style='font-size:.78rem;font-weight:600;margin-bottom:.4rem;color:var(--tx)'>Registrar pago</div>"+
+        "<div style='display:flex;gap:.4rem;flex-wrap:wrap'>"+
+          "<input type='number' id='_adminCCMonto' placeholder='Monto $' style='flex:1;min-width:100px;padding:.4rem .6rem;border:1px solid var(--bd);border-radius:6px;font-size:.82rem;background:var(--sur2);color:var(--tx)'>"+
+          "<select id='_adminCCForma' style='padding:.4rem .6rem;border:1px solid var(--bd);border-radius:6px;font-size:.82rem;background:var(--sur2);color:var(--tx)'>"+
+            "<option value='efectivo'>Efectivo</option><option value='transferencia'>Transferencia</option><option value='tarjeta'>Tarjeta</option>"+
+          "</select>"+
+          "<button class='btn btn-a' style='font-size:.78rem' onclick='_adminCCRegistrarPago("+clienteId+")'>Registrar</button>"+
+        "</div>"+
       "</div>"+
-      "<div style='display:grid;grid-template-columns:1fr 1fr;gap:.4rem;margin-bottom:.5rem'>"+
-        "<div style='background:var(--sur2);border-radius:6px;padding:.4rem .5rem'><div style='font-size:.58rem;color:var(--tx3);text-transform:uppercase'>Vendedor</div><div style='font-size:.75rem;font-weight:600;color:var(--tx)'>"+vend+"</div></div>"+
-        "<div style='background:var(--sur2);border-radius:6px;padding:.4rem .5rem'><div style='font-size:.58rem;color:var(--tx3);text-transform:uppercase'>Saldo CC</div><div style='font-size:.75rem;font-weight:600;color:"+(!c.cuenta_corriente_habilitada?"var(--tx3)":(c.saldo_cc||0)<0?"var(--red)":"var(--green)")+"'>"+(!c.cuenta_corriente_habilitada?"—":fmt(c.saldo_cc||0))+"</div></div>"+
-      "</div>"+
-      "<div style='font-size:.65rem;color:var(--tx3);'>Último pedido: "+ultima+(c.cuenta_corriente_habilitada?" · <span style='color:var(--acc)'>💳 CC</span>":"")+"</div>"+
-    "</div>";
-  }).join("");
+    "</div></div>";
+  document.body.appendChild(mo);
+  // No cerrar al click-fuera
+  Promise.all([
+    apiGet("clientes","select=saldo_cc&id=eq."+clienteId),
+    apiGet("cuenta_corriente_movimientos","select=*&cliente_id=eq."+clienteId+"&order=created_at.desc&limit=20")
+  ]).then(function(res){
+    var el=document.getElementById("_adminCCContenido");if(!el)return;
+    var saldo=res[0]&&res[0][0]?parseFloat(res[0][0].saldo_cc)||0:0;
+    var movs=Array.isArray(res[1])?res[1]:[];
+    var h="<div style='background:var(--sur2);border-radius:8px;padding:.8rem;text-align:center;margin-bottom:.8rem'>";
+    h+="<div style='font-size:.7rem;color:var(--tx3)'>Saldo</div>";
+    if(Math.abs(saldo)<0.01){
+      h+="<div style='font-size:1.5rem;font-weight:700;color:var(--tx2)'>$0</div>";
+      h+="<div style='font-size:.68rem;color:var(--tx3)'>Sin deuda</div></div>";
+    } else {
+      h+="<div style='font-size:1.5rem;font-weight:700;color:"+(saldo>0?"var(--green)":"var(--red)")+"'>$"+Math.round(Math.abs(saldo)).toLocaleString("es-AR")+"</div>";
+      h+="<div style='font-size:.68rem;color:var(--tx3)'>"+(saldo>0?"A favor del cliente":"Deuda del cliente")+"</div></div>";
+    }
+    if(movs.length){
+      h+="<div style='font-size:.72rem;font-weight:600;text-transform:uppercase;color:var(--acc);margin-bottom:.4rem'>Últimos movimientos</div>";
+      movs.forEach(function(m){
+        var esDebito=m.tipo==="cargo"||m.tipo==="concesion";
+        var fecha=new Date(m.created_at).toLocaleDateString("es-AR",{day:"2-digit",month:"2-digit",year:"2-digit"});
+        h+="<div style='display:flex;justify-content:space-between;padding:.4rem .6rem;background:var(--sur2);border-radius:6px;margin-bottom:.3rem;font-size:.78rem'>";
+        h+="<div><div>"+(m.descripcion||m.tipo)+"</div><div style='font-size:.65rem;color:var(--tx3)'>"+fecha+"</div></div>";
+        h+="<div style='font-weight:600;color:"+(esDebito?"var(--red)":"var(--green)")+"'>"+(esDebito?"-":"+")+fmt(Math.abs(m.monto))+"</div></div>";
+      });
+    } else {
+      h+="<div style='text-align:center;padding:1rem;color:var(--tx3);font-size:.78rem;font-style:italic'>Aún no hay movimientos</div>";
+    }
+    el.innerHTML=h;
+  }).catch(function(e){
+    console.error("[belle] _adminVerCC error:",e);
+    var el=document.getElementById("_adminCCContenido");
+    if(el) el.innerHTML="<div style='color:var(--red);padding:1rem;text-align:center'>Error al cargar movimientos</div>";
+  });
+}
+
+function _adminCCRegistrarPago(clienteId){
+  var monto=parseFloat((document.getElementById("_adminCCMonto")||{value:0}).value)||0;
+  var forma=(document.getElementById("_adminCCForma")||{value:"efectivo"}).value;
+  if(!monto||monto<=0){toast("Ingresá un monto válido","twarn");return;}
+  apiPost("cuenta_corriente_movimientos",{
+    cliente_id:clienteId,tipo:"pago_total",monto:monto,
+    descripcion:"Pago en "+(forma==="efectivo"?"efectivo":forma)+" — admin "+new Date().toLocaleDateString("es-AR"),
+    fecha:new Date().toISOString().split("T")[0]
+  }).then(function(){
+    return apiGet("clientes","select=saldo_cc&id=eq."+clienteId);
+  }).then(function(rows){
+    if(!rows||!rows[0])return;
+    var nuevoSaldo=(parseFloat(rows[0].saldo_cc)||0)+monto;
+    return apiPatch("clientes",{saldo_cc:nuevoSaldo},"id=eq."+clienteId);
+  }).then(function(){
+    toast("Pago de "+fmt(monto)+" registrado","tok");
+    var inp=document.getElementById("_adminCCMonto");if(inp)inp.value="";
+    _adminVerCC(clienteId,"");
+    loadClientes();
+  }).catch(function(e){
+    console.error("[belle] _adminCCRegistrarPago error:",e);
+    toast("Error al registrar pago","terr");
+  });
 }
 
 function verClienteFicha(id){
@@ -8057,77 +8225,167 @@ function verClienteFicha(id){
   var c=_clienteFicha;
   Promise.all([
     apiGet("pedidos_catalogo","select=id,nro_orden,total,estado,created_at&cliente_id=eq."+id+"&order=created_at.desc&limit=10"),
-    apiGet("clientes_direcciones","select=*&cliente_id=eq."+id),
+    apiGet("clientes_direcciones","select=id,etiqueta,direccion_completa,localidad,provincia,es_principal,principal&cliente_id=eq."+id),
     apiGet("vendedores","select=id,nombre&activo=is.true")
   ]).then(function(res){
     var pedidos=Array.isArray(res[0])?res[0]:[];
+    var dirs=Array.isArray(res[1])?res[1]:[];
     var vends=Array.isArray(res[2])?res[2]:[];
-    var nombre=(c.nombre||"")+" "+(c.apellido||"");
-    var total=pedidos.filter(function(p){return p.estado!=="cancelado";}).reduce(function(s,p){return s+(p.total||0);},0);
+    var nombre=((c.nombre||"")+" "+(c.apellido||"")).trim()||"Cliente #"+id;
+    var totalComprado=pedidos.filter(function(p){return p.estado!=="cancelado";}).reduce(function(s,p){return s+(p.total||0);},0);
+    var ccActiva=!!c.cuenta_corriente_habilitada;
+    var saldoNum=parseFloat(c.saldo_cc)||0;
+    var saldoColor=saldoNum<-0.01?"var(--red)":(saldoNum>0.01?"var(--green)":"var(--tx2)");
+    var saldoLabel=saldoNum<-0.01?"Adeuda":(saldoNum>0.01?"A favor":"Sin saldo");
+
     var vendsOpts=vends.map(function(v){
       return "<option value='"+v.id+"'"+(c.vendedor_asignado_id===v.id?" selected":"")+">"+v.nombre+"</option>";
     }).join("");
+
     var mo=document.createElement("div");
     mo.id="_moClienteFicha";mo.className="mo open";
-    var h="<div class='md' style='max-width:640px;width:95%;max-height:90vh;overflow-y:auto'>";
-    h+="<div class='mh'><div class='mtt'>"+nombre+"</div>";
+    var inputStyle="width:100%;padding:.45rem .6rem;border:1px solid var(--bd);border-radius:6px;font-size:.84rem;background:var(--sur2);color:var(--tx);margin-top:.2rem;box-sizing:border-box";
+    var labelStyle="font-size:.66rem;color:var(--tx3);text-transform:uppercase;font-weight:600";
+
+    var h="<div class='md' style='max-width:680px;width:95%;max-height:92vh;display:flex;flex-direction:column'>";
+    h+="<div class='mh'><div class='mtt'>👤 "+nombre+" <span style='font-size:.65rem;font-weight:400;color:var(--tx3);background:var(--sur2);padding:.1rem .4rem;border-radius:4px;margin-left:.3rem'>#"+c.id+"</span></div>";
     h+="<button class='btn btn-g xb' onclick='var _m=document.getElementById(\"_moClienteFicha\");if(_m)_m.remove()'>&#x2715;</button></div>";
-    h+="<div class='mb' style='display:flex;flex-direction:column;gap:.8rem'>";
+    h+="<div class='mb' style='overflow-y:auto;flex:1;display:flex;flex-direction:column;gap:.7rem'>";
+
+    // Estadísticas (3 cuadros)
     h+="<div style='display:grid;grid-template-columns:repeat(3,1fr);gap:.5rem'>";
     h+="<div style='background:var(--sur2);border-radius:8px;padding:.6rem;text-align:center'><div style='font-size:.58rem;color:var(--tx3);text-transform:uppercase'>Pedidos</div><div style='font-size:1.3rem;font-weight:700;color:var(--tx)'>"+pedidos.length+"</div></div>";
-    h+="<div style='background:var(--sur2);border-radius:8px;padding:.6rem;text-align:center'><div style='font-size:.58rem;color:var(--tx3);text-transform:uppercase'>Total comprado</div><div style='font-size:.9rem;font-weight:700;color:var(--acc)'>"+fmt(total)+"</div></div>";
-    h+="<div style='background:var(--sur2);border-radius:8px;padding:.6rem;text-align:center'><div style='font-size:.58rem;color:var(--tx3);text-transform:uppercase'>Saldo CC</div><div style='font-size:1rem;font-weight:700;color:var(--acc)'>"+fmt(Math.abs(c.saldo_cc||0))+"</div></div>";
+    h+="<div style='background:var(--sur2);border-radius:8px;padding:.6rem;text-align:center'><div style='font-size:.58rem;color:var(--tx3);text-transform:uppercase'>Total comprado</div><div style='font-size:.9rem;font-weight:700;color:var(--acc)'>"+fmt(totalComprado)+"</div></div>";
+    h+="<div style='background:var(--sur2);border-radius:8px;padding:.6rem;text-align:center'><div style='font-size:.58rem;color:var(--tx3);text-transform:uppercase'>Direcciones</div><div style='font-size:1.3rem;font-weight:700;color:var(--tx)'>"+dirs.length+"</div></div>";
     h+="</div>";
-    h+="<div style='display:grid;grid-template-columns:1fr 1fr;gap:.6rem'>";
-    h+="<div><label style='font-size:.7rem;color:var(--tx3);display:block;margin-bottom:.2rem'>Estado</label>";
-    h+="<select id='_cfEst' style='width:100%;padding:.35rem .5rem;border:1px solid var(--bd);border-radius:5px;font-size:.78rem;background:var(--sur2);color:var(--tx)'>";
-    h+="<option value='activo'"+(c.estado==="activo"?" selected":"")+">Activo</option>";
-    h+="<option value='suspendido'"+(c.estado==="suspendido"?" selected":"")+">Suspendido</option>";
-    h+="<option value='pendiente'"+(c.estado==="pendiente"?" selected":"")+">Pendiente</option>";
+
+    // Datos personales (TODOS editables — admin tiene super poderes)
+    h+="<div style='background:var(--sur);border:1px solid var(--bd);border-radius:8px;padding:.7rem .85rem'>";
+    h+="<div style='font-size:.7rem;color:var(--tx3);text-transform:uppercase;font-weight:600;margin-bottom:.5rem'>Datos personales</div>";
+    h+="<div style='display:grid;grid-template-columns:1fr 1fr;gap:.5rem;margin-bottom:.5rem'>";
+    h+="<div><label style='"+labelStyle+"'>Nombre *</label><input type='text' id='_cfNombre' value='"+(c.nombre||"").replace(/'/g,"&#39;")+"' style='"+inputStyle+"'></div>";
+    h+="<div><label style='"+labelStyle+"'>Apellido</label><input type='text' id='_cfApellido' value='"+(c.apellido||"").replace(/'/g,"&#39;")+"' style='"+inputStyle+"'></div>";
+    h+="</div>";
+    h+="<div style='margin-bottom:.5rem'><label style='"+labelStyle+"'>Teléfono</label><input type='text' id='_cfTel' value='"+(c.telefono_principal||"").replace(/'/g,"&#39;")+"' style='"+inputStyle+"'></div>";
+    h+="<div style='margin-bottom:.5rem'><label style='"+labelStyle+"'>Email</label><input type='email' id='_cfEmail' value='"+(c.email||"").replace(/'/g,"&#39;")+"' style='"+inputStyle+"'></div>";
+    h+="<div style='display:grid;grid-template-columns:1fr 1fr;gap:.5rem'>";
+    h+="<div><label style='"+labelStyle+"'>Estado</label><select id='_cfEst' style='"+inputStyle+"'>";
+    ["activo","pendiente","suspendido"].forEach(function(v){h+="<option value='"+v+"' "+((c.estado||"activo")===v?"selected":"")+">"+v+"</option>";});
     h+="</select></div>";
-    h+="<div><label style='font-size:.7rem;color:var(--tx3);display:block;margin-bottom:.2rem'>Vendedor asignado</label>";
-    h+="<select id='_cfVend' style='width:100%;padding:.35rem .5rem;border:1px solid var(--bd);border-radius:5px;font-size:.78rem;background:var(--sur2);color:var(--tx)'>";
-    h+="<option value=''>Sin asignar</option>"+vendsOpts;
-    h+="</select></div>";
-    h+="<div><label style='font-size:.7rem;color:var(--tx3);display:block;margin-bottom:.2rem'>L&#237;mite cr&#233;dito ($)</label>";
-    h+="<input type='number' id='_cfLim' value='"+(c.limite_credito||0)+"' style='width:100%;padding:.35rem .5rem;border:1px solid var(--bd);border-radius:5px;font-size:.78rem;background:var(--sur2);color:var(--tx)'></div>";
+    h+="<div><label style='"+labelStyle+"'>Vendedor asignado</label><select id='_cfVend' style='"+inputStyle+"'><option value=''>Sin asignar</option>"+vendsOpts+"</select></div>";
     h+="</div>";
-    h+="<label style='display:flex;align-items:center;gap:.4rem;cursor:pointer;font-size:.78rem'>";
-    h+="<input type='checkbox' id='_cfCC' "+(c.cuenta_corriente_habilitada?"checked":"")+"> Cuenta corriente habilitada</label>";
-    h+="<div><label style='font-size:.7rem;color:var(--tx3);display:block;margin-bottom:.2rem'>Notas internas</label>";
-    h+="<textarea id='_cfNotas' rows='2' style='width:100%;padding:.4rem .6rem;border:1px solid var(--bd);border-radius:6px;font-size:.78rem;background:var(--sur2);color:var(--tx);resize:vertical'>"+(c.notas_internas||"")+"</textarea></div>";
-    h+="<div style='display:flex;gap:.5rem'>";
-    h+="<button class='btn btn-a' style='flex:1' onclick='_guardarCambiosCliente("+c.id+")'>💾 Guardar cambios</button>";
-    h+="<button class='btn btn-red' style='padding:.5rem .9rem' onclick='_eliminarClienteAdmin("+c.id+")' title='Eliminar cliente (solo admin)'>🗑 Eliminar</button>";
     h+="</div>";
+
+    // BLOQUE CUENTA CORRIENTE — destacado, igual que el del vendedor
+    h+="<div style='background:"+(ccActiva?"linear-gradient(135deg, rgba(196,150,90,.08), rgba(196,150,90,.04))":"var(--sur)")+";border:1px solid "+(ccActiva?"var(--acc)":"var(--bd)")+";border-radius:8px;padding:.7rem .85rem'>";
+    h+="<div style='display:flex;justify-content:space-between;align-items:center;gap:.5rem;margin-bottom:"+(ccActiva?".5rem":"0")+"'>";
+    h+="<div style='display:flex;align-items:center;gap:.5rem;flex:1;min-width:0'>";
+    h+="<span style='font-size:1.05rem'>💳</span>";
+    h+="<div style='min-width:0'>";
+    h+="<div style='font-size:.82rem;font-weight:600;color:var(--tx)'>Cuenta Corriente</div>";
+    h+="<div style='font-size:.66rem;color:var(--tx3)'>"+(ccActiva?"Habilitada":"No habilitada — el cliente paga al contado")+"</div>";
+    h+="</div></div>";
+    h+="<label style='display:flex;align-items:center;gap:.4rem;cursor:pointer;flex-shrink:0'>";
+    h+="<input type='checkbox' id='_cfCC' "+(ccActiva?"checked":"")+" onchange='_cfToggleCCVisualAdmin(this.checked)' style='width:20px;height:20px;cursor:pointer;accent-color:var(--acc)'>";
+    h+="<span style='font-size:.7rem;color:var(--tx3);text-transform:uppercase;font-weight:600;letter-spacing:.04em'>Activar</span>";
+    h+="</label>";
+    h+="</div>";
+    h+="<div id='_cfCCDetalle' style='display:"+(ccActiva?"block":"none")+";padding-top:.5rem;border-top:1px solid "+(ccActiva?"rgba(196,150,90,.2)":"var(--bd)")+";margin-top:.4rem'>";
+    h+="<div style='display:flex;justify-content:space-between;align-items:center;gap:.5rem;margin-bottom:.55rem'>";
+    h+="<div>";
+    h+="<div style='font-size:.66rem;color:var(--tx3);text-transform:uppercase;font-weight:600'>"+saldoLabel+"</div>";
+    h+="<div style='font-size:1.05rem;font-weight:700;color:"+saldoColor+"'>"+fmt(Math.abs(saldoNum))+"</div>";
+    h+="</div>";
+    h+="<button class='btn btn-g' style='font-size:.74rem;padding:.4rem .7rem' onclick='_adminVerCC("+c.id+",&#39;"+_adminEscNomJS(nombre)+"&#39;)'>Ver movimientos</button>";
+    h+="</div>";
+    h+="<div><label style='"+labelStyle+"'>Límite de crédito ($)</label>";
+    h+="<input type='number' id='_cfLim' value='"+(c.limite_credito||0)+"' style='"+inputStyle+"' placeholder='0'>";
+    h+="<div style='font-size:.6rem;color:var(--tx3);margin-top:.15rem'>Tope máximo de deuda permitido</div></div>";
+    h+="</div>";
+    h+="</div>";
+
+    // Notas internas
+    h+="<div><label style='"+labelStyle+"'>Notas internas (no las ve el cliente)</label>";
+    h+="<textarea id='_cfNotas' rows='2' style='"+inputStyle+";resize:vertical;font-family:inherit'>"+(c.notas_internas||"").replace(/</g,"&lt;")+"</textarea></div>";
+
+    // Direcciones (solo lectura)
+    if(dirs.length){
+      h+="<div style='background:var(--sur);border:1px solid var(--bd);border-radius:8px;padding:.7rem .85rem'>";
+      h+="<div style='font-size:.7rem;color:var(--tx3);text-transform:uppercase;font-weight:600;margin-bottom:.45rem'>Direcciones del cliente ("+dirs.length+")</div>";
+      dirs.forEach(function(d){
+        var esPrinc=d.es_principal||d.principal;
+        h+="<div style='font-size:.78rem;color:var(--tx);padding:.3rem 0;border-bottom:1px solid var(--bd)'>";
+        h+="<span style='font-weight:600'>"+(d.etiqueta||"Sin etiqueta")+"</span>";
+        if(esPrinc) h+=" <span style='font-size:.6rem;color:var(--acc);background:rgba(196,150,90,.12);padding:.05rem .35rem;border-radius:4px;margin-left:.3rem'>PRINCIPAL</span>";
+        h+="<div style='font-size:.7rem;color:var(--tx3);margin-top:.1rem'>"+(d.direccion_completa||((d.localidad||"")+", "+(d.provincia||"")))+"</div>";
+        h+="</div>";
+      });
+      h+="</div>";
+    }
+
+    // Últimos pedidos
     if(pedidos.length){
-      h+="<div style='font-size:.72rem;font-weight:600;text-transform:uppercase;color:var(--acc);margin-bottom:.4rem'>&#218;ltimos pedidos</div>";
+      h+="<div style='background:var(--sur);border:1px solid var(--bd);border-radius:8px;padding:.7rem .85rem'>";
+      h+="<div style='font-size:.7rem;color:var(--tx3);text-transform:uppercase;font-weight:600;margin-bottom:.45rem'>Últimos pedidos</div>";
       pedidos.forEach(function(p){
         var fecha=new Date(p.created_at).toLocaleDateString("es-AR",{day:"2-digit",month:"2-digit",year:"2-digit"});
-        h+="<div style='display:flex;justify-content:space-between;padding:.4rem .6rem;background:var(--sur2);border-radius:6px;margin-bottom:.3rem;font-size:.78rem'>";
-        h+="<span>"+p.nro_orden+"</span><span>"+fecha+"</span>";
-        h+="<span style='font-weight:600;color:var(--acc)'>"+fmt(p.total)+"</span>";
-        h+="<span style='font-size:.68rem;color:var(--tx3)'>"+p.estado+"</span></div>";
+        h+="<div style='display:flex;justify-content:space-between;padding:.4rem .55rem;background:var(--sur2);border-radius:6px;margin-bottom:.3rem;font-size:.76rem;align-items:center;gap:.4rem'>";
+        h+="<span style='font-weight:600;flex-shrink:0'>"+(p.nro_orden||"#"+p.id)+"</span>";
+        h+="<span style='color:var(--tx3);font-size:.7rem'>"+fecha+"</span>";
+        h+="<span style='color:var(--tx3);font-size:.66rem;text-transform:capitalize;flex-shrink:0'>"+p.estado+"</span>";
+        h+="<span style='font-weight:600;color:var(--acc);flex-shrink:0'>"+fmt(p.total)+"</span>";
+        h+="</div>";
       });
+      h+="</div>";
     }
+
+    // Botones (super poderes admin)
+    h+="<div style='display:flex;gap:.5rem;justify-content:flex-end;padding-top:.4rem;border-top:1px solid var(--bd)'>";
+    h+="<button class='btn btn-g' style='color:var(--red);border-color:var(--red)' onclick='_eliminarClienteAdmin("+c.id+")'>🗑 Eliminar cliente</button>";
+    h+="<div style='flex:1'></div>";
+    h+="<button class='btn btn-g' onclick='var _m=document.getElementById(\"_moClienteFicha\");if(_m)_m.remove()'>Cerrar</button>";
+    h+="<button class='btn btn-a' onclick='_guardarCambiosCliente("+c.id+")'>💾 Guardar cambios</button>";
+    h+="</div>";
+
     h+="</div></div>";
     mo.innerHTML=h;
     document.body.appendChild(mo);
-    mo.addEventListener("click",function(e){if(e.target===mo)mo.remove();});
+    // No cerrar al click-fuera (regla)
+  }).catch(function(e){
+    console.error("[belle] verClienteFicha error:",e);
+    toast("Error al cargar ficha","terr");
   });
 }
 
+// Toggle visual del bloque CC en la ficha admin
+function _cfToggleCCVisualAdmin(checked){
+  var det=document.getElementById("_cfCCDetalle");
+  if(det) det.style.display=checked?"block":"none";
+}
+
 function _guardarCambiosCliente(id){
-  var est=(document.getElementById("_cfEst")||{value:"activo"}).value;
-  var vend=(document.getElementById("_cfVend")||{value:""}).value;
-  var cc=(document.getElementById("_cfCC")||{checked:false}).checked;
-  var lim=parseFloat((document.getElementById("_cfLim")||{value:"0"}).value)||0;
-  var notas=(document.getElementById("_cfNotas")||{value:""}).value.trim();
-  apiPatch("clientes",{estado:est,vendedor_asignado_id:vend?parseInt(vend):null,cuenta_corriente_habilitada:cc,limite_credito:lim,notas_internas:notas||null,updated_at:new Date().toISOString()},"id=eq."+id).then(function(){
+  var nombre=(document.getElementById("_cfNombre")||{value:""}).value.trim();
+  if(!nombre){toast("El nombre es obligatorio","twarn");return;}
+  var data={
+    nombre:nombre,
+    apellido:(document.getElementById("_cfApellido")||{value:""}).value.trim()||null,
+    telefono_principal:(document.getElementById("_cfTel")||{value:""}).value.trim()||null,
+    email:(document.getElementById("_cfEmail")||{value:""}).value.trim()||null,
+    estado:(document.getElementById("_cfEst")||{value:"activo"}).value,
+    vendedor_asignado_id:(function(){var v=(document.getElementById("_cfVend")||{value:""}).value;return v?parseInt(v):null;})(),
+    cuenta_corriente_habilitada:(document.getElementById("_cfCC")||{checked:false}).checked,
+    limite_credito:parseFloat((document.getElementById("_cfLim")||{value:"0"}).value)||0,
+    notas_internas:(document.getElementById("_cfNotas")||{value:""}).value.trim()||null,
+    updated_at:new Date().toISOString()
+  };
+  apiPatch("clientes",data,"id=eq."+id).then(function(){
     toast("Cliente actualizado","tok");
     var mo=document.getElementById("_moClienteFicha");if(mo)mo.remove();
     loadClientes();
-  }).catch(function(e){toast("Error al guardar","terr");});
+  }).catch(function(e){
+    console.error("[belle] _guardarCambiosCliente error:",e);
+    toast("Error al guardar","terr");
+  });
 }
 
 // Solo admin: eliminar cliente. Verifica que no tenga pedidos activos ni saldo CC pendiente
