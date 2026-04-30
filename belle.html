@@ -860,6 +860,7 @@ td{padding:.35rem .5rem;font-size:.78rem;color:var(--tx2);vertical-align:middle;
       <!-- Tabs de secciones -->
       <div style="display:flex;gap:.4rem;flex-wrap:wrap;margin-bottom:1rem;border-bottom:1px solid var(--bd);padding-bottom:.6rem">
         <button class="btn btn-a _repTab" data-tab="financiero" onclick="_repCambiarTab('financiero')">💰 Financiero</button>
+        <button class="btn btn-g _repTab" data-tab="rentabilidad" onclick="_repCambiarTab('rentabilidad')">💎 Rentabilidad</button>
         <button class="btn btn-g _repTab" data-tab="vendedores" onclick="_repCambiarTab('vendedores')">👥 Por Vendedor</button>
         <button class="btn btn-g _repTab" data-tab="clientes" onclick="_repCambiarTab('clientes')">🛍️ Clientes</button>
         <button class="btn btn-g _repTab" data-tab="productos" onclick="_repCambiarTab('productos')">📦 Productos</button>
@@ -14344,6 +14345,7 @@ function _repInit(){
   // Limpiar caches y cargar
   _repCacheCobros = null; _repCacheVendedores = null;
   _repCacheClientes = null; _repCacheProductos = null;
+  window._repRentabilidadData = null;
   _repRenderTab();
 }
 
@@ -14385,6 +14387,7 @@ function _repRenderTab(){
   el.innerHTML = "<div class='loading'><div class='spin'></div>Cargando datos del período...</div>";
   var tab = window._repTab;
   if(tab === "financiero") _repCargarFinanciero();
+  else if(tab === "rentabilidad") _repCargarRentabilidad();
   else if(tab === "vendedores") _repCargarVendedores();
   else if(tab === "clientes") _repCargarClientes();
   else if(tab === "productos") _repCargarProductos();
@@ -14553,6 +14556,355 @@ function _repCargarFinanciero(){
     var el = document.getElementById("_repContenido");
     if(el) el.innerHTML = "<div style='color:var(--red);padding:2rem;text-align:center'>Error al cargar reportes financieros</div>";
   });
+}
+
+// ════════════════════════════════════════════════════════════════════
+// SECCIÓN: RENTABILIDAD (la joya de la corona)
+// Calcula: facturación, costos productos, gastos operativos,
+//          ganancia bruta, ganancia neta, márgenes, ticket promedio
+// Compara: período actual vs anterior, detalle por vendedor, top productos por margen
+// ════════════════════════════════════════════════════════════════════
+function _repCargarRentabilidad(){
+  var r = _repCalcRango(window._repPeriodo);
+  var rAnt = (function(){
+    var dur = r.hasta - r.desde;
+    return { desde: new Date(r.desde - dur), hasta: r.desde };
+  })();
+
+  var estadosV = "estado=in.(confirmada,archivada_periodo)";
+
+  Promise.all([
+    // Ventas del período
+    apiGet("ventas", "select=*&"+estadosV+"&created_at=gte."+r.desde.toISOString()+"&created_at=lt."+r.hasta.toISOString()+"&limit=5000").catch(function(){return [];}),
+    // Ventas del período anterior (mismo tamaño)
+    apiGet("ventas", "select=producto_id,cantidad,total,vendedor_id&"+estadosV+"&created_at=gte."+rAnt.desde.toISOString()+"&created_at=lt."+rAnt.hasta.toISOString()+"&limit=5000").catch(function(){return [];}),
+    // Gastos aprobados del período
+    apiGet("gastos_vendedor", "select=*&aprobado=is.true&created_at=gte."+r.desde.toISOString()+"&created_at=lt."+r.hasta.toISOString()).catch(function(){return [];}),
+    // Gastos del anterior
+    apiGet("gastos_vendedor", "select=monto&aprobado=is.true&created_at=gte."+rAnt.desde.toISOString()+"&created_at=lt."+rAnt.hasta.toISOString()).catch(function(){return [];}),
+    // Productos (necesario para costos si prods global no está cargado)
+    (Array.isArray(prods) && prods.length) ? Promise.resolve(prods) :
+      apiGet("productos", "select=id,nombre,costo_ind,costo_log,activo&limit=5000").catch(function(){return [];})
+  ]).then(function(data){
+    var vActual = data[0] || [];
+    var vAnterior = data[1] || [];
+    var gActual = data[2] || [];
+    var gAnterior = data[3] || [];
+    var productos = data[4] || [];
+    var cotiz = (typeof cotizActual !== "undefined" && cotizActual) ? cotizActual : 1520;
+
+    // Mapa producto_id → costo_total_pesos
+    var mapCostoProd = {};
+    productos.forEach(function(p){
+      mapCostoProd[p.id] = ((parseFloat(p.costo_ind)||0) + (parseFloat(p.costo_log)||0)) * cotiz;
+    });
+
+    // ── Cálculos del período actual ──
+    function calcMetricas(ventas, gastos){
+      var fact = 0, costo = 0, unidades = 0;
+      var porSeg = {};
+      var porVendedor = {};
+      var porProducto = {};
+      ventas.forEach(function(v){
+        var t = parseFloat(v.total)||0;
+        var qty = parseInt(v.cantidad)||0;
+        var costoUnit = mapCostoProd[v.producto_id] || 0;
+        var costoLinea = costoUnit * qty;
+        fact += t;
+        costo += costoLinea;
+        unidades += qty;
+        // Por segmento
+        var seg = v.segmento || "otro";
+        if(!porSeg[seg]) porSeg[seg] = { fact:0, costo:0, unid:0 };
+        porSeg[seg].fact += t;
+        porSeg[seg].costo += costoLinea;
+        porSeg[seg].unid += qty;
+        // Por vendedor
+        var vid = v.vendedor_id || 0;
+        if(!porVendedor[vid]) porVendedor[vid] = { fact:0, costo:0, unid:0, ventas:0 };
+        porVendedor[vid].fact += t;
+        porVendedor[vid].costo += costoLinea;
+        porVendedor[vid].unid += qty;
+        porVendedor[vid].ventas++;
+        // Por producto
+        var pid = v.producto_id || 0;
+        if(pid){
+          if(!porProducto[pid]){
+            porProducto[pid] = { id: pid, nombre: v.producto_nombre || ("ID "+pid), fact:0, costo:0, unid:0 };
+          }
+          porProducto[pid].fact += t;
+          porProducto[pid].costo += costoLinea;
+          porProducto[pid].unid += qty;
+        }
+      });
+      var gasto = (gastos||[]).reduce(function(s,g){return s+(parseFloat(g.monto)||0);}, 0);
+      var ganBruta = fact - costo;
+      var ganNeta = fact - costo - gasto;
+      var margenBruto = fact > 0 ? (ganBruta/fact*100) : 0;
+      var margenNeto = fact > 0 ? (ganNeta/fact*100) : 0;
+      return {
+        fact: fact, costo: costo, gasto: gasto,
+        unidades: unidades,
+        ganBruta: ganBruta, ganNeta: ganNeta,
+        margenBruto: margenBruto, margenNeto: margenNeto,
+        ticketProm: unidades > 0 ? fact/unidades : 0,
+        porSeg: porSeg, porVendedor: porVendedor, porProducto: porProducto
+      };
+    }
+
+    var m = calcMetricas(vActual, gActual);
+    var mAnt = calcMetricas(vAnterior, gAnterior);
+
+    // Detalle de gastos por categoría (concepto)
+    var gastosPorConcepto = {};
+    gActual.forEach(function(g){
+      var cat = g.concepto || "Sin categoría";
+      // Tomar las primeras 3 palabras del concepto como agrupador
+      cat = cat.split(":")[0].trim() || "Sin categoría";
+      if(!gastosPorConcepto[cat]) gastosPorConcepto[cat] = { total:0, count:0 };
+      gastosPorConcepto[cat].total += parseFloat(g.monto)||0;
+      gastosPorConcepto[cat].count++;
+    });
+
+    // Top productos por ganancia (margen absoluto)
+    var topProdsPorMargen = Object.values(m.porProducto).map(function(p){
+      var ganancia = p.fact - p.costo;
+      var margenPct = p.fact > 0 ? (ganancia/p.fact*100) : 0;
+      return Object.assign({}, p, { ganancia: ganancia, margenPct: margenPct });
+    }).sort(function(a,b){return b.ganancia - a.ganancia;}).slice(0, 15);
+
+    // Helper delta
+    function deltaTxt(actual, anterior){
+      if(!anterior || anterior === 0){
+        return actual > 0 ? "<span style='color:var(--green);font-size:.62rem;margin-top:.15rem;display:block'>▲ Sin comparativa</span>" : "";
+      }
+      var diff = actual - anterior;
+      var pct = Math.abs(diff/anterior*100);
+      var pos = diff >= 0;
+      var clr = pos ? "var(--green)" : "var(--red)";
+      var arrow = pos ? "▲" : "▼";
+      return "<div style='font-size:.62rem;color:"+clr+";margin-top:.15rem'>"+arrow+" "+pct.toFixed(1)+"% vs período anterior</div>";
+    }
+
+    var h = "";
+    h += _repHeaderSeccion("💎 Rentabilidad", "rentabilidad");
+    h += "<div style='font-size:.7rem;color:var(--tx3);margin-bottom:.8rem;padding:.5rem .7rem;background:var(--sur2);border-radius:7px'>📐 Cotización USD usada: <b style='color:var(--acc)'>$"+cotiz+"</b> · Costos = (costo_ind + costo_log) × cotización × cantidad</div>";
+
+    // ── Resumen ejecutivo (KPIs grandes con delta) ──
+    h += "<div style='display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:.7rem;margin-bottom:1rem'>";
+
+    h += "<div style='background:var(--sur);border:1px solid var(--bd);border-radius:10px;padding:.85rem 1rem'>";
+    h += "<div style='font-size:.66rem;color:var(--tx3);text-transform:uppercase;font-weight:700;letter-spacing:.04em;margin-bottom:.3rem'>💵 Facturación</div>";
+    h += "<div style='font-size:1.4rem;font-weight:800;color:var(--green);line-height:1.1'>"+fmt(m.fact)+"</div>";
+    h += "<div style='font-size:.66rem;color:var(--tx3);margin-top:.15rem'>"+m.unidades+" unidades · ticket "+fmt(Math.round(m.ticketProm))+"</div>";
+    h += deltaTxt(m.fact, mAnt.fact);
+    h += "</div>";
+
+    h += "<div style='background:var(--sur);border:1px solid var(--bd);border-radius:10px;padding:.85rem 1rem'>";
+    h += "<div style='font-size:.66rem;color:var(--tx3);text-transform:uppercase;font-weight:700;letter-spacing:.04em;margin-bottom:.3rem'>📦 Costo productos</div>";
+    h += "<div style='font-size:1.4rem;font-weight:800;color:var(--red);line-height:1.1'>"+fmt(m.costo)+"</div>";
+    h += "<div style='font-size:.66rem;color:var(--tx3);margin-top:.15rem'>"+(m.fact>0?(m.costo/m.fact*100).toFixed(1):"0")+"% de facturación</div>";
+    h += "</div>";
+
+    h += "<div style='background:var(--sur);border:1px solid var(--bd);border-radius:10px;padding:.85rem 1rem'>";
+    h += "<div style='font-size:.66rem;color:var(--tx3);text-transform:uppercase;font-weight:700;letter-spacing:.04em;margin-bottom:.3rem'>💸 Gastos operativos</div>";
+    h += "<div style='font-size:1.4rem;font-weight:800;color:var(--red);line-height:1.1'>"+fmt(m.gasto)+"</div>";
+    h += "<div style='font-size:.66rem;color:var(--tx3);margin-top:.15rem'>"+gActual.length+" gasto"+(gActual.length===1?"":"s")+" aprobado"+(gActual.length===1?"":"s")+"</div>";
+    h += deltaTxt(m.gasto, mAnt.gasto);
+    h += "</div>";
+
+    var clrBruta = m.ganBruta >= 0 ? "var(--green)" : "var(--red)";
+    h += "<div style='background:rgba(76,175,130,.05);border:1px solid rgba(76,175,130,.3);border-radius:10px;padding:.85rem 1rem'>";
+    h += "<div style='font-size:.66rem;color:var(--tx3);text-transform:uppercase;font-weight:700;letter-spacing:.04em;margin-bottom:.3rem'>💚 Ganancia BRUTA</div>";
+    h += "<div style='font-size:1.4rem;font-weight:800;color:"+clrBruta+";line-height:1.1'>"+fmt(m.ganBruta)+"</div>";
+    h += "<div style='font-size:.66rem;color:var(--tx3);margin-top:.15rem'>Margen <b>"+m.margenBruto.toFixed(1)+"%</b></div>";
+    h += deltaTxt(m.ganBruta, mAnt.ganBruta);
+    h += "</div>";
+
+    var clrNeta = m.ganNeta >= 0 ? "var(--green)" : "var(--red)";
+    h += "<div style='background:"+(m.ganNeta>=0?"rgba(76,175,130,.1)":"rgba(217,72,72,.08)")+";border:1px solid "+(m.ganNeta>=0?"rgba(76,175,130,.4)":"rgba(217,72,72,.4)")+";border-radius:10px;padding:.85rem 1rem'>";
+    h += "<div style='font-size:.66rem;color:var(--tx3);text-transform:uppercase;font-weight:700;letter-spacing:.04em;margin-bottom:.3rem'>💎 Ganancia NETA</div>";
+    h += "<div style='font-size:1.5rem;font-weight:800;color:"+clrNeta+";line-height:1.1'>"+fmt(m.ganNeta)+"</div>";
+    h += "<div style='font-size:.66rem;color:var(--tx3);margin-top:.15rem'>Margen <b>"+m.margenNeto.toFixed(1)+"%</b></div>";
+    h += deltaTxt(m.ganNeta, mAnt.ganNeta);
+    h += "</div>";
+
+    h += "</div>";
+
+    // ── P&L (Estado de resultados) ──
+    h += "<div style='background:var(--sur);border:1px solid var(--bd);border-radius:10px;padding:1rem;margin-bottom:1rem'>";
+    h += "<div style='display:flex;justify-content:space-between;align-items:center;margin-bottom:.7rem'>";
+    h += "<div style='font-size:.85rem;font-weight:700'>📊 Estado de Resultados (P&L)</div>";
+    h += "<button class='btn btn-g' onclick='_repExportRentabilidad()' style='font-size:.72rem'>⬇ Exportar Excel</button>";
+    h += "</div>";
+
+    h += "<div style='font-size:.84rem'>";
+    function lineaPL(label, valor, opts){
+      opts = opts || {};
+      var color = opts.color || "var(--tx)";
+      var weight = opts.weight || "500";
+      var bg = opts.bg || "transparent";
+      var bord = opts.bord || "none";
+      var indent = opts.indent ? "padding-left:1.5rem;" : "";
+      return "<div style='display:flex;justify-content:space-between;padding:.55rem .8rem;background:"+bg+";border-top:"+bord+";"+indent+"'>"+
+        "<span style='color:var(--tx2);font-weight:"+weight+"'>"+label+"</span>"+
+        "<span style='color:"+color+";font-weight:"+weight+"'>"+fmt(valor)+"</span>"+
+        "</div>";
+    }
+    h += lineaPL("Facturación bruta", m.fact, {color:"var(--green)", weight:"700", bg:"var(--sur2)"});
+    h += lineaPL("(−) Costo productos vendidos", -m.costo, {color:"var(--red)", indent:true});
+    h += lineaPL("= Ganancia BRUTA", m.ganBruta, {color:clrBruta, weight:"700", bg:"rgba(76,175,130,.05)", bord:"1px solid var(--bd)"});
+    h += "<div style='padding:.3rem .8rem;font-size:.7rem;color:var(--tx3);background:var(--sur2)'>Margen bruto: <b>"+m.margenBruto.toFixed(1)+"%</b></div>";
+    h += lineaPL("(−) Gastos operativos (sueldos, comisiones, etc)", -m.gasto, {color:"var(--red)", indent:true});
+    h += lineaPL("= Ganancia NETA", m.ganNeta, {color:clrNeta, weight:"800", bg:m.ganNeta>=0?"rgba(76,175,130,.1)":"rgba(217,72,72,.08)", bord:"2px solid "+(m.ganNeta>=0?"var(--green)":"var(--red)")});
+    h += "<div style='padding:.3rem .8rem;font-size:.7rem;color:var(--tx3);background:var(--sur2)'>Margen neto: <b>"+m.margenNeto.toFixed(1)+"%</b></div>";
+    h += "</div>";
+    h += "</div>";
+
+    // ── Por segmento ──
+    if(Object.keys(m.porSeg).length){
+      h += "<div style='background:var(--sur);border:1px solid var(--bd);border-radius:10px;padding:1rem;margin-bottom:1rem'>";
+      h += "<div style='font-size:.85rem;font-weight:700;margin-bottom:.7rem'>🎯 Rentabilidad por segmento</div>";
+      h += "<div style='overflow-x:auto'>";
+      h += "<table style='width:100%;font-size:.76rem;border-collapse:collapse'>";
+      h += "<thead><tr style='border-bottom:1px solid var(--bd);text-align:left;color:var(--tx3);font-size:.66rem;text-transform:uppercase'>";
+      h += "<th style='padding:.5rem'>Segmento</th><th>Unid.</th><th>Facturación</th><th>Costo</th><th>Ganancia</th><th>Margen</th>";
+      h += "</tr></thead><tbody>";
+      Object.keys(m.porSeg).sort(function(a,b){return m.porSeg[b].fact - m.porSeg[a].fact;}).forEach(function(seg){
+        var d = m.porSeg[seg];
+        var ganSeg = d.fact - d.costo;
+        var margSeg = d.fact > 0 ? (ganSeg/d.fact*100) : 0;
+        h += "<tr style='border-bottom:1px solid var(--bd)'>";
+        h += "<td style='padding:.45rem .5rem;font-weight:600'>"+_admEsc(seg)+"</td>";
+        h += "<td>"+d.unid+"</td>";
+        h += "<td>"+fmt(d.fact)+"</td>";
+        h += "<td style='color:var(--red)'>"+fmt(d.costo)+"</td>";
+        h += "<td style='font-weight:700;color:"+(ganSeg>=0?"var(--green)":"var(--red)")+"'>"+fmt(ganSeg)+"</td>";
+        h += "<td style='font-weight:600;color:"+(margSeg>=30?"var(--green)":margSeg>=15?"var(--yel)":"var(--red)")+"'>"+margSeg.toFixed(1)+"%</td>";
+        h += "</tr>";
+      });
+      h += "</tbody></table></div></div>";
+    }
+
+    // ── Por vendedor ──
+    if(Object.keys(m.porVendedor).length){
+      h += "<div style='background:var(--sur);border:1px solid var(--bd);border-radius:10px;padding:1rem;margin-bottom:1rem'>";
+      h += "<div style='font-size:.85rem;font-weight:700;margin-bottom:.7rem'>👥 Rentabilidad por vendedor</div>";
+      h += "<div style='overflow-x:auto'>";
+      h += "<table style='width:100%;font-size:.76rem;border-collapse:collapse'>";
+      h += "<thead><tr style='border-bottom:1px solid var(--bd);text-align:left;color:var(--tx3);font-size:.66rem;text-transform:uppercase'>";
+      h += "<th style='padding:.5rem'>Vendedor</th><th>Ventas</th><th>Unid.</th><th>Facturación</th><th>Costo</th><th>Gan. Bruta</th><th>Margen</th>";
+      h += "</tr></thead><tbody>";
+      Object.keys(m.porVendedor).sort(function(a,b){return m.porVendedor[b].fact - m.porVendedor[a].fact;}).forEach(function(vid){
+        var d = m.porVendedor[vid];
+        var ganV = d.fact - d.costo;
+        var margV = d.fact > 0 ? (ganV/d.fact*100) : 0;
+        h += "<tr style='border-bottom:1px solid var(--bd)'>";
+        h += "<td style='padding:.45rem .5rem;font-weight:600'>"+_repNombreVendedor(parseInt(vid))+"</td>";
+        h += "<td>"+d.ventas+"</td>";
+        h += "<td>"+d.unid+"</td>";
+        h += "<td>"+fmt(d.fact)+"</td>";
+        h += "<td style='color:var(--red)'>"+fmt(d.costo)+"</td>";
+        h += "<td style='font-weight:700;color:"+(ganV>=0?"var(--green)":"var(--red)")+"'>"+fmt(ganV)+"</td>";
+        h += "<td style='font-weight:600;color:"+(margV>=30?"var(--green)":margV>=15?"var(--yel)":"var(--red)")+"'>"+margV.toFixed(1)+"%</td>";
+        h += "</tr>";
+      });
+      h += "</tbody></table></div></div>";
+    }
+
+    // ── Top productos por ganancia ──
+    if(topProdsPorMargen.length){
+      h += "<div style='background:var(--sur);border:1px solid var(--bd);border-radius:10px;padding:1rem;margin-bottom:1rem'>";
+      h += "<div style='font-size:.85rem;font-weight:700;margin-bottom:.7rem'>🏆 Top 15 productos más rentables (por ganancia $)</div>";
+      h += "<div style='overflow-x:auto'>";
+      h += "<table style='width:100%;font-size:.76rem;border-collapse:collapse'>";
+      h += "<thead><tr style='border-bottom:1px solid var(--bd);text-align:left;color:var(--tx3);font-size:.66rem;text-transform:uppercase'>";
+      h += "<th style='padding:.5rem'>#</th><th>Producto</th><th>Unid.</th><th>Facturación</th><th>Costo</th><th>Ganancia</th><th>Margen</th>";
+      h += "</tr></thead><tbody>";
+      topProdsPorMargen.forEach(function(p, i){
+        h += "<tr style='border-bottom:1px solid var(--bd)'>";
+        h += "<td style='padding:.45rem .5rem;color:var(--tx3)'>"+(i+1)+"</td>";
+        h += "<td style='max-width:300px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap'>"+_admEsc(p.nombre||"—")+"</td>";
+        h += "<td>"+p.unid+"</td>";
+        h += "<td>"+fmt(p.fact)+"</td>";
+        h += "<td style='color:var(--red)'>"+fmt(p.costo)+"</td>";
+        h += "<td style='font-weight:700;color:"+(p.ganancia>=0?"var(--green)":"var(--red)")+"'>"+fmt(p.ganancia)+"</td>";
+        h += "<td style='font-weight:600;color:"+(p.margenPct>=30?"var(--green)":p.margenPct>=15?"var(--yel)":"var(--red)")+"'>"+p.margenPct.toFixed(1)+"%</td>";
+        h += "</tr>";
+      });
+      h += "</tbody></table></div></div>";
+    }
+
+    // ── Detalle de gastos ──
+    if(Object.keys(gastosPorConcepto).length){
+      h += "<div style='background:var(--sur);border:1px solid var(--bd);border-radius:10px;padding:1rem;margin-bottom:1rem'>";
+      h += "<div style='font-size:.85rem;font-weight:700;margin-bottom:.7rem'>💸 Desglose de gastos operativos</div>";
+      Object.keys(gastosPorConcepto).sort(function(a,b){return gastosPorConcepto[b].total - gastosPorConcepto[a].total;}).forEach(function(cat){
+        var d = gastosPorConcepto[cat];
+        var pct = m.gasto > 0 ? (d.total/m.gasto*100) : 0;
+        h += "<div style='display:flex;justify-content:space-between;align-items:center;padding:.5rem .75rem;background:var(--sur2);border-radius:7px;margin-bottom:.3rem;font-size:.78rem'>";
+        h += "<div><b>"+_admEsc(cat)+"</b> <span style='color:var(--tx3);font-size:.66rem'>· "+d.count+" registro"+(d.count===1?"":"s")+"</span></div>";
+        h += "<div style='text-align:right'><div style='font-weight:700;color:var(--red)'>"+fmt(d.total)+"</div><div style='font-size:.62rem;color:var(--tx3)'>"+pct.toFixed(1)+"%</div></div>";
+        h += "</div>";
+      });
+      h += "</div>";
+    }
+
+    window._repRentabilidadData = { metricas: m, anterior: mAnt, gastosPorConcepto: gastosPorConcepto, topProductos: topProdsPorMargen, cotizacion: cotiz };
+
+    var el = document.getElementById("_repContenido"); if(el) el.innerHTML = h;
+  }).catch(function(e){
+    console.error("[belle] _repCargarRentabilidad error:", e);
+    var el = document.getElementById("_repContenido");
+    if(el) el.innerHTML = "<div style='color:var(--red);padding:2rem;text-align:center'>Error al cargar rentabilidad: "+(e.message||e)+"</div>";
+  });
+}
+
+function _repExportRentabilidad(){
+  var d = window._repRentabilidadData; if(!d){toast("Sin datos","twarn"); return;}
+  var m = d.metricas;
+  var rows = [
+    ["RENTABILIDAD — "+_repFmtRango(window._repPeriodo)],
+    ["Cotización USD usada", d.cotizacion],
+    [],
+    ["RESUMEN"],
+    ["Concepto","Monto"],
+    ["Facturación", m.fact],
+    ["Costo productos", -m.costo],
+    ["Ganancia bruta", m.ganBruta],
+    ["Margen bruto %", m.margenBruto.toFixed(2)+"%"],
+    ["Gastos operativos", -m.gasto],
+    ["Ganancia neta", m.ganNeta],
+    ["Margen neto %", m.margenNeto.toFixed(2)+"%"],
+    ["Unidades", m.unidades],
+    ["Ticket promedio", m.ticketProm.toFixed(2)],
+    [],
+    ["POR SEGMENTO"],
+    ["Segmento","Unidades","Facturación","Costo","Ganancia","Margen %"]
+  ];
+  Object.keys(m.porSeg).forEach(function(seg){
+    var s = m.porSeg[seg];
+    var gan = s.fact - s.costo;
+    var marg = s.fact > 0 ? (gan/s.fact*100).toFixed(2)+"%" : "0%";
+    rows.push([seg, s.unid, s.fact, s.costo, gan, marg]);
+  });
+  rows.push([], ["POR VENDEDOR"], ["Vendedor","Ventas","Unidades","Facturación","Costo","Ganancia bruta","Margen %"]);
+  Object.keys(m.porVendedor).forEach(function(vid){
+    var v = m.porVendedor[vid];
+    var gan = v.fact - v.costo;
+    var marg = v.fact > 0 ? (gan/v.fact*100).toFixed(2)+"%" : "0%";
+    rows.push([_repNombreVendedor(parseInt(vid)).replace(/<[^>]+>/g,""), v.ventas, v.unid, v.fact, v.costo, gan, marg]);
+  });
+  rows.push([], ["TOP PRODUCTOS POR GANANCIA"], ["Producto","Unidades","Facturación","Costo","Ganancia","Margen %"]);
+  d.topProductos.forEach(function(p){
+    rows.push([p.nombre, p.unid, p.fact, p.costo, p.ganancia, p.margenPct.toFixed(2)+"%"]);
+  });
+  rows.push([], ["DESGLOSE DE GASTOS"], ["Categoría","Cantidad","Monto"]);
+  Object.keys(d.gastosPorConcepto).forEach(function(cat){
+    rows.push([cat, d.gastosPorConcepto[cat].count, d.gastosPorConcepto[cat].total]);
+  });
+  _repDescargarCSV("rentabilidad", rows);
+  toast("Excel descargado","tok");
 }
 
 function _repObtenerPeriodoAnterior(){
@@ -14870,7 +15222,7 @@ function _repCargarProductos(){
 
   Promise.all([
     apiGet("ventas", "select=*&estado=eq.confirmada&created_at=gte."+r.desde.toISOString()+"&created_at=lt."+r.hasta.toISOString()).catch(function(){return [];}),
-    apiGet("productos", "select=id,nombre,marca,stock_actual,stock_minimo,activo&activo=is.true&limit=2000").catch(function(){return [];})
+    apiGet("productos", "select=id,nombre,stock_actual,stock_minimo,activo&activo=is.true&limit=2000").catch(function(){return [];})
   ]).then(function(data){
     var ventas = data[0]; var productos = data[1];
 
