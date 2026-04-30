@@ -2432,27 +2432,9 @@ function vcVerCC(clienteId, clienteNombre){
   });
 }
 
-function _vcRegistrarPago(clienteId){
-  var monto=parseFloat((document.getElementById("_vcCCMonto")||{value:0}).value)||0;
-  var forma=(document.getElementById("_vcCCForma")||{value:"efectivo"}).value;
-  if(!monto||monto<=0){toast("Ingresá el monto","twarn");return;}
-  apiPost("cuenta_corriente_movimientos",{
-    cliente_id:clienteId,tipo:"pago_total",monto:monto,
-    descripcion:"Pago en "+(forma==="efectivo"?"efectivo":forma)+" — "+new Date().toLocaleDateString("es-AR"),
-    vendedor_id:VENDEDOR_ID,fecha:new Date().toISOString().split("T")[0]
-  }).then(function(){
-    // Actualizar saldo
-    return apiGet("clientes","select=saldo_cc&id=eq."+clienteId);
-  }).then(function(rows){
-    if(!rows||!rows[0])return;
-    var nuevoSaldo=(rows[0].saldo_cc||0)+monto;
-    return apiPatch("clientes",{saldo_cc:nuevoSaldo},"id=eq."+clienteId);
-  }).then(function(){
-    toast("Pago de "+fmt(monto)+" registrado","tok");
-    document.getElementById("_vcCCMonto").value="";
-    vcVerCC(clienteId,"");
-  }).catch(function(){toast("Error al registrar pago","terr");});
-}
+// ── REMOVIDA: _vcRegistrarPago — código muerto, modal CC simple reemplazado por FIFO
+// El modal viejo escribía en cuenta_corriente_movimientos (tabla legacy).
+// Ahora todos los pagos CC se hacen vía vcVerCC → modal FIFO → cc_pagos.
 
 
 // ═══════════════════════════════════════════════════════════════
@@ -2802,21 +2784,11 @@ function _postVentaCliente(nroOrden, items, total){
     },"id=eq."+pedId).then(function(){
       // Log de estado
       _logEstadoPedidoV(pedId,'en_preparacion','Pedido asignado al cliente por '+VENDEDOR_NOMBRE);
-      if(esCC){
-        return apiPost("cuenta_corriente_movimientos",{
-          cliente_id:c.id,tipo:"cargo",monto:total,
-          descripcion:"Pedido "+nroOrden+" en consignación",
-          pedido_id:pedId,vendedor_id:VENDEDOR_ID,
-          fecha:new Date().toISOString().split("T")[0]
-        }).then(function(){
-          return apiGet("clientes","select=saldo_cc&id=eq."+c.id).then(function(rows){
-            var s=rows&&rows[0]?rows[0].saldo_cc||0:0;
-            return apiPatch("clientes",{saldo_cc:s-total,ultimo_pedido_at:new Date().toISOString()},"id=eq."+c.id);
-          });
-        });
-      } else {
-        return apiPatch("clientes",{ultimo_pedido_at:new Date().toISOString()},"id=eq."+c.id);
-      }
+      // Sistema FIFO nuevo: NO insertamos un "cargo" en la tabla vieja ni tocamos saldo_cc.
+      // El pedido CC ya queda en pedidos_catalogo con cobrado_total=0, y eso forma
+      // automáticamente parte de la deuda del cliente (se calcula dinámicamente).
+      // El saldo_cc se usa solo para "saldo a favor" cuando paga de más.
+      return apiPatch("clientes",{ultimo_pedido_at:new Date().toISOString()},"id=eq."+c.id);
     });
   }).catch(function(e){console.error('[belle] error silencioso:',e);});
   _limpiarCarritoCliente();
@@ -2891,18 +2863,29 @@ function _cobrarProductosCC(pedidoId, clienteId, totalPed){
     var promises=[
       apiPatch("pedidos_catalogo",Object.assign({items_cobrados:JSON.stringify(nuevoCobrados),cobrado_parcial:nuevoCobrado},esSaldado?{estado:"cobrado",confirmado_cobro:true}:{}),"id=eq."+pedidoId)
     ];
-    // Registrar pago en CC
-    promises.push(apiPost("cuenta_corriente_movimientos",{
-      cliente_id:clienteId,tipo:"pago_parcial",monto:totalCobrar,
-      descripcion:"Cobro "+idxs.length+" producto(s) — pedido #"+pedidoId,
-      pedido_id:pedidoId,vendedor_id:VENDEDOR_ID,
-      fecha:new Date().toISOString().split("T")[0]
-    }));
-    // Actualizar saldo CC cliente
-    promises.push(apiGet("clientes","select=saldo_cc&id=eq."+clienteId).then(function(rows){
-      var s=rows&&rows[0]?rows[0].saldo_cc||0:0;
-      return apiPatch("clientes",{saldo_cc:s+totalCobrar},"id=eq."+clienteId);
-    }));
+    // Registrar pago en sistema FIFO nuevo (cc_pagos + aplicación al pedido)
+    promises.push(
+      apiPost("cc_pagos",{
+        cliente_id: clienteId,
+        monto: totalCobrar,
+        forma_pago: 'efectivo',
+        fecha: new Date().toISOString().split("T")[0],
+        vendedor_id: VENDEDOR_ID,
+        registrado_por: VENDEDOR_NOMBRE || ('Vendedor '+VENDEDOR_ID),
+        nota: "Cobro "+idxs.length+" producto(s) — pedido #"+pedidoId,
+        saldo_a_favor: 0
+      }).then(function(rows){
+        var pago = Array.isArray(rows)&&rows.length ? rows[0] : null;
+        if(pago && pago.id){
+          return apiPost("cc_pagos_aplicaciones",{
+            pago_id: pago.id,
+            pedido_id: pedidoId,
+            monto_aplicado: totalCobrar,
+            cubrio_pedido_completo: !!esSaldado
+          });
+        }
+      })
+    );
     return Promise.all(promises);
   }).then(function(){
     toast("Cobro registrado","tok");
@@ -2922,15 +2905,25 @@ function _confirmarCobrarCC(pedidoId, clienteId, totalPed, cobradoHasta){
   var esSaldado=nuevoCobrado>=totalPed-1;
   Promise.all([
     apiPatch("pedidos_catalogo",Object.assign({cobrado_parcial:nuevoCobrado},esSaldado?{estado:"cobrado",confirmado_cobro:true}:{}),"id=eq."+pedidoId),
-    apiPost("cuenta_corriente_movimientos",{
-      cliente_id:clienteId,tipo:esSaldado?"pago_total":"pago_parcial",monto:monto,
-      descripcion:"Cobro "+forma+" — pedido #"+pedidoId+(esSaldado?" (saldado)":""),
-      pedido_id:pedidoId,vendedor_id:VENDEDOR_ID,
-      fecha:new Date().toISOString().split("T")[0]
-    }),
-    apiGet("clientes","select=saldo_cc&id=eq."+clienteId).then(function(rows){
-      var s=rows&&rows[0]?rows[0].saldo_cc||0:0;
-      return apiPatch("clientes",{saldo_cc:s+monto},"id=eq."+clienteId);
+    apiPost("cc_pagos",{
+      cliente_id: clienteId,
+      monto: monto,
+      forma_pago: forma,
+      fecha: new Date().toISOString().split("T")[0],
+      vendedor_id: VENDEDOR_ID,
+      registrado_por: VENDEDOR_NOMBRE || ('Vendedor '+VENDEDOR_ID),
+      nota: "Cobro "+forma+" — pedido #"+pedidoId+(esSaldado?" (saldado)":""),
+      saldo_a_favor: 0
+    }).then(function(rows){
+      var pago = Array.isArray(rows)&&rows.length ? rows[0] : null;
+      if(pago && pago.id){
+        return apiPost("cc_pagos_aplicaciones",{
+          pago_id: pago.id,
+          pedido_id: pedidoId,
+          monto_aplicado: monto,
+          cubrio_pedido_completo: !!esSaldado
+        });
+      }
     })
   ]).then(function(){
     toast("Cobro de "+fmt(monto)+" registrado"+(esSaldado?" — ¡Pedido saldado!":""),"tok");
@@ -3782,19 +3775,29 @@ function _mgConfirmarCobro(){
         // Log estado entregado si el pedido tiene cliente asignado
         if(rec.cliente_id){
           _logEstadoPedidoV(id,'entregado','Pedido cobrado y entregado por '+VENDEDOR_NOMBRE);
-          // Si era CC registrar pago en movimientos CC
+          // Si era CC, registrar el pago en el sistema FIFO nuevo (cc_pagos + aplicaciones)
           if(rec.es_cc){
-            apiPost('cuenta_corriente_movimientos',{
-              cliente_id:rec.cliente_id,tipo:'pago_total',monto:montoCobrar,
-              descripcion:'Cobro final — '+nroOrden,
-              pedido_id:id,vendedor_id:VENDEDOR_ID,
-              fecha:new Date().toISOString().split('T')[0]
-            }).then(function(){
-              return apiGet('clientes','select=saldo_cc&id=eq.'+rec.cliente_id).then(function(rows){
-                var s=rows&&rows[0]?rows[0].saldo_cc||0:0;
-                return apiPatch('clientes',{saldo_cc:s+montoCobrar},'id=eq.'+rec.cliente_id);
-              });
-            }).catch(function(e){console.error('[belle] error silencioso:',e);});
+            apiPost('cc_pagos',{
+              cliente_id: rec.cliente_id,
+              monto: montoCobrar,
+              forma_pago: forma,
+              fecha: new Date().toISOString().split('T')[0],
+              vendedor_id: VENDEDOR_ID,
+              registrado_por: VENDEDOR_NOMBRE || ('Vendedor '+VENDEDOR_ID),
+              nota: 'Cobro final pedido '+nroOrden,
+              saldo_a_favor: 0
+            }).then(function(rows){
+              // Crear aplicación que vincula este pago al pedido cobrado
+              var pago = Array.isArray(rows)&&rows.length ? rows[0] : null;
+              if(pago && pago.id){
+                return apiPost('cc_pagos_aplicaciones', {
+                  pago_id: pago.id,
+                  pedido_id: id,
+                  monto_aplicado: montoCobrar,
+                  cubrio_pedido_completo: true
+                });
+              }
+            }).catch(function(e){console.error('[belle] cc_pagos error:',e);});
           }
         }
       });
@@ -5364,7 +5367,19 @@ function loadGastos(){
       "<div class='form-card' style='margin-bottom:.7rem'>"+
       "<div class='form-title'>Registrar gasto</div>"+
       "<div class='form-row'>"+
-      "<div class='fg'><label>Concepto</label><input class='fi' id='gConc' type='text' placeholder='ej: Nafta, traslado...'></div>"+
+      "<div class='fg' style='max-width:160px'><label>Categoría</label>"+
+        "<select class='fi' id='gCat' onchange='_gastoToggleConceptoLibre()'>"+
+          "<option value='CAPITAL SOCIOS'>CAPITAL SOCIOS</option>"+
+          "<option value='CAPITAL MARCELA'>CAPITAL MARCELA</option>"+
+          "<option value='ENVIO'>ENVÍO</option>"+
+          "<option value='PAQ.AR'>PAQ.AR</option>"+
+          "<option value='GAS'>GAS</option>"+
+          "<option value='NAFTA'>NAFTA</option>"+
+          "<option value='ESTACIONAMIENTO'>ESTACIONAMIENTO</option>"+
+          "<option value='OTRO'>OTRO</option>"+
+        "</select>"+
+      "</div>"+
+      "<div class='fg'><label>Observación</label><input class='fi' id='gConc' type='text' placeholder='Detalle (opcional para categorías predefinidas)'></div>"+
       "<div class='fg' style='max-width:115px'><label>Monto $</label><input class='fi' id='gMon' type='number' placeholder='0'></div>"+
       "<button class='btn btn-red' onclick='addGasto()' style='align-self:flex-end'>+ Agregar</button>"+
       "</div></div>"
@@ -5409,17 +5424,36 @@ function cancelarGastoDavid(id){
   });  });
 }
 
+function _gastoToggleConceptoLibre(){
+  // Si elige OTRO, hacer obligatoria la observación
+  var sel = document.getElementById("gCat");
+  var inp = document.getElementById("gConc");
+  if(!sel || !inp) return;
+  if(sel.value === "OTRO"){
+    inp.placeholder = "Especificá el gasto (obligatorio)";
+    inp.style.borderColor = "var(--acc)";
+  } else {
+    inp.placeholder = "Detalle (opcional para categorías predefinidas)";
+    inp.style.borderColor = "";
+  }
+}
+
 function addGasto(){
-  var con=document.getElementById("gConc").value.trim();
-  var monto=parseInt(document.getElementById("gMon").value)||0;
-  if(!con||!monto){toast("Complete concepto y monto","twarn");return;}
+  var cat = (document.getElementById("gCat")||{value:"OTRO"}).value;
+  var obs = document.getElementById("gConc").value.trim();
+  var monto = parseInt(document.getElementById("gMon").value)||0;
+  if(!monto){toast("Ingresá el monto","twarn"); return;}
+  if(cat === "OTRO" && !obs){toast("Si elegís OTRO, especificá el gasto","twarn"); return;}
+  // Concepto final = "CATEGORIA: observación" o solo "CATEGORIA" si no hay obs
+  var con = obs ? cat + ": " + obs : cat;
   var nroOp="GAS-"+Math.floor(100000+Math.random()*900000);
-  var esComisionMarcela=con.toLowerCase().indexOf("comision marcela")>=0||con.toLowerCase().indexOf("comisión marcela")>=0;
-  apiPost("gastos_vendedor",{vendedor_id:VENDEDOR_ID,concepto:con,monto:monto,periodo:periodoActual,aprobado:false,nro_operacion:nroOp}).then(function(){
+  var esComisionMarcela = con.toLowerCase().indexOf("comision marcela")>=0||con.toLowerCase().indexOf("comisión marcela")>=0;
+  apiPost("gastos_vendedor",{vendedor_id:VENDEDOR_ID,concepto:con,categoria:cat,monto:monto,periodo:periodoActual,aprobado:false,nro_operacion:nroOp}).then(function(){
     document.getElementById("gConc").value="";document.getElementById("gMon").value="";
+    if(document.getElementById("gCat")) document.getElementById("gCat").value = "CAPITAL SOCIOS";
     // Si es comisión de Marcela, crear también el registro en vendedor_id=3 como aprobado
     if(esComisionMarcela){
-      apiPost("gastos_vendedor",{vendedor_id:3,concepto:con,monto:monto,periodo:periodoActual,aprobado:true,periodo_cerrado:false,nro_operacion:nroOp}).catch(function(e){});
+      apiPost("gastos_vendedor",{vendedor_id:3,concepto:con,categoria:cat,monto:monto,periodo:periodoActual,aprobado:true,periodo_cerrado:false,nro_operacion:nroOp}).catch(function(e){});
       toast("Gasto + comisión Marcela registrados","tok");
     } else {
       toast("Gasto registrado - pendiente aprobacion","tok");
@@ -5913,20 +5947,8 @@ function confirmarReservarPed(){
         _logEstadoPedidoV(nuevoPedId,"en_preparacion","Pedido reservado para cliente por "+VENDEDOR_NOMBRE);
         // Actualizar último_pedido del cliente
         apiPatch("clientes",{ultimo_pedido_at:new Date().toISOString()},"id=eq."+c.id).catch(function(e){console.error("[belle] error silencioso:",e);});
-        // Si es CC, registrar movimiento
-        if(c.es_cc&&c.cuenta_corriente_habilitada){
-          apiPost("cuenta_corriente_movimientos",{
-            cliente_id:c.id,tipo:"cargo",monto:total,
-            descripcion:"Pedido "+nroOrden+" en consignación (reservado)",
-            pedido_id:nuevoPedId,vendedor_id:VENDEDOR_ID,
-            fecha:new Date().toISOString().split("T")[0]
-          }).then(function(){
-            return apiGet("clientes","select=saldo_cc&id=eq."+c.id).then(function(rows2){
-              var s=rows2&&rows2[0]?rows2[0].saldo_cc||0:0;
-              return apiPatch("clientes",{saldo_cc:s-total},"id=eq."+c.id);
-            });
-          }).catch(function(e){console.error("[belle] error silencioso:",e);});
-        }
+        // Sistema FIFO nuevo: si es CC, el pedido ya queda como pendiente automáticamente
+        // (cobrado_total=0 en pedidos_catalogo). No insertamos cargo viejo ni tocamos saldo_cc.
       }).catch(function(e){console.error("[belle] error silencioso:",e);});
       _limpiarCarritoCliente();
     }

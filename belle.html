@@ -14584,20 +14584,41 @@ function _repCargarRentabilidad(){
     apiGet("gastos_vendedor", "select=monto&aprobado=is.true&created_at=gte."+rAnt.desde.toISOString()+"&created_at=lt."+rAnt.hasta.toISOString()).catch(function(){return [];}),
     // Productos (necesario para costos si prods global no está cargado)
     (Array.isArray(prods) && prods.length) ? Promise.resolve(prods) :
-      apiGet("productos", "select=id,nombre,costo_ind,costo_log,activo&limit=5000").catch(function(){return [];})
+      apiGet("productos", "select=id,nombre,costo_ind,costo_log,activo&limit=5000").catch(function(){return [];}),
+    // Ventas transferidas del período (para mostrar Marcela/Facu que transfieren)
+    apiGet("ventas_transferidas", "select=id,creada_por,asignada_a,producto_id,cantidad,total,estado,created_at&created_at=gte."+r.desde.toISOString()+"&created_at=lt."+r.hasta.toISOString()+"&limit=5000").catch(function(){return [];})
   ]).then(function(data){
     var vActual = data[0] || [];
     var vAnterior = data[1] || [];
     var gActual = data[2] || [];
     var gAnterior = data[3] || [];
     var productos = data[4] || [];
+    var transferidasOriginales = data[5] || [];
     var cotiz = (typeof cotizActual !== "undefined" && cotizActual) ? cotizActual : 1520;
 
-    // Mapa producto_id → costo_total_pesos
+    // Mapa producto_id → costo_total_pesos (PERFUME COMPLETO 100ml)
     var mapCostoProd = {};
     productos.forEach(function(p){
       mapCostoProd[p.id] = ((parseFloat(p.costo_ind)||0) + (parseFloat(p.costo_log)||0)) * cotiz;
     });
+
+    // Costo del perfumero vacío (frasquito de 5ml para decans)
+    var COSTO_PERFUMERO_VACIO_USD = 0.94;
+    var costoPerfumeroVacio = COSTO_PERFUMERO_VACIO_USD * cotiz;
+    // Volumen del decan en ml (siempre 5ml según el negocio)
+    var DECAN_ML = 5;
+    var PERFUME_ML = 100;
+
+    // Helper: calcular costo de UNA unidad de un item de venta
+    function _costoUnitItem(v){
+      var costoBase = mapCostoProd[v.producto_id] || 0;
+      var seg = (v.segmento||"").toLowerCase();
+      // Si es decan: costo proporcional al volumen + perfumero vacío
+      if(seg === "decan"){
+        return (costoBase * DECAN_ML / PERFUME_ML) + costoPerfumeroVacio;
+      }
+      return costoBase;
+    }
 
     // ── Cálculos del período actual ──
     function calcMetricas(ventas, gastos){
@@ -14608,7 +14629,7 @@ function _repCargarRentabilidad(){
       ventas.forEach(function(v){
         var t = parseFloat(v.total)||0;
         var qty = parseInt(v.cantidad)||0;
-        var costoUnit = mapCostoProd[v.producto_id] || 0;
+        var costoUnit = _costoUnitItem(v);
         var costoLinea = costoUnit * qty;
         fact += t;
         costo += costoLinea;
@@ -14619,13 +14640,33 @@ function _repCargarRentabilidad(){
         porSeg[seg].fact += t;
         porSeg[seg].costo += costoLinea;
         porSeg[seg].unid += qty;
-        // Por vendedor
+        // Por vendedor — separado por origen
         var vid = v.vendedor_id || 0;
-        if(!porVendedor[vid]) porVendedor[vid] = { fact:0, costo:0, unid:0, ventas:0 };
+        if(!porVendedor[vid]) porVendedor[vid] = { fact:0, costo:0, unid:0, ventas:0,
+          // Subdesgloses por origen
+          factPropias:0, costoPropias:0, unidPropias:0,
+          factWeb:0, costoWeb:0, unidWeb:0,
+          factTransf:0, costoTransf:0, unidTransf:0
+        };
         porVendedor[vid].fact += t;
         porVendedor[vid].costo += costoLinea;
         porVendedor[vid].unid += qty;
         porVendedor[vid].ventas++;
+        // Clasificar por origen
+        var origen = (v.origen||"vendedor").toLowerCase();
+        if(origen === "catalogo" || origen === "reserva"){
+          porVendedor[vid].factWeb += t;
+          porVendedor[vid].costoWeb += costoLinea;
+          porVendedor[vid].unidWeb += qty;
+        } else if(origen === "transferencia"){
+          porVendedor[vid].factTransf += t;
+          porVendedor[vid].costoTransf += costoLinea;
+          porVendedor[vid].unidTransf += qty;
+        } else {
+          porVendedor[vid].factPropias += t;
+          porVendedor[vid].costoPropias += costoLinea;
+          porVendedor[vid].unidPropias += qty;
+        }
         // Por producto
         var pid = v.producto_id || 0;
         if(pid){
@@ -14786,14 +14827,28 @@ function _repCargarRentabilidad(){
       h += "</tbody></table></div></div>";
     }
 
-    // ── Por vendedor ──
+    // ── Por vendedor (con desglose propias / web / transferidas) ──
     if(Object.keys(m.porVendedor).length){
       h += "<div style='background:var(--sur);border:1px solid var(--bd);border-radius:10px;padding:1rem;margin-bottom:1rem'>";
-      h += "<div style='font-size:.85rem;font-weight:700;margin-bottom:.7rem'>👥 Rentabilidad por vendedor</div>";
+      h += "<div style='font-size:.85rem;font-weight:700;margin-bottom:.4rem'>👥 Rentabilidad por vendedor</div>";
+      h += "<div style='font-size:.66rem;color:var(--tx3);margin-bottom:.7rem'>📌 Solo se muestran las ventas que cada vendedor COBRÓ. Quien transfiere y no cobra (Marcela, Facu si aplica) tiene su tabla aparte abajo.</div>";
       h += "<div style='overflow-x:auto'>";
-      h += "<table style='width:100%;font-size:.76rem;border-collapse:collapse'>";
-      h += "<thead><tr style='border-bottom:1px solid var(--bd);text-align:left;color:var(--tx3);font-size:.66rem;text-transform:uppercase'>";
-      h += "<th style='padding:.5rem'>Vendedor</th><th>Ventas</th><th>Unid.</th><th>Facturación</th><th>Costo</th><th>Gan. Bruta</th><th>Margen</th>";
+      h += "<table style='width:100%;font-size:.74rem;border-collapse:collapse'>";
+      h += "<thead>";
+      h += "<tr style='border-bottom:2px solid var(--bd);text-align:left;color:var(--tx3);font-size:.62rem;text-transform:uppercase'>";
+      h += "<th rowspan='2' style='padding:.5rem;vertical-align:bottom'>Vendedor</th>";
+      h += "<th colspan='2' style='text-align:center;border-bottom:1px solid var(--bd);padding-bottom:.3rem'>🛍️ Propias (mostrador)</th>";
+      h += "<th colspan='2' style='text-align:center;border-bottom:1px solid var(--bd);padding-bottom:.3rem'>🌐 Web (catálogo)</th>";
+      h += "<th colspan='2' style='text-align:center;border-bottom:1px solid var(--bd);padding-bottom:.3rem'>↔️ Transferidas (cobradas)</th>";
+      h += "<th colspan='3' style='text-align:center;border-bottom:1px solid var(--bd);padding-bottom:.3rem;background:rgba(196,150,90,.05)'>💰 TOTAL</th>";
+      h += "</tr>";
+      h += "<tr style='border-bottom:1px solid var(--bd);text-align:left;color:var(--tx3);font-size:.6rem'>";
+      h += "<th style='padding:.3rem .5rem'>Unid.</th><th>Facturación</th>";
+      h += "<th>Unid.</th><th>Facturación</th>";
+      h += "<th>Unid.</th><th>Facturación</th>";
+      h += "<th style='background:rgba(196,150,90,.05)'>Facturación</th>";
+      h += "<th style='background:rgba(196,150,90,.05)'>Ganancia</th>";
+      h += "<th style='background:rgba(196,150,90,.05)'>Margen</th>";
       h += "</tr></thead><tbody>";
       Object.keys(m.porVendedor).sort(function(a,b){return m.porVendedor[b].fact - m.porVendedor[a].fact;}).forEach(function(vid){
         var d = m.porVendedor[vid];
@@ -14801,14 +14856,72 @@ function _repCargarRentabilidad(){
         var margV = d.fact > 0 ? (ganV/d.fact*100) : 0;
         h += "<tr style='border-bottom:1px solid var(--bd)'>";
         h += "<td style='padding:.45rem .5rem;font-weight:600'>"+_repNombreVendedor(parseInt(vid))+"</td>";
-        h += "<td>"+d.ventas+"</td>";
-        h += "<td>"+d.unid+"</td>";
-        h += "<td>"+fmt(d.fact)+"</td>";
-        h += "<td style='color:var(--red)'>"+fmt(d.costo)+"</td>";
-        h += "<td style='font-weight:700;color:"+(ganV>=0?"var(--green)":"var(--red)")+"'>"+fmt(ganV)+"</td>";
-        h += "<td style='font-weight:600;color:"+(margV>=30?"var(--green)":margV>=15?"var(--yel)":"var(--red)")+"'>"+margV.toFixed(1)+"%</td>";
+        h += "<td>"+d.unidPropias+"</td>";
+        h += "<td>"+(d.factPropias>0?fmt(d.factPropias):"<span style='color:var(--tx3)'>—</span>")+"</td>";
+        h += "<td>"+d.unidWeb+"</td>";
+        h += "<td>"+(d.factWeb>0?fmt(d.factWeb):"<span style='color:var(--tx3)'>—</span>")+"</td>";
+        h += "<td>"+d.unidTransf+"</td>";
+        h += "<td>"+(d.factTransf>0?fmt(d.factTransf):"<span style='color:var(--tx3)'>—</span>")+"</td>";
+        h += "<td style='font-weight:700;background:rgba(196,150,90,.05)'>"+fmt(d.fact)+"</td>";
+        h += "<td style='font-weight:700;background:rgba(196,150,90,.05);color:"+(ganV>=0?"var(--green)":"var(--red)")+"'>"+fmt(ganV)+"</td>";
+        h += "<td style='font-weight:600;background:rgba(196,150,90,.05);color:"+(margV>=30?"var(--green)":margV>=15?"var(--yel)":"var(--red)")+"'>"+margV.toFixed(1)+"%</td>";
         h += "</tr>";
       });
+      h += "</tbody></table></div></div>";
+    }
+
+    // ── Sección "Quien transfiere y no cobra" ──
+    // Mostramos: cantidad transferida, monto de esas transferencias, comisión generada
+    if(transferidasOriginales && transferidasOriginales.length){
+      var statsTransf = {};
+      transferidasOriginales.forEach(function(t){
+        var creador = t.creada_por || "Sin nombre";
+        if(!statsTransf[creador]) statsTransf[creador] = {
+          totalCantidad: 0, totalMonto: 0, comision: 0, ventas: 0
+        };
+        statsTransf[creador].ventas++;
+        var cantTotal = (parseInt(t.cantidad)||0);
+        statsTransf[creador].totalCantidad += cantTotal;
+        statsTransf[creador].totalMonto += parseFloat(t.total)||0;
+      });
+      // Sumar comisiones de gastos_vendedor por persona
+      // Marcela = vendedor_id=3, Facu = 2
+      var mapNombreVid = { "Marcela": 3, "Facu": 2, "David": 1 };
+      gActual.forEach(function(g){
+        var nom = (g.concepto||"").toLowerCase();
+        if(nom.indexOf("comision marcela") >= 0 && statsTransf["Marcela"]){
+          statsTransf["Marcela"].comision += parseFloat(g.monto)||0;
+        } else if(nom.indexOf("comision facu") >= 0 && statsTransf["Facu"]){
+          statsTransf["Facu"].comision += parseFloat(g.monto)||0;
+        }
+      });
+
+      h += "<div style='background:var(--sur);border:1px solid var(--bd);border-radius:10px;padding:1rem;margin-bottom:1rem'>";
+      h += "<div style='font-size:.85rem;font-weight:700;margin-bottom:.4rem'>↔️ Vendedores que transfieren (no cobran directo)</div>";
+      h += "<div style='font-size:.66rem;color:var(--tx3);margin-bottom:.7rem'>Aportan ventas a David para cobrar y generan comisión por hacerlo</div>";
+      h += "<div style='overflow-x:auto'>";
+      h += "<table style='width:100%;font-size:.76rem;border-collapse:collapse'>";
+      h += "<thead><tr style='border-bottom:2px solid var(--bd);text-align:left;color:var(--tx3);font-size:.62rem;text-transform:uppercase'>";
+      h += "<th style='padding:.5rem'>Vendedor</th><th>Ventas creadas</th><th>Unidades</th><th>Facturación generada</th><th>Comisión ganada</th><th>% sobre fact.</th>";
+      h += "</tr></thead><tbody>";
+      var hayDatos = false;
+      Object.keys(statsTransf).sort(function(a,b){return statsTransf[b].totalMonto - statsTransf[a].totalMonto;}).forEach(function(nom){
+        var s = statsTransf[nom];
+        if(s.ventas === 0) return;
+        hayDatos = true;
+        var pctCom = s.totalMonto > 0 ? (s.comision/s.totalMonto*100) : 0;
+        h += "<tr style='border-bottom:1px solid var(--bd)'>";
+        h += "<td style='padding:.45rem .5rem;font-weight:600'>"+_admEsc(nom)+"</td>";
+        h += "<td>"+s.ventas+"</td>";
+        h += "<td>"+s.totalCantidad+"</td>";
+        h += "<td>"+fmt(s.totalMonto)+"</td>";
+        h += "<td style='font-weight:700;color:var(--green)'>"+fmt(s.comision)+"</td>";
+        h += "<td>"+pctCom.toFixed(1)+"%</td>";
+        h += "</tr>";
+      });
+      if(!hayDatos){
+        h += "<tr><td colspan='6' style='padding:.7rem;text-align:center;color:var(--tx3);font-style:italic'>No hubo transferencias en este período</td></tr>";
+      }
       h += "</tbody></table></div></div>";
     }
 
