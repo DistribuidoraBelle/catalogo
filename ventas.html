@@ -2769,11 +2769,13 @@ function verHistorialPedido(pedId){
   });
 }
 
-// ── Post-venta: vincular pedido a cliente y CC si corresponde ──
+// ── Post-venta: vincular pedido a cliente y aplicar FIFO si es CC ──
 function _postVentaCliente(nroOrden, items, total){
   if(!_carritoCliente)return;
   var c=_carritoCliente;
   var esCC=c.es_cc&&c.cuenta_corriente_habilitada;
+  var clienteId=c.id;
+
   apiGet("pedidos_catalogo","select=id&nro_orden=eq."+nroOrden+"&limit=1").then(function(rows){
     var pedId=rows&&rows[0]&&rows[0].id;
     if(!pedId)return;
@@ -2782,15 +2784,143 @@ function _postVentaCliente(nroOrden, items, total){
       es_cc:esCC,
       estado_envio:"en_preparacion"
     },"id=eq."+pedId).then(function(){
-      // Log de estado
       _logEstadoPedidoV(pedId,'en_preparacion','Pedido asignado al cliente por '+VENDEDOR_NOMBRE);
-      // Sistema FIFO nuevo: NO insertamos un "cargo" en la tabla vieja ni tocamos saldo_cc.
-      // El pedido CC ya queda en pedidos_catalogo con cobrado_total=0, y eso forma
-      // automáticamente parte de la deuda del cliente (se calcula dinámicamente).
-      // El saldo_cc se usa solo para "saldo a favor" cuando paga de más.
-      return apiPatch("clientes",{ultimo_pedido_at:new Date().toISOString()},"id=eq."+c.id);
+      // FIX BUG B: Si es CC, aplicar FIFO automático.
+      // Si NO es CC, solo actualizar ultimo_pedido y listo.
+      if(!esCC){
+        return apiPatch("clientes",{ultimo_pedido_at:new Date().toISOString()},"id=eq."+c.id);
+      }
+      // ── FLUJO CC con FIFO automático ──
+      // Buscar deudas previas del cliente (pedidos pendientes de cobro)
+      return apiGet("pedidos_catalogo",
+        "select=id,nro_orden,total,cobrado_total,created_at&cliente_id=eq."+clienteId+
+        "&es_cc=eq.true&estado=neq.cancelado&estado=neq.cobrado&id=neq."+pedId+
+        "&order=created_at.asc"
+      ).then(function(deudas){
+        var deudasArr = Array.isArray(deudas)?deudas:[];
+        // Calcular saldo pendiente de cada deuda previa
+        var deudasConSaldo = deudasArr.map(function(d){
+          var pendiente = (parseFloat(d.total)||0) - (parseFloat(d.cobrado_total)||0);
+          return Object.assign({}, d, {pendiente: pendiente});
+        }).filter(function(d){return d.pendiente > 0.01;}); // ignorar centavos
+        var totalDeudaPrevia = deudasConSaldo.reduce(function(s,d){return s+d.pendiente;}, 0);
+        if(totalDeudaPrevia <= 0){
+          // No hay deuda previa: flujo simple (pedido nuevo queda como cobrado al toque)
+          // Marcar el pedido como saldado al instante (cobrado_total = total)
+          return apiPatch("pedidos_catalogo",{
+            cobrado_total: total,
+            estado: 'cobrado',
+            confirmado_cobro: true,
+            confirmado_at: new Date().toISOString()
+          },"id=eq."+pedId).then(function(){
+            return apiPatch("clientes",{ultimo_pedido_at:new Date().toISOString()},"id=eq."+c.id);
+          });
+        }
+        // SÍ hay deuda previa: aplicar FIFO
+        // El cliente acaba de pagar `total` (lo del carrito).
+        // Aplicar primero a deudas viejas, lo que sobre va al pedido nuevo, lo que sobre saldo a favor.
+        var dineroDisponible = total;
+        var aplicaciones = []; // {pedido_id, monto, cubrio_completo}
+        // 1. Aplicar a deudas viejas (FIFO)
+        deudasConSaldo.forEach(function(d){
+          if(dineroDisponible <= 0) return;
+          var aplicar = Math.min(dineroDisponible, d.pendiente);
+          aplicaciones.push({
+            pedido_id: d.id,
+            monto: aplicar,
+            cubrio_completo: aplicar >= d.pendiente - 0.01,
+            nuevo_cobrado: (parseFloat(d.cobrado_total)||0) + aplicar,
+            total_pedido: parseFloat(d.total)||0
+          });
+          dineroDisponible -= aplicar;
+        });
+        // 2. Lo que quedó va al pedido nuevo
+        var aplicadoAlNuevo = 0;
+        if(dineroDisponible > 0){
+          aplicadoAlNuevo = Math.min(dineroDisponible, total);
+          dineroDisponible -= aplicadoAlNuevo;
+        }
+        // 3. Lo que aún sobra → saldo a favor del cliente
+        var saldoAFavor = dineroDisponible;
+
+        // Crear el pago en cc_pagos con el TOTAL pagado
+        return apiPost("cc_pagos",{
+          cliente_id: clienteId,
+          monto: total,
+          forma_pago: 'efectivo', // por defecto, executeVenta no captura forma_cobro de cliente
+          fecha: new Date().toISOString().split("T")[0],
+          vendedor_id: VENDEDOR_ID,
+          registrado_por: VENDEDOR_NOMBRE || ('Vendedor '+VENDEDOR_ID),
+          nota: 'Cobro al toque cliente CC — pedido '+nroOrden+' (FIFO)',
+          saldo_a_favor: saldoAFavor
+        }).then(function(rows2){
+          var pago = Array.isArray(rows2)&&rows2.length ? rows2[0] : null;
+          if(!pago||!pago.id) return;
+          // Crear aplicaciones (a deudas previas)
+          var promsApp = aplicaciones.map(function(a){
+            // Patchear el pedido viejo con su nuevo cobrado_total y estado si saldó
+            var patchOld = {cobrado_total: a.nuevo_cobrado};
+            if(a.cubrio_completo){
+              patchOld.estado = 'cobrado';
+              patchOld.confirmado_cobro = true;
+              patchOld.confirmado_at = new Date().toISOString();
+            }
+            apiPatch("pedidos_catalogo", patchOld, "id=eq."+a.pedido_id).catch(function(e){console.error('[belle] error silencioso:',e);});
+            return apiPost("cc_pagos_aplicaciones",{
+              pago_id: pago.id,
+              pedido_id: a.pedido_id,
+              monto_aplicado: a.monto,
+              cubrio_pedido_completo: a.cubrio_completo
+            });
+          });
+          // Aplicación al pedido nuevo (si aplica)
+          if(aplicadoAlNuevo > 0){
+            var cubrioNuevo = aplicadoAlNuevo >= total - 0.01;
+            var patchNuevo = {cobrado_total: aplicadoAlNuevo};
+            if(cubrioNuevo){
+              patchNuevo.estado = 'cobrado';
+              patchNuevo.confirmado_cobro = true;
+              patchNuevo.confirmado_at = new Date().toISOString();
+            }
+            apiPatch("pedidos_catalogo", patchNuevo, "id=eq."+pedId).catch(function(e){console.error('[belle] error silencioso:',e);});
+            promsApp.push(apiPost("cc_pagos_aplicaciones",{
+              pago_id: pago.id,
+              pedido_id: pedId,
+              monto_aplicado: aplicadoAlNuevo,
+              cubrio_pedido_completo: cubrioNuevo
+            }));
+          }
+          // Si quedó saldo a favor, sumarlo al cliente.saldo_cc
+          if(saldoAFavor > 0){
+            promsApp.push(
+              apiGet("clientes","select=saldo_cc&id=eq."+clienteId).then(function(rs){
+                var actual = (rs&&rs[0]?parseFloat(rs[0].saldo_cc)||0:0);
+                return apiPatch("clientes",{saldo_cc: actual + saldoAFavor, ultimo_pedido_at: new Date().toISOString()},"id=eq."+clienteId);
+              })
+            );
+          } else {
+            promsApp.push(apiPatch("clientes",{ultimo_pedido_at:new Date().toISOString()},"id=eq."+clienteId));
+          }
+          return Promise.all(promsApp).then(function(){
+            // Notificar al vendedor qué pasó (mensaje informativo)
+            var msgParts = [];
+            if(aplicaciones.length){
+              msgParts.push("FIFO aplicado: "+fmt(aplicaciones.reduce(function(s,a){return s+a.monto;},0))+" a "+aplicaciones.length+" deuda(s) vieja(s)");
+            }
+            if(aplicadoAlNuevo > 0){
+              msgParts.push(fmt(aplicadoAlNuevo)+" al pedido nuevo");
+            }
+            if(saldoAFavor > 0){
+              msgParts.push(fmt(saldoAFavor)+" como saldo a favor");
+            }
+            if(msgParts.length){
+              setTimeout(function(){toast(msgParts.join(" · "),"tok");}, 1200);
+            }
+          });
+        });
+      });
     });
-  }).catch(function(e){console.error('[belle] error silencioso:',e);});
+  }).catch(function(e){console.error('[belle] _postVentaCliente FIFO error:',e);});
   _limpiarCarritoCliente();
 }
 
@@ -3770,35 +3900,36 @@ function _mgConfirmarCobro(){
   });
 
   Promise.all(proms).then(function(){
+    // FIX BUG A: Si es cliente CC, registrar el pago en cc_pagos SIEMPRE
+    // (sea cobro total o parcial). Antes solo se registraba el cobro saldado.
+    if(rec.es_cc && rec.cliente_id){
+      apiPost('cc_pagos',{
+        cliente_id: rec.cliente_id,
+        monto: montoCobrar,
+        forma_pago: forma,
+        fecha: new Date().toISOString().split('T')[0],
+        vendedor_id: VENDEDOR_ID,
+        registrado_por: VENDEDOR_NOMBRE || ('Vendedor '+VENDEDOR_ID),
+        nota: (esSaldado ? 'Cobro final pedido ' : 'Cobro parcial pedido ')+nroOrden,
+        saldo_a_favor: 0
+      }).then(function(rows){
+        // Crear aplicación que vincula este pago al pedido
+        var pago = Array.isArray(rows)&&rows.length ? rows[0] : null;
+        if(pago && pago.id){
+          return apiPost('cc_pagos_aplicaciones', {
+            pago_id: pago.id,
+            pedido_id: id,
+            monto_aplicado: montoCobrar,
+            cubrio_pedido_completo: !!esSaldado
+          });
+        }
+      }).catch(function(e){console.error('[belle] cc_pagos error:',e);});
+    }
+    // Si está saldado, actualizar estado del pedido y log
     if(esSaldado){
       return apiPatch('pedidos_catalogo',_patchSaldo,'id=eq.'+id).then(function(){
-        // Log estado entregado si el pedido tiene cliente asignado
         if(rec.cliente_id){
           _logEstadoPedidoV(id,'entregado','Pedido cobrado y entregado por '+VENDEDOR_NOMBRE);
-          // Si era CC, registrar el pago en el sistema FIFO nuevo (cc_pagos + aplicaciones)
-          if(rec.es_cc){
-            apiPost('cc_pagos',{
-              cliente_id: rec.cliente_id,
-              monto: montoCobrar,
-              forma_pago: forma,
-              fecha: new Date().toISOString().split('T')[0],
-              vendedor_id: VENDEDOR_ID,
-              registrado_por: VENDEDOR_NOMBRE || ('Vendedor '+VENDEDOR_ID),
-              nota: 'Cobro final pedido '+nroOrden,
-              saldo_a_favor: 0
-            }).then(function(rows){
-              // Crear aplicación que vincula este pago al pedido cobrado
-              var pago = Array.isArray(rows)&&rows.length ? rows[0] : null;
-              if(pago && pago.id){
-                return apiPost('cc_pagos_aplicaciones', {
-                  pago_id: pago.id,
-                  pedido_id: id,
-                  monto_aplicado: montoCobrar,
-                  cubrio_pedido_completo: true
-                });
-              }
-            }).catch(function(e){console.error('[belle] cc_pagos error:',e);});
-          }
         }
       });
     }
