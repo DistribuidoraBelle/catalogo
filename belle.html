@@ -4939,6 +4939,12 @@ function _renderPedidosChips(){
     if(er==='cobrado'||er==='cancelado')return false;
     return new Date(p.created_at)<hace7d;
   }).length;
+  // CC: pedidos marcados como CC, o de cliente con CC habilitada
+  var cCC=data.filter(function(p){
+    if(p.es_cc)return true;
+    var c=window._pedidosClienteCache[p.cliente_id];
+    return c&&c.cuenta_corriente_habilitada;
+  }).length;
   var cTransf=transf.length;
   var cTransfPend=transf.filter(function(t){return t.estado==='pendiente';}).length;
 
@@ -4950,6 +4956,7 @@ function _renderPedidosChips(){
     {key:'cobrado',label:'✅ Cobrados',count:cCobr,color:'var(--green)'},
     {key:'cancelado',label:'❌ Cancelados',count:cCanc,color:'var(--red)'},
     {key:'abandonado',label:'🕒 Abandonados (+7d)',count:cAband,color:'var(--red)'},
+    {key:'cc',label:'💳 Solo CC',count:cCC,color:'var(--acc)'},
     {key:'transferencia',label:'↔️ Transferencias',count:cTransf,color:'var(--cyan)',sub:cTransfPend?cTransfPend+' pend.':''}
   ];
   chipsEl.innerHTML=chips.map(function(ch){
@@ -4993,6 +5000,12 @@ function renderPedidos(){
       var er=_pedidoEstadoReal(p);
       if(er==='cobrado'||er==='cancelado')return false;
       if(new Date(p.created_at)>=hace7d)return false;
+    } else if(est==='cc'){
+      // Filtro CC: pedido marcado como CC o cliente con CC habilitada
+      if(!p.es_cc){
+        var c=window._pedidosClienteCache[p.cliente_id];
+        if(!c||!c.cuenta_corriente_habilitada)return false;
+      }
     } else if(est && _pedidoEstadoReal(p)!==est)return false;
     if(vend==='__sin'){if(p.vendedor_id)return false;}
     else if(vend && String(p.vendedor_id)!==vend)return false;
@@ -5102,10 +5115,10 @@ function renderPedidos(){
       // Botones de acción
       "<div style='display:flex;gap:.4rem;flex-wrap:wrap'>"+
         "<button class='btn btn-a' style='font-size:.72rem;padding:.35rem .7rem' onclick='_adminAbrirDetallePedido("+p.id+")'>👁 Ver detalle completo</button>"+
-        (estReal!=='cancelado'&&estReal!=='cobrado'?"<button class='btn btn-g' style='font-size:.72rem;padding:.35rem .7rem' onclick='_adminEditarItemsPedido("+p.id+")'>✏️ Editar items</button>":'')+
+        "<button class='btn btn-g' style='font-size:.72rem;padding:.35rem .7rem' onclick='_adminEditarItemsPedido("+p.id+")'>✏️ Editar items</button>"+
         (estReal!=='cancelado'&&estReal!=='cobrado'?"<button class='btn btn-g' style='font-size:.72rem;padding:.35rem .7rem;color:var(--green);border-color:var(--green)' onclick='_adminMarcarCobrado("+p.id+")'>✓ Marcar cobrado</button>":'')+
-        (estReal==='cobrado'?"<button class='btn btn-g' style='font-size:.72rem;padding:.35rem .7rem;color:var(--yel);border-color:var(--yel)' onclick='_adminRevertirCobro("+p.id+")'>↶ Revertir cobro</button>":'')+
-        (estReal!=='cancelado'?"<button class='btn btn-g' style='font-size:.72rem;padding:.35rem .7rem;color:var(--red);border-color:var(--red)' onclick='_adminCancelarPedido("+p.id+")'>✗ Cancelar</button>":'')+
+        (estReal==='cobrado'?"<button class='btn btn-g' style='font-size:.72rem;padding:.35rem .7rem;color:var(--yel);border-color:var(--yel)' onclick='_adminRevertirCobro("+p.id+")'>↶ Anular cobro</button>":'')+
+        (estReal==='cancelado'?"<button class='btn btn-g' style='font-size:.72rem;padding:.35rem .7rem;color:var(--green);border-color:var(--green)' onclick='_adminReactivarPedido("+p.id+")'>↻ Reactivar</button>":"<button class='btn btn-g' style='font-size:.72rem;padding:.35rem .7rem;color:var(--red);border-color:var(--red)' onclick='_adminCancelarPedido("+p.id+")'>✗ Cancelar</button>")+
         "<button class='btn btn-g' style='font-size:.72rem;padding:.35rem .7rem;color:var(--red);border-color:var(--red)' onclick='_adminEliminarPedido("+p.id+")'>🗑 Eliminar</button>"+
       "</div>"+
     "</div>";
@@ -5127,7 +5140,19 @@ function _renderTransferencias(q,vendFilt){
     });
   }
   if(vendFilt&&vendFilt!=='__sin'){
-    data=data.filter(function(t){return String(t.asignada_a)===vendFilt;});
+    // Filtrar transferencias DE o HACIA ese vendedor
+    var vid=parseInt(vendFilt);
+    var vendNombre='';
+    var v=(window._pedidosVendCache||[]).find(function(x){return x.id===vid;});
+    if(v)vendNombre=(v.nombre||'').toLowerCase();
+    data=data.filter(function(t){
+      // Asignada a ese vendedor (por id)
+      if(String(t.asignada_a)===vendFilt)return true;
+      // Creada por ese vendedor (por nombre)
+      var creador=(t.creada_por||'').toLowerCase();
+      if(vendNombre && creador===vendNombre)return true;
+      return false;
+    });
   }
 
   // Stats
@@ -5217,18 +5242,27 @@ function _adminAbrirDetallePedido(id){
     var p=data[0];
     var items=[];try{items=typeof p.items==='string'?JSON.parse(p.items):p.items||[];}catch(e){}
     var cli=window._pedidosClienteCache?window._pedidosClienteCache[p.cliente_id]:null;
+    var nroOrden=p.nro_orden||'';
 
-    // Cargar log de estados en paralelo
-    apiGet('pedidos_estados_log','select=*&pedido_id=eq.'+id+'&order=created_at.desc&limit=50').then(function(logs){
-      var logsArr=Array.isArray(logs)?logs:[];
-      _adminAbrirDetallePedidoUI(p,items,cli,logsArr);
+    // Cargar log de estados + movimientos de stock + cc_pagos en paralelo
+    Promise.all([
+      apiGet('pedidos_estados_log','select=*&pedido_id=eq.'+id+'&order=created_at.desc&limit=50').catch(function(){return [];}),
+      nroOrden?apiGet('movimientos_stock','select=*&motivo=ilike.*'+encodeURIComponent(nroOrden)+'*&order=created_at.desc&limit=100').catch(function(){return [];}):Promise.resolve([]),
+      apiGet('cc_pagos_aplicaciones','select=*,cc_pagos(id,monto,forma_pago,fecha,vendedor_id,registrado_por,nota)&pedido_id=eq.'+id+'&order=created_at.desc').catch(function(){return [];})
+    ]).then(function(extras){
+      var logs=Array.isArray(extras[0])?extras[0]:[];
+      var movs=Array.isArray(extras[1])?extras[1]:[];
+      var pagos=Array.isArray(extras[2])?extras[2]:[];
+      _adminAbrirDetallePedidoUI(p,items,cli,logs,movs,pagos);
     }).catch(function(){
-      _adminAbrirDetallePedidoUI(p,items,cli,[]);
+      _adminAbrirDetallePedidoUI(p,items,cli,[],[],[]);
     });
   });
 }
 
-function _adminAbrirDetallePedidoUI(p,items,cli,logs){
+function _adminAbrirDetallePedidoUI(p,items,cli,logs,movs,pagos){
+  movs=movs||[];
+  pagos=pagos||[];
   var estReal=_pedidoEstadoReal(p);
   var estColors={pendiente:'var(--yel)',reservado:'var(--cyan)',parcial:'var(--blue)',cobrado:'var(--green)',cancelado:'var(--red)'};
   var estColor=estColors[estReal]||'var(--tx3)';
@@ -5236,6 +5270,16 @@ function _adminAbrirDetallePedidoUI(p,items,cli,logs){
   var cobMto=parseFloat(p.cobrado_total)||0;
   var falta=totMto-cobMto;
   var fecha=new Date(p.created_at).toLocaleString('es-AR',{timeZone:'America/Argentina/Buenos_Aires'});
+
+  // Determinar qué items están "reservados" según movimientos de stock
+  // Un item está reservado si hay un movimiento tipo "reserva" sin un movimiento "venta"/"cancelacion" posterior
+  var itemEstado={}; // producto_id -> "reservado" | "vendido" | "devuelto"
+  movs.forEach(function(m){
+    if(!m.producto_id)return;
+    if(m.tipo==='reserva')itemEstado[m.producto_id]='reservado';
+    else if(m.tipo==='venta')itemEstado[m.producto_id]='vendido';
+    else if(m.tipo==='cancelacion'||m.tipo==='devolucion')itemEstado[m.producto_id]='devuelto';
+  });
 
   var mo=document.createElement('div');
   mo.id='_moDetallePed';
@@ -5257,6 +5301,9 @@ function _adminAbrirDetallePedidoUI(p,items,cli,logs){
   h+="<div><div style='font-size:.6rem;color:var(--tx3);text-transform:uppercase'>Origen</div><div style='font-size:.78rem;color:var(--tx);font-weight:600'>"+(_pedidoOrigen(p)==='web'?'🌐 Web':_pedidoOrigen(p)==='propio'?'🤝 Propio':'Otro')+"</div></div>";
   if(p.es_cc||(cli&&cli.cuenta_corriente_habilitada)){
     h+="<div><div style='font-size:.6rem;color:var(--tx3);text-transform:uppercase'>Forma</div><div style='font-size:.78rem;color:var(--acc);font-weight:600'>💳 Cuenta corriente</div></div>";
+  }
+  if(p.forma_pago){
+    h+="<div><div style='font-size:.6rem;color:var(--tx3);text-transform:uppercase'>Pago</div><div style='font-size:.78rem;color:var(--tx);font-weight:600'>"+p.forma_pago+"</div></div>";
   }
   h+="</div></div>";
 
@@ -5281,9 +5328,7 @@ function _adminAbrirDetallePedidoUI(p,items,cli,logs){
   h+="<div style='background:var(--sur2);border-radius:8px;padding:.8rem'>";
   h+="<div style='display:flex;justify-content:space-between;align-items:center;margin-bottom:.5rem'>";
   h+="<div style='font-size:.65rem;color:var(--tx3);text-transform:uppercase;font-weight:600'>📦 Items del pedido</div>";
-  if(estReal!=='cancelado'&&estReal!=='cobrado'){
-    h+="<button class='btn btn-a' style='font-size:.7rem;padding:.3rem .6rem' onclick='_adminEditarItemsPedido("+p.id+")'>✏️ Editar</button>";
-  }
+  h+="<button class='btn btn-a' style='font-size:.7rem;padding:.3rem .6rem' onclick='_adminEditarItemsPedido("+p.id+")'>✏️ Editar</button>";
   h+="</div>";
   if(Array.isArray(items)&&items.length){
     h+="<div style='display:flex;flex-direction:column;gap:.3rem'>";
@@ -5293,19 +5338,75 @@ function _adminAbrirDetallePedidoUI(p,items,cli,logs){
       var prec=parseFloat(it.precio)||parseFloat(it.precio_unitario)||0;
       var tot=parseFloat(it.total)||(prec*qty);
       var seg=it.segmento||'';
+      // Estado del item según movimientos
+      var estItem=it.producto_id?itemEstado[it.producto_id]:null;
+      var badgeR='';
+      if(estItem==='reservado')badgeR="<span style='font-size:.55rem;background:var(--cyan);color:#000;border-radius:3px;padding:.05rem .3rem;font-weight:700;margin-left:.3rem' title='Stock reservado'>R</span>";
+      else if(estItem==='vendido')badgeR="<span style='font-size:.55rem;background:var(--green);color:#000;border-radius:3px;padding:.05rem .3rem;font-weight:700;margin-left:.3rem' title='Stock descontado (venta)'>V</span>";
+      else if(estItem==='devuelto')badgeR="<span style='font-size:.55rem;background:var(--red);color:#fff;border-radius:3px;padding:.05rem .3rem;font-weight:700;margin-left:.3rem' title='Stock devuelto'>D</span>";
+
       h+="<div style='display:flex;justify-content:space-between;align-items:center;padding:.35rem .55rem;background:var(--sur3);border-radius:5px;font-size:.75rem'>";
       h+="<div style='flex:1;min-width:0'>";
-      h+="<div style='color:var(--tx);overflow:hidden;text-overflow:ellipsis;white-space:nowrap'>"+nom+"</div>";
+      h+="<div style='color:var(--tx);overflow:hidden;text-overflow:ellipsis;white-space:nowrap'>"+nom+badgeR+"</div>";
       h+="<div style='font-size:.6rem;color:var(--tx3)'>"+qty+"u &times; "+fmt(prec)+(seg?' &middot; '+seg:'')+(it.isDecan?' &middot; 🧪 decan':'')+(it.isCombo?' &middot; 🎁 combo':'')+"</div>";
       h+="</div>";
       h+="<div style='font-weight:700;color:var(--tx)'>"+fmt(tot)+"</div>";
       h+="</div>";
     });
     h+="</div>";
+    // Leyenda de badges
+    h+="<div style='font-size:.58rem;color:var(--tx3);margin-top:.4rem;display:flex;gap:.5rem;flex-wrap:wrap'>";
+    h+="<span><b style='color:var(--cyan)'>R</b> = Reservado &middot; <b style='color:var(--green)'>V</b> = Vendido (stock descontado) &middot; <b style='color:var(--red)'>D</b> = Devuelto</span>";
+    h+="</div>";
   } else {
     h+="<div style='font-size:.75rem;color:var(--tx3);text-align:center;padding:.6rem'>Sin items</div>";
   }
   h+="</div>";
+
+  // Movimientos de stock (NUEVO)
+  if(movs.length){
+    h+="<div style='background:var(--sur2);border-radius:8px;padding:.8rem'>";
+    h+="<div style='font-size:.65rem;color:var(--tx3);text-transform:uppercase;font-weight:600;margin-bottom:.4rem'>📊 Movimientos de stock relacionados</div>";
+    h+="<div style='display:flex;flex-direction:column;gap:.25rem;max-height:200px;overflow-y:auto'>";
+    movs.forEach(function(m){
+      var fm=new Date(m.created_at).toLocaleString('es-AR',{day:'2-digit',month:'2-digit',hour:'2-digit',minute:'2-digit',timeZone:'America/Argentina/Buenos_Aires'});
+      var tipoColors={reserva:'var(--cyan)',venta:'var(--green)',cancelacion:'var(--red)',devolucion:'var(--yel)',entrada:'var(--blue)',salida:'var(--red)'};
+      var col=tipoColors[m.tipo]||'var(--tx2)';
+      h+="<div style='font-size:.7rem;padding:.3rem .5rem;background:var(--sur3);border-radius:4px;border-left:2px solid "+col+";display:flex;justify-content:space-between;align-items:center;gap:.5rem'>";
+      h+="<div style='flex:1;min-width:0'>";
+      h+="<div style='display:flex;align-items:center;gap:.3rem;flex-wrap:wrap'>";
+      h+="<b style='color:"+col+";text-transform:uppercase;font-size:.62rem'>"+m.tipo+"</b>";
+      h+="<span style='color:var(--tx2);font-size:.65rem;overflow:hidden;text-overflow:ellipsis;white-space:nowrap'>"+(m.producto_nombre||'?')+"</span>";
+      h+="</div>";
+      if(m.motivo)h+="<div style='font-size:.6rem;color:var(--tx3);margin-top:.1rem'>"+m.motivo+"</div>";
+      h+="</div>";
+      h+="<div style='text-align:right;flex-shrink:0'>";
+      h+="<div style='font-size:.78rem;font-weight:700;color:"+col+"'>"+(m.tipo==='reserva'||m.tipo==='salida'||m.tipo==='venta'?'-':'+')+m.cantidad+"u</div>";
+      h+="<div style='font-size:.55rem;color:var(--tx3)'>"+fm+"</div>";
+      h+="</div>";
+      h+="</div>";
+    });
+    h+="</div></div>";
+  }
+
+  // Pagos asociados (cc_pagos)
+  if(pagos.length){
+    h+="<div style='background:var(--sur2);border-radius:8px;padding:.8rem;border-left:3px solid var(--green)'>";
+    h+="<div style='font-size:.65rem;color:var(--tx3);text-transform:uppercase;font-weight:600;margin-bottom:.4rem'>💵 Pagos registrados (CC)</div>";
+    h+="<div style='display:flex;flex-direction:column;gap:.25rem'>";
+    pagos.forEach(function(ap){
+      var pg=ap.cc_pagos||{};
+      var fp=pg.fecha?new Date(pg.fecha+'T00:00:00').toLocaleDateString('es-AR',{day:'2-digit',month:'2-digit',year:'2-digit'}):'';
+      h+="<div style='font-size:.72rem;padding:.4rem .55rem;background:var(--sur3);border-radius:5px'>";
+      h+="<div style='display:flex;justify-content:space-between;align-items:center'>";
+      h+="<div><b style='color:var(--green)'>"+fmt(ap.monto_aplicado||0)+"</b>"+(pg.forma_pago?" <span style='color:var(--tx3);font-size:.65rem'>("+pg.forma_pago+")</span>":'')+(ap.cubrio_pedido_completo?" <span style='font-size:.55rem;background:var(--green);color:#000;padding:.05rem .25rem;border-radius:3px;margin-left:.2rem'>SALDADO</span>":"")+"</div>";
+      h+="<div style='font-size:.62rem;color:var(--tx3)'>"+fp+"</div>";
+      h+="</div>";
+      if(pg.registrado_por)h+="<div style='font-size:.6rem;color:var(--tx3);margin-top:.1rem'>"+pg.registrado_por+"</div>";
+      h+="</div>";
+    });
+    h+="</div></div>";
+  }
 
   // Montos
   h+="<div style='background:var(--sur2);border-radius:8px;padding:.8rem'>";
@@ -5344,17 +5445,26 @@ function _adminAbrirDetallePedidoUI(p,items,cli,logs){
   h+="<div style='background:var(--sur2);border-radius:8px;padding:.8rem;border:1px solid var(--acc)'>";
   h+="<div style='font-size:.65rem;color:var(--acc);text-transform:uppercase;font-weight:700;margin-bottom:.5rem'>⚡ Acciones admin</div>";
   h+="<div style='display:flex;gap:.4rem;flex-wrap:wrap'>";
+  // Editar items: SIEMPRE disponible
+  h+="<button class='btn btn-g' style='font-size:.72rem;padding:.4rem .7rem' onclick='_adminEditarItemsPedido("+p.id+")'>✏️ Editar items</button>";
+  // Cambiar cliente y vendedor: SIEMPRE
+  h+="<button class='btn btn-g' style='font-size:.72rem;padding:.4rem .7rem' onclick='_adminCambiarVendedor("+p.id+")'>👤 Cambiar vendedor</button>";
+  h+="<button class='btn btn-g' style='font-size:.72rem;padding:.4rem .7rem' onclick='_adminCambiarCliente("+p.id+")'>👥 Cambiar cliente</button>";
+  // Cobrar: solo si NO está cobrado ni cancelado
   if(estReal!=='cancelado'&&estReal!=='cobrado'){
-    h+="<button class='btn btn-g' style='font-size:.72rem;padding:.4rem .7rem' onclick='_adminEditarItemsPedido("+p.id+")'>✏️ Editar items</button>";
     h+="<button class='btn btn-g' style='font-size:.72rem;padding:.4rem .7rem;color:var(--green);border-color:var(--green)' onclick='_adminMarcarCobrado("+p.id+")'>✓ Marcar cobrado</button>";
-    h+="<button class='btn btn-g' style='font-size:.72rem;padding:.4rem .7rem' onclick='_adminCambiarVendedor("+p.id+")'>👤 Cambiar vendedor</button>";
-    h+="<button class='btn btn-g' style='font-size:.72rem;padding:.4rem .7rem' onclick='_adminCambiarCliente("+p.id+")'>👥 Cambiar cliente</button>";
   }
+  // Anular cobro: solo si está cobrado
   if(estReal==='cobrado'){
-    h+="<button class='btn btn-g' style='font-size:.72rem;padding:.4rem .7rem;color:var(--yel);border-color:var(--yel)' onclick='_adminRevertirCobro("+p.id+")'>↶ Revertir cobro</button>";
+    h+="<button class='btn btn-g' style='font-size:.72rem;padding:.4rem .7rem;color:var(--yel);border-color:var(--yel)' onclick='_adminRevertirCobro("+p.id+")'>↶ Anular cobro</button>";
   }
+  // Cancelar: si NO está cancelado
   if(estReal!=='cancelado'){
     h+="<button class='btn btn-g' style='font-size:.72rem;padding:.4rem .7rem;color:var(--red);border-color:var(--red)' onclick='_adminCancelarPedido("+p.id+")'>✗ Cancelar (devuelve stock)</button>";
+  }
+  // Reactivar: solo si está cancelado
+  if(estReal==='cancelado'){
+    h+="<button class='btn btn-g' style='font-size:.72rem;padding:.4rem .7rem;color:var(--green);border-color:var(--green)' onclick='_adminReactivarPedido("+p.id+")'>↻ Reactivar (vuelve a pendiente)</button>";
   }
   h+="<button class='btn btn-g' style='font-size:.72rem;padding:.4rem .7rem;color:var(--red);border-color:var(--red)' onclick='_adminEliminarPedido("+p.id+")'>🗑 Eliminar definitivo</button>";
   h+="</div></div>";
@@ -5669,19 +5779,82 @@ function _adminGuardarCobro(id){
 }
 
 // ═══════════════════════════════════════════════════════════════════
-// REVERTIR COBRO
+// REVERTIR / ANULAR COBRO
 // ═══════════════════════════════════════════════════════════════════
 function _adminRevertirCobro(id){
-  if(!confirm('Revertir el cobro de este pedido?\n\nEl pedido vuelve a estado "pendiente". Esto NO toca cc_pagos. Si había un pago en CC, gestionalo aparte.'))return;
-  apiPatch('pedidos_catalogo',{
-    estado:'pendiente',
-    confirmado_cobro:false,
-    cobrado_total:0
-  },'id=eq.'+id).then(function(){
-    apiPost('pedidos_estados_log',{pedido_id:id,pedido_tabla:'pedidos_catalogo',estado:'pendiente',nota:'Cobro revertido por admin',usuario:curUser||'admin'}).catch(function(){});
-    toast('Cobro revertido','tok');
+  if(!confirm('Anular el cobro de este pedido?\n\n• El pedido vuelve a estado "pendiente"\n• Si era CC y se registró un pago en cc_pagos, ese pago se BORRA\n• Si el pago tenía aplicaciones a OTROS pedidos viejos, esos también pierden su pago\n\n¿Continuar?'))return;
+  apiGet('pedidos_catalogo','select=*&id=eq.'+id).then(function(d){
+    if(!Array.isArray(d)||!d.length)return;
+    var p=d[0];
+    var promesas=[];
+    // Patch del pedido: vuelve a pendiente
+    promesas.push(apiPatch('pedidos_catalogo',{
+      estado:'pendiente',
+      confirmado_cobro:false,
+      cobrado_total:0,
+      confirmado_at:null,
+      forma_pago:null
+    },'id=eq.'+id));
+    // Buscar y borrar cc_pagos_aplicaciones de este pedido
+    promesas.push(apiGet('cc_pagos_aplicaciones','select=id,pago_id&pedido_id=eq.'+id).then(function(apps){
+      if(!Array.isArray(apps)||!apps.length)return;
+      var pagoIds=Array.from(new Set(apps.map(function(a){return a.pago_id;}).filter(function(x){return x;})));
+      // Borrar las aplicaciones
+      var p1=apiDelete('cc_pagos_aplicaciones','pedido_id=eq.'+id);
+      // Borrar los cc_pagos que solo tenían aplicación a este pedido
+      var p2=Promise.all(pagoIds.map(function(pid){
+        return apiGet('cc_pagos_aplicaciones','select=id&pago_id=eq.'+pid).then(function(rest){
+          if(!Array.isArray(rest)||!rest.length){
+            // Ya no hay aplicaciones de ese pago -> borrar el pago
+            return apiDelete('cc_pagos','id=eq.'+pid);
+          }
+        });
+      }));
+      return Promise.all([p1,p2]);
+    }).catch(function(e){console.error('cc_pagos cleanup',e);}));
+    return Promise.all(promesas);
+  }).then(function(){
+    apiPost('pedidos_estados_log',{pedido_id:id,pedido_tabla:'pedidos_catalogo',estado:'pendiente',nota:'Cobro anulado por admin (cc_pagos asociado borrado)',usuario:curUser||'admin'}).catch(function(){});
+    toast('Cobro anulado ✅ — pedido vuelve a pendiente','tok');
     var _md=document.getElementById('_moDetallePed');if(_md)_md.remove();
     loadPedidos();
+  }).catch(function(e){toast('Error: '+(e.message||''),'terr');});
+}
+
+// ═══════════════════════════════════════════════════════════════════
+// REACTIVAR PEDIDO CANCELADO (vuelve a pendiente, RE-RESERVA stock)
+// ═══════════════════════════════════════════════════════════════════
+function _adminReactivarPedido(id){
+  apiGet('pedidos_catalogo','select=*&id=eq.'+id).then(function(data){
+    if(!Array.isArray(data)||!data.length)return;
+    var p=data[0];
+    if(p.estado!=='cancelado'){toast('El pedido no está cancelado','twarn');return;}
+    var items=[];try{items=typeof p.items==='string'?JSON.parse(p.items):p.items||[];}catch(e){items=[];}
+    if(!confirm('Reactivar este pedido?\n\n• Vuelve a estado "pendiente"\n• Se RE-RESERVA el stock de los items (descuenta stock_actual y suma a reserva)\n• Si no hay stock suficiente puede dar error\n\n¿Continuar?'))return;
+    var promesas=[apiPatch('pedidos_catalogo',{estado:'pendiente',confirmado_cobro:false,cobrado_total:0},'id=eq.'+id)];
+    if(Array.isArray(items)){
+      items.forEach(function(it){
+        if(!it.producto_id||it.isDecan)return;
+        var qty=parseInt(it.qty)||parseInt(it.cantidad)||1;
+        promesas.push(patchStockFresco(it.producto_id,{stock_actual:-qty,reserva:+qty},'Reactivar pedido '+p.nro_orden));
+        if(it.isCombo&&it.combo_id){
+          promesas.push(apiGet('combo_items','select=producto_id,cantidad&combo_id=eq.'+it.combo_id).then(function(ci){
+            if(!Array.isArray(ci))return;
+            return Promise.all(ci.filter(function(c){return c.producto_id;}).map(function(c){
+              var q=(parseInt(c.cantidad)||1)*qty;
+              return patchStockFresco(c.producto_id,{stock_actual:-q,reserva:+q},'Reactivar combo '+p.nro_orden);
+            }));
+          }));
+        }
+      });
+    }
+    return Promise.all(promesas);
+  }).then(function(){
+    apiPost('pedidos_estados_log',{pedido_id:id,pedido_tabla:'pedidos_catalogo',estado:'pendiente',nota:'Reactivado por admin (stock re-reservado)',usuario:curUser||'admin'}).catch(function(){});
+    toast('Pedido reactivado ✅ — stock re-reservado','tok');
+    var _md=document.getElementById('_moDetallePed');if(_md)_md.remove();
+    loadPedidos();
+    loadProds();
   }).catch(function(e){toast('Error: '+(e.message||''),'terr');});
 }
 
