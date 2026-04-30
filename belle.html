@@ -14577,7 +14577,7 @@ function _repCargarRentabilidad(){
     // Ventas del período
     apiGet("ventas", "select=*&"+estadosV+"&created_at=gte."+r.desde.toISOString()+"&created_at=lt."+r.hasta.toISOString()+"&limit=5000").catch(function(){return [];}),
     // Ventas del período anterior (mismo tamaño)
-    apiGet("ventas", "select=producto_id,cantidad,total,vendedor_id&"+estadosV+"&created_at=gte."+rAnt.desde.toISOString()+"&created_at=lt."+rAnt.hasta.toISOString()+"&limit=5000").catch(function(){return [];}),
+    apiGet("ventas", "select=producto_id,producto_nombre,cantidad,total,vendedor_id,segmento&"+estadosV+"&created_at=gte."+rAnt.desde.toISOString()+"&created_at=lt."+rAnt.hasta.toISOString()+"&limit=5000").catch(function(){return [];}),
     // Gastos aprobados del período
     apiGet("gastos_vendedor", "select=*&aprobado=is.true&created_at=gte."+r.desde.toISOString()+"&created_at=lt."+r.hasta.toISOString()).catch(function(){return [];}),
     // Gastos del anterior
@@ -14585,8 +14585,10 @@ function _repCargarRentabilidad(){
     // Productos (necesario para costos si prods global no está cargado)
     (Array.isArray(prods) && prods.length) ? Promise.resolve(prods) :
       apiGet("productos", "select=id,nombre,costo_ind,costo_log,activo&limit=5000").catch(function(){return [];}),
-    // Ventas transferidas del período (para mostrar Marcela/Facu que transfieren)
-    apiGet("ventas_transferidas", "select=id,creada_por,asignada_a,producto_id,cantidad,total,estado,created_at&created_at=gte."+r.desde.toISOString()+"&created_at=lt."+r.hasta.toISOString()+"&limit=5000").catch(function(){return [];})
+    // Ventas transferidas del período (items es JSON array)
+    apiGet("ventas_transferidas", "select=id,creada_por,asignada_a,items,total,estado,created_at&created_at=gte."+r.desde.toISOString()+"&created_at=lt."+r.hasta.toISOString()+"&limit=5000").catch(function(){return [];}),
+    // Combos con sus items (para calcular costo de combos vendidos)
+    apiGet("combos", "select=id,nombre,combo_items(producto_id,cantidad,es_decan)").catch(function(){return [];})
   ]).then(function(data){
     var vActual = data[0] || [];
     var vAnterior = data[1] || [];
@@ -14594,6 +14596,7 @@ function _repCargarRentabilidad(){
     var gAnterior = data[3] || [];
     var productos = data[4] || [];
     var transferidasOriginales = data[5] || [];
+    var combos = data[6] || [];
     var cotiz = (typeof cotizActual !== "undefined" && cotizActual) ? cotizActual : 1520;
 
     // Mapa producto_id → costo_total_pesos (PERFUME COMPLETO 100ml)
@@ -14609,10 +14612,31 @@ function _repCargarRentabilidad(){
     var DECAN_ML = 5;
     var PERFUME_ML = 100;
 
+    // Mapa nombre_combo → costo_total_combo (sumar items del combo)
+    var mapCostoCombo = {};
+    combos.forEach(function(c){
+      var costoTotal = 0;
+      (c.combo_items||[]).forEach(function(ci){
+        var costoBase = mapCostoProd[ci.producto_id] || 0;
+        var qty = parseInt(ci.cantidad)||1;
+        if(ci.es_decan){
+          costoTotal += ((costoBase * DECAN_ML / PERFUME_ML) + costoPerfumeroVacio) * qty;
+        } else {
+          costoTotal += costoBase * qty;
+        }
+      });
+      // Indexar por nombre exacto (case sensitive)
+      if(c.nombre) mapCostoCombo[c.nombre] = costoTotal;
+    });
+
     // Helper: calcular costo de UNA unidad de un item de venta
     function _costoUnitItem(v){
-      var costoBase = mapCostoProd[v.producto_id] || 0;
       var seg = (v.segmento||"").toLowerCase();
+      // Si es combo: buscar por nombre
+      if(seg === "combo"){
+        return mapCostoCombo[v.producto_nombre] || 0;
+      }
+      var costoBase = mapCostoProd[v.producto_id] || 0;
       // Si es decan: costo proporcional al volumen + perfumero vacío
       if(seg === "decan"){
         return (costoBase * DECAN_ML / PERFUME_ML) + costoPerfumeroVacio;
@@ -14683,6 +14707,14 @@ function _repCargarRentabilidad(){
       var ganNeta = fact - costo - gasto;
       var margenBruto = fact > 0 ? (ganBruta/fact*100) : 0;
       var margenNeto = fact > 0 ? (ganNeta/fact*100) : 0;
+      // Asegurar que David, Facu y Marcela aparezcan en porVendedor aunque no tengan ventas
+      [1, 2, 3].forEach(function(vid){
+        if(!porVendedor[vid]) porVendedor[vid] = { fact:0, costo:0, unid:0, ventas:0,
+          factPropias:0, costoPropias:0, unidPropias:0,
+          factWeb:0, costoWeb:0, unidWeb:0,
+          factTransf:0, costoTransf:0, unidTransf:0
+        };
+      });
       return {
         fact: fact, costo: costo, gasto: gasto,
         unidades: unidades,
@@ -14880,8 +14912,14 @@ function _repCargarRentabilidad(){
           totalCantidad: 0, totalMonto: 0, comision: 0, ventas: 0
         };
         statsTransf[creador].ventas++;
-        var cantTotal = (parseInt(t.cantidad)||0);
-        statsTransf[creador].totalCantidad += cantTotal;
+        // items es JSON array con cada producto
+        var items = [];
+        try { items = typeof t.items === "string" ? JSON.parse(t.items) : (t.items||[]); } catch(e){}
+        if(Array.isArray(items)){
+          items.forEach(function(it){
+            statsTransf[creador].totalCantidad += parseInt(it.cantidad || it.qty)||0;
+          });
+        }
         statsTransf[creador].totalMonto += parseFloat(t.total)||0;
       });
       // Sumar comisiones de gastos_vendedor por persona
@@ -15335,7 +15373,7 @@ function _repCargarProductos(){
 
   Promise.all([
     apiGet("ventas", "select=*&estado=eq.confirmada&created_at=gte."+r.desde.toISOString()+"&created_at=lt."+r.hasta.toISOString()).catch(function(){return [];}),
-    apiGet("productos", "select=id,nombre,stock_actual,stock_minimo,activo&activo=is.true&limit=2000").catch(function(){return [];})
+    apiGet("productos", "select=id,nombre,empresa,stock_actual,deposito_m,activo&activo=is.true&limit=2000").catch(function(){return [];})
   ]).then(function(data){
     var ventas = data[0]; var productos = data[1];
 
@@ -15353,13 +15391,13 @@ function _repCargarProductos(){
     var idsConVentas = new Set(Object.keys(statsProd).map(function(k){return parseInt(k);}));
     var sinMov = productos.filter(function(p){return !idsConVentas.has(p.id);});
 
-    // Stock crítico
+    // Stock crítico (deposito_m es el mínimo de stock para reposición)
     var stockCritico = productos.filter(function(p){
-      var sa = parseInt(p.stock_actual)||0; var sm = parseInt(p.stock_minimo)||0;
+      var sa = parseInt(p.stock_actual)||0; var sm = parseInt(p.deposito_m)||0;
       return sm > 0 && sa <= sm;
     }).sort(function(a,b){
-      var diffA = (parseInt(a.stock_actual)||0) - (parseInt(a.stock_minimo)||0);
-      var diffB = (parseInt(b.stock_actual)||0) - (parseInt(b.stock_minimo)||0);
+      var diffA = (parseInt(a.stock_actual)||0) - (parseInt(a.deposito_m)||0);
+      var diffB = (parseInt(b.stock_actual)||0) - (parseInt(b.deposito_m)||0);
       return diffA - diffB;
     });
 
@@ -15427,7 +15465,7 @@ function _repCargarProductos(){
       stockCritico.slice(0, 20).forEach(function(p){
         h += "<div style='display:flex;justify-content:space-between;align-items:center;padding:.5rem .75rem;background:rgba(217,72,72,.05);border:1px solid rgba(217,72,72,.2);border-radius:7px;margin-bottom:.3rem;font-size:.78rem'>";
         h += "<div>"+_admEsc(p.nombre||"—")+"</div>";
-        h += "<div style='font-size:.7rem'><b style='color:var(--red)'>"+(p.stock_actual||0)+"</b><span style='color:var(--tx3)'> / mín "+p.stock_minimo+"</span></div>";
+        h += "<div style='font-size:.7rem'><b style='color:var(--red)'>"+(p.stock_actual||0)+"</b><span style='color:var(--tx3)'> / mín "+(p.deposito_m||0)+"</span></div>";
         h += "</div>";
       });
       if(stockCritico.length > 20) h += "<div style='text-align:center;color:var(--tx3);font-size:.7rem'>Y "+(stockCritico.length-20)+" más...</div>";
@@ -15567,7 +15605,7 @@ function _repExportProductos(){
   var rows = [["Top Vendidos del Período"], ["Producto","Cantidad","Monto"]];
   d.topVendidos.forEach(function(p){ rows.push([p.nombre, p.cantidad, p.monto]); });
   rows.push([], ["Stock Crítico"], ["Producto","Stock Actual","Mínimo"]);
-  d.stockCritico.forEach(function(p){ rows.push([p.nombre, p.stock_actual||0, p.stock_minimo||0]); });
+  d.stockCritico.forEach(function(p){ rows.push([p.nombre, p.stock_actual||0, p.deposito_m||0]); });
   _repDescargarCSV("reporte_productos", rows);
   toast("Excel descargado","tok");
 }
