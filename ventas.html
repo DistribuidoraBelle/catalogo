@@ -4354,8 +4354,13 @@ function renderPedCard(ped,cobrado){
   if(cancelado){
     html+="<span class='badge bg-red'>Cancelado</span>";
   } else if(!cobrado){
+    // Botón "Agregar a ruta" solo si el pedido NO está ya en reparto
+    var btnRuta = _enReparto
+      ? ""
+      : "<button class='btn btn-g' onclick='_rbAgregarPedidoModal("+ped.id+")' title='Agregar a un borrador de ruta' style='padding:.4rem .55rem;flex-shrink:0'>🚚</button>";
     html+="<div style='display:flex;gap:.4rem;flex-wrap:wrap'>"+
       "<button class='btn btn-a' onclick='_gestionarPedido(\"web\","+ped.id+")' style='flex:1;justify-content:center;min-width:110px'>🗂 Gestionar</button>"+
+      btnRuta+
     "</div>";
   } else {
     html+="<span class='badge bg-green'>Cobrado</span>";
@@ -9874,48 +9879,58 @@ var _rt = {
   pedidosDisponibles: [],   // Pedidos con dirección, listos para repartir
   pedidosSeleccionados: [], // [{id, ...pedido, direccion}]
   vendedorDirs: [],         // Mis direcciones de partida
-  puntoPartida: null,       // {lat, lng, label}
+  puntoPartida: null,       // {lat, lng, label, id?} — OBLIGATORIO al confirmar ruta
+  puntoFinal: null,         // {lat, lng, label, id?} — OPCIONAL (si no, la última parada es el destino)
   rutaCalculada: null,      // {orden:[idx], distanciaTotal, tiempoTotal}
   map: null,
   directionsService: null,
   directionsRenderer: null,
   geocoder: null,
-  paso: 1                    // 1: seleccionar pedidos | 2: punto partida | 3: ver/ajustar | 4: confirmada
+  paso: 1,                   // 1: seleccionar pedidos | 2: punto partida | 3: ver/ajustar | 4: confirmada
+  borradores: [],            // Borradores guardados en BD (rutas_borradores)
+  borradorActivo: null,      // ID del borrador en edición (null = ninguno)
+  pedidosTodos: []           // Cache: todos los pedidos del vendedor para búsqueda
 };
 
 function loadRutas(){
   var pg = document.getElementById("pg-rutas");
   if(!pg) return;
   pg.style.display = "block";
-  // Resetear estado al entrar
-  _rt.pedidosSeleccionados = [];
-  _rt.puntoPartida = null;
-  _rt.rutaCalculada = null;
-  _rt.paso = 1;
+  // NO resetear si volvemos de un sub-tab — solo si es primera carga
+  if(!_rt.pedidosTodos.length){
+    _rt.pedidosSeleccionados = [];
+    _rt.puntoPartida = null;
+    _rt.rutaCalculada = null;
+    _rt.paso = 1;
+  }
   pg.innerHTML = "<div class='loading'><div class='spin'></div>Cargando rutas...</div>";
 
-  // Cargar en paralelo: pedidos listos para repartir + mis direcciones de partida + rutas activas hoy
+  // Traer TODOS los pedidos relevantes (mis pedidos + sin asignar) sin importar si tienen dirección
+  // (la pantalla los separa entre "con dirección" y "sin dirección")
   Promise.all([
-    // Pedidos del vendedor en estados activos (no cancelados ni entregados ni en reparto)
     apiGet("pedidos_catalogo",
-      "select=id,nro_orden,total,estado,estado_envio,cliente_id,direccion_entrega_id,modo_entrega,distancia_km,created_at,items"+
-      "&vendedor_id=eq."+VENDEDOR_ID+
+      "select=id,nro_orden,total,estado,estado_envio,cliente_id,direccion_entrega_id,modo_entrega,distancia_km,created_at,items,vendedor_id"+
+      "&or=(vendedor_id.eq."+VENDEDOR_ID+",vendedor_id.is.null)"+
       "&estado=in.(pendiente,reservado,cobrado_parcial,cobrado)"+
       "&or=(estado_envio.is.null,estado_envio.eq.en_preparacion)"+
-      "&order=created_at.desc&limit=200"
+      "&order=created_at.desc&limit=300"
     ),
     apiGet("vendedores_direcciones","select=*&vendedor_id=eq."+VENDEDOR_ID+"&order=predeterminada.desc,created_at.desc"),
-    // Pedidos hoy en reparto (rutas activas)
+    // Pedidos en reparto
     apiGet("pedidos_catalogo",
-      "select=id,nro_orden,total,estado_envio,cliente_id,direccion_entrega_id,reparto_at"+
+      "select=id,nro_orden,total,estado_envio,cliente_id,direccion_entrega_id,reparto_at,vendedor_id"+
       "&vendedor_id=eq."+VENDEDOR_ID+
       "&estado_envio=eq.en_reparto"+
       "&order=reparto_at.desc.nullslast,created_at.desc&limit=50"
-    )
+    ),
+    // Borradores del vendedor
+    apiGet("rutas_borradores","select=*&vendedor_id=eq."+VENDEDOR_ID+"&order=updated_at.desc&limit=20").catch(function(){return [];})
   ]).then(function(res){
     _rt.pedidosDisponibles = Array.isArray(res[0]) ? res[0] : [];
+    _rt.pedidosTodos = _rt.pedidosDisponibles.slice(); // copia para búsqueda
     _rt.vendedorDirs = Array.isArray(res[1]) ? res[1] : [];
     _rt.pedidosEnReparto = Array.isArray(res[2]) ? res[2] : [];
+    _rt.borradores = Array.isArray(res[3]) ? res[3] : [];
     _renderRutasMain();
   }).catch(function(e){
     console.error("[belle] loadRutas error:",e);
@@ -9927,15 +9942,16 @@ function loadRutas(){
 function _renderRutasMain(){
   var pg = document.getElementById("pg-rutas");
   if(!pg) return;
-  if(!_rt.subTab) _rt.subTab = "armar";
+  if(!_rt.subTab) _rt.subTab = "borradores";
 
   var h = "";
   // Header con sub-tabs
   h += "<div style='display:flex;gap:.4rem;border-bottom:1px solid var(--bd);margin-bottom:1rem;flex-wrap:wrap'>";
   var subTabs = [
-    {key:"armar",   label:"🗺 Armar ruta",     count: _rt.pedidosDisponibles.length},
-    {key:"reparto", label:"🚚 En reparto",     count: (_rt.pedidosEnReparto||[]).length},
-    {key:"misdir",  label:"📍 Mis direcciones", count: _rt.vendedorDirs.length}
+    {key:"borradores", label:"📝 Borradores",     count: (_rt.borradores||[]).length},
+    {key:"armar",      label:"🗺 Armar ruta",     count: _rt.pedidosSeleccionados.length},
+    {key:"reparto",    label:"🚚 En reparto",     count: (_rt.pedidosEnReparto||[]).length},
+    {key:"misdir",     label:"📍 Mis direcciones", count: _rt.vendedorDirs.length}
   ];
   subTabs.forEach(function(t){
     var act = _rt.subTab === t.key;
@@ -9953,7 +9969,8 @@ function _rtSubTab(t){_rt.subTab = t; _rtRenderSubTab();}
 function _rtRenderSubTab(){
   var b = document.getElementById("_rtBody");
   if(!b) return;
-  if(_rt.subTab === "armar")        _rtRenderArmar(b);
+  if(_rt.subTab === "borradores")   _rbRenderListaBorradores(b);
+  else if(_rt.subTab === "armar")   _rtRenderArmar(b);
   else if(_rt.subTab === "reparto") _rtRenderEnReparto(b);
   else if(_rt.subTab === "misdir")  _rtRenderMisDirecciones(b);
 }
@@ -9961,6 +9978,23 @@ function _rtRenderSubTab(){
 // ── ARMAR RUTA — vista principal con paso 1, 2, 3 ───────────────────
 function _rtRenderArmar(b){
   var h = "";
+
+  // Banner de borrador activo (si está editando uno)
+  if(_rt.borradorActivo){
+    var br = (_rt.borradores||[]).find(function(x){return x.id===_rt.borradorActivo;});
+    if(br){
+      h += "<div style='background:rgba(196,150,90,.12);border:1px solid var(--acc);border-radius:8px;padding:.55rem .8rem;margin-bottom:.7rem;display:flex;justify-content:space-between;align-items:center;gap:.5rem;flex-wrap:wrap'>";
+      h += "<div style='font-size:.78rem;color:var(--tx)'>📝 Editando borrador: <b style='color:var(--acc)'>"+(br.nombre||"")+"</b></div>";
+      h += "<button class='btn btn-g' onclick='_rt.borradorActivo=null;_rt.pedidosSeleccionados=[];_rt.subTab=\"borradores\";_renderRutasMain();' style='font-size:.7rem;padding:.25rem .55rem'>✕ Salir del borrador</button>";
+      h += "</div>";
+    }
+  }
+
+  // Buscador rápido para agregar pedidos
+  h += "<div style='margin-bottom:.7rem;position:relative'>";
+  h += "<input type='text' id='_rbSearch' oninput='_rbBuscarPedido()' placeholder='🔍 Buscar pedido por número, monto o cliente...' style='width:100%;padding:.45rem .65rem;background:var(--sur2);border:1px solid var(--bd);border-radius:6px;color:var(--tx);font-size:.78rem'>";
+  h += "<div id='_rbSearchResults' style='background:var(--sur);border:1px solid var(--bd);border-radius:6px;margin-top:.3rem;max-height:280px;overflow-y:auto'></div>";
+  h += "</div>";
 
   // Stepper visual
   h += "<div style='display:flex;align-items:center;gap:.3rem;margin-bottom:1rem;padding:.6rem .8rem;background:var(--sur);border:1px solid var(--bd);border-radius:8px;flex-wrap:wrap'>";
@@ -10106,6 +10140,10 @@ function _rtToggleSel(pedId, checked){
     if(_rt.pedidosSeleccionados.indexOf(pedId)<0) _rt.pedidosSeleccionados.push(pedId);
   } else {
     _rt.pedidosSeleccionados = _rt.pedidosSeleccionados.filter(function(x){return x!==pedId;});
+  }
+  // Si hay borrador activo, sincronizar con BD (fire-and-forget)
+  if(_rt.borradorActivo){
+    _rbSincronizarBorrador().catch(function(){});
   }
   _rtRenderSubTab();
 }
@@ -10527,10 +10565,11 @@ function _rtElegirDirGuardada(pedId, clienteId, dirId, dirCompleta, nombreCli){
   });
 }
 
-// Confirmar la ruta: marcar pedidos como en_reparto + log + abrir Maps con la ruta
+// Confirmar la ruta: marcar pedidos como en_reparto + actualizar borrador a en_reparto
 function _rtConfirmarRuta(){
   if(!_rt.pedidosOrdenados || !_rt.pedidosOrdenados.length){toast("No hay ruta calculada","twarn");return;}
-  if(!confirm("Confirmar ruta de "+_rt.pedidosOrdenados.length+" pedidos? Pasarán a estado \"En reparto\" y los clientes lo verán en su panel.")) return;
+  if(!_rt.puntoPartida){toast("Falta el punto de partida (obligatorio)","twarn");return;}
+  if(!confirm("Confirmar ruta de "+_rt.pedidosOrdenados.length+" pedidos? Pasarán a estado \"En reparto\".")) return;
 
   var ahora = new Date().toISOString();
   var promesas = [];
@@ -10541,7 +10580,6 @@ function _rtConfirmarRuta(){
         reparto_at: ahora,
         reparto_orden: idx + 1
       }, "id=eq."+p.id).then(function(){
-        // Log del cambio
         return apiPost("pedidos_estados_log", {
           pedido_id: p.id,
           pedido_tabla: "pedidos_catalogo",
@@ -10554,15 +10592,48 @@ function _rtConfirmarRuta(){
   });
 
   Promise.all(promesas).then(function(){
+    // Si hay borrador activo, marcarlo como en_reparto + setear todos los pedidos como 'activo' + persistir punto partida/final
+    if(_rt.borradorActivo){
+      var br = (_rt.borradores||[]).find(function(x){return x.id===_rt.borradorActivo;});
+      var ids = _rt.pedidosOrdenados.map(function(p){return p.id;});
+      var estados = ids.map(function(id){
+        // Mantener entradas previas si ya existían (caso re-confirmación), sino crear como 'activo'
+        var prev = (br && Array.isArray(br.pedidos_estados))
+          ? br.pedidos_estados.find(function(e){return e.id===id;}) : null;
+        return prev || {id:id, estado:'activo'};
+      });
+      var patchBorr = {
+        estado: 'en_reparto',
+        confirmada_at: ahora,
+        pedidos_ids: ids,
+        pedidos_estados: estados,
+        punto_partida_id: _rt.puntoPartida.id || null,
+        punto_partida_lat: _rt.puntoPartida.lat,
+        punto_partida_lng: _rt.puntoPartida.lng,
+        punto_partida_nombre: _rt.puntoPartida.label || _rt.puntoPartida.nombre || null
+      };
+      if(_rt.puntoFinal){
+        patchBorr.punto_final_id = _rt.puntoFinal.id || null;
+        patchBorr.punto_final_lat = _rt.puntoFinal.lat;
+        patchBorr.punto_final_lng = _rt.puntoFinal.lng;
+        patchBorr.punto_final_nombre = _rt.puntoFinal.label || _rt.puntoFinal.nombre || null;
+      }
+      apiPatch("rutas_borradores", patchBorr, "id=eq."+_rt.borradorActivo).then(function(){
+        if(br){
+          br.estado = 'en_reparto';
+          br.confirmada_at = ahora;
+          br.pedidos_ids = ids;
+          br.pedidos_estados = estados;
+        }
+      }).catch(function(e){console.error("[belle] confirmar borrador en_reparto:",e);});
+    }
     toast("Ruta confirmada — "+_rt.pedidosOrdenados.length+" pedidos en reparto","tok");
-    // Abrir Google Maps en una pestaña nueva con la ruta navegable
     _rtAbrirEnGoogleMaps();
-    // Reset y volver
+    // El borrador queda en estado 'en_reparto' — el vendedor sigue gestionándolo
     _rt.pedidosSeleccionados = [];
-    _rt.puntoPartida = null;
     _rt.pedidosOrdenados = null;
     _rt.paso = 1;
-    _rt.subTab = "reparto";
+    _rt.subTab = "borradores"; // volver a la lista para ver el borrador en reparto
     loadRutas();
   }).catch(function(e){
     console.error("[belle] _rtConfirmarRuta error:",e);
@@ -10570,16 +10641,28 @@ function _rtConfirmarRuta(){
   });
 }
 
-// Abre Google Maps con la ruta navegable (la app del vendedor lo lleva al Maps de su celular si está en mobile)
+// Abre Google Maps con la ruta navegable. Si hay puntoFinal, lo usa como destination
+// y todas las paradas como waypoints. Si no, la última parada es el destination.
 function _rtAbrirEnGoogleMaps(){
   if(!_rt.pedidosOrdenados || !_rt.puntoPartida) return;
   var url = "https://www.google.com/maps/dir/?api=1";
   url += "&origin="+_rt.puntoPartida.lat+","+_rt.puntoPartida.lng;
-  var dest = _rt.pedidosOrdenados[_rt.pedidosOrdenados.length-1];
-  url += "&destination="+dest._dir.lat+","+dest._dir.lng;
-  if(_rt.pedidosOrdenados.length > 1){
-    var wps = _rt.pedidosOrdenados.slice(0,-1).map(function(p){return p._dir.lat+","+p._dir.lng;}).join("|");
-    url += "&waypoints="+encodeURIComponent(wps);
+
+  if(_rt.puntoFinal && _rt.puntoFinal.lat){
+    // Punto final explícito: todas las paradas son waypoints
+    url += "&destination="+_rt.puntoFinal.lat+","+_rt.puntoFinal.lng;
+    if(_rt.pedidosOrdenados.length > 0){
+      var wps = _rt.pedidosOrdenados.map(function(p){return p._dir.lat+","+p._dir.lng;}).join("|");
+      url += "&waypoints="+encodeURIComponent(wps);
+    }
+  } else {
+    // Sin punto final: la última parada es el destination
+    var dest = _rt.pedidosOrdenados[_rt.pedidosOrdenados.length-1];
+    url += "&destination="+dest._dir.lat+","+dest._dir.lng;
+    if(_rt.pedidosOrdenados.length > 1){
+      var wps2 = _rt.pedidosOrdenados.slice(0,-1).map(function(p){return p._dir.lat+","+p._dir.lng;}).join("|");
+      url += "&waypoints="+encodeURIComponent(wps2);
+    }
   }
   url += "&travelmode=driving";
   window.open(url, "_blank");
@@ -10630,6 +10713,737 @@ function _rtMarcarEntregado(pedId){
   }).catch(function(e){
     console.error("[belle] _rtMarcarEntregado:",e);
     toast("Error","terr");
+  });
+}
+
+// ════════════════════════════════════════════════════════════════════
+// SUB-TAB: BORRADORES — gestión de múltiples rutas en proceso
+// ════════════════════════════════════════════════════════════════════
+
+// Lista de borradores
+function _rbRenderListaBorradores(b){
+  if(!b)return;
+  // Filtrar borradores completados — no se muestran (ya quedaron archivados/borrados)
+  var bs = (_rt.borradores || []).filter(function(br){return br.estado!=='completado';});
+  // Separar por estado: edición vs reparto
+  var enReparto = bs.filter(function(br){return br.estado==='en_reparto';});
+  var enEdicion = bs.filter(function(br){return br.estado!=='en_reparto';});
+
+  var h = "";
+  h += "<div style='display:flex;justify-content:space-between;align-items:center;margin-bottom:.8rem;gap:.5rem;flex-wrap:wrap'>";
+  h += "<div style='font-size:.78rem;color:var(--tx2);max-width:560px'>Tus borradores de ruta. Podés tener varios al mismo tiempo (ej: 'Hoy mañana', 'Tarde'). Editá uno para agregarle pedidos o tocá 🚚 en cualquier pedido para sumarlo.</div>";
+  h += "<button class='btn btn-a' onclick='_rbCrearBorrador(null,true)' style='font-size:.78rem'>+ Nuevo borrador</button>";
+  h += "</div>";
+
+  if(!bs.length){
+    h += "<div class='empty' style='padding:1.2rem;text-align:center'>"+
+      "<div style='font-size:1.3rem;margin-bottom:.4rem'>📝</div>"+
+      "<div style='font-size:.85rem;color:var(--tx2)'>Sin borradores activos.</div>"+
+      "<div style='font-size:.72rem;color:var(--tx3);margin-top:.3rem'>Tocá <b>+ Nuevo borrador</b> arriba o el botón 🚚 en cualquier pedido.</div>"+
+    "</div>";
+    b.innerHTML = h;return;
+  }
+
+  // SECCIÓN: en reparto
+  if(enReparto.length){
+    h += "<div style='font-size:.7rem;color:var(--blue);text-transform:uppercase;letter-spacing:.06em;font-weight:700;margin:0 0 .4rem 0;display:flex;align-items:center;gap:.4rem'>🚚 En reparto ("+enReparto.length+")</div>";
+    enReparto.forEach(function(br){h += _rbRenderTarjetaBorrador(br, 'reparto');});
+  }
+
+  // SECCIÓN: en edición
+  if(enEdicion.length){
+    if(enReparto.length) h += "<div style='height:.5rem'></div>";
+    h += "<div style='font-size:.7rem;color:var(--acc);text-transform:uppercase;letter-spacing:.06em;font-weight:700;margin:0 0 .4rem 0'>📝 En edición ("+enEdicion.length+")</div>";
+    enEdicion.forEach(function(br){h += _rbRenderTarjetaBorrador(br, 'edicion');});
+  }
+
+  b.innerHTML = h;
+}
+
+// Render de una tarjeta de borrador en la lista
+function _rbRenderTarjetaBorrador(br, modo){
+  var pedidosIds = br.pedidos_ids || [];
+  var totalPedidos = pedidosIds.length;
+  var fechaUpd = br.updated_at ? new Date(br.updated_at).toLocaleString("es-AR",{day:"2-digit",month:"2-digit",hour:"2-digit",minute:"2-digit",timeZone:"America/Argentina/Buenos_Aires"}) : "";
+  var pedsArr = (_rt.pedidosTodos||[]).filter(function(p){return pedidosIds.indexOf(p.id)>=0;});
+  var totalPesos = pedsArr.reduce(function(s,p){return s+(parseFloat(p.total)||0);},0);
+  var conDir = pedsArr.filter(function(p){return p.cliente_id&&p.direccion_entrega_id;}).length;
+  var sinDir = totalPedidos - conDir;
+
+  var h = "";
+  // Color del borde según estado
+  var borderColor = modo==='reparto' ? 'var(--blue)' : 'var(--acc)';
+  h += "<div class='tbl-wrap' style='margin-bottom:.6rem;padding:.7rem .9rem;border-left:3px solid "+borderColor+"'>";
+  h += "<div style='display:flex;justify-content:space-between;align-items:flex-start;gap:.5rem;flex-wrap:wrap'>";
+  h += "<div style='flex:1;min-width:200px'>";
+  h += "<div style='font-size:.85rem;font-weight:600;color:var(--tx)'>"+(br.nombre||"Sin nombre")+"</div>";
+
+  // Si está en reparto, mostrar resumen de estados
+  if(modo==='reparto' && Array.isArray(br.pedidos_estados)){
+    var nAct = br.pedidos_estados.filter(function(e){return e.estado==='activo';}).length;
+    var nEnt = br.pedidos_estados.filter(function(e){return e.estado==='entregado';}).length;
+    var nCanc = br.pedidos_estados.filter(function(e){return e.estado==='cancelado';}).length;
+    var nPau = br.pedidos_estados.filter(function(e){return e.estado==='pausado';}).length;
+    var partes = [];
+    if(nAct) partes.push("<span style='color:var(--blue)'>"+nAct+" activo"+(nAct===1?"":"s")+"</span>");
+    if(nPau) partes.push("<span style='color:var(--yel)'>⏸ "+nPau+" pausado"+(nPau===1?"":"s")+"</span>");
+    if(nEnt) partes.push("<span style='color:var(--green)'>✓ "+nEnt+" entregado"+(nEnt===1?"":"s")+"</span>");
+    if(nCanc) partes.push("<span style='color:var(--red)'>✕ "+nCanc+" cancelado"+(nCanc===1?"":"s")+"</span>");
+    h += "<div style='font-size:.66rem;margin-top:.2rem;display:flex;flex-wrap:wrap;gap:.5rem'>"+partes.join(" · ")+"</div>";
+  }
+
+  h += "<div style='font-size:.65rem;color:var(--tx3);margin-top:.15rem'>"+totalPedidos+" pedido"+(totalPedidos===1?"":"s")+
+    (sinDir?" <span style='color:var(--yel)'>("+sinDir+" sin dirección)</span>":"")+
+    " · <b style='color:var(--acc)'>"+fmt(totalPesos)+"</b>"+
+    (fechaUpd?" · <span style='color:var(--tx3)'>"+fechaUpd+"</span>":"")+
+    "</div>";
+  h += "</div>";
+  h += "<div style='display:flex;gap:.3rem;flex-wrap:wrap'>";
+  if(modo==='reparto'){
+    h += "<button class='btn btn-a' onclick='_rbAbrirEnReparto("+br.id+")' style='font-size:.7rem;padding:.3rem .55rem'>🚚 Gestionar reparto</button>";
+  } else {
+    h += "<button class='btn btn-a' onclick='_rbEditarBorrador("+br.id+")' style='font-size:.7rem;padding:.3rem .55rem'>✏️ Editar</button>";
+  }
+  h += "<button class='btn btn-g' onclick='_rbRenombrarBorrador("+br.id+")' style='font-size:.7rem;padding:.3rem .5rem' title='Renombrar'>📝</button>";
+  h += "<button class='btn btn-red' onclick='_rbEliminarBorrador("+br.id+")' style='font-size:.7rem;padding:.3rem .5rem' title='Eliminar borrador'>🗑</button>";
+  h += "</div>";
+  h += "</div>";
+  h += "</div>";
+  return h;
+}
+
+// ════════════════════════════════════════════════════════════════════
+// BORRADOR EN REPARTO — vista de gestión durante la entrega
+// ════════════════════════════════════════════════════════════════════
+
+// Abrir vista de gestión de un borrador en reparto
+function _rbAbrirEnReparto(borradorId){
+  _rt.borradorActivo = borradorId;
+  // Render dedicado en el body de rutas
+  var b = document.getElementById("_rtBody");
+  if(!b) return;
+  _rbRenderEnReparto(b);
+}
+
+function _rbRenderEnReparto(b){
+  var br = (_rt.borradores||[]).find(function(x){return x.id===_rt.borradorActivo;});
+  if(!br){toast("Borrador no encontrado","terr");_rt.subTab="borradores";_renderRutasMain();return;}
+  var estados = Array.isArray(br.pedidos_estados) ? br.pedidos_estados : [];
+  // Mapa id→estado
+  var mapaEst = {};
+  estados.forEach(function(e){mapaEst[e.id]=e;});
+  // Pedidos con datos completos
+  var pedidos = (_rt.pedidosTodos||[]).filter(function(p){return (br.pedidos_ids||[]).indexOf(p.id)>=0;});
+
+  // Conteos
+  var nAct=0,nEnt=0,nCanc=0,nPau=0;
+  estados.forEach(function(e){
+    if(e.estado==='activo')nAct++;
+    else if(e.estado==='entregado')nEnt++;
+    else if(e.estado==='cancelado')nCanc++;
+    else if(e.estado==='pausado')nPau++;
+  });
+
+  var h = "";
+  // Header
+  h += "<div style='background:rgba(91,141,238,.1);border:1px solid var(--blue);border-radius:8px;padding:.65rem .85rem;margin-bottom:.7rem;display:flex;justify-content:space-between;align-items:center;gap:.5rem;flex-wrap:wrap'>";
+  h += "<div>";
+  h += "<div style='font-size:.65rem;color:var(--blue);text-transform:uppercase;letter-spacing:.06em'>🚚 Reparto en curso</div>";
+  h += "<div style='font-size:.95rem;font-weight:700;color:var(--tx)'>"+(br.nombre||"Sin nombre")+"</div>";
+  h += "</div>";
+  h += "<div style='display:flex;gap:.3rem;flex-wrap:wrap'>";
+  h += "<button class='btn btn-g' onclick='_rt.borradorActivo=null;_rt.subTab=\"borradores\";_renderRutasMain();' style='font-size:.7rem;padding:.3rem .55rem'>← Volver</button>";
+  h += "</div>";
+  h += "</div>";
+
+  // Resumen
+  h += "<div style='display:flex;gap:.4rem;flex-wrap:wrap;margin-bottom:.8rem'>";
+  if(nAct)  h += "<div style='font-size:.7rem;background:rgba(91,141,238,.15);color:var(--blue);padding:.2rem .5rem;border-radius:4px'>"+nAct+" activo"+(nAct===1?"":"s")+"</div>";
+  if(nPau)  h += "<div style='font-size:.7rem;background:rgba(240,180,41,.15);color:var(--yel);padding:.2rem .5rem;border-radius:4px'>⏸ "+nPau+" pausado"+(nPau===1?"":"s")+"</div>";
+  if(nEnt)  h += "<div style='font-size:.7rem;background:rgba(76,175,130,.15);color:var(--green);padding:.2rem .5rem;border-radius:4px'>✓ "+nEnt+" entregado"+(nEnt===1?"":"s")+"</div>";
+  if(nCanc) h += "<div style='font-size:.7rem;background:rgba(224,92,110,.15);color:var(--red);padding:.2rem .5rem;border-radius:4px'>✕ "+nCanc+" cancelado"+(nCanc===1?"":"s")+"</div>";
+  h += "</div>";
+
+  // Acciones globales
+  h += "<div style='display:flex;gap:.4rem;flex-wrap:wrap;margin-bottom:.8rem'>";
+  h += "<button class='btn btn-a' onclick='_rbRegenerarMaps()' style='font-size:.74rem' title='Volver a abrir Google Maps con la ruta de los pedidos activos'>🔄 Regenerar Maps</button>";
+  h += "<button class='btn btn-g' onclick='_rbAgregarMasPedidosAlBorrador()' style='font-size:.74rem' title='Agregar más pedidos a este borrador'>+ Agregar pedidos</button>";
+  h += "<button class='btn btn-acc' onclick='_rbCompletarBorradorManual()' style='font-size:.74rem;margin-left:auto' title='Marcar el reparto como completado'>✅ Completar reparto</button>";
+  h += "</div>";
+
+  // Listado de paradas, separadas por estado (activos arriba)
+  var ordenEstados = ['activo','pausado','entregado','cancelado'];
+  ordenEstados.forEach(function(estFiltro){
+    var grupo = pedidos.filter(function(p){return (mapaEst[p.id]||{}).estado===estFiltro;});
+    if(!grupo.length) return;
+    var labelGrupo = estFiltro==='activo'?'En ruta':
+      estFiltro==='pausado'?'⏸ Pausados':
+      estFiltro==='entregado'?'✓ Entregados':'✕ Cancelados';
+    var colorGrupo = estFiltro==='activo'?'var(--blue)':
+      estFiltro==='pausado'?'var(--yel)':
+      estFiltro==='entregado'?'var(--green)':'var(--red)';
+    h += "<div style='font-size:.65rem;color:"+colorGrupo+";text-transform:uppercase;font-weight:700;letter-spacing:.06em;margin:.6rem 0 .3rem'>"+labelGrupo+" ("+grupo.length+")</div>";
+    grupo.forEach(function(p){
+      h += _rbRenderParada(p, mapaEst[p.id]||{});
+    });
+  });
+
+  b.innerHTML = h;
+}
+
+// Render de una parada individual
+function _rbRenderParada(p, est){
+  var estado = est.estado || 'activo';
+  var esActivo = estado==='activo';
+  var esPausado = estado==='pausado';
+  var esEntregado = estado==='entregado';
+  var esCancelado = estado==='cancelado';
+  var op = (esEntregado||esCancelado) ? '.65' : '1';
+  var nro = p.nro_orden || ('#'+p.id);
+  var total = fmt(p.total||0);
+  var cliRef = p.cliente_id ? ("Cliente #"+p.cliente_id) : "Sin cliente";
+
+  var h = "";
+  h += "<div style='background:var(--sur);border:1px solid var(--bd);border-radius:7px;padding:.55rem .7rem;margin-bottom:.4rem;opacity:"+op+"'>";
+  h += "<div style='display:flex;justify-content:space-between;align-items:center;gap:.5rem;flex-wrap:wrap'>";
+  h += "<div style='flex:1;min-width:160px'>";
+  h += "<div style='font-size:.78rem;color:var(--tx);font-weight:600'>"+nro+"</div>";
+  h += "<div style='font-size:.65rem;color:var(--tx3)'>"+cliRef+" · <b style='color:var(--acc)'>"+total+"</b></div>";
+  h += "</div>";
+  h += "<div style='display:flex;gap:.3rem;flex-wrap:wrap'>";
+  if(esActivo){
+    h += "<button class='btn btn-a' onclick='_rbMarcarEntregado("+p.id+")' style='font-size:.65rem;padding:.25rem .5rem;background:#5a8a4a;border-color:#5a8a4a' title='Marcar como entregado'>✓ Entregado</button>";
+    h += "<button class='btn btn-g' onclick='_rbPausarParada("+p.id+")' style='font-size:.65rem;padding:.25rem .5rem' title='Pausar (no aparece en la ruta)'>⏸</button>";
+    h += "<button class='btn btn-red' onclick='_rbCancelarParadaModal("+p.id+")' style='font-size:.65rem;padding:.25rem .5rem' title='Cancelar / mover'>✕</button>";
+  } else if(esPausado){
+    h += "<button class='btn btn-a' onclick='_rbReanudarParada("+p.id+")' style='font-size:.65rem;padding:.25rem .5rem' title='Volver a ruta'>▶ Reanudar</button>";
+    h += "<button class='btn btn-red' onclick='_rbCancelarParadaModal("+p.id+")' style='font-size:.65rem;padding:.25rem .5rem'>✕</button>";
+  } else if(esEntregado){
+    h += "<span style='font-size:.65rem;color:var(--green);font-weight:700'>✓ Entregado</span>";
+  } else if(esCancelado){
+    h += "<span style='font-size:.65rem;color:var(--red);font-weight:700'>✕ Cancelado</span>";
+  }
+  h += "</div>";
+  h += "</div>";
+  h += "</div>";
+  return h;
+}
+
+// Marcar como entregado
+function _rbMarcarEntregado(pedId){
+  if(!confirm("¿Marcar pedido #"+pedId+" como entregado?")) return;
+  // Cambiar estado del pedido en BD (estado_envio=entregado)
+  var prom1 = apiPatch("pedidos_catalogo",{estado_envio:"entregado",entregado_at:new Date().toISOString()},"id=eq."+pedId);
+  // Actualizar estado dentro del borrador
+  var prom2 = _rbActualizarEstadoPedido(pedId, 'entregado');
+  Promise.all([prom1, prom2]).then(function(){
+    apiPost("pedidos_estados_log",{pedido_id:pedId,pedido_tabla:"pedidos_catalogo",estado:"entregado",nota:"Entregado en ruta por "+VENDEDOR_NOMBRE,usuario:VENDEDOR_NOMBRE}).catch(function(e){console.error("[belle] log:",e);});
+    toast("Pedido #"+pedId+" entregado ✓","tok");
+    _rbRenderEnReparto(document.getElementById("_rtBody"));
+    // Auto-completar si es el último
+    _rbVerificarAutoCompletar();
+  }).catch(function(e){
+    console.error("[belle] _rbMarcarEntregado:",e);
+    toast("Error al marcar entregado","terr");
+  });
+}
+
+// Pausar parada
+function _rbPausarParada(pedId){
+  _rbActualizarEstadoPedido(pedId, 'pausado').then(function(){
+    toast("Parada pausada — regenerá Maps para actualizar la ruta","tok");
+    _rbRenderEnReparto(document.getElementById("_rtBody"));
+  }).catch(function(e){
+    console.error("[belle] pausar:",e);
+    toast("Error al pausar","terr");
+  });
+}
+
+// Reanudar parada
+function _rbReanudarParada(pedId){
+  _rbActualizarEstadoPedido(pedId, 'activo').then(function(){
+    toast("Parada reanudada — regenerá Maps para incluirla","tok");
+    _rbRenderEnReparto(document.getElementById("_rtBody"));
+  }).catch(function(e){
+    console.error("[belle] reanudar:",e);
+    toast("Error al reanudar","terr");
+  });
+}
+
+// Modal de cancelar parada con dos opciones: quitar definitivamente / mover a otro borrador
+function _rbCancelarParadaModal(pedId){
+  var old = document.getElementById("_moRbCancelar"); if(old) old.remove();
+  var mo = document.createElement("div");
+  mo.id = "_moRbCancelar";
+  mo.className = "mo open";
+  mo.style.zIndex = "99999";
+  var bs = (_rt.borradores||[]).filter(function(br){
+    return br.estado!=='completado' && br.id!==_rt.borradorActivo;
+  });
+  var h = "<div class='md' style='max-width:460px;width:95%'>";
+  h += "<div class='mh'><div class='mtt'>✕ Cancelar parada</div>";
+  h += "<button class='btn btn-g xb' onclick='document.getElementById(\"_moRbCancelar\").remove()'>✕</button></div>";
+  h += "<div class='mb'>";
+  h += "<div style='font-size:.78rem;color:var(--tx2);margin-bottom:.7rem'>Pedido <b>#"+pedId+"</b> — ¿qué querés hacer?</div>";
+  h += "<button class='btn btn-red' onclick='_rbCancelarParadaConfirmar("+pedId+")' style='width:100%;justify-content:center;margin-bottom:.5rem'>✕ Cancelar (quita esta parada de la ruta)</button>";
+  if(bs.length){
+    h += "<div style='font-size:.7rem;color:var(--tx3);margin:.7rem 0 .35rem'>O moverla a otro borrador:</div>";
+    h += "<div style='display:flex;flex-direction:column;gap:.35rem'>";
+    bs.forEach(function(br){
+      var lbl = (br.nombre||"Sin nombre")+" ("+(br.estado==='en_reparto'?'en reparto':'en edición')+")";
+      h += "<button class='btn btn-g' onclick='_rbMoverParadaAOtro("+pedId+","+br.id+")' style='justify-content:flex-start;font-size:.74rem'>→ "+lbl+"</button>";
+    });
+    h += "</div>";
+  } else {
+    h += "<div style='font-size:.65rem;color:var(--tx3);margin-top:.7rem;font-style:italic'>No tenés otros borradores para moverlo.</div>";
+  }
+  h += "</div></div>";
+  mo.innerHTML = h;
+  document.body.appendChild(mo);
+  mo.addEventListener("click",function(e){if(e.target===mo)mo.remove();});
+}
+
+// Confirmar cancelación: el pedido pasa a estado 'cancelado' en este borrador
+// y vuelve a estado_envio=null en pedidos_catalogo (no en reparto)
+function _rbCancelarParadaConfirmar(pedId){
+  var mo = document.getElementById("_moRbCancelar"); if(mo) mo.remove();
+  Promise.all([
+    apiPatch("pedidos_catalogo",{estado_envio:null,reparto_at:null,reparto_orden:null},"id=eq."+pedId),
+    _rbActualizarEstadoPedido(pedId, 'cancelado')
+  ]).then(function(){
+    apiPost("pedidos_estados_log",{pedido_id:pedId,pedido_tabla:"pedidos_catalogo",estado:"reparto_cancelado",nota:"Parada cancelada en ruta por "+VENDEDOR_NOMBRE,usuario:VENDEDOR_NOMBRE}).catch(function(e){console.error("[belle] log:",e);});
+    toast("Parada cancelada","tok");
+    _rbRenderEnReparto(document.getElementById("_rtBody"));
+    _rbVerificarAutoCompletar();
+  }).catch(function(e){
+    console.error("[belle] cancelar parada:",e);
+    toast("Error al cancelar","terr");
+  });
+}
+
+// Mover parada a otro borrador
+function _rbMoverParadaAOtro(pedId, destinoBorradorId){
+  var mo = document.getElementById("_moRbCancelar"); if(mo) mo.remove();
+  var brOrigen = (_rt.borradores||[]).find(function(x){return x.id===_rt.borradorActivo;});
+  var brDestino = (_rt.borradores||[]).find(function(x){return x.id===destinoBorradorId;});
+  if(!brOrigen || !brDestino){toast("Borrador no encontrado","terr");return;}
+
+  // Quitar del origen
+  var idsOrigen = (brOrigen.pedidos_ids||[]).filter(function(x){return x!==pedId;});
+  var estadosOrigen = (brOrigen.pedidos_estados||[]).filter(function(e){return e.id!==pedId;});
+  // Agregar al destino (como activo)
+  var idsDestino = (brDestino.pedidos_ids||[]).slice();
+  if(idsDestino.indexOf(pedId)<0) idsDestino.push(pedId);
+  var estadosDestino = (brDestino.pedidos_estados||[]).slice();
+  if(!estadosDestino.find(function(e){return e.id===pedId;})){
+    estadosDestino.push({id:pedId, estado:'activo'});
+  }
+
+  Promise.all([
+    apiPatch("rutas_borradores",{pedidos_ids:idsOrigen, pedidos_estados:estadosOrigen},"id=eq."+brOrigen.id),
+    apiPatch("rutas_borradores",{pedidos_ids:idsDestino, pedidos_estados:estadosDestino},"id=eq."+brDestino.id),
+    // Pedido vuelve a estado pre-reparto
+    apiPatch("pedidos_catalogo",{estado_envio:null,reparto_at:null,reparto_orden:null},"id=eq."+pedId)
+  ]).then(function(){
+    brOrigen.pedidos_ids = idsOrigen; brOrigen.pedidos_estados = estadosOrigen;
+    brDestino.pedidos_ids = idsDestino; brDestino.pedidos_estados = estadosDestino;
+    toast("Parada movida a '"+brDestino.nombre+"'","tok");
+    _rbRenderEnReparto(document.getElementById("_rtBody"));
+    _rbVerificarAutoCompletar();
+  }).catch(function(e){
+    console.error("[belle] mover parada:",e);
+    toast("Error al mover","terr");
+  });
+}
+
+// Regenerar Maps con los pedidos 'activo' del borrador actual
+function _rbRegenerarMaps(){
+  var br = (_rt.borradores||[]).find(function(x){return x.id===_rt.borradorActivo;});
+  if(!br){toast("Sin borrador","terr");return;}
+  if(!br.punto_partida_lat){toast("Falta punto de partida","terr");return;}
+  var activos = (br.pedidos_estados||[]).filter(function(e){return e.estado==='activo';});
+  if(!activos.length){toast("No hay paradas activas","twarn");return;}
+  // Cargar coordenadas de cada pedido activo (necesitan dirección)
+  var paradasIds = activos.map(function(e){return e.id;});
+  var pedsArr = (_rt.pedidosTodos||[]).filter(function(p){return paradasIds.indexOf(p.id)>=0;});
+  // Necesitamos las direcciones. Las traemos en bulk.
+  var dirIds = pedsArr.filter(function(p){return p.direccion_entrega_id;}).map(function(p){return p.direccion_entrega_id;});
+  if(!dirIds.length){toast("Las paradas activas no tienen dirección","terr");return;}
+  apiGet("clientes_direcciones","select=id,direccion_completa,lat,lng&id=in.("+dirIds.join(",")+")").then(function(dirs){
+    if(!Array.isArray(dirs)||!dirs.length){toast("No se cargaron direcciones","terr");return;}
+    var dirMap = {};
+    dirs.forEach(function(d){dirMap[d.id]=d;});
+    var paradasOK = pedsArr.filter(function(p){
+      var d = dirMap[p.direccion_entrega_id];
+      return d && d.lat!=null && d.lng!=null;
+    }).map(function(p){
+      return {lat: dirMap[p.direccion_entrega_id].lat, lng: dirMap[p.direccion_entrega_id].lng};
+    });
+    if(!paradasOK.length){toast("Ninguna parada tiene coordenadas","terr");return;}
+
+    var url = "https://www.google.com/maps/dir/?api=1";
+    url += "&origin="+br.punto_partida_lat+","+br.punto_partida_lng;
+    if(br.punto_final_lat){
+      url += "&destination="+br.punto_final_lat+","+br.punto_final_lng;
+      url += "&waypoints="+encodeURIComponent(paradasOK.map(function(p){return p.lat+","+p.lng;}).join("|"));
+    } else {
+      var ult = paradasOK[paradasOK.length-1];
+      url += "&destination="+ult.lat+","+ult.lng;
+      if(paradasOK.length>1){
+        var wps = paradasOK.slice(0,-1).map(function(p){return p.lat+","+p.lng;}).join("|");
+        url += "&waypoints="+encodeURIComponent(wps);
+      }
+    }
+    url += "&travelmode=driving";
+    window.open(url, "_blank");
+    toast("Maps abierto con "+paradasOK.length+" parada"+(paradasOK.length===1?"":"s"),"tok");
+  }).catch(function(e){
+    console.error("[belle] regenerar maps:",e);
+    toast("Error al regenerar","terr");
+  });
+}
+
+// Agregar más pedidos al borrador desde la vista en reparto
+function _rbAgregarMasPedidosAlBorrador(){
+  // Cambiar a vista de armar ruta con el borrador activo
+  var br = (_rt.borradores||[]).find(function(x){return x.id===_rt.borradorActivo;});
+  if(!br) return;
+  toast("Volvé a la pestaña Pedidos y tocá 🚚 en el pedido que querés agregar","tok");
+}
+
+// Verificar si todos los pedidos están entregados/cancelados → auto-completar
+function _rbVerificarAutoCompletar(){
+  var br = (_rt.borradores||[]).find(function(x){return x.id===_rt.borradorActivo;});
+  if(!br) return;
+  if(!_rbBorradorTieneActivos(br)){
+    // No quedan ni activos ni pausados → auto-completar
+    setTimeout(function(){
+      if(confirm("¡Todas las paradas están resueltas!\n\n¿Completar el borrador '"+br.nombre+"' ahora?")){
+        _rbCompletarBorradorEjecutar(false);
+      }
+    }, 400);
+  }
+}
+
+// Botón manual de "Completar reparto" — maneja pausados con confirmación
+function _rbCompletarBorradorManual(){
+  var br = (_rt.borradores||[]).find(function(x){return x.id===_rt.borradorActivo;});
+  if(!br) return;
+  var estados = br.pedidos_estados || [];
+  var nAct = estados.filter(function(e){return e.estado==='activo';}).length;
+  var nPau = estados.filter(function(e){return e.estado==='pausado';}).length;
+
+  var msg = "¿Completar el reparto?";
+  if(nAct){
+    msg += "\n\n⚠ Hay "+nAct+" parada"+(nAct===1?"":"s")+" todavía activa"+(nAct===1?"":"s")+". Esa"+(nAct===1?"":"s")+" parada"+(nAct===1?"":"s")+" volverá"+(nAct===1?"":"n")+" a estado pendiente sin ruta.";
+  }
+  if(nPau){
+    msg += "\n\n⏸ Hay "+nPau+" parada"+(nPau===1?"":"s")+" pausada"+(nPau===1?"":"s")+". Esa"+(nPau===1?"":"s")+" parada"+(nPau===1?"":"s")+" volverá"+(nPau===1?"":"n")+" a estado pendiente sin ruta — el vendedor tendrá que asignarles otro borrador.";
+  }
+  if(!confirm(msg)) return;
+  _rbCompletarBorradorEjecutar(true);
+}
+
+// Ejecuta la lógica de completar: limpia activos/pausados, marca borrador como completado
+function _rbCompletarBorradorEjecutar(volverPendientes){
+  var br = (_rt.borradores||[]).find(function(x){return x.id===_rt.borradorActivo;});
+  if(!br) return;
+  var estados = br.pedidos_estados || [];
+  var pendientes = estados.filter(function(e){
+    return e.estado==='activo' || e.estado==='pausado';
+  }).map(function(e){return e.id;});
+
+  var promesas = [];
+  // Para los pedidos que quedaron pendientes (activos/pausados al cerrar), volverlos a estado_envio=null
+  if(volverPendientes && pendientes.length){
+    pendientes.forEach(function(pid){
+      promesas.push(apiPatch("pedidos_catalogo",{estado_envio:null,reparto_at:null,reparto_orden:null},"id=eq."+pid));
+    });
+  }
+  // Marcar borrador como completado y guardar timestamp
+  promesas.push(apiPatch("rutas_borradores",{estado:'completado',completada_at:new Date().toISOString()},"id=eq."+br.id));
+
+  Promise.all(promesas).then(function(){
+    toast("Reparto completado ✓","tok");
+    _rt.borradorActivo = null;
+    _rt.subTab = "borradores";
+    loadRutas();
+  }).catch(function(e){
+    console.error("[belle] completar borrador:",e);
+    toast("Error al completar","terr");
+  });
+}
+
+// Crear nuevo borrador (con o sin pedidos iniciales)
+function _rbCrearBorrador(pedidoId, irAEditar){
+  var nombre = prompt("Nombre del borrador (ej: 'Ruta de hoy', 'Mañana', 'Tarde'):");
+  if(!nombre || !nombre.trim()) return;
+  var data = {
+    vendedor_id: VENDEDOR_ID,
+    nombre: nombre.trim(),
+    pedidos_ids: pedidoId ? [pedidoId] : []
+  };
+  apiPost("rutas_borradores", data).then(function(rows){
+    var nuevo = Array.isArray(rows) && rows[0];
+    if(!nuevo){toast("Error creando borrador","terr");return;}
+    toast("Borrador '"+nombre.trim()+"' creado"+(pedidoId?" con el pedido agregado":""),"tok");
+    // Refrescar lista en memoria (recargar todo es lo más simple)
+    if(irAEditar){
+      _rt.subTab = "borradores";
+    }
+    loadRutas();
+  }).catch(function(e){
+    console.error("[belle] _rbCrearBorrador:",e);
+    toast("Error: "+(e&&e.message||"desconocido"),"terr");
+  });
+}
+
+// Renombrar borrador
+function _rbRenombrarBorrador(id){
+  var br = (_rt.borradores||[]).find(function(x){return x.id===id;});
+  if(!br) return;
+  var nuevo = prompt("Nuevo nombre para '"+br.nombre+"':", br.nombre);
+  if(!nuevo || !nuevo.trim() || nuevo.trim()===br.nombre) return;
+  apiPatch("rutas_borradores",{nombre:nuevo.trim()},"id=eq."+id).then(function(){
+    toast("Borrador renombrado","tok");
+    loadRutas();
+  }).catch(function(e){
+    console.error("[belle] renombrar borrador:",e);
+    toast("Error al renombrar","terr");
+  });
+}
+
+// Eliminar borrador (con confirmación)
+function _rbEliminarBorrador(id){
+  var br = (_rt.borradores||[]).find(function(x){return x.id===id;});
+  if(!br) return;
+  if(!confirm("¿Eliminar el borrador '"+br.nombre+"'?\nLos pedidos NO se borran, solo el borrador.")) return;
+  apiDelete("rutas_borradores","id=eq."+id).then(function(){
+    toast("Borrador eliminado","tok");
+    if(_rt.borradorActivo===id) _rt.borradorActivo = null;
+    loadRutas();
+  }).catch(function(e){
+    console.error("[belle] eliminar borrador:",e);
+    toast("Error al eliminar","terr");
+  });
+}
+
+// Editar borrador → entra al modo "armar ruta" cargando los pedidos del borrador
+function _rbEditarBorrador(id){
+  var br = (_rt.borradores||[]).find(function(x){return x.id===id;});
+  if(!br) return;
+  _rt.borradorActivo = id;
+  _rt.subTab = "armar";
+  // Pre-cargar los pedidos del borrador en pedidosSeleccionados
+  var ids = br.pedidos_ids || [];
+  _rt.pedidosSeleccionados = (_rt.pedidosTodos||[]).filter(function(p){return ids.indexOf(p.id)>=0;}).map(function(p){return p.id;});
+  _rt.paso = 1;
+  _renderRutasMain();
+}
+
+// ── Modal "Agregar pedido a borrador" — abierto desde el botón 🚚 en pedidos ──
+function _rbAgregarPedidoModal(pedId){
+  // Asegurar que tenemos los borradores cargados (puede ser primera vez si no entró a Rutas)
+  if(!_rt.borradores || !Array.isArray(_rt.borradores)){
+    apiGet("rutas_borradores","select=*&vendedor_id=eq."+VENDEDOR_ID+"&order=updated_at.desc&limit=20").then(function(rows){
+      _rt.borradores = Array.isArray(rows)?rows:[];
+      _rbAgregarPedidoModalShow(pedId);
+    }).catch(function(){_rt.borradores=[];_rbAgregarPedidoModalShow(pedId);});
+  } else {
+    _rbAgregarPedidoModalShow(pedId);
+  }
+}
+
+function _rbAgregarPedidoModalShow(pedId){
+  var bs = _rt.borradores || [];
+  var old = document.getElementById("_moRbAgregar"); if(old) old.remove();
+  var mo = document.createElement("div");
+  mo.id = "_moRbAgregar";
+  mo.className = "mo open";
+  mo.style.zIndex = "99999";
+
+  var h = "<div class='md' style='max-width:460px;width:95%'>";
+  h += "<div class='mh'><div class='mtt'>🚚 Agregar pedido a ruta</div>";
+  h += "<button class='btn btn-g xb' onclick='document.getElementById(\"_moRbAgregar\").remove()'>✕</button></div>";
+  h += "<div class='mb'>";
+  h += "<div style='font-size:.78rem;color:var(--tx2);margin-bottom:.8rem'>Elegí a qué borrador agregar el pedido <b>#"+pedId+"</b>:</div>";
+
+  if(bs.length){
+    h += "<div style='display:flex;flex-direction:column;gap:.4rem;margin-bottom:.7rem'>";
+    bs.forEach(function(br){
+      var ya = (br.pedidos_ids||[]).indexOf(pedId)>=0;
+      var disabled = ya ? "disabled" : "";
+      var label = ya ? " (ya está en este borrador)" : " — "+(br.pedidos_ids||[]).length+" pedido"+((br.pedidos_ids||[]).length===1?"":"s");
+      h += "<button class='btn btn-a' "+disabled+" onclick='_rbAgregarPedidoABorrador("+pedId+","+br.id+")' style='justify-content:flex-start;padding:.55rem .7rem;text-align:left;"+(ya?"opacity:.5;cursor:not-allowed":"")+"'>"+
+        "<span style='font-weight:600'>"+(br.nombre||"Sin nombre")+"</span>"+
+        "<span style='font-size:.65rem;color:rgba(255,255,255,.7);margin-left:.3rem'>"+label+"</span>"+
+        "</button>";
+    });
+    h += "</div>";
+    h += "<div style='border-top:1px solid var(--bd);padding-top:.7rem'>";
+  }
+
+  h += "<button class='btn btn-g' onclick='_rbAgregarYCrearNuevo("+pedId+")' style='width:100%;justify-content:center'>+ Crear nuevo borrador con este pedido</button>";
+
+  if(bs.length) h += "</div>";
+
+  h += "</div></div>";
+  mo.innerHTML = h;
+  document.body.appendChild(mo);
+  mo.addEventListener("click",function(e){if(e.target===mo)mo.remove();});
+}
+
+function _rbAgregarPedidoABorrador(pedId, borradorId){
+  var br = (_rt.borradores||[]).find(function(x){return x.id===borradorId;});
+  if(!br){toast("Borrador no encontrado","terr");return;}
+  var ids = (br.pedidos_ids || []).slice();
+  if(ids.indexOf(pedId)>=0){toast("Ya está en este borrador","twarn");return;}
+  ids.push(pedId);
+  apiPatch("rutas_borradores",{pedidos_ids:ids},"id=eq."+borradorId).then(function(){
+    br.pedidos_ids = ids; // actualizar local
+    toast("Pedido agregado a '"+br.nombre+"'","tok");
+    var mo = document.getElementById("_moRbAgregar"); if(mo) mo.remove();
+  }).catch(function(e){
+    console.error("[belle] agregar a borrador:",e);
+    toast("Error: "+(e&&e.message||""),"terr");
+  });
+}
+
+function _rbAgregarYCrearNuevo(pedId){
+  var mo = document.getElementById("_moRbAgregar"); if(mo) mo.remove();
+  _rbCrearBorrador(pedId, false);
+}
+
+// Quitar pedido de un borrador (durante edición)
+function _rbQuitarPedidoDeBorrador(pedId){
+  if(!_rt.borradorActivo) return;
+  var br = (_rt.borradores||[]).find(function(x){return x.id===_rt.borradorActivo;});
+  if(!br) return;
+  var ids = (br.pedidos_ids||[]).filter(function(x){return x!==pedId;});
+  apiPatch("rutas_borradores",{pedidos_ids:ids},"id=eq."+_rt.borradorActivo).then(function(){
+    br.pedidos_ids = ids;
+    _rt.pedidosSeleccionados = _rt.pedidosSeleccionados.filter(function(x){return x!==pedId;});
+    toast("Pedido quitado del borrador","tok");
+    _rtRenderSubTab();
+  }).catch(function(e){
+    console.error("[belle] quitar de borrador:",e);
+    toast("Error","terr");
+  });
+}
+
+// Sincronizar pedidosSeleccionados → borrador en BD (cuando se modifica al armar ruta)
+function _rbSincronizarBorrador(){
+  if(!_rt.borradorActivo) return Promise.resolve();
+  var ids = (_rt.pedidosSeleccionados||[]).slice();
+  // También sincronizar pedidos_estados: agregar nuevos como 'activo', quitar los que ya no están
+  var br = (_rt.borradores||[]).find(function(x){return x.id===_rt.borradorActivo;});
+  var estadosActuales = (br && Array.isArray(br.pedidos_estados)) ? br.pedidos_estados.slice() : [];
+  // Mantener entradas para pedidos que siguen, agregar nuevos como 'activo'
+  var nuevosEstados = ids.map(function(id){
+    var existente = estadosActuales.find(function(e){return e.id===id;});
+    return existente || {id:id, estado:'activo'};
+  });
+  return apiPatch("rutas_borradores",{pedidos_ids:ids, pedidos_estados:nuevosEstados},"id=eq."+_rt.borradorActivo).then(function(){
+    if(br){br.pedidos_ids = ids; br.pedidos_estados = nuevosEstados;}
+  }).catch(function(e){
+    console.error("[belle] sincronizar borrador:",e);
+  });
+}
+
+// Lee el estado actual de un pedido dentro del borrador activo
+function _rbEstadoPedido(pedId){
+  if(!_rt.borradorActivo) return null;
+  var br = (_rt.borradores||[]).find(function(x){return x.id===_rt.borradorActivo;});
+  if(!br || !Array.isArray(br.pedidos_estados)) return null;
+  var entrada = br.pedidos_estados.find(function(e){return e.id===pedId;});
+  return entrada ? entrada.estado : null;
+}
+
+// Cambia el estado de un pedido en el borrador activo (en BD + memoria)
+// estados: 'activo' | 'entregado' | 'cancelado' | 'pausado'
+function _rbActualizarEstadoPedido(pedId, nuevoEstado, extras){
+  if(!_rt.borradorActivo) return Promise.reject(new Error("Sin borrador activo"));
+  var br = (_rt.borradores||[]).find(function(x){return x.id===_rt.borradorActivo;});
+  if(!br) return Promise.reject(new Error("Borrador no encontrado"));
+  var estados = Array.isArray(br.pedidos_estados) ? br.pedidos_estados.slice() : [];
+  var idx = estados.findIndex(function(e){return e.id===pedId;});
+  var ahora = new Date().toISOString();
+  var entrada = idx>=0 ? Object.assign({}, estados[idx]) : {id:pedId};
+  entrada.estado = nuevoEstado;
+  if(nuevoEstado==='entregado') entrada.entregado_at = ahora;
+  if(nuevoEstado==='cancelado') entrada.cancelado_at = ahora;
+  if(nuevoEstado==='pausado')   entrada.pausado_at = ahora;
+  if(extras) Object.assign(entrada, extras);
+  if(idx>=0) estados[idx] = entrada;
+  else estados.push(entrada);
+  return apiPatch("rutas_borradores",{pedidos_estados:estados},"id=eq."+_rt.borradorActivo).then(function(){
+    br.pedidos_estados = estados;
+    return entrada;
+  });
+}
+
+// Lista de pedidos en el borrador filtrados por estado
+function _rbPedidosPorEstado(borrador, estado){
+  if(!borrador || !Array.isArray(borrador.pedidos_estados)) return [];
+  return borrador.pedidos_estados.filter(function(e){return e.estado===estado;});
+}
+
+// ¿Quedan pedidos por entregar (activos o pausados) en el borrador?
+function _rbBorradorTieneActivos(borrador){
+  if(!borrador || !Array.isArray(borrador.pedidos_estados)) return false;
+  return borrador.pedidos_estados.some(function(e){
+    return e.estado==='activo' || e.estado==='pausado';
+  });
+}
+
+// Buscador de pedidos en pestaña Rutas (para agregar al borrador activo o a la selección)
+function _rbBuscarPedido(){
+  var inp = document.getElementById("_rbSearch");
+  if(!inp) return;
+  var q = inp.value.toLowerCase().trim();
+  var resBox = document.getElementById("_rbSearchResults");
+  if(!resBox) return;
+  if(!q || q.length<2){resBox.innerHTML="";return;}
+  // Buscar en pedidosTodos por nro_orden, cliente_id, total, etc.
+  var todos = _rt.pedidosTodos || [];
+  var matches = todos.filter(function(p){
+    var nro = (p.nro_orden||"").toLowerCase();
+    var nroSinPrefijo = nro.replace(/^(web-|ord-|cob-|res-)/i,"");
+    var totalStr = String(p.total||"");
+    var clienteStr = String(p.cliente_id||"");
+    return nro.indexOf(q)>=0 || nroSinPrefijo.indexOf(q)>=0 || totalStr.indexOf(q)>=0 || clienteStr.indexOf(q)>=0;
+  }).slice(0,15);
+
+  if(!matches.length){
+    resBox.innerHTML = "<div style='font-size:.7rem;color:var(--tx3);padding:.5rem;text-align:center'>Sin resultados para '"+q+"'</div>";
+    return;
+  }
+
+  var sel = _rt.pedidosSeleccionados || [];
+  resBox.innerHTML = matches.map(function(p){
+    var ya = sel.indexOf(p.id)>=0;
+    var nom = (p.nro_orden||"#"+p.id) + " · " + fmt(p.total||0);
+    var disab = ya ? "style='opacity:.5;cursor:not-allowed'" : "";
+    var btn = ya
+      ? "<span style='font-size:.65rem;color:var(--green)'>✓ ya en ruta</span>"
+      : "<button class='btn btn-a' style='font-size:.65rem;padding:.2rem .5rem' onclick='_rbAgregarSeleccionado("+p.id+")'>+ Agregar</button>";
+    return "<div "+disab+" style='display:flex;justify-content:space-between;align-items:center;padding:.4rem .5rem;border-bottom:1px solid var(--bd);font-size:.74rem'>"+
+      "<span>"+nom+"</span>"+btn+
+      "</div>";
+  }).join("");
+}
+
+function _rbAgregarSeleccionado(pedId){
+  var sel = _rt.pedidosSeleccionados || [];
+  if(sel.indexOf(pedId)>=0){toast("Ya está","twarn");return;}
+  sel.push(pedId);
+  _rt.pedidosSeleccionados = sel;
+  // Si hay borrador activo, sincronizar
+  _rbSincronizarBorrador().then(function(){
+    var inp = document.getElementById("_rbSearch");
+    if(inp){inp.value="";_rbBuscarPedido();}
+    toast("Pedido agregado","tok");
+    _rtRenderSubTab();
   });
 }
 
