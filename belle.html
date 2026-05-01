@@ -1173,15 +1173,16 @@ td{padding:.35rem .5rem;font-size:.78rem;color:var(--tx2);vertical-align:middle;
       <span style="font-size:.72rem;color:var(--tx3);font-style:italic">Ninguno todavia...</span>
     </div>
     <div style="display:flex;gap:.4rem;flex-wrap:wrap;align-items:center">
-      <select id="bcProvNombre" class="fi" style="width:130px;font-size:.75rem">
+      <select id="bcProvNombre" class="fi" onchange="_bcProvNombreCambio()" style="width:130px;font-size:.75rem">
         <option value="">Proveedor...</option>
         <option value="ATACADO">ATACADO</option>
         <option value="ASM">ASM</option>
         <option value="STAR">STAR</option>
         <option value="AGATRES">AGATRES</option>
         <option value="EPIC">EPIC</option>
-        <option value="OTRO">OTRO</option>
+        <option value="__OTRO__">+ Otro...</option>
       </select>
+      <input id="bcProvNombreCustom" type="text" placeholder="Nombre del proveedor" maxlength="30" oninput="this.value=this.value.toUpperCase()" style="display:none;width:160px;padding:.32rem .5rem;background:var(--sur3);border:1px solid var(--bd);border-radius:var(--rs);color:var(--tx);font-size:.75rem">
       <label class="btn btn-a" style="cursor:pointer;font-size:.72rem">
         &#128194; PDF / Excel
         <input type="file" id="bcProvFile" accept=".pdf,.xlsx,.xls,.csv,.txt" style="display:none" onchange="bcCargarArchivo(this)">
@@ -11645,7 +11646,10 @@ function draftInit(){
   apiGet('bellcito_drafts','select=*&order=updated_at.asc').then(function(rows){
     if(Array.isArray(rows)&&rows.length){
       var activeRow=rows.find(function(r){return r.draft_id==='__active__';});
-      var draftRows=rows.filter(function(r){return r.draft_id!=='__active__';});
+      // Excluir el registro especial __active__ y los __matches__<id> (matches manuales)
+      var draftRows=rows.filter(function(r){
+        return r.draft_id!=='__active__' && (r.draft_id||'').indexOf('__matches__')!==0;
+      });
       if(draftRows.length){
         drafts=draftRows.map(function(r){
           return {id:r.draft_id,label:r.label||'Borrador',nombre:r.label||'Borrador',
@@ -11740,7 +11744,12 @@ function draftDelete(id){
   if(!confirm('Borrar este borrador? Se perderan los proveedores y cantidades cargadas.')) return;
   drafts=drafts.filter(function(d){return d.id!==id;});
   apiDelete('bellcito_drafts','draft_id=eq.'+id);
-  try{localStorage.setItem('belleDrafts',JSON.stringify(drafts));}catch(e){}
+  // Fix #8: borrar también los matches manuales asociados a este draft
+  apiDelete('bellcito_drafts','draft_id=eq.__matches__'+id).catch(function(){});
+  try{
+    localStorage.setItem('belleDrafts',JSON.stringify(drafts));
+    localStorage.removeItem('bcMatches_'+id);
+  }catch(e){}
   if(activeDraftId===id){activeDraftId=drafts[0].id;draftLoad(activeDraftId);}
   draftRenderTabs();
 }
@@ -14286,8 +14295,30 @@ function bcToggleTexto(){
   if(el) el.style.display=el.style.display==='none'?'block':'none';
 }
 
+// Fix #7: helpers para soportar nombre custom de proveedor
+function _bcGetProvNombre(){
+  var sel=(document.getElementById('bcProvNombre')||{}).value||'';
+  if(sel==='__OTRO__'){
+    var custom=((document.getElementById('bcProvNombreCustom')||{}).value||'').trim().toUpperCase();
+    return custom;
+  }
+  return sel.trim().toUpperCase();
+}
+function _bcProvNombreCambio(){
+  var sel=(document.getElementById('bcProvNombre')||{}).value||'';
+  var inp=document.getElementById('bcProvNombreCustom');
+  if(!inp)return;
+  if(sel==='__OTRO__'){
+    inp.style.display='';
+    setTimeout(function(){inp.focus();},50);
+  } else {
+    inp.style.display='none';
+    inp.value='';
+  }
+}
+
 function bcCargarTexto(){
-  var nombre=(document.getElementById('bcProvNombre').value||'').trim().toUpperCase();
+  var nombre=_bcGetProvNombre();
   if(!nombre){toast('Selecciona un proveedor','twarn');return;}
   var text=document.getElementById('bcTexto').value||'';
   if(!text.trim()){toast('El texto esta vacio','twarn');return;}
@@ -14310,7 +14341,7 @@ function bcAgregarManual(){
   var nombre=(document.getElementById('bcManNombre')||{}).value||'';
   var precio=parseFloat((document.getElementById('bcManPrecio')||{}).value||0);
   var codigo=(document.getElementById('bcManCodigo')||{}).value||'';
-  var prov=(document.getElementById('bcProvNombre')||{}).value||'';
+  var prov=_bcGetProvNombre();
 
   if(!nombre.trim()){toast('Ingresá el nombre del producto','twarn');return;}
   if(!prov){toast('Seleccioná un proveedor arriba','twarn');return;}
@@ -14348,7 +14379,7 @@ function bcAgregarManual(){
 
 
 function bcCargarArchivo(input){
-  var nombre=(document.getElementById('bcProvNombre').value||'').trim().toUpperCase();
+  var nombre=_bcGetProvNombre();
   if(!nombre){toast('Selecciona un proveedor primero','twarn');input.value='';return;}
   var file=input.files[0];
   if(!file){return;}
@@ -14420,7 +14451,7 @@ function bcCargarArchivo(input){
     }
     function doParse(){
       var lib=window['pdfjs-dist/build/pdf'];
-      if(!lib){toast('Error cargando PDF.js','terr');return;}
+      if(!lib){toast('Error cargando PDF.js','terr');_bcLimpiarLoading(nombre);return;}
       lib.GlobalWorkerOptions.workerSrc='';
       var rd=new FileReader();
       rd.onload=function(e){
@@ -14443,8 +14474,13 @@ function bcCargarArchivo(input){
             var items=parsed.map(function(p){return{nombre_proveedor:p.nombre_proveedor,nombre_norm:bcNormalizarNombre(p.nombre_proveedor),precio_usd:p.precio_usd,proveedor:nombre,codigo:p.codigo||'',marca:p.marca||''};});
             if(!items.length){items=comprasParseAnyText(txt,nombre).map(function(p){p.nombre_norm=bcNormalizarNombre(p.nombre_proveedor);return p;});}
             bcGuardarProveedor(nombre,items);
+          }).catch(function(err){
+            console.error('[bc] PDF parse error:',err);
+            toast('Error procesando PDF: '+(err&&err.message||'desconocido'),'terr');
+            _bcLimpiarLoading(nombre);
           });
       };
+      rd.onerror=function(){toast('Error leyendo el archivo','terr');_bcLimpiarLoading(nombre);};
       rd.readAsArrayBuffer(file);
     }
     if(window['pdfjs-dist/build/pdf']){doParse();return;}
@@ -14505,8 +14541,9 @@ function bcCargarArchivo(input){
             items=parseSheet(wb3,true);
           }
           bcGuardarProveedor(nombre,items);
-        }catch(err){toast('Error Excel: '+err.message,'terr');console.error(err);}
+        }catch(err){toast('Error Excel: '+err.message,'terr');console.error(err);_bcLimpiarLoading(nombre);}
       };
+      rd.onerror=function(){toast('Error leyendo Excel','terr');_bcLimpiarLoading(nombre);};
       rd.readAsArrayBuffer(file);
     }
     if(window.XLSX){doExcel();return;}
@@ -14529,11 +14566,20 @@ function bcCargarArchivo(input){
 function bcShowProvLoading(nombre){
   var el=document.getElementById('bcProvsList');
   if(!el) return;
+  // Limpiar previo si existe (evita duplicados)
+  var prev=document.getElementById('bcload-'+nombre);
+  if(prev)prev.parentNode.removeChild(prev);
   var sp=document.createElement('span');
   sp.id='bcload-'+nombre;
   sp.style.cssText='font-size:.72rem;color:var(--tx3);display:inline-flex;align-items:center;gap:.3rem';
   sp.innerHTML='<div class="spin" style="width:12px;height:12px;border-width:2px"></div> '+nombre+'...';
   el.appendChild(sp);
+}
+
+// Fix #10: helper para limpiar el spinner si la carga falla
+function _bcLimpiarLoading(nombre){
+  var loadEl=document.getElementById('bcload-'+nombre);
+  if(loadEl&&loadEl.parentNode)loadEl.parentNode.removeChild(loadEl);
 }
 
 function bcGuardarProveedor(nombre, items){
@@ -14546,7 +14592,7 @@ function bcGuardarProveedor(nombre, items){
   bcMatchCache=null;
   toast(nombre+': '+items.length+' productos cargados','tok');
   draftSave();
-  bcRenderProvsList
+  bcRenderProvsList();
   bcRenderMain();
 }
 
@@ -14697,17 +14743,26 @@ function bcSetTabLista(nombre, el){
 // ── COMPARATIVA ─────────────────────────────────────────────────
 function bcGetMatches(){
   if(bcMatchCache) return bcMatchCache;
-  var keys=Object.keys(bcProveedores);
-  var simMin=(parseFloat(document.getElementById('comprasSimilitud').value)||90)/100;
+  var keys=Object.keys(bcProveedores||{});
+  // Fix #2: protección contra ningún proveedor cargado
+  if(!keys.length) return [];
+  // Fix #3: usar el proveedor con MÁS items como base (no el primero alfabético)
+  // Así no se pierden items por usar de base un proveedor pequeño
+  keys.sort(function(a,b){
+    return (bcProveedores[b]||[]).length-(bcProveedores[a]||[]).length;
+  });
+  var simMin=(parseFloat((document.getElementById('comprasSimilitud')||{value:90}).value)||90)/100;
   var baseKey=keys[0];
+  var baseList=bcProveedores[baseKey]||[];
+  if(!baseList.length) return [];
   var rows=[];
-  bcProveedores[baseKey].forEach(function(base,bi){
+  baseList.forEach(function(base,bi){
     var row={nombre:base.nombre_norm||base.nombre_proveedor, baseIdx:bi, baseKey:baseKey};
     row[baseKey]={precio:base.precio_usd,nombre:base.nombre_proveedor,norm:base.nombre_norm,idx:bi};
     var hasMatch=false;
     keys.slice(1).forEach(function(ok){
       var best=null,bestScore=0;
-      bcProveedores[ok].forEach(function(other,oi){
+      (bcProveedores[ok]||[]).forEach(function(other,oi){
         var s=bcSim(base.nombre_norm||base.nombre_proveedor, other.nombre_norm||other.nombre_proveedor);
         if(s>bestScore){bestScore=s;best={...other,idx:oi};}
       });
@@ -14718,7 +14773,8 @@ function bcGetMatches(){
         row[ok]=null;
       }
     });
-    if(hasMatch) rows.push(row);
+    // Si solo hay 1 proveedor, hasMatch=false pero igual queremos mostrar la fila
+    if(hasMatch||keys.length===1) rows.push(row);
   });
   rows.sort(function(a,b){
     var pa=keys.map(function(k){return a[k]?a[k].precio:null;}).filter(Boolean);
@@ -14928,8 +14984,52 @@ function bcExportPedidoWA(k){
   var lines=['*Pedido '+k+'*',''];
   sel.forEach(function(it){lines.push('• '+it.nombre+' x'+it.qty+' = u$d '+(it.precio*it.qty).toFixed(2));});
   lines.push('');lines.push('*TOTAL: u$d '+total.toFixed(2)+'*');
-  try{navigator.clipboard.writeText(lines.join('\n'));toast('Copiado para WA','tok');}
-  catch(e){prompt('Copia este texto:',lines.join('\n'));}
+  var texto=lines.join('\n');
+  // Intentar clipboard nativo
+  if(navigator.clipboard&&navigator.clipboard.writeText){
+    navigator.clipboard.writeText(texto).then(function(){
+      toast('Copiado para WhatsApp','tok');
+    }).catch(function(){
+      _bcShowTextoModal('Pedido '+k+' — copialo manualmente',texto);
+    });
+  } else {
+    _bcShowTextoModal('Pedido '+k+' — copialo manualmente',texto);
+  }
+}
+
+function _bcShowTextoModal(titulo,texto){
+  var existente=document.getElementById('_moBcTexto');
+  if(existente)existente.remove();
+  var mo=document.createElement('div');
+  mo.id='_moBcTexto';
+  mo.className='mo open';
+  mo.style.zIndex='10001';
+  var h="<div class='md' style='max-width:520px;width:96%;display:flex;flex-direction:column'>";
+  h+="<div class='mh'><div class='mtt'>"+_admEsc(titulo)+"</div>";
+  h+="<button class='btn btn-g xb' onclick='var _m=document.getElementById(\"_moBcTexto\");if(_m)_m.remove()'>&#x2715;</button></div>";
+  h+="<div class='mb'>";
+  h+="<div style='font-size:.7rem;color:var(--tx3);margin-bottom:.5rem'>El navegador no permitió copiar automáticamente. Seleccioná el texto y copialo manualmente:</div>";
+  h+="<textarea id='_bcTextoOut' rows='12' readonly style='width:100%;padding:.55rem;background:var(--sur2);border:1px solid var(--bd);border-radius:6px;color:var(--tx);font-size:.78rem;box-sizing:border-box;font-family:monospace'>"+_admEsc(texto)+"</textarea>";
+  h+="</div>";
+  h+="<div style='padding:.7rem;border-top:1px solid var(--bd);display:flex;gap:.5rem;justify-content:flex-end'>";
+  h+="<button class='btn btn-a' onclick='_bcCopiarTextoModal()' style='font-size:.78rem'>📋 Seleccionar todo</button>";
+  h+="<button class='btn btn-g' onclick='var _m=document.getElementById(\"_moBcTexto\");if(_m)_m.remove()' style='font-size:.78rem'>Cerrar</button>";
+  h+="</div></div>";
+  mo.innerHTML=h;
+  document.body.appendChild(mo);
+}
+
+function _bcCopiarTextoModal(){
+  var ta=document.getElementById('_bcTextoOut');
+  if(!ta)return;
+  ta.focus();
+  ta.select();
+  try{
+    document.execCommand('copy');
+    toast('Texto copiado','tok');
+  }catch(e){
+    toast('Seleccioná el texto manualmente','twarn');
+  }
 }
 
 function bcExportPedidoPDF(k){
@@ -14980,51 +15080,157 @@ function bcConfirmarPedido(k){
   var sel=Object.values(bcPedidos[k]&&bcPedidos[k].items||{}).filter(function(i){return i.qty>0;});
   if(!sel.length){toast('Pedido vacio','twarn');return;}
   var total=sel.reduce(function(s,i){return s+i.precio*i.qty;},0);
-  if(!confirm('Confirmar pedido a '+k+'?\n'+sel.length+' productos | u$d '+total.toFixed(2)+'\n\nSe guardara en Pedidos al Proveedor y en Borradores.')) return;
+  var unidades=sel.reduce(function(s,i){return s+i.qty;},0);
+  var nroSugerido='PED-'+Math.floor(100000+Math.random()*900000);
 
-  var nro='PED-'+Math.floor(100000+Math.random()*900000);
-
-  // ── Guardar en pedidos_proveedor (Supabase) ──
-  apiPost('pedidos_proveedor',{
-    nro_pedido:nro, proveedor:k,
-    fecha_pedido:(function(){var d=new Date();d.setHours(d.getHours()-3);return d.toISOString().slice(0,10);})(),
-    total_usd:total, estado:'pendiente',
-    notas:'Creado desde Bellcito Comparador'
-  }).then(function(res){
-    var pedidoId=res&&res[0]?res[0].id:null;
-    if(!pedidoId){toast('Error guardando pedido en DB','terr');return;}
-    var proms=sel.map(function(it){
-      // Try to match item with catalog
-      var match=bcFindInProds({nombre_norm:it.nombre,nombre_proveedor:it.nombre});
-      var prodId=match?match.id:null;
-      return apiPost('pedidos_proveedor_items',{
-        pedido_id:pedidoId, nombre_proveedor:it.nombre, marca:k,
-        precio_usd:it.precio, cantidad_pedida:it.qty, cantidad_recibida:0,
-        codigo_proveedor:'', producto_id:prodId,
-        es_nuevo:!prodId, estado_item:'pendiente', observacion:''
-      });
-    });
-    return Promise.all(proms);
-  }).then(function(){
-    toast('Pedido '+nro+' guardado en Pedidos al Proveedor — macheá manualmente para actualizar En Viaje','tok');
-    // FIX: NO subir en_viaje automáticamente — solo al machear manualmente
-  }).catch(function(err){toast('Error DB: '+err.message,'terr');});
-
-  // ── Guardar como borrador en Bellcito ──
-  // Build a comprasItems-compatible array for draftSave
-  var oldItems=typeof comprasItems!=='undefined'?comprasItems:[];
-  comprasItems=sel.map(function(it){
-    return {nombre_proveedor:it.nombre,codigo:'',marca:k,precio_usd:it.precio,qty:it.qty,
-      selected:true,catalogo_match:null,stock_actual:null,vendidos:0,
-      es_nuevo:true,priority:'all',reasons:'',_diffs:[],producto_id:null,
-      estado_item:'pendiente',observacion:''};
+  // Pre-calcular cuántos items matchean con catálogo
+  var conMatch=0,sinMatch=0;
+  sel.forEach(function(it){
+    var key=bcNorm(it.nombre);
+    var m=bcManualMatches[key]?(prods||[]).find(function(p){return p.id===bcManualMatches[key];}):null;
+    if(!m){
+      // Auto-match con item completo (incluyendo nombre_norm calculado correctamente)
+      m=bcFindInProds({nombre_norm:bcNormalizarNombre(it.nombre),nombre_proveedor:it.nombre});
+    }
+    if(m)conMatch++;else sinMatch++;
   });
-  // Guardar estado actual del borrador ANTES de limpiar
-  if(typeof draftSave==='function') draftSave();
-  comprasItems=oldItems;
 
-  // Limpiar pedido local (items a 0, no elimina del borrador)
-  bcLimpiarPedido(k);
+  var existente=document.getElementById('_moBcConfPed');
+  if(existente)existente.remove();
+  var mo=document.createElement('div');
+  mo.id='_moBcConfPed';
+  mo.className='mo open';
+  mo.style.zIndex='10001';
+  var h="<div class='md' style='max-width:480px;width:96%;display:flex;flex-direction:column'>";
+  h+="<div class='mh'><div class='mtt'>📦 Confirmar pedido a "+_admEsc(k)+"</div>";
+  h+="<button class='btn btn-g xb' onclick='var _m=document.getElementById(\"_moBcConfPed\");if(_m)_m.remove()'>&#x2715;</button></div>";
+  h+="<div class='mb' style='display:flex;flex-direction:column;gap:.65rem'>";
+
+  // Resumen
+  h+="<div style='background:var(--sur2);border-radius:8px;padding:.6rem .8rem;display:grid;grid-template-columns:1fr 1fr 1fr;gap:.4rem;font-size:.72rem'>";
+  h+="<div><div style='color:var(--tx3);font-size:.6rem;text-transform:uppercase'>Productos</div><div style='font-weight:700;font-size:.95rem'>"+sel.length+"</div></div>";
+  h+="<div><div style='color:var(--tx3);font-size:.6rem;text-transform:uppercase'>Unidades</div><div style='font-weight:700;font-size:.95rem'>"+unidades+"</div></div>";
+  h+="<div><div style='color:var(--tx3);font-size:.6rem;text-transform:uppercase'>Total</div><div style='font-weight:700;font-size:.95rem;color:var(--green)'>u$d "+total.toFixed(2)+"</div></div>";
+  h+="</div>";
+
+  // Match catálogo info
+  h+="<div style='background:"+(sinMatch>0?'rgba(255,180,0,.08);border:1px solid rgba(255,180,0,.3)':'rgba(99,187,106,.08);border:1px solid rgba(99,187,106,.3)')+";border-radius:6px;padding:.5rem;font-size:.7rem'>";
+  if(conMatch>0){h+="<div style='color:var(--green)'>✓ "+conMatch+" item(s) matcheados con catálogo</div>";}
+  if(sinMatch>0){h+="<div style='color:var(--yel)'>⚠️ "+sinMatch+" item(s) <b>sin match</b> — quedarán como nuevos</div>";}
+  h+="<div style='color:var(--tx3);margin-top:.3rem;font-size:.65rem'>El stock <b>en viaje</b> NO se actualiza ahora — vinculá manualmente desde Pedidos en viaje cuando sea necesario.</div>";
+  h+="</div>";
+
+  // Nro de pedido editable (Fix #6)
+  h+="<div>";
+  h+="<label style='font-size:.66rem;color:var(--tx3);text-transform:uppercase;font-weight:600'>Número de pedido</label>";
+  h+="<input type='text' id='_bcNroPed' value='"+nroSugerido+"' style='width:100%;padding:.5rem;background:var(--sur2);border:1px solid var(--bd);border-radius:6px;color:var(--tx);font-size:.85rem;margin-top:.2rem;box-sizing:border-box;font-family:monospace'>";
+  h+="<div style='font-size:.6rem;color:var(--tx3);margin-top:.2rem'>Auto-generado. Editalo si necesitás un número específico.</div>";
+  h+="</div>";
+
+  // Notas opcionales
+  h+="<div>";
+  h+="<label style='font-size:.66rem;color:var(--tx3);text-transform:uppercase;font-weight:600'>Notas (opcional)</label>";
+  h+="<input type='text' id='_bcNotas' placeholder='ej: Para retirar el viernes, factura a nombre de...' style='width:100%;padding:.5rem;background:var(--sur2);border:1px solid var(--bd);border-radius:6px;color:var(--tx);font-size:.85rem;margin-top:.2rem;box-sizing:border-box'>";
+  h+="</div>";
+
+  h+="</div>"; // mb
+
+  h+="<div style='padding:.7rem;border-top:1px solid var(--bd);display:flex;gap:.5rem;justify-content:flex-end'>";
+  h+="<button class='btn btn-g' onclick='var _m=document.getElementById(\"_moBcConfPed\");if(_m)_m.remove()' style='font-size:.78rem'>Cancelar</button>";
+  h+="<button class='btn btn-a' onclick='_bcConfirmarPedidoFinal(\""+_admEsc(k).replace(/"/g,'\\&quot;')+"\")' style='font-size:.78rem;font-weight:600;background:var(--green);border-color:var(--green);color:#000'>✓ Confirmar pedido</button>";
+  h+="</div>";
+  h+="</div>";
+  mo.innerHTML=h;
+  document.body.appendChild(mo);
+}
+
+function _bcConfirmarPedidoFinal(k){
+  var nro=(document.getElementById('_bcNroPed')||{value:''}).value.trim();
+  var notas=(document.getElementById('_bcNotas')||{value:''}).value.trim()||'Creado desde Bellcito Comparador';
+  if(!nro){toast('Ingresá un número de pedido','twarn');return;}
+
+  var sel=Object.values(bcPedidos[k]&&bcPedidos[k].items||{}).filter(function(i){return i.qty>0;});
+  if(!sel.length){toast('Pedido vacio','twarn');return;}
+  var total=sel.reduce(function(s,i){return s+i.precio*i.qty;},0);
+
+  // Verificar que el nro no exista
+  apiGet('pedidos_proveedor','select=id&nro_pedido=eq.'+encodeURIComponent(nro)).then(function(existe){
+    if(Array.isArray(existe)&&existe.length){
+      toast('Ya existe un pedido con número '+nro+' — elegí otro','terr');
+      return;
+    }
+    return apiPost('pedidos_proveedor',{
+      nro_pedido:nro, proveedor:k,
+      fecha_pedido:(function(){var d=new Date();d.setHours(d.getHours()-3);return d.toISOString().slice(0,10);})(),
+      total_usd:total, estado:'pendiente',
+      notas:notas
+    }).then(function(res){
+      var pedidoId=res&&res[0]?res[0].id:null;
+      if(!pedidoId){toast('Error guardando pedido en DB','terr');return;}
+      var proms=sel.map(function(it){
+        // Fix #5: usar nombre_norm calculado correctamente, no el title-case
+        var key=bcNorm(it.nombre);
+        var match=bcManualMatches[key]?(prods||[]).find(function(p){return p.id===bcManualMatches[key];}):null;
+        if(!match){
+          match=bcFindInProds({nombre_norm:bcNormalizarNombre(it.nombre),nombre_proveedor:it.nombre});
+        }
+        var prodId=match?match.id:null;
+        return apiPost('pedidos_proveedor_items',{
+          pedido_id:pedidoId, nombre_proveedor:it.nombre, marca:k,
+          precio_usd:it.precio, cantidad_pedida:it.qty, cantidad_recibida:0,
+          codigo_proveedor:it.codigo||'', producto_id:prodId,
+          es_nuevo:!prodId, estado_item:'pendiente', observacion:''
+        });
+      });
+      return Promise.all(proms).then(function(){return {nro:nro,pedidoId:pedidoId};});
+    });
+  }).then(function(result){
+    if(!result)return;
+    toast('Pedido '+result.nro+' guardado ✓','tok');
+    var _m=document.getElementById('_moBcConfPed');if(_m)_m.remove();
+
+    // Guardar como borrador comprasItems
+    var oldItems=typeof comprasItems!=='undefined'?comprasItems:[];
+    comprasItems=sel.map(function(it){
+      return {nombre_proveedor:it.nombre,codigo:it.codigo||'',marca:k,precio_usd:it.precio,qty:it.qty,
+        selected:true,catalogo_match:null,stock_actual:null,vendidos:0,
+        es_nuevo:true,priority:'all',reasons:'',_diffs:[],producto_id:null,
+        estado_item:'pendiente',observacion:''};
+    });
+    if(typeof draftSave==='function') draftSave();
+    comprasItems=oldItems;
+
+    // Limpiar el pedido del proveedor confirmado
+    bcLimpiarPedido(k);
+
+    // Fix #9: Preguntar qué hacer con el borrador si todos los proveedores fueron confirmados
+    _bcMaybePromptDraftClose();
+  }).catch(function(err){toast('Error: '+(err&&err.message||'desconocido'),'terr');console.error(err);});
+}
+
+// Fix #9: si después de confirmar no quedan items pendientes en ningún proveedor, preguntar
+function _bcMaybePromptDraftClose(){
+  var totalPendientes=0;
+  Object.keys(bcPedidos||{}).forEach(function(k){
+    var its=Object.values((bcPedidos[k]||{}).items||{});
+    its.forEach(function(it){if((it.qty||0)>0)totalPendientes++;});
+  });
+  if(totalPendientes>0)return; // todavía hay pedidos en armado
+
+  if(drafts.length<=1)return; // si es el único borrador no preguntamos (no se puede borrar)
+
+  setTimeout(function(){
+    if(!confirm('✅ Todos los proveedores fueron confirmados.\n\n¿Cerrar este borrador y crear uno nuevo para el próximo pedido?'))return;
+    var idCerrar=activeDraftId;
+    // Crear nuevo borrador y activarlo
+    draftNew();
+    // Borrar el viejo
+    drafts=drafts.filter(function(d){return d.id!==idCerrar;});
+    apiDelete('bellcito_drafts','draft_id=eq.'+idCerrar).catch(function(){});
+    try{localStorage.setItem('belleDrafts',JSON.stringify(drafts));}catch(e){}
+    draftRenderTabs();
+    toast('Borrador cerrado, nuevo creado','tok');
+  },300);
 }
 
 
@@ -20913,13 +21119,50 @@ function draftRenameConfirm(){
 
 var bcManualMatches={};
 function bcGetMatchKey(item){return bcNorm(item.nombre_norm||item.nombre_proveedor||'');}
+
+// Fix #8: matches en Supabase + cache local (resiliente offline)
 function bcSetManualMatch(k,pid){
   if(pid===null||pid===undefined){delete bcManualMatches[k];}
   else{bcManualMatches[k]=parseInt(pid);}
+  // Cache local inmediato
   try{localStorage.setItem('bcMatches_'+(activeDraftId||'default'),JSON.stringify(bcManualMatches));}catch(e){}
+  // Persistir a Supabase (debounce de 800ms para no saturar)
+  clearTimeout(window._bcMatchSaveTimer);
+  window._bcMatchSaveTimer=setTimeout(function(){
+    apiUpsert('bellcito_drafts',{
+      draft_id:'__matches__'+(activeDraftId||'default'),
+      label:'matches',
+      items:JSON.stringify(bcManualMatches),
+      proveedores:'{}',
+      pedidos:'{}',
+      updated_at:new Date().toISOString()
+    }).catch(function(e){console.error('[bc] save matches err:',e);});
+  },800);
 }
+
 function bcLoadManualMatches(){
-  try{var s=localStorage.getItem('bcMatches_'+(activeDraftId||'default'));bcManualMatches=s?JSON.parse(s):{};}catch(e){bcManualMatches={};}
+  // 1) Cargar primero del cache local (rápido)
+  try{
+    var s=localStorage.getItem('bcMatches_'+(activeDraftId||'default'));
+    bcManualMatches=s?JSON.parse(s):{};
+  }catch(e){bcManualMatches={};}
+  // 2) Después intentar leer de Supabase y reemplazar (autoritativo)
+  apiGet('bellcito_drafts','select=items&draft_id=eq.__matches__'+(activeDraftId||'default')).then(function(rows){
+    if(Array.isArray(rows)&&rows.length&&rows[0].items){
+      try{
+        var fromDb=JSON.parse(rows[0].items);
+        if(fromDb&&typeof fromDb==='object'){
+          bcManualMatches=fromDb;
+          // Sincronizar cache local
+          try{localStorage.setItem('bcMatches_'+(activeDraftId||'default'),JSON.stringify(bcManualMatches));}catch(e){}
+          // Re-renderizar si la vista del comparador está abierta
+          if(document.getElementById('page-compras-ia')&&document.getElementById('page-compras-ia').style.display!=='none'){
+            if(typeof bcRenderAllViews==='function')bcRenderAllViews();
+          }
+        }
+      }catch(e){console.error('[bc] parse matches err:',e);}
+    }
+  }).catch(function(){/* offline ok, cache local sirve */});
 }
 function bcAbrirMatchModal(itemKey,currentMatchId,provNombre){
   var mo=document.getElementById('moMatchProd');
