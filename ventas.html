@@ -9923,15 +9923,48 @@ function loadRutas(){
       "&estado_envio=eq.en_reparto"+
       "&order=reparto_at.desc.nullslast,created_at.desc&limit=50"
     ),
-    // Borradores del vendedor
-    apiGet("rutas_borradores","select=*&vendedor_id=eq."+VENDEDOR_ID+"&order=updated_at.desc&limit=20").catch(function(){return [];})
+    // Borradores del vendedor (todos menos los completados)
+    apiGet("rutas_borradores","select=*&vendedor_id=eq."+VENDEDOR_ID+"&estado=neq.completado&order=updated_at.desc&limit=20").catch(function(){return [];})
   ]).then(function(res){
     _rt.pedidosDisponibles = Array.isArray(res[0]) ? res[0] : [];
     _rt.pedidosTodos = _rt.pedidosDisponibles.slice(); // copia para búsqueda
     _rt.vendedorDirs = Array.isArray(res[1]) ? res[1] : [];
     _rt.pedidosEnReparto = Array.isArray(res[2]) ? res[2] : [];
     _rt.borradores = Array.isArray(res[3]) ? res[3] : [];
-    _renderRutasMain();
+
+    // Juntar pedidos referenciados por los borradores que NO estén en el cache
+    var idsEnCache = {};
+    _rt.pedidosTodos.forEach(function(p){idsEnCache[p.id]=true;});
+    var idsFaltantesSet = {};
+    _rt.borradores.forEach(function(br){
+      (br.pedidos_ids||[]).forEach(function(pid){
+        if(!idsEnCache[pid]) idsFaltantesSet[pid] = true;
+      });
+    });
+    var idsFaltantes = Object.keys(idsFaltantesSet);
+
+    if(!idsFaltantes.length){
+      _renderRutasMain();
+      return;
+    }
+
+    // Cargar pedidos faltantes (los que están en borradores pero no en la query principal)
+    apiGet("pedidos_catalogo",
+      "select=id,nro_orden,total,estado,estado_envio,cliente_id,direccion_entrega_id,direccion_entrega_texto,direccion_entrega_lat,direccion_entrega_lng,direccion_entrega_referencias,modo_entrega,distancia_km,created_at,items,vendedor_id"+
+      "&id=in.("+idsFaltantes.join(",")+")"
+    ).then(function(extras){
+      if(Array.isArray(extras)){
+        extras.forEach(function(p){
+          if(!_rt.pedidosTodos.find(function(x){return x.id===p.id;})){
+            _rt.pedidosTodos.push(p);
+          }
+        });
+      }
+      _renderRutasMain();
+    }).catch(function(e){
+      console.error("[belle] cargar pedidos de borradores:",e);
+      _renderRutasMain();
+    });
   }).catch(function(e){
     console.error("[belle] loadRutas error:",e);
     pg.innerHTML = "<div class='empty'>Error al cargar rutas: "+(e.message||"desconocido")+"</div>";
@@ -11098,10 +11131,40 @@ function _rbConfirmarDir(){
 // Abrir vista de gestión de un borrador en reparto
 function _rbAbrirEnReparto(borradorId){
   _rt.borradorActivo = borradorId;
-  // Render dedicado en el body de rutas
   var b = document.getElementById("_rtBody");
   if(!b) return;
-  _rbRenderEnReparto(b);
+
+  // Asegurar que tenemos los pedidos del borrador en cache
+  var br = (_rt.borradores||[]).find(function(x){return x.id===borradorId;});
+  if(!br){toast("Borrador no encontrado","terr");return;}
+  var ids = br.pedidos_ids || [];
+  if(!ids.length){
+    _rbRenderEnReparto(b);
+    return;
+  }
+  var idsEnCache = (_rt.pedidosTodos||[]).map(function(p){return p.id;});
+  var idsFaltantes = ids.filter(function(x){return idsEnCache.indexOf(x)<0;});
+  if(!idsFaltantes.length){
+    _rbRenderEnReparto(b);
+    return;
+  }
+  // Cargar pedidos faltantes
+  apiGet("pedidos_catalogo",
+    "select=id,nro_orden,total,estado,estado_envio,cliente_id,direccion_entrega_id,direccion_entrega_texto,direccion_entrega_lat,direccion_entrega_lng,direccion_entrega_referencias,modo_entrega,distancia_km,created_at,items,vendedor_id"+
+    "&id=in.("+idsFaltantes.join(",")+")"
+  ).then(function(extras){
+    if(Array.isArray(extras) && extras.length){
+      extras.forEach(function(p){
+        if(!_rt.pedidosTodos.find(function(x){return x.id===p.id;})){
+          _rt.pedidosTodos.push(p);
+        }
+      });
+    }
+    _rbRenderEnReparto(b);
+  }).catch(function(e){
+    console.error("[belle] cargar pedidos en reparto:",e);
+    _rbRenderEnReparto(b);
+  });
 }
 
 function _rbRenderEnReparto(b){
@@ -11532,11 +11595,49 @@ function _rbEditarBorrador(id){
   if(!br) return;
   _rt.borradorActivo = id;
   _rt.subTab = "armar";
-  // Pre-cargar los pedidos del borrador en pedidosSeleccionados
-  var ids = br.pedidos_ids || [];
-  _rt.pedidosSeleccionados = (_rt.pedidosTodos||[]).filter(function(p){return ids.indexOf(p.id)>=0;}).map(function(p){return p.id;});
   _rt.paso = 1;
-  _renderRutasMain();
+
+  var ids = br.pedidos_ids || [];
+  if(!ids.length){
+    // Borrador vacío
+    _rt.pedidosSeleccionados = [];
+    _renderRutasMain();
+    return;
+  }
+
+  // Traer los pedidos del borrador desde la BD (los que no estén ya en cache)
+  var idsEnCache = (_rt.pedidosTodos||[]).map(function(p){return p.id;});
+  var idsFaltantes = ids.filter(function(x){return idsEnCache.indexOf(x)<0;});
+
+  if(!idsFaltantes.length){
+    // Todo en cache — ir directo
+    _rt.pedidosSeleccionados = ids.slice();
+    _renderRutasMain();
+    return;
+  }
+
+  // Hay pedidos del borrador que NO están en cache (porque son de otro vendedor, ya cobrados, etc).
+  // Los traemos y los agregamos al cache para que se vean en la pantalla del borrador.
+  apiGet("pedidos_catalogo",
+    "select=id,nro_orden,total,estado,estado_envio,cliente_id,direccion_entrega_id,direccion_entrega_texto,direccion_entrega_lat,direccion_entrega_lng,direccion_entrega_referencias,modo_entrega,distancia_km,created_at,items,vendedor_id"+
+    "&id=in.("+idsFaltantes.join(",")+")"
+  ).then(function(extras){
+    if(Array.isArray(extras) && extras.length){
+      // Mergear sin duplicar
+      extras.forEach(function(p){
+        if(!_rt.pedidosTodos.find(function(x){return x.id===p.id;})){
+          _rt.pedidosTodos.push(p);
+        }
+      });
+    }
+    _rt.pedidosSeleccionados = ids.slice();
+    _renderRutasMain();
+  }).catch(function(e){
+    console.error("[belle] cargar pedidos del borrador:",e);
+    // Igual rendereamos con lo que hay
+    _rt.pedidosSeleccionados = ids.slice();
+    _renderRutasMain();
+  });
 }
 
 // ── Modal "Agregar pedido a borrador" — abierto desde el botón 🚚 en pedidos ──
