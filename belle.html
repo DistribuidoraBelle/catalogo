@@ -1023,8 +1023,18 @@ td{padding:.35rem .5rem;font-size:.78rem;color:var(--tx2);vertical-align:middle;
       </div>
     </div>
     <div class="page" id="page-combos" style="display:none">
-      <div style="display:flex;justify-content:flex-end;margin-bottom:.6rem">
-        <button class="btn btn-a" onclick="abrirModalCombo(null)" style="font-size:.78rem">➕ Nuevo combo</button>
+      <div style="display:flex;gap:.5rem;flex-wrap:wrap;margin-bottom:.7rem;align-items:center">
+        <input type="text" id="combosSrch" placeholder="🔍 Buscar combo, descripción..." oninput="renderCombosGrid()" style="flex:1;min-width:200px;padding:.4rem .55rem;background:var(--sur2);border:1px solid var(--bd);border-radius:6px;color:var(--tx);font-size:.75rem">
+        <select class="fi" id="combosEstado" onchange="renderCombosGrid()" style="font-size:.72rem">
+          <option value="">📋 Todos</option>
+          <option value="activos">✅ Activos disponibles</option>
+          <option value="pausados">⏸ Pausados</option>
+          <option value="sinstock">❌ Sin stock</option>
+        </select>
+        <button class="btn btn-g" onclick="loadCombos()" style="font-size:.72rem">🔄 Recargar</button>
+        <button class="btn btn-a" onclick="_combosExportExcel()" style="font-size:.72rem" title="Exportar a Excel">📥 Excel</button>
+        <span id="combosCount" style="font-size:.7rem;color:var(--tx3)"></span>
+        <button class="btn btn-a" onclick="abrirModalCombo(null)" style="font-size:.78rem;margin-left:auto">➕ Nuevo combo</button>
       </div>
       <div id="combosGrid">
         <div class="loading"><div class="spin"></div>Cargando combos...</div>
@@ -7622,9 +7632,57 @@ function toggleCuenta(id,activo){
 // CATALOGO EDIT
 var CE_PG=1,CE_PER=30;
 function loadCombosStock(){
-  apiGet("combos","select=*,combo_items(producto_id,cantidad,producto_nombre,es_decan,precio_ref)&order=created_at.desc").then(function(data){
+  apiGet("combos","select=*,combo_items(producto_id,cantidad,producto_nombre,es_decan,precio_ref)&order=created_at.desc&limit=500").then(function(data){
     combosData=Array.isArray(data)?data:[];
     renderCombosInStock();
+    // Fix #1+#2: cargar contadores de vendidos y reservados
+    _cargarContadoresCombos();
+  });
+}
+
+// Fix #1+#2: Llenar los contadores Vendidos y Reservados de cada combo
+function _cargarContadoresCombos(){
+  if(!combosData||!combosData.length)return;
+  // Vendidos: ventas con segmento='combo' (nombre del combo en producto_nombre)
+  // Reservados: pedidos_catalogo_items con combo_id y pedido no cancelado/cobrado
+  Promise.all([
+    apiGet("ventas","select=producto_nombre,cantidad&estado=eq.confirmada&segmento=eq.combo&limit=2000").catch(function(){return [];}),
+    apiGet("pedidos_catalogo_items","select=combo_id,pedido_id&combo_id=not.is.null&limit=2000").catch(function(){return [];}),
+    apiGet("pedidos_catalogo","select=id,estado&estado=neq.cancelado&estado=neq.cobrado&limit=2000").catch(function(){return [];})
+  ]).then(function(res){
+    var ventas=Array.isArray(res[0])?res[0]:[];
+    var reservasItems=Array.isArray(res[1])?res[1]:[];
+    var pedidosActivos=Array.isArray(res[2])?res[2]:[];
+    var pedActivosSet={};
+    pedidosActivos.forEach(function(p){pedActivosSet[p.id]=true;});
+
+    // Mapa nombre_normalizado → cantidad vendida
+    var vendCountByName={};
+    ventas.forEach(function(v){
+      if(!v.producto_nombre)return;
+      var key=String(v.producto_nombre).toLowerCase().trim();
+      vendCountByName[key]=(vendCountByName[key]||0)+(parseInt(v.cantidad)||1);
+    });
+
+    // Mapa combo_id → cantidad reservada (solo pedidos activos)
+    var resCount={};
+    reservasItems.forEach(function(r){
+      if(!r.combo_id||!pedActivosSet[r.pedido_id])return;
+      resCount[r.combo_id]=(resCount[r.combo_id]||0)+1;
+    });
+
+    combosData.forEach(function(c){
+      var elV=document.getElementById('combo-vend-'+c.id);
+      if(elV){
+        var nameKey=String(c.nombre||'').toLowerCase().trim();
+        elV.textContent=vendCountByName[nameKey]||0;
+      }
+      var elR=document.getElementById('combo-res-'+c.id);
+      if(elR)elR.textContent=resCount[c.id]||0;
+    });
+  }).catch(function(e){
+    console.error('[combos] contadores err:',e);
+    // Si falla, dejar guiones (no romper la vista)
   });
 }
 
@@ -9278,9 +9336,11 @@ function loadCombos(){
   var grid=document.getElementById('combosGrid');
   if(grid)grid.innerHTML="<div class='loading'><div class='spin'></div>Cargando combos...</div>";
   function doLoad(intento){
-    apiGet("combos","select=*,combo_items(producto_id,cantidad,producto_nombre,es_decan,precio_ref)&order=created_at.desc").then(function(data){
+    apiGet("combos","select=*,combo_items(producto_id,cantidad,producto_nombre,es_decan,precio_ref)&order=created_at.desc&limit=500").then(function(data){
       combosData=Array.isArray(data)?data:[];
       renderCombosGrid();
+      // Llenar contadores también acá
+      if(typeof _cargarContadoresCombos==='function')_cargarContadoresCombos();
     }).catch(function(e){
       if(intento<3){
         setTimeout(function(){doLoad(intento+1);},1500);
@@ -9297,11 +9357,46 @@ function renderCombosGrid(){
   var grid=document.getElementById("combosGrid");if(!grid)return;
   if(!combosData.length){
     grid.innerHTML="<div class='empty' style='grid-column:1/-1;padding:2rem'>Sin combos creados. Crea el primero con + Nuevo combo.</div>";
+    var elCnt0=document.getElementById('combosCount');if(elCnt0)elCnt0.textContent='';
     return;
   }
-  grid.innerHTML=combosData.map(function(c){
+
+  // Aplicar filtros (Fix #8 + #9)
+  var srch=((document.getElementById('combosSrch')||{}).value||'').toLowerCase().trim();
+  var fEst=((document.getElementById('combosEstado')||{}).value||'');
+
+  var filtrados=combosData.filter(function(c){
     var items=c.combo_items||[];
-    // Check stock availability
+    var sinStock=items.some(function(it){
+      var p=prods.find(function(x){return x.id===it.producto_id;});
+      return p&&(p.stock_actual||0)<=0;
+    });
+    var disponible=c.activo&&!sinStock;
+
+    // Estado
+    if(fEst==='activos' && !disponible)return false;
+    if(fEst==='pausados' && c.activo)return false;
+    if(fEst==='sinstock' && !sinStock)return false;
+
+    // Búsqueda en nombre y descripción
+    if(srch){
+      var t=((c.nombre||'')+' '+(c.descripcion||'')).toLowerCase();
+      if(t.indexOf(srch)<0)return false;
+    }
+    return true;
+  });
+
+  // Contador
+  var elCnt=document.getElementById('combosCount');
+  if(elCnt)elCnt.textContent=filtrados.length+'/'+combosData.length+' combo'+(combosData.length===1?'':'s');
+
+  if(!filtrados.length){
+    grid.innerHTML="<div class='empty' style='grid-column:1/-1;padding:2rem'>Sin resultados con los filtros aplicados.</div>";
+    return;
+  }
+
+  grid.innerHTML=filtrados.map(function(c){
+    var items=c.combo_items||[];
     var sinStock=items.some(function(it){
       var p=prods.find(function(x){return x.id===it.producto_id;});
       return p&&(p.stock_actual||0)<=0;
@@ -9319,18 +9414,20 @@ function renderCombosGrid(){
       items.map(function(it){
         var p=prods.find(function(x){return x.id===it.producto_id;});
         var stock=p?(p.stock_actual||0):0;
+        var faltaProducto=p&&stock<=0;
+        // Fix #11: destacar visualmente el producto sin stock
         var skColor=stock<=0?"var(--red)":stock<=3?"var(--yel)":"var(--green)";
+        var rowBg=faltaProducto?"background:rgba(220,80,80,.08);":"";
+        var iconAlerta=faltaProducto?"⚠️ ":"";
         var r=p?calcP(p):{pi:it.precio_ref||0,decan:it.precio_ref||0};
-        // Si es decan usar precio_ref directamente (ya corregido en BD)
-        // Si precio_ref no está, usar precio_decan del producto
         var precioItem=it.es_decan
           ?(it.precio_ref>0?it.precio_ref:(p&&p.precio_decan>0?p.precio_decan:0))
           :(it.precio_ref>0?it.precio_ref:(r.pi||0));
-        return"<tr>"+
-          "<td style='font-size:.7rem;color:var(--tx);padding:.25rem .3rem'>"+it.producto_nombre+"</td>"+
+        return"<tr style='"+rowBg+"'>"+
+          "<td style='font-size:.7rem;color:var(--tx);padding:.25rem .3rem'>"+iconAlerta+_admEsc(it.producto_nombre||'')+(faltaProducto?" <b style='color:var(--red);font-size:.6rem'>(sin stock)</b>":"")+"</td>"+
           "<td style='font-size:.7rem;text-align:center;color:var(--tx2);padding:.25rem'>"+it.cantidad+"</td>"+
           "<td style='font-size:.7rem;text-align:right;color:var(--acc);padding:.25rem .3rem'>"+fmt(precioItem)+"</td>"+
-          "<td style='font-size:.7rem;text-align:center;padding:.25rem;color:"+skColor+"'>"+stock+"</td>"+
+          "<td style='font-size:.7rem;text-align:center;padding:.25rem;color:"+skColor+";font-weight:"+(faltaProducto?"700":"400")+"'>"+stock+"</td>"+
           "</tr>";
       }).join("")+"</tbody></table>";
     return"<div style='background:var(--sur);border:1px solid "+(sinStock?"var(--red)":"var(--bd)")+";border-radius:var(--r);overflow:hidden'>"+
@@ -9338,9 +9435,9 @@ function renderCombosGrid(){
         "<div style='height:50px;background:var(--sur2);display:flex;align-items:center;justify-content:center;font-size:1.5rem'>&#127873;</div>")+
       "<div style='padding:.8rem'>"+
         "<div style='display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:.3rem'>"+
-          "<div style='font-size:.9rem;font-weight:600;color:var(--tx)'>"+c.nombre+"</div>"+est+
+          "<div style='font-size:.9rem;font-weight:600;color:var(--tx)'>"+_admEsc(c.nombre||'')+"</div>"+est+
         "</div>"+
-        (c.descripcion?"<div style='font-size:.72rem;color:var(--tx3);margin-bottom:.3rem'>"+c.descripcion+"</div>":"")+
+        (c.descripcion?"<div style='font-size:.72rem;color:var(--tx3);margin-bottom:.3rem'>"+_admEsc(c.descripcion)+"</div>":"")+
         "<div style='font-size:1.1rem;font-weight:700;color:var(--acc);margin:.4rem 0'>"+fmt(c.precio)+"</div>"+
         itemsHtml+
         "<div style='display:flex;gap:.4rem;margin-top:.7rem'>"+
@@ -9351,6 +9448,8 @@ function renderCombosGrid(){
       "</div>"+
     "</div>";
   }).join("");
+  // Fix #1+#2: actualizar contadores también acá
+  if(typeof _cargarContadoresCombos==='function')_cargarContadoresCombos();
 }
 
 
@@ -9367,8 +9466,10 @@ function abrirModalCombo(id){
   document.getElementById("comboProdResults").innerHTML="";
   document.getElementById("moComboTitle").textContent=id?"Editar combo":"Nuevo combo";
   var pestanasIdsCombo=[];
+  // Fix #4: declarar c en scope superior — antes solo existía dentro de if(id)
+  var c=null;
   if(id){
-    var c=combosData.find(function(x){return x.id===id;});
+    c=combosData.find(function(x){return x.id===id;});
     if(c){
       document.getElementById("comboNombre").value=c.nombre||"";
       document.getElementById("comboPrecio").value=c.precio||"";
@@ -9572,54 +9673,54 @@ function guardarCombo(){
   var desc=document.getElementById("comboDesc").value.trim();
   if(desc)data.descripcion=desc;
   if(imgUrl)data.imagen_url=imgUrl;
+
   function saveItems(cid){
-    fetch(SB_URL+"/rest/v1/combo_items?combo_id=eq."+cid,{
-      method:"DELETE",
-      headers:{"apikey":SB_KEY,"Authorization":"Bearer "+SB_KEY,"Prefer":"return=minimal"}
-    }).then(function(delRes){
-      if(!delRes.ok&&delRes.status!==204){toast("Error borrando items ("+delRes.status+")","terr");return;}
-      var proms=comboItemsSelec.map(function(it){
-        var body={combo_id:cid,producto_id:Number(it.producto_id),cantidad:Number(it.cantidad)||1,
-          producto_nombre:String(it.nombre||""),
-          es_decan:it.isDecan===true||it.isDecan==="true",
-          precio_ref:Math.round(Number(it.precio_ref)||0)};
-        return fetch(SB_URL+"/rest/v1/combo_items",{
-          method:"POST",
-          headers:{"Content-Type":"application/json","apikey":SB_KEY,"Authorization":"Bearer "+SB_KEY,"Prefer":"return=minimal"},
-          body:JSON.stringify(body)
-        }).then(function(r){
-          if(!r.ok)return r.text().then(function(t){throw new Error("Item error ("+r.status+"): "+t.slice(0,80));});
+    // Borrar items previos del combo
+    apiDelete("combo_items","combo_id=eq."+cid).then(function(){
+      // Crear los nuevos en serie (evita race condition)
+      var chain=Promise.resolve();
+      comboItemsSelec.forEach(function(it){
+        chain=chain.then(function(){
+          return apiPost("combo_items",{
+            combo_id:cid,
+            producto_id:Number(it.producto_id),
+            cantidad:Number(it.cantidad)||1,
+            producto_nombre:String(it.nombre||""),
+            es_decan:it.isDecan===true||it.isDecan==="true",
+            precio_ref:Math.round(Number(it.precio_ref)||0)
+          });
         });
       });
-      Promise.all(proms).then(function(){
-        toast(id?"Combo actualizado":"Combo creado","tok");
-        cerrarModal("moCombo");loadCombos();
-      }).catch(function(e){toast(e.message,"terr");loadCombos();});
-    }).catch(function(e){toast("Error de red: "+e.message,"terr");});
+      return chain;
+    }).then(function(){
+      toast(id?"Combo actualizado":"Combo creado","tok");
+      cerrarModal("moCombo");
+      loadCombos();
+    }).catch(function(e){
+      console.error('[combos] saveItems error:',e);
+      toast("Error guardando items: "+(e&&e.message||""),"terr");
+      loadCombos();
+    });
   }
+
   if(comboId){
-    fetch(SB_URL+"/rest/v1/combos?id=eq."+comboId,{
-      method:"PATCH",
-      headers:{"Content-Type":"application/json","apikey":SB_KEY,"Authorization":"Bearer "+SB_KEY,"Prefer":"return=minimal"},
-      body:JSON.stringify(data)
-    }).then(function(r){
-      if(!r.ok){r.text().then(function(t){toast("Error: "+t.slice(0,80),"terr");});return;}
+    // Actualizar combo existente
+    apiPatch("combos",data,"id=eq."+comboId).then(function(){
       saveItems(comboId);
-    }).catch(function(e){toast("Error de red: "+e.message,"terr");});
+    }).catch(function(e){
+      console.error('[combos] patch error:',e);
+      toast("Error actualizando combo: "+(e&&e.message||""),"terr");
+    });
   } else {
-    fetch(SB_URL+"/rest/v1/combos",{
-      method:"POST",
-      headers:{"Content-Type":"application/json","apikey":SB_KEY,"Authorization":"Bearer "+SB_KEY,"Prefer":"return=representation"},
-      body:JSON.stringify(data)
-    }).then(function(r){
-      if(!r.ok){r.text().then(function(t){toast("Error: "+t.slice(0,80),"terr");});return;}
-      return r.json();
-    }).then(function(res){
-      if(!res)return;
+    // Crear nuevo combo
+    apiPost("combos",data).then(function(res){
       var newId=Array.isArray(res)&&res.length?res[0].id:null;
-      if(!newId){toast("Error: sin ID","terr");return;}
+      if(!newId){toast("Error: sin ID retornado","terr");return;}
       saveItems(newId);
-    }).catch(function(e){toast("Error de red: "+e.message,"terr");});
+    }).catch(function(e){
+      console.error('[combos] post error:',e);
+      toast("Error creando combo: "+(e&&e.message||""),"terr");
+    });
   }
 }
 function _showModal(titulo,contenido){
@@ -9909,11 +10010,112 @@ function toggleComboActivo(id,activo){
   });
 }
 
+// Fix #10: Export Excel de combos
+function _combosExportExcel(){
+  var data=combosData||[];
+  if(!data.length){toast('No hay combos para exportar','twarn');return;}
+
+  var doExport=function(){
+    var wb=XLSX.utils.book_new();
+
+    // Hoja 1: Combos (uno por fila con resumen)
+    var rows=[['Combo','Estado','Precio','Items','Mostrar inicio','Descripción','Pestañas']];
+    data.forEach(function(c){
+      var items=c.combo_items||[];
+      var sinStock=items.some(function(it){
+        var p=prods.find(function(x){return x.id===it.producto_id;});
+        return p&&(p.stock_actual||0)<=0;
+      });
+      var estado=sinStock?'Sin stock':(c.activo?'Activo':'Pausado');
+      var pestanasTxt=Array.isArray(c.pestanas_ids)?c.pestanas_ids.join(', '):'';
+      rows.push([
+        c.nombre||'',
+        estado,
+        parseFloat(c.precio)||0,
+        items.length,
+        c.mostrar_en_inicio?'Sí':'No',
+        c.descripcion||'',
+        pestanasTxt
+      ]);
+    });
+    var ws=XLSX.utils.aoa_to_sheet(rows);
+    ws['!cols']=[{wch:30},{wch:10},{wch:11},{wch:7},{wch:12},{wch:35},{wch:15}];
+    XLSX.utils.book_append_sheet(wb,ws,'Combos');
+
+    // Hoja 2: Items detallados
+    var rows2=[['Combo','Producto','Cantidad','Es decan','Precio unit. ref','Stock actual','Reserva']];
+    data.forEach(function(c){
+      var items=c.combo_items||[];
+      items.forEach(function(it){
+        var p=prods.find(function(x){return x.id===it.producto_id;});
+        rows2.push([
+          c.nombre||'',
+          it.producto_nombre||'',
+          it.cantidad||1,
+          it.es_decan?'Sí':'No',
+          parseFloat(it.precio_ref)||0,
+          p?(parseInt(p.stock_actual)||0):0,
+          p?(parseInt(p.reserva)||0):0
+        ]);
+      });
+    });
+    var ws2=XLSX.utils.aoa_to_sheet(rows2);
+    ws2['!cols']=[{wch:30},{wch:30},{wch:9},{wch:9},{wch:14},{wch:9},{wch:9}];
+    XLSX.utils.book_append_sheet(wb,ws2,'Items combos');
+
+    var fecha=new Date().toISOString().split('T')[0];
+    XLSX.writeFile(wb,'combos_'+fecha+'.xlsx');
+    toast('Excel descargado','tok');
+  };
+
+  if(typeof XLSX==='undefined'){
+    toast('Cargando librería de Excel...','tok');
+    var sc=document.createElement('script');
+    sc.src='https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js';
+    sc.onload=doExport;
+    sc.onerror=function(){toast('No se pudo cargar la librería Excel','terr');};
+    document.head.appendChild(sc);
+  } else {
+    doExport();
+  }
+}
+
 function eliminarCombo(id){
-  if(!confirm("Eliminar este combo? Esta accion no se puede deshacer."))return;
-  apiDelete("combos","id=eq."+id).then(function(){
+  var c=combosData.find(function(x){return x.id===id;});
+  var nombre=c?c.nombre:'este combo';
+
+  // Modal custom en vez de confirm() nativo
+  var existente=document.getElementById('_moComboDel');
+  if(existente)existente.remove();
+  var mo=document.createElement('div');
+  mo.id='_moComboDel';
+  mo.className='mo open';
+  mo.style.zIndex='10001';
+  mo.innerHTML="<div class='md' style='max-width:420px;width:95%'>"+
+    "<div class='mh'><div class='mtt' style='color:var(--red)'>🗑 Eliminar combo</div>"+
+    "<button class='btn btn-g xb' onclick='var _m=document.getElementById(\"_moComboDel\");if(_m)_m.remove()'>&#x2715;</button></div>"+
+    "<div class='mb' style='display:flex;flex-direction:column;gap:.6rem'>"+
+      "<div style='font-size:.85rem;color:var(--tx)'>¿Seguro que querés eliminar <b>"+_admEsc(nombre)+"</b>?</div>"+
+      "<div style='font-size:.72rem;color:var(--tx3);background:rgba(220,80,80,.08);border:1px solid rgba(220,80,80,.3);border-radius:6px;padding:.5rem .65rem'>⚠️ Se borrarán también todos sus items configurados. Esta acción no se puede deshacer.</div>"+
+    "</div>"+
+    "<div style='padding:.7rem;border-top:1px solid var(--bd);display:flex;gap:.5rem;justify-content:flex-end'>"+
+      "<button class='btn btn-g' onclick='var _m=document.getElementById(\"_moComboDel\");if(_m)_m.remove()' style='font-size:.78rem'>Cancelar</button>"+
+      "<button class='btn btn-red' onclick='_eliminarComboConfirmado("+id+")' style='font-size:.78rem;font-weight:700'>🗑 Sí, eliminar</button>"+
+    "</div></div>";
+  document.body.appendChild(mo);
+}
+
+function _eliminarComboConfirmado(id){
+  var _m=document.getElementById('_moComboDel');if(_m)_m.remove();
+  // Borrar items primero (Fix #3), luego el combo
+  apiDelete("combo_items","combo_id=eq."+id).then(function(){
+    return apiDelete("combos","id=eq."+id);
+  }).then(function(){
     toast("Combo eliminado","tok");
     loadCombos();
+  }).catch(function(e){
+    console.error('[combos] eliminar error:',e);
+    toast('Error eliminando combo: '+(e&&e.message||''),'terr');
   });
 }
 
