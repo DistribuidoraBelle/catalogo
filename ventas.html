@@ -9909,7 +9909,7 @@ function loadRutas(){
   // (la pantalla los separa entre "con dirección" y "sin dirección")
   Promise.all([
     apiGet("pedidos_catalogo",
-      "select=id,nro_orden,total,estado,estado_envio,cliente_id,direccion_entrega_id,modo_entrega,distancia_km,created_at,items,vendedor_id"+
+      "select=id,nro_orden,total,estado,estado_envio,cliente_id,direccion_entrega_id,direccion_entrega_texto,direccion_entrega_lat,direccion_entrega_lng,direccion_entrega_referencias,modo_entrega,distancia_km,created_at,items,vendedor_id"+
       "&or=(vendedor_id.eq."+VENDEDOR_ID+",vendedor_id.is.null)"+
       "&estado=in.(pendiente,reservado,cobrado_parcial,cobrado)"+
       "&or=(estado_envio.is.null,estado_envio.eq.en_preparacion)"+
@@ -10030,78 +10030,161 @@ function _rtRenderArmar(b){
 
 // ── PASO 1: seleccionar pedidos ─────────────────────────────────────
 function _rtRenderPaso1Pedidos(){
-  var disp = _rt.pedidosDisponibles;
+  // Si hay borrador activo, mostrar SOLO los pedidos del borrador (con o sin dirección)
+  // Si no hay borrador activo, mostrar todos los pedidos disponibles del vendedor
+  var enBorrador = !!_rt.borradorActivo;
+  var br = enBorrador ? (_rt.borradores||[]).find(function(x){return x.id===_rt.borradorActivo;}) : null;
+  var disp;
+  if(enBorrador && br){
+    var ids = br.pedidos_ids || [];
+    disp = (_rt.pedidosTodos||[]).filter(function(p){return ids.indexOf(p.id)>=0;});
+  } else {
+    disp = _rt.pedidosDisponibles;
+  }
+
   if(!disp.length){
+    if(enBorrador){
+      return "<div class='empty' style='padding:2.5rem 1rem;text-align:center'>"+
+        "<div style='font-size:2.5rem;margin-bottom:.5rem;opacity:.5'>📝</div>"+
+        "<div style='font-weight:600;font-size:.9rem;color:var(--tx);margin-bottom:.3rem'>Borrador vacío</div>"+
+        "<div style='font-size:.78rem;color:var(--tx3);max-width:380px;margin:0 auto'>Andá a la pestaña <b>Pedidos</b> y tocá 🚚 en cualquier pedido para sumarlo a este borrador. También podés usar el buscador de arriba.</div>"+
+        "</div>";
+    }
     return "<div class='empty' style='padding:2.5rem 1rem;text-align:center'>"+
       "<div style='font-size:2.5rem;margin-bottom:.5rem;opacity:.5'>📭</div>"+
       "<div style='font-weight:600;font-size:.9rem;color:var(--tx);margin-bottom:.3rem'>No hay pedidos para repartir</div>"+
-      "<div style='font-size:.78rem;color:var(--tx3);max-width:380px;margin:0 auto'>Acá aparecen tus pedidos confirmados que aún no fueron despachados. Para incluir un pedido en una ruta, debe tener un cliente asignado con dirección.</div>"+
+      "<div style='font-size:.78rem;color:var(--tx3);max-width:380px;margin:0 auto'>Acá aparecen tus pedidos confirmados que aún no fueron despachados.</div>"+
       "</div>";
   }
 
   // Separar los que se pueden incluir en la ruta (con dirección) vs los que no
-  var conDir = disp.filter(function(p){return p.cliente_id && p.direccion_entrega_id;});
-  var sinDir = disp.filter(function(p){return !p.cliente_id || !p.direccion_entrega_id;});
+  // Un pedido tiene dirección si: a) tiene direccion_entrega_id (ref a clientes_direcciones)
+  //                            o b) tiene direccion_entrega_lat/lng (dirección directa del pedido)
+  var tieneDirFn = function(p){
+    return !!(p.direccion_entrega_id || (p.direccion_entrega_lat && p.direccion_entrega_lng));
+  };
+  var conDir = disp.filter(tieneDirFn);
+  var sinDir = disp.filter(function(p){return !tieneDirFn(p);});
 
   var h = "";
-  h += "<div style='font-size:.78rem;color:var(--tx2);margin-bottom:.6rem'>Marcá los pedidos que vas a repartir hoy:</div>";
+  if(enBorrador){
+    h += "<div style='font-size:.78rem;color:var(--tx2);margin-bottom:.6rem'>Pedidos del borrador <b>'"+(br?br.nombre:"")+"'</b>:</div>";
+  } else {
+    h += "<div style='font-size:.78rem;color:var(--tx2);margin-bottom:.6rem'>Marcá los pedidos que vas a repartir hoy:</div>";
+  }
 
-  // Lista de pedidos con dirección (seleccionables)
+  // Lista de pedidos con dirección (seleccionables si NO está en modo borrador, automático si SÍ)
   if(conDir.length){
     h += "<div style='display:flex;flex-direction:column;gap:.5rem;margin-bottom:1rem'>";
     conDir.forEach(function(p){
-      var sel = _rt.pedidosSeleccionados.indexOf(p.id) >= 0;
+      // En modo borrador, todos los pedidos del borrador están "seleccionados" automáticamente
+      var sel = enBorrador ? true : (_rt.pedidosSeleccionados.indexOf(p.id) >= 0);
       var modoIcon = p.modo_entrega === "correo" ? "📦" : "🚚";
-      h += "<label style='display:flex;align-items:flex-start;gap:.55rem;background:"+(sel?"rgba(196,150,90,.07)":"var(--sur)")+";border:1px solid "+(sel?"var(--acc)":"var(--bd)")+";border-radius:8px;padding:.7rem .8rem;cursor:pointer;transition:border-color .15s'>";
-      h += "<input type='checkbox' "+(sel?"checked":"")+" onchange='_rtToggleSel("+p.id+",this.checked)' style='width:18px;height:18px;cursor:pointer;flex-shrink:0;margin-top:.15rem;accent-color:var(--acc)'>";
+      h += "<div style='display:flex;align-items:flex-start;gap:.55rem;background:"+(sel?"rgba(196,150,90,.07)":"var(--sur)")+";border:1px solid "+(sel?"var(--acc)":"var(--bd)")+";border-radius:8px;padding:.7rem .8rem;transition:border-color .15s'>";
+      if(enBorrador){
+        // En borrador: ícono + botón quitar
+        h += "<div style='font-size:1.1rem;flex-shrink:0;color:var(--green);margin-top:.05rem'>✓</div>";
+      } else {
+        h += "<input type='checkbox' "+(sel?"checked":"")+" onchange='_rtToggleSel("+p.id+",this.checked)' style='width:18px;height:18px;cursor:pointer;flex-shrink:0;margin-top:.15rem;accent-color:var(--acc)'>";
+      }
       h += "<div style='flex:1;min-width:0'>";
       h += "<div style='display:flex;justify-content:space-between;align-items:flex-start;gap:.5rem;margin-bottom:.2rem'>";
       h += "<div style='font-size:.84rem;font-weight:600;color:var(--tx)'>"+modoIcon+" "+(p.nro_orden||"#"+p.id)+"</div>";
       h += "<div style='font-size:.85rem;font-weight:700;color:var(--acc);flex-shrink:0'>"+fmt(p.total||0)+"</div>";
       h += "</div>";
-      h += "<div id='_rtCli"+p.id+"' style='font-size:.72rem;color:var(--tx3)'>Cargando cliente...</div>";
-      h += "<div id='_rtDir"+p.id+"' style='font-size:.7rem;color:var(--tx2);margin-top:.15rem'>Cargando dirección...</div>";
+      // Cliente: si tiene, se carga después; si no, mostrar "entrega directa"
+      if(p.cliente_id){
+        h += "<div id='_rtCli"+p.id+"' style='font-size:.72rem;color:var(--tx3)'>Cargando cliente...</div>";
+      } else {
+        h += "<div style='font-size:.7rem;color:var(--tx3);font-style:italic'>📦 Entrega directa (sin cliente)</div>";
+      }
+      // Dirección: si viene de clientes_direcciones, cargar; si es directa del pedido, usarla
+      if(p.direccion_entrega_id){
+        h += "<div id='_rtDir"+p.id+"' style='font-size:.7rem;color:var(--tx2);margin-top:.15rem'>Cargando dirección...</div>";
+      } else if(p.direccion_entrega_texto){
+        var dirTxt = p.direccion_entrega_texto;
+        if(p.direccion_entrega_referencias) dirTxt += " ("+p.direccion_entrega_referencias+")";
+        h += "<div style='font-size:.7rem;color:var(--tx2);margin-top:.15rem'>📍 "+dirTxt+"</div>";
+      }
       if(p.distancia_km) h += "<div style='font-size:.65rem;color:var(--tx3);margin-top:.2rem'>📏 "+p.distancia_km+" km del depósito</div>";
+      if(enBorrador){
+        h += "<div style='margin-top:.4rem;display:flex;gap:.3rem;flex-wrap:wrap'>";
+        if(!p.cliente_id){
+          h += "<button class='btn btn-g' onclick='_rtAsignarClienteAPedido("+p.id+")' style='font-size:.65rem;padding:.2rem .5rem' title='Asociar a un cliente'>👤 Asignar cliente</button>";
+        }
+        h += "<button class='btn btn-g' onclick='_rbAsignarDirA("+p.id+")' style='font-size:.65rem;padding:.2rem .5rem' title='Cambiar dirección'>📍 Cambiar dirección</button>";
+        h += "<button class='btn btn-red' onclick='_rbQuitarPedidoDeBorrador("+p.id+")' style='font-size:.65rem;padding:.2rem .5rem;margin-left:auto' title='Quitar del borrador'>🗑 Quitar</button>";
+        h += "</div>";
+      }
       h += "</div>";
-      h += "</label>";
+      h += "</div>";
     });
     h += "</div>";
   }
 
-  // Pedidos sin dirección — el vendedor puede asignarles cliente directamente desde acá
+  // Pedidos sin cliente o sin dirección
   if(sinDir.length){
-    h += "<div style='background:#fef9e8;border:1px solid #f4d987;border-radius:8px;padding:.55rem .8rem;margin:1rem 0 .6rem;font-size:.74rem;color:#7a5a1a'>";
-    h += "⚠ <b>"+sinDir.length+" pedido(s) sin cliente o dirección</b> — asigná un cliente con domicilio para incluirlos en la ruta.";
+    h += "<div style='background:rgba(240,180,41,.1);border:1px solid var(--yel);border-radius:8px;padding:.55rem .8rem;margin:1rem 0 .6rem;font-size:.74rem;color:var(--tx)'>";
+    h += "⚠ <b>"+sinDir.length+" pedido"+(sinDir.length===1?"":"s")+" con datos faltantes.</b> "+
+      (enBorrador
+        ? "Asigná cliente o dirección a cada uno. Si los dejás así, al confirmar la ruta quedarán pausados (no entran al Maps)."
+        : "Asignales un cliente con domicilio para incluirlos en la ruta.");
     h += "</div>";
-    h += "<div style='display:flex;flex-direction:column;gap:.4rem;margin-bottom:1rem'>";
+    h += "<div style='display:flex;flex-direction:column;gap:.5rem;margin-bottom:1rem'>";
     sinDir.forEach(function(p){
-      var motivo = !p.cliente_id ? "sin cliente" : "cliente sin dirección";
-      h += "<div style='background:var(--sur);border:1px dashed var(--bd);border-radius:7px;padding:.55rem .7rem;font-size:.78rem'>";
-      h += "<div style='display:flex;justify-content:space-between;align-items:center;gap:.5rem;flex-wrap:wrap'>";
-      h += "<div style='color:var(--tx2)'><span style='color:var(--tx)'>"+(p.nro_orden||"#"+p.id)+"</span> · "+fmt(p.total||0)+
-        " <span style='font-size:.65rem;color:var(--yel);margin-left:.3rem'>"+motivo+"</span></div>";
-      h += "<button class='btn btn-a' onclick='_rtAsignarClienteAPedido("+p.id+")' style='font-size:.68rem;padding:.25rem .55rem'>👤 "+
-        (!p.cliente_id?"Asignar cliente":"Asignar dirección")+"</button>";
+      var faltaCliente = !p.cliente_id;
+      var faltaDir = !p.direccion_entrega_id;
+      h += "<div style='background:var(--sur);border:1px dashed var(--yel);border-radius:7px;padding:.6rem .75rem;font-size:.78rem'>";
+      // Header
+      h += "<div style='display:flex;justify-content:space-between;align-items:flex-start;gap:.5rem;flex-wrap:wrap;margin-bottom:.3rem'>";
+      h += "<div style='font-size:.84rem;font-weight:600;color:var(--tx)'>🚚 "+(p.nro_orden||"#"+p.id)+"</div>";
+      h += "<div style='font-size:.85rem;font-weight:700;color:var(--acc);flex-shrink:0'>"+fmt(p.total||0)+"</div>";
+      h += "</div>";
+
+      // Avisos
+      h += "<div style='display:flex;flex-direction:column;gap:.15rem;margin-bottom:.4rem'>";
+      if(faltaCliente){
+        h += "<div style='font-size:.7rem;color:var(--yel)'>⚠ Falta asignar cliente</div>";
+      } else {
+        // Mostrar cliente asignado
+        h += "<div id='_rtCli"+p.id+"' style='font-size:.72rem;color:var(--tx3)'>Cargando cliente...</div>";
+      }
+      if(faltaDir){
+        h += "<div style='font-size:.7rem;color:var(--yel)'>⚠ Falta asignar dirección</div>";
+      }
+      h += "</div>";
+
+      // Botones
+      h += "<div style='display:flex;gap:.3rem;flex-wrap:wrap'>";
+      if(faltaCliente){
+        h += "<button class='btn btn-a' onclick='_rtAsignarClienteAPedido("+p.id+")' style='font-size:.68rem;padding:.3rem .55rem'>👤 Asignar cliente</button>";
+      }
+      h += "<button class='btn btn-a' onclick='_rbAsignarDirA("+p.id+")' style='font-size:.68rem;padding:.3rem .55rem'>📍 Asignar dirección</button>";
+      if(enBorrador){
+        h += "<button class='btn btn-red' onclick='_rbQuitarPedidoDeBorrador("+p.id+")' style='font-size:.65rem;padding:.3rem .5rem;margin-left:auto' title='Quitar del borrador'>🗑 Quitar</button>";
+      }
       h += "</div>";
       h += "</div>";
     });
     h += "</div>";
-  }
-
-  if(!conDir.length && sinDir.length){
-    h += "<div style='font-size:.78rem;color:var(--tx3);text-align:center;padding:1rem;font-style:italic'>Ninguno de tus pedidos tiene dirección asignada. Asignales clientes y direcciones desde la pestaña <b>Pedidos</b>.</div>";
   }
 
   // Resumen y botón siguiente
-  var totSel = _rt.pedidosSeleccionados.length;
+  var totSel = enBorrador ? conDir.length : _rt.pedidosSeleccionados.length;
   h += "<div style='position:sticky;bottom:0;background:var(--bg-card,var(--sur));border:1px solid var(--bd);border-radius:8px;padding:.7rem .9rem;display:flex;justify-content:space-between;align-items:center;gap:.5rem;flex-wrap:wrap;box-shadow:0 -4px 12px rgba(0,0,0,.05)'>";
-  h += "<div style='font-size:.82rem'><b>"+totSel+"</b> pedido"+(totSel===1?"":"s")+" seleccionado"+(totSel===1?"":"s")+"</div>";
+  if(enBorrador){
+    h += "<div style='font-size:.82rem'><b>"+conDir.length+"</b> con dirección"+(sinDir.length?" · <span style='color:var(--yel)'>"+sinDir.length+" pendiente"+(sinDir.length===1?"":"s")+"</span>":"")+"</div>";
+  } else {
+    h += "<div style='font-size:.82rem'><b>"+totSel+"</b> pedido"+(totSel===1?"":"s")+" seleccionado"+(totSel===1?"":"s")+"</div>";
+  }
   h += "<button class='btn btn-a' "+(totSel===0?"disabled style='opacity:.5;cursor:not-allowed'":"")+" onclick='_rtIrAPaso(2)'>Siguiente: Punto de partida →</button>";
   h += "</div>";
 
   // Cargar nombres de clientes y direcciones después del render — solo para los que tienen
   setTimeout(function(){
     conDir.forEach(function(p){_rtCargarDetallePedido(p);});
+    // También para los con cliente pero sin dirección
+    sinDir.forEach(function(p){if(p.cliente_id) _rtCargarDetallePedido(p);});
   }, 50);
 
   return h;
@@ -10813,6 +10896,202 @@ function _rbRenderTarjetaBorrador(br, modo){
 }
 
 // ════════════════════════════════════════════════════════════════════
+// ASIGNAR DIRECCIÓN A UN PEDIDO desde el borrador (Google Places)
+// ════════════════════════════════════════════════════════════════════
+
+// Variable global para el autocomplete
+var _rbAsigDir = null;
+
+function _rbAsignarDirA(pedId){
+  // Obtener el pedido actual
+  var p = (_rt.pedidosTodos||[]).find(function(x){return x.id===pedId;});
+  if(!p){toast("Pedido no encontrado","terr");return;}
+
+  // Cargar info del cliente si tiene
+  var clientePromise = p.cliente_id
+    ? apiGet("clientes","select=id,nombre,apellido&id=eq."+p.cliente_id+"&limit=1")
+    : Promise.resolve([]);
+
+  clientePromise.then(function(rows){
+    var cliente = (rows && rows[0]) || null;
+    _rbAbrirModalDir(p, cliente);
+  }).catch(function(e){
+    console.error("[belle] _rbAsignarDirA:",e);
+    _rbAbrirModalDir(p, null);
+  });
+}
+
+function _rbAbrirModalDir(pedido, cliente){
+  var old = document.getElementById("_moRbDir"); if(old) old.remove();
+  _rbAsigDir = {pedidoId: pedido.id, cliente: cliente, pos: null, completa: "", etiqueta: ""};
+
+  var mo = document.createElement("div");
+  mo.id = "_moRbDir";
+  mo.className = "mo open";
+  mo.style.zIndex = "99999";
+
+  var nomCliente = cliente ? ((cliente.nombre||"")+" "+(cliente.apellido||"")).trim() : null;
+
+  var h = "<div class='md' style='max-width:520px;width:95%'>";
+  h += "<div class='mh'><div class='mtt'>📍 Asignar dirección al pedido</div>";
+  h += "<button class='btn btn-g xb' onclick='document.getElementById(\"_moRbDir\").remove()'>✕</button></div>";
+  h += "<div class='mb'>";
+
+  // Info del pedido
+  h += "<div style='background:var(--sur2);border-radius:6px;padding:.55rem .7rem;margin-bottom:.7rem;font-size:.78rem'>";
+  h += "<div style='font-weight:600;color:var(--tx)'>"+(pedido.nro_orden||"#"+pedido.id)+" · "+fmt(pedido.total||0)+"</div>";
+  if(cliente){
+    h += "<div style='font-size:.7rem;color:var(--tx2);margin-top:.2rem'>👤 "+(nomCliente||("Cliente #"+cliente.id))+
+      " <span style='color:var(--green);font-size:.65rem'>· la dirección se guardará en el cliente</span></div>";
+  } else {
+    h += "<div style='font-size:.7rem;color:var(--yel);margin-top:.2rem'>⚠ Sin cliente asignado · la dirección se guardará solo para este pedido</div>";
+  }
+  h += "</div>";
+
+  // Input de búsqueda con autocomplete
+  h += "<div style='margin-bottom:.7rem'>";
+  h += "<label style='font-size:.7rem;color:var(--tx2);display:block;margin-bottom:.25rem'>Buscar dirección (Google Maps):</label>";
+  h += "<input type='text' id='_rbDirSearch' placeholder='Ej: Av. Colón 1234, Córdoba' style='width:100%;padding:.5rem .65rem;background:var(--sur2);border:1px solid var(--bd);border-radius:6px;color:var(--tx);font-size:.82rem'>";
+  h += "</div>";
+
+  // Resultado seleccionado (se llena con autocomplete)
+  h += "<div id='_rbDirResultado' style='display:none;background:rgba(76,175,130,.1);border:1px solid var(--green);border-radius:6px;padding:.55rem .7rem;margin-bottom:.7rem;font-size:.78rem'>";
+  h += "<div style='color:var(--green);font-weight:600;font-size:.7rem;margin-bottom:.2rem'>📍 Dirección encontrada</div>";
+  h += "<div id='_rbDirCompleta' style='color:var(--tx)'></div>";
+  h += "</div>";
+
+  // Etiqueta opcional (solo si hay cliente, así se distinguen sus direcciones)
+  if(cliente){
+    h += "<div style='margin-bottom:.7rem'>";
+    h += "<label style='font-size:.7rem;color:var(--tx2);display:block;margin-bottom:.25rem'>Etiqueta (opcional):</label>";
+    h += "<input type='text' id='_rbDirEtiqueta' placeholder='Ej: Casa, Trabajo, Depto' style='width:100%;padding:.5rem .65rem;background:var(--sur2);border:1px solid var(--bd);border-radius:6px;color:var(--tx);font-size:.82rem'>";
+    h += "</div>";
+  }
+
+  // Referencias opcionales
+  h += "<div style='margin-bottom:.9rem'>";
+  h += "<label style='font-size:.7rem;color:var(--tx2);display:block;margin-bottom:.25rem'>Referencias / detalles (opcional):</label>";
+  h += "<input type='text' id='_rbDirReferencias' placeholder='Ej: Depto 4B, timbre rojo, casa azul al fondo' style='width:100%;padding:.5rem .65rem;background:var(--sur2);border:1px solid var(--bd);border-radius:6px;color:var(--tx);font-size:.82rem'>";
+  h += "</div>";
+
+  // Botones
+  h += "<div style='display:flex;gap:.5rem;justify-content:flex-end'>";
+  h += "<button class='btn btn-g' onclick='document.getElementById(\"_moRbDir\").remove()'>Cancelar</button>";
+  h += "<button class='btn btn-acc' onclick='_rbConfirmarDir()'>📍 Asignar dirección</button>";
+  h += "</div>";
+
+  h += "</div></div>";
+  mo.innerHTML = h;
+  document.body.appendChild(mo);
+  mo.addEventListener("click",function(e){if(e.target===mo)mo.remove();});
+
+  // Activar autocomplete después del render
+  setTimeout(function(){
+    var inp = document.getElementById("_rbDirSearch");
+    if(inp && window.google && google.maps && google.maps.places && google.maps.places.Autocomplete){
+      try {
+        var ac = new google.maps.places.Autocomplete(inp, {
+          fields:["formatted_address","geometry"],
+          types:["address"],
+          componentRestrictions:{country:"ar"}
+        });
+        ac.addListener("place_changed", function(){
+          var pl = ac.getPlace();
+          if(pl && pl.geometry && pl.geometry.location){
+            _rbAsigDir.pos = {lat: pl.geometry.location.lat(), lng: pl.geometry.location.lng()};
+            _rbAsigDir.completa = pl.formatted_address || "";
+            // Mostrar resultado
+            var box = document.getElementById("_rbDirResultado");
+            var txt = document.getElementById("_rbDirCompleta");
+            if(box) box.style.display = "";
+            if(txt) txt.textContent = _rbAsigDir.completa;
+          }
+        });
+        inp.focus();
+      } catch(e){
+        console.error("[belle] _rbAsignarDir autocomplete:",e);
+      }
+    } else if(inp){
+      // Fallback: si Places no cargó, mostrar mensaje
+      inp.placeholder = "Google Maps no cargado — recargá la página";
+    }
+  }, 80);
+}
+
+function _rbConfirmarDir(){
+  if(!_rbAsigDir || !_rbAsigDir.pos){
+    toast("Buscá y seleccioná una dirección de la lista de Google","twarn");
+    return;
+  }
+  var pedId = _rbAsigDir.pedidoId;
+  var cliente = _rbAsigDir.cliente;
+  var pos = _rbAsigDir.pos;
+  var completa = _rbAsigDir.completa;
+  var refInp = document.getElementById("_rbDirReferencias");
+  var etqInp = document.getElementById("_rbDirEtiqueta");
+  var referencias = refInp ? (refInp.value||"").trim() : "";
+  var etiqueta = etqInp ? (etqInp.value||"").trim() : "";
+
+  if(cliente){
+    // CASO 1: el pedido tiene cliente → guardar la dirección en clientes_direcciones
+    // (queda asociada al cliente para futuro) Y asignarla al pedido
+    var dirData = {
+      cliente_id: cliente.id,
+      etiqueta: etiqueta || null,
+      direccion_completa: completa,
+      lat: pos.lat,
+      lng: pos.lng,
+      referencias: referencias || null,
+      es_principal: false  // No tocar el principal del cliente
+    };
+    apiPost("clientes_direcciones", dirData).then(function(rows){
+      var nuevaDir = Array.isArray(rows) && rows[0];
+      if(!nuevaDir){toast("Error guardando dirección","terr");return;}
+      // Asignar al pedido
+      apiPatch("pedidos_catalogo",{direccion_entrega_id: nuevaDir.id, estado_envio: "en_preparacion"},"id=eq."+pedId).then(function(){
+        // Actualizar cache local
+        var pCache = (_rt.pedidosTodos||[]).find(function(x){return x.id===pedId;});
+        if(pCache){pCache.direccion_entrega_id = nuevaDir.id;}
+        var mo = document.getElementById("_moRbDir"); if(mo) mo.remove();
+        toast("Dirección asignada al cliente y al pedido","tok");
+        loadRutas();
+      }).catch(function(e){
+        console.error("[belle] asignar dir a pedido:",e);
+        toast("Error al asignar dirección al pedido","terr");
+      });
+    }).catch(function(e){
+      console.error("[belle] guardar dir cliente:",e);
+      toast("Error guardando dirección: "+(e&&e.message||""),"terr");
+    });
+  } else {
+    // CASO 2: el pedido NO tiene cliente → guardar la dirección directamente en el pedido
+    // (en columnas direccion_entrega_texto/lat/lng/referencias del pedido)
+    var patch = {
+      direccion_entrega_texto: completa,
+      direccion_entrega_lat: pos.lat,
+      direccion_entrega_lng: pos.lng,
+      direccion_entrega_referencias: referencias || null,
+      estado_envio: "en_preparacion"
+    };
+    apiPatch("pedidos_catalogo", patch, "id=eq."+pedId).then(function(){
+      var pCache = (_rt.pedidosTodos||[]).find(function(x){return x.id===pedId;});
+      if(pCache){
+        pCache.direccion_entrega_texto = patch.direccion_entrega_texto;
+        pCache.direccion_entrega_lat = pos.lat;
+        pCache.direccion_entrega_lng = pos.lng;
+        pCache.direccion_entrega_referencias = patch.direccion_entrega_referencias;
+      }
+      var mo = document.getElementById("_moRbDir"); if(mo) mo.remove();
+      toast("Dirección asignada al pedido","tok");
+      loadRutas();
+    }).catch(function(e){
+      console.error("[belle] asignar dir solo pedido:",e);
+      toast("Error: "+(e&&e.message||""),"terr");
+    });
+  }
+}
+
+// ════════════════════════════════════════════════════════════════════
 // BORRADOR EN REPARTO — vista de gestión durante la entrega
 // ════════════════════════════════════════════════════════════════════
 
@@ -11066,19 +11345,26 @@ function _rbRegenerarMaps(){
   // Cargar coordenadas de cada pedido activo (necesitan dirección)
   var paradasIds = activos.map(function(e){return e.id;});
   var pedsArr = (_rt.pedidosTodos||[]).filter(function(p){return paradasIds.indexOf(p.id)>=0;});
-  // Necesitamos las direcciones. Las traemos en bulk.
-  var dirIds = pedsArr.filter(function(p){return p.direccion_entrega_id;}).map(function(p){return p.direccion_entrega_id;});
-  if(!dirIds.length){toast("Las paradas activas no tienen dirección","terr");return;}
-  apiGet("clientes_direcciones","select=id,direccion_completa,lat,lng&id=in.("+dirIds.join(",")+")").then(function(dirs){
-    if(!Array.isArray(dirs)||!dirs.length){toast("No se cargaron direcciones","terr");return;}
-    var dirMap = {};
-    dirs.forEach(function(d){dirMap[d.id]=d;});
-    var paradasOK = pedsArr.filter(function(p){
+
+  // Pedidos con dirección directa en el pedido (lat/lng propios)
+  var conDirDirecta = pedsArr.filter(function(p){return p.direccion_entrega_lat && p.direccion_entrega_lng;});
+  // Pedidos con direccion_entrega_id (referencia a clientes_direcciones)
+  var conDirRef = pedsArr.filter(function(p){return !p.direccion_entrega_lat && p.direccion_entrega_id;});
+  var dirIds = conDirRef.map(function(p){return p.direccion_entrega_id;});
+
+  // Helper: arma la lista final de paradas en el orden de pedsArr
+  function armarYAbrir(dirMap){
+    var paradasOK = pedsArr.map(function(p){
+      if(p.direccion_entrega_lat && p.direccion_entrega_lng){
+        return {lat: parseFloat(p.direccion_entrega_lat), lng: parseFloat(p.direccion_entrega_lng), pedId: p.id};
+      }
       var d = dirMap[p.direccion_entrega_id];
-      return d && d.lat!=null && d.lng!=null;
-    }).map(function(p){
-      return {lat: dirMap[p.direccion_entrega_id].lat, lng: dirMap[p.direccion_entrega_id].lng};
-    });
+      if(d && d.lat!=null && d.lng!=null){
+        return {lat: parseFloat(d.lat), lng: parseFloat(d.lng), pedId: p.id};
+      }
+      return null;
+    }).filter(function(x){return x;});
+
     if(!paradasOK.length){toast("Ninguna parada tiene coordenadas","terr");return;}
 
     var url = "https://www.google.com/maps/dir/?api=1";
@@ -11097,9 +11383,21 @@ function _rbRegenerarMaps(){
     url += "&travelmode=driving";
     window.open(url, "_blank");
     toast("Maps abierto con "+paradasOK.length+" parada"+(paradasOK.length===1?"":"s"),"tok");
+  }
+
+  if(!dirIds.length){
+    // Solo direcciones directas — no necesitamos query
+    armarYAbrir({});
+    return;
+  }
+
+  apiGet("clientes_direcciones","select=id,direccion_completa,lat,lng&id=in.("+dirIds.join(",")+")").then(function(dirs){
+    var dirMap = {};
+    if(Array.isArray(dirs)) dirs.forEach(function(d){dirMap[d.id]=d;});
+    armarYAbrir(dirMap);
   }).catch(function(e){
     console.error("[belle] regenerar maps:",e);
-    toast("Error al regenerar","terr");
+    toast("Error al cargar direcciones","terr");
   });
 }
 
