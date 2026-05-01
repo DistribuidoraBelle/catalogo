@@ -644,7 +644,21 @@ function calcAlertaPrecio(items){
 
 
 function getCartTotalUnits(){return Object.values(cart).filter(function(i){return !i.isDecan;}).reduce(function(s,i){return s+i.qty;},0);}
-function getBestSeg(total,r){if(total>=10&&r.pm)return"pm";if(total>=3&&r.pe)return"pe";return"pi";}
+
+// Helper: detecta si el cliente del carrito tiene CC habilitada
+// (usado para forzar precio mayorista en getBestSeg sin tocar 20 invocaciones)
+function _esCarritoCC(){
+  return !!(typeof _carritoCliente!=="undefined" && _carritoCliente && _carritoCliente.cuenta_corriente_habilitada);
+}
+
+function getBestSeg(total,r){
+  // Cliente con CC habilitada → SIEMPRE precio mayorista (x10), sin importar la cantidad.
+  // Solo aplica si el producto realmente tiene precio mayorista calculable (r.pm).
+  if(_esCarritoCC() && r && r.pm) return "pm";
+  if(total>=10&&r.pm)return"pm";
+  if(total>=3&&r.pe)return"pe";
+  return"pi";
+}
 
 
 function loadQuickPanels(){
@@ -829,6 +843,8 @@ function renderProdCard(p,totalUnits){
   var skCls=stockTotal===0?"sb-r":sa===0?"sb-y":sa<=3?"sb-y":"sb-g";
   var previewTotal=totalUnits+(st.qty||0)-(ic&&!ic.isDecan?ic.qty:0);
   var bestSeg=previewTotal>0?getBestSeg(previewTotal,r):"none";
+  // Cliente CC: forzar visualmente x10 destacado + x3/x1 tachados como precio normal
+  var _isCC = _esCarritoCC() && r.pm;
   var segs=[{k:"pm",l:"x10+",v:r.pm},{k:"pe",l:"x3+",v:r.pe},{k:"pi",l:"x1",v:r.pi}];
   // Precio unico
   var _pUnico=p.precio_pestana||0;
@@ -836,6 +852,26 @@ function renderProdCard(p,totalUnits){
   if(_pUnico>0){
     segHtml="<div class='segs'><div class='seg-btn lit' style='grid-column:1/-1'>"+
       "<span class='sbl'>Precio único</span><span class='sbv'>"+fmt(_pUnico)+"</span></div></div>";
+  } else if(_isCC){
+    // Modo CC: x10 destacado grande, x3/x1 tachados mostrando ahorro
+    segHtml="<div class='segs'>";
+    segs.forEach(function(s){
+      if(!s.v){segHtml+="<div class='seg-btn' style='opacity:.3'><span class='sbl'>"+s.l+"</span><span class='sbv'>-</span></div>";return;}
+      if(s.k==="pm"){
+        // x10 destacado con badge 💎 CC
+        segHtml+="<div class='seg-btn lit' id='seg-"+id+"-"+s.k+"' style='border:2px solid var(--acc);background:rgba(196,150,90,.18)'>"+
+          "<span class='sbl' style='color:var(--acc);font-weight:700'>💎 CC</span>"+
+          "<span class='sbv' style='font-weight:700'>"+fmt(s.v)+"</span>"+
+          "</div>";
+      } else {
+        // x3 / x1 tachados como referencia
+        segHtml+="<div class='seg-btn' id='seg-"+id+"-"+s.k+"' style='opacity:.5;text-decoration:line-through'>"+
+          "<span class='sbl'>"+s.l+"</span>"+
+          "<span class='sbv'>"+fmt(s.v)+"</span>"+
+          "</div>";
+      }
+    });
+    segHtml+="</div>";
   } else {
     segHtml="<div class='segs'>";
     segs.forEach(function(s){
@@ -847,7 +883,7 @@ function renderProdCard(p,totalUnits){
   }
   var priceTagHtml="";
   if(bestSeg!=="none"&&previewTotal>0){
-    var pn=bestSeg==="pm"?"Precio x10":bestSeg==="pe"?"Precio x3":"Precio unitario";
+    var pn=_isCC?"💎 Precio CC (x10)":(bestSeg==="pm"?"Precio x10":bestSeg==="pe"?"Precio x3":"Precio unitario");
     priceTagHtml="<span class='price-tag'>"+pn+"</span>";
   }
   // Decan row
@@ -2561,14 +2597,31 @@ function _seleccionarClienteDrawer(id){
     apiGet("clientes","select=id,nombre,apellido,telefono_principal,cuenta_corriente_habilitada&id=eq."+id).then(function(rows){
       var c=rows&&rows[0];if(!c)return;
       var nom=(c.nombre||"")+" "+(c.apellido||"");
+      // Si estamos en flujo de rutas, buscar primero las direcciones del cliente
+      var enRutas = window._rtAsignandoEnRutas === modo.pedId;
+      if(enRutas){
+        // Buscar direcciones del cliente. Si no tiene, avisar y abortar.
+        apiGet("clientes_direcciones","select=id,etiqueta,direccion_completa,es_principal,lat,lng&cliente_id=eq."+c.id+"&order=es_principal.desc,id.asc").then(function(dirs){
+          if(!Array.isArray(dirs)||!dirs.length){
+            toast("⚠ "+nom.trim()+" no tiene direcciones cargadas. Agregale una desde Clientes.","terr");
+            return;
+          }
+          // Si tiene una sola, asignar directamente
+          if(dirs.length===1){
+            return _rtConfirmarAsignacion(modo.pedId, c, dirs[0], nom);
+          }
+          // Si tiene varias, mostrar selector
+          _rtSeleccionarDireccion(modo.pedId, c, dirs, nom);
+        }).catch(function(e){console.error("[belle] dirs cliente error:",e);toast("Error al cargar direcciones","terr");});
+        return;
+      }
+      // Flujo original (no rutas)
       if(!confirm("Asignar el pedido a "+nom.trim()+" (#"+c.id+")?"))return;
-      // Patch del pedido
       var patch={cliente_id:c.id,estado_envio:"en_preparacion"};
       apiPatch("pedidos_catalogo",patch,"id=eq."+modo.pedId).then(function(){
         var nota=modo.clienteActualId?"Cliente cambiado a "+nom.trim()+" (#"+c.id+") por "+VENDEDOR_NOMBRE
           :"Cliente asignado: "+nom.trim()+" (#"+c.id+") por "+VENDEDOR_NOMBRE;
         _logEstadoPedidoV(modo.pedId,modo.clienteActualId?"cliente_cambiado":"cliente_asignado",nota);
-        // Actualizar último pedido del cliente
         apiPatch("clientes",{ultimo_pedido_at:new Date().toISOString()},"id=eq."+c.id).catch(function(e){console.error("[belle] error silencioso:",e);});
         toast(nom.trim()+" asignado al pedido","tok");
         var moB=document.getElementById("_moBuscarCliente");if(moB)moB.remove();
@@ -2600,6 +2653,8 @@ function _seleccionarClienteDrawer(id){
     // Cerrar modal buscador
     var mo=document.getElementById("_moBuscarCliente");if(mo)mo.remove();
     toast((c.nombre||"")+" asignado al pedido","tok");
+    // Re-render del catálogo: si el cliente tiene CC habilitada, las tarjetas mostrarán precio x10 forzado
+    if(typeof renderCat==="function") renderCat();
   });
 }
 
@@ -2613,6 +2668,8 @@ function _desasignarCliente(){
   if(ccCheck)ccCheck.checked=false;
   var mo=document.getElementById("_moBuscarCliente");if(mo)mo.remove();
   toast("Cliente desasignado","tok");
+  // Re-render del catálogo (cliente quitado → vuelve a precios normales)
+  if(typeof renderCat==="function") renderCat();
 }
 
 function toggleCCDrawer(checked){
@@ -2635,6 +2692,8 @@ function _limpiarCarritoCliente(){
   if(ccCheck){ccCheck.checked=false;}
   var fc=document.getElementById("formaCobro");
   if(fc){fc.disabled=false;fc.style.opacity="1";}
+  // Re-render del catálogo (cliente limpiado → vuelve a precios normales)
+  if(typeof renderCat==="function") renderCat();
 }
 
 // ── Helper log de estados desde ventas ───────────────────────
@@ -4249,10 +4308,16 @@ function renderPedCard(ped,cobrado){
       _asigBadge="<span class='badge' style='font-size:.55rem;margin-left:.4rem;background:rgba(74,159,216,.15);color:var(--blue);border:1px solid rgba(74,159,216,.4)'>👤 "+_vn+"</span>";
     }
   }
+  // Badge "En reparto" — bien visible cuando el pedido salió en una ruta
+  var _enReparto = ped.estado_envio==="en_reparto";
+  var _repartoBadge = _enReparto
+    ? "<span class='badge' style='margin-left:.4rem;font-size:.6rem;background:rgba(91,141,238,.18);color:var(--blue);border:1px solid var(--blue);font-weight:700;padding:.1rem .4rem'>🚚 En reparto</span>"
+    : "";
   var html="<div class='ped-card"+(cobrado||cancelado?"":" nuevo")+"'>";
   html+="<div class='ped-header'>";
   html+="<div><div style='font-size:.78rem;font-weight:500;color:var(--tx)'>Pedido web <span style='color:var(--acc);font-size:.7rem'>"+(ped.nro_orden||("#"+ped.id))+"</span>"+
     _asigBadge+
+    _repartoBadge+
     (ped.estado==="entregado"?"<span class='badge bg-cyan' style='margin-left:.4rem;font-size:.55rem'>Entregado por Marcela</span>":"")+
     "</div>";
   html+="<div class='ped-fecha'>"+fecha+"</div></div>";
@@ -9969,17 +10034,20 @@ function _rtRenderPaso1Pedidos(){
     h += "</div>";
   }
 
-  // Pedidos sin dirección (informativos, no se pueden agregar a la ruta)
+  // Pedidos sin dirección — el vendedor puede asignarles cliente directamente desde acá
   if(sinDir.length){
     h += "<div style='background:#fef9e8;border:1px solid #f4d987;border-radius:8px;padding:.55rem .8rem;margin:1rem 0 .6rem;font-size:.74rem;color:#7a5a1a'>";
-    h += "⚠ <b>"+sinDir.length+" pedido(s) sin cliente o dirección</b> — no se pueden incluir en la ruta hasta asignarles cliente + dirección. Andá a Pedidos para asignarlos.";
+    h += "⚠ <b>"+sinDir.length+" pedido(s) sin cliente o dirección</b> — asigná un cliente con domicilio para incluirlos en la ruta.";
     h += "</div>";
-    h += "<div style='display:flex;flex-direction:column;gap:.4rem;margin-bottom:1rem;opacity:.6'>";
+    h += "<div style='display:flex;flex-direction:column;gap:.4rem;margin-bottom:1rem'>";
     sinDir.forEach(function(p){
-      h += "<div style='background:var(--sur);border:1px dashed var(--bd);border-radius:7px;padding:.5rem .7rem;font-size:.78rem;color:var(--tx3)'>";
-      h += "<div style='display:flex;justify-content:space-between;align-items:center;gap:.5rem'>";
-      h += "<div>"+(p.nro_orden||"#"+p.id)+" · "+fmt(p.total||0)+"</div>";
-      h += "<div style='font-size:.65rem'>"+(!p.cliente_id?"sin cliente":"sin dirección")+"</div>";
+      var motivo = !p.cliente_id ? "sin cliente" : "cliente sin dirección";
+      h += "<div style='background:var(--sur);border:1px dashed var(--bd);border-radius:7px;padding:.55rem .7rem;font-size:.78rem'>";
+      h += "<div style='display:flex;justify-content:space-between;align-items:center;gap:.5rem;flex-wrap:wrap'>";
+      h += "<div style='color:var(--tx2)'><span style='color:var(--tx)'>"+(p.nro_orden||"#"+p.id)+"</span> · "+fmt(p.total||0)+
+        " <span style='font-size:.65rem;color:var(--yel);margin-left:.3rem'>"+motivo+"</span></div>";
+      h += "<button class='btn btn-a' onclick='_rtAsignarClienteAPedido("+p.id+")' style='font-size:.68rem;padding:.25rem .55rem'>👤 "+
+        (!p.cliente_id?"Asignar cliente":"Asignar dirección")+"</button>";
       h += "</div>";
       h += "</div>";
     });
@@ -10380,6 +10448,82 @@ function _rtRedibujarRuta(){
           "</div>";
       }
     }
+  });
+}
+
+// ── Asignar cliente a un pedido desde la pantalla de rutas ──
+// Reusa el buscador existente abrirBuscadorClienteParaPedido pero aplica un override
+// para que después de asignar el cliente también setee la direccion_entrega_id por defecto
+// y refresque la pantalla de rutas en vez de la de pedidos.
+function _rtAsignarClienteAPedido(pedId){
+  // Marcamos contexto de "estoy en rutas" para que el callback refresque rutas
+  window._rtAsignandoEnRutas = pedId;
+  abrirBuscadorClienteParaPedido(pedId, null);
+}
+
+// Si el cliente tiene una sola dirección, asignarla directamente
+function _rtConfirmarAsignacion(pedId, cliente, direccion, nombreCli){
+  if(!confirm("Asignar pedido a "+nombreCli.trim()+" (#"+cliente.id+")?\nDirección: "+direccion.direccion_completa))return;
+  var patch={
+    cliente_id: cliente.id,
+    direccion_entrega_id: direccion.id,
+    estado_envio: "en_preparacion"
+  };
+  apiPatch("pedidos_catalogo", patch, "id=eq."+pedId).then(function(){
+    _logEstadoPedidoV(pedId,"cliente_asignado","Cliente "+nombreCli.trim()+" (#"+cliente.id+") + dirección asignados desde Rutas por "+VENDEDOR_NOMBRE);
+    apiPatch("clientes",{ultimo_pedido_at:new Date().toISOString()},"id=eq."+cliente.id).catch(function(e){console.error("[belle] silencioso:",e);});
+    toast("Cliente y dirección asignados","tok");
+    var moB=document.getElementById("_moBuscarCliente");if(moB)moB.remove();
+    var moD=document.getElementById("_moRtSelDir");if(moD)moD.remove();
+    window._rtAsignandoEnRutas = null;
+    // Refrescar rutas (no pedidos) — recarga los datos y re-renderiza
+    if(typeof loadRutas==="function") loadRutas();
+  }).catch(function(e){
+    console.error("[belle] _rtConfirmarAsignacion error:",e);
+    toast("Error al asignar: "+(e&&e.message||""),"terr");
+  });
+}
+
+// Si el cliente tiene varias direcciones, mostrar selector
+function _rtSeleccionarDireccion(pedId, cliente, dirs, nombreCli){
+  // Cerrar el modal del buscador antes de abrir el de direcciones
+  var moB=document.getElementById("_moBuscarCliente");if(moB)moB.remove();
+
+  var mo=document.createElement("div");
+  mo.id="_moRtSelDir";
+  mo.className="mo open";
+  mo.style.zIndex="999999";
+  var h="<div class='md' style='max-width:460px;width:95%'>";
+  h+="<div class='mh'><div class='mtt'>📍 Elegir dirección para entrega</div>";
+  h+="<button class='btn btn-g xb' onclick='var _m=document.getElementById(\"_moRtSelDir\");if(_m)_m.remove();window._rtAsignandoEnRutas=null;'>✕</button></div>";
+  h+="<div class='mb'>";
+  h+="<div style='font-size:.78rem;color:var(--tx2);margin-bottom:.7rem'>Cliente: <b>"+nombreCli.trim()+"</b> tiene "+dirs.length+" direcciones cargadas.</div>";
+  h+="<div style='display:flex;flex-direction:column;gap:.4rem'>";
+  dirs.forEach(function(d){
+    var ppal = d.es_principal ? "<span style='font-size:.6rem;background:rgba(74,159,216,.15);color:var(--blue);padding:.1rem .4rem;border-radius:3px;margin-left:.4rem'>Principal</span>" : "";
+    h+="<button onclick='_rtElegirDirGuardada("+pedId+","+cliente.id+","+d.id+",\""+(d.direccion_completa||"").replace(/\"/g,'&quot;').replace(/'/g,"&#39;")+"\",\""+(nombreCli||"").replace(/\"/g,'&quot;').replace(/'/g,"&#39;")+"\")' style='display:block;width:100%;text-align:left;background:var(--sur2);border:1px solid var(--bd);border-radius:6px;padding:.55rem .7rem;cursor:pointer;color:var(--tx);font-size:.78rem'>";
+    h+="<div style='font-weight:600'>"+(d.etiqueta||"Domicilio")+ppal+"</div>";
+    h+="<div style='font-size:.7rem;color:var(--tx2);margin-top:.2rem'>"+(d.direccion_completa||"")+"</div>";
+    h+="</button>";
+  });
+  h+="</div>";
+  h+="</div></div>";
+  mo.innerHTML=h;
+  document.body.appendChild(mo);
+  mo.addEventListener("click",function(e){if(e.target===mo){mo.remove();window._rtAsignandoEnRutas=null;}});
+}
+
+// Click en una dirección guardada del selector
+function _rtElegirDirGuardada(pedId, clienteId, dirId, dirCompleta, nombreCli){
+  // Re-fetch del cliente y dirección para confirmar (más seguro que pasar todo por args)
+  Promise.all([
+    apiGet("clientes","select=id,nombre,apellido&id=eq."+clienteId+"&limit=1"),
+    apiGet("clientes_direcciones","select=id,direccion_completa&id=eq."+dirId+"&limit=1")
+  ]).then(function(res){
+    var c=res[0]&&res[0][0];
+    var d=res[1]&&res[1][0];
+    if(!c||!d){toast("Datos no disponibles","terr");return;}
+    _rtConfirmarAsignacion(pedId, c, d, nombreCli || ((c.nombre||"")+" "+(c.apellido||"")));
   });
 }
 
