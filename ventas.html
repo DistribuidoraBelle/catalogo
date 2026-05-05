@@ -3628,12 +3628,15 @@ function loadPedidosWeb(){
     apiGet("pedidos_catalogo","select=*&confirmado_cobro=eq.false&estado=neq.cancelado&order=created_at.desc&limit=300"),
     apiGet("pedidos_catalogo","select=*&confirmado_cobro=eq.true&estado=eq.cobrado&order=confirmado_at.desc&limit=100"+(periodoActual?'&periodo=eq.'+encodeURIComponent(periodoActual):'')),
     apiGet("pedidos_catalogo","select=*&estado=eq.cancelado&order=created_at.desc&limit=50"),
-    apiGet("ventas_transferidas","select=*&estado=eq.pendiente&order=created_at.desc&limit=100")
+    // UNIFICADO: las "transferidas" ahora son los pedidos_catalogo con transferida_por_id (sistema único).
+    // Marcela escribe acá ahora; David/Facu transfieren acá. Una sola fuente.
+    apiGet("pedidos_catalogo","select=*&transferida_por_id=not.is.null&order=transferida_at.desc.nullslast,created_at.desc&limit=200")
   ]).then(function(res){
     var sinCobrar=(Array.isArray(res[0])?res[0]:[]).concat(Array.isArray(res[1])?res[1]:[]);
     var seen={}; sinCobrar=sinCobrar.filter(function(p){if(seen[p.id])return false;seen[p.id]=true;return true;});
     var pedidos=sinCobrar.concat(Array.isArray(res[2])?res[2]:[]).concat(Array.isArray(res[3])?res[3]:[]);
-    var transferidas=(Array.isArray(res[4])?res[4]:[]).map(function(t){t._esTransf=true;return t;});
+    // Las transferidas ya son pedidos_catalogo, no necesitan flag _esTransf
+    var transferidas=Array.isArray(res[4])?res[4]:[];
     window._pedidosData=pedidos;
     window._transfData=transferidas;
     _renderPedidosFiltrados(window._pedFiltroEstado||"todos");
@@ -3805,7 +3808,8 @@ function _renderPedidosFiltrados(filtroEstado){
     if(pend.length){html+="<div class='sec-title'>Pendientes <span style='color:var(--red)'>"+pend.length+"</span></div>";pend.forEach(function(p){html+=renderPedCard(p,false);});}
     if(resv.length){html+="<div class='sec-title' style='margin-top:.6rem'>Reservados <span style='color:var(--cyan)'>"+resv.length+"</span></div>";resv.forEach(function(p){html+=renderPedCard(p,false);});}
     if(parc.length){html+="<div class='sec-title' style='margin-top:.6rem'>Cobro parcial</div>";parc.forEach(function(p){html+=renderPedCard(p,false);});}
-    if(transf.length){html+="<div class='sec-title' style='margin-top:.6rem'>Transferidas</div>";transf.forEach(function(p){html+=renderPedCard(p,false);});}
+    // NOTA: ya NO se agrega sección "Transferidas" aparte porque ahora son pedidos_catalogo
+    // y ya aparecen dentro de Pendientes/Cobrados/etc según estado. El filtro chip 'Transferidas' sigue funcionando.
     if(cob.length){html+="<div class='sec-title' style='margin-top:.6rem'>Cobrados</div>";cob.forEach(function(p){html+=renderPedCard(p,true);});}
     if(canc.length){html+="<div class='sec-title' style='margin-top:.6rem;color:var(--red)'>Cancelados</div>";canc.forEach(function(p){html+=renderPedCard(p,false);});}
   } else {
@@ -4711,19 +4715,26 @@ function guardarEditPed(){
 
 // TRANSFERIDAS
 
-function cancelarTransf(id,conReserva,btn){
+function cancelarTransf(id,conReserva,btn,esUnificado){
   if(!confirm("Cancelar esta transferencia?"+(conReserva?" El stock reservado vuelve al inventario.":"")))return;
   if(btn)btn.disabled=true;
-  apiGet("ventas_transferidas","select=*&id=eq."+id).then(function(data){
+  // Sistema unificado (pedidos_catalogo) o legacy (ventas_transferidas)
+  var tabla = esUnificado ? "pedidos_catalogo" : "ventas_transferidas";
+  apiGet(tabla,"select=*&id=eq."+id).then(function(data){
     if(!Array.isArray(data)||!data.length)return;
     var v=data[0];var items=[];
     try{items=typeof v.items==="string"?JSON.parse(v.items):v.items;}catch(e){}
-    var promises=[apiPatch("ventas_transferidas",{estado:"cancelada"},"id=eq."+id)];
+    var promises=[];
+    if(esUnificado){
+      // pedidos_catalogo: marcar como cancelado
+      promises.push(apiPatch("pedidos_catalogo",{estado:"cancelado"},"id=eq."+id));
+    } else {
+      promises.push(apiPatch("ventas_transferidas",{estado:"cancelada"},"id=eq."+id));
+    }
     if(conReserva&&Array.isArray(items)){
       items.forEach(function(it){
         var pid=it.producto_id;
         if(!pid||it.isDecan)return;
-        // FIX: eliminar prods.find() — siempre leer BD fresca para devolver stock
         promises.push(
           apiGet("productos","select=id,stock_actual,reserva&id=eq."+pid).then(function(rows){
             var fp=rows&&rows[0];
@@ -4743,8 +4754,8 @@ function cancelarTransf(id,conReserva,btn){
       });
     }
     Promise.all(promises).then(function(){
-      // If from Marcela, delete her pending commission (it shouldn't be paid)
-      if(v.creada_por==='Marcela'&&v.nro_orden){
+      // If from Marcela (legacy), delete her pending commission
+      if(!esUnificado && v.creada_por==='Marcela'&&v.nro_orden){
         apiGet('gastos_vendedor','select=id,concepto&vendedor_id=eq.3&aprobado=eq.false&concepto=like.%25'+v.nro_orden+'%25').then(function(gastos){
           if(Array.isArray(gastos)&&gastos.length){
             Promise.all(gastos.map(function(g){
@@ -4792,26 +4803,69 @@ function editarTransf(id){
   });
 }
 
-function eliminarTransf(id,btn){
+function eliminarTransf(id,btn,esUnificado){
   bellConfirm("Eliminar esta transferencia definitivamente?",function(){
-  if(btn)btn.disabled=true;
-  apiDelete("ventas_transferidas","id=eq."+id).then(function(){
-    toast("Transferencia eliminada","twarn");loadTransferidas();
-  }).catch(function(){if(btn)btn.disabled=false;});  });
+    if(btn)btn.disabled=true;
+    var tabla = esUnificado ? "pedidos_catalogo" : "ventas_transferidas";
+    apiDelete(tabla,"id=eq."+id).then(function(){
+      toast("Transferencia eliminada","twarn");loadTransferidas();
+    }).catch(function(){if(btn)btn.disabled=false;});
+  });
 }
 
 
 function loadTransferidas(){
   var pg=document.getElementById("pg-transferidas");
   pg.innerHTML="<div class='loading'><div class='spin'></div>Cargando...</div>";
-  // Load both: ventas_transferidas AND ventas from deposito pending approval
+  // ═══════════════════════════════════════════════════════════════════
+  // UNIFICACIÓN: ahora leemos de DOS fuentes:
+  //   1) ventas_transferidas (histórico — pendientes y confirmadas previas a la migración)
+  //   2) pedidos_catalogo con transferida_por_id != null (sistema unificado actual)
+  // 
+  // Mapeamos los pedidos_catalogo al formato ventas_transferidas para que la
+  // lógica de render existente (que es muy larga) funcione sin cambios.
+  // ═══════════════════════════════════════════════════════════════════
+  var mapVendedoresIdNombre = {1:'david', 2:'facu', 3:'marcela'};
   Promise.all([
-    apiGet("ventas_transferidas","select=*&order=created_at.desc&limit=500"),
+    apiGet("ventas_transferidas","select=*&estado=neq.migrada_a_pedidos&order=created_at.desc&limit=500"),
     apiGet("ventas","select=*&estado=eq.pendiente_aprobacion&origen=eq.deposito&order=created_at.desc"),
-    apiGet("ventas_transferidas","select=*&order=created_at.desc&limit=1")
+    apiGet("ventas_transferidas","select=*&order=created_at.desc&limit=1"),
+    // Sistema unificado: pedidos_catalogo con transferencia
+    apiGet("pedidos_catalogo","select=*&transferida_por_id=not.is.null&order=transferida_at.desc.nullslast,created_at.desc&limit=300")
   ]).then(function(res){
-    var _todasTransf=Array.isArray(res[0])?res[0]:[];
+    var legacyTransf = Array.isArray(res[0])?res[0]:[];
     var deposito=Array.isArray(res[1])?res[1]:[];
+    var pedidosTransf = Array.isArray(res[3])?res[3]:[];
+
+    // Mapear pedidos_catalogo → formato ventas_transferidas para el render
+    var mapped = pedidosTransf.map(function(p){
+      var creadaPor = mapVendedoresIdNombre[p.transferida_por_id] || ('V#'+p.transferida_por_id);
+      // Estado equivalente: si está cobrado → 'confirmada', cancelado → 'cancelada', resto → 'pendiente'
+      var est = (p.estado === 'cobrado' || p.confirmado_cobro === true) ? 'confirmada'
+              : (p.estado === 'cancelado') ? 'cancelada'
+              : 'pendiente';
+      return {
+        id: p.id,
+        nro_orden: p.nro_orden,
+        creada_por: creadaPor,
+        asignada_a: p.vendedor_id,
+        items: p.items,
+        total: p.total,
+        estado: est,
+        con_reserva: p.con_reserva,
+        reserva_ejecutada: p.reserva_ejecutada,
+        notas: p.notas_transferencia || ('De '+creadaPor),
+        created_at: p.transferida_at || p.created_at,
+        confirmada_at: p.confirmado_at,
+        forma_cobro: p.forma_cobro,
+        periodo: p.periodo,
+        _esUnificado: true,           // flag para diferenciar el origen
+        _pedidoOriginal: p             // referencia al pedido_catalogo completo
+      };
+    });
+    // Combinar legacy + nuevos. Los nuevos van primero (más recientes)
+    var _todasTransf = mapped.concat(legacyTransf);
+
     // Filtrar recibidas y enviadas del mismo resultado
     var _allTransf=_todasTransf.filter(function(t){
       return String(t.asignada_a)===String(VENDEDOR_ID);
@@ -5146,10 +5200,12 @@ function renderTransfCard(v,done){
       }
     }
     // Show full action buttons
+    // Tipo: si es del sistema unificado (pedidos_catalogo) → "web", sino → "transferida" (legacy)
+    var _tipoGest = v._esUnificado ? "web" : "transferida";
     html+="<div style='display:flex;gap:.4rem;flex-wrap:wrap'>";
-    html+="<button class='btn btn-a' onclick='_gestionarPedido(\"transferida\","+v.id+")' style='flex:1;min-width:130px;justify-content:center'>🗂 Gestionar</button>";
-    html+="<button class='btn btn-red' onclick='cancelarTransf("+v.id+","+v.con_reserva+",this)' style='padding:.4rem .7rem'>Cancelar</button>";
-    html+="<button class='btn btn-g' style='padding:.4rem .7rem;border-color:var(--red);color:var(--red)' onclick='eliminarTransf("+v.id+",this)'>Eliminar</button>";
+    html+="<button class='btn btn-a' onclick='_gestionarPedido(\""+_tipoGest+"\","+v.id+")' style='flex:1;min-width:130px;justify-content:center'>🗂 Gestionar</button>";
+    html+="<button class='btn btn-red' onclick='cancelarTransf("+v.id+","+v.con_reserva+",this,"+(v._esUnificado?"true":"false")+")' style='padding:.4rem .7rem'>Cancelar</button>";
+    html+="<button class='btn btn-g' style='padding:.4rem .7rem;border-color:var(--red);color:var(--red)' onclick='eliminarTransf("+v.id+",this,"+(v._esUnificado?"true":"false")+")'>Eliminar</button>";
     html+="</div>";
   } else {
     if(cancelado){
