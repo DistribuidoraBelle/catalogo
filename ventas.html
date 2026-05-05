@@ -2730,6 +2730,9 @@ function tomarPedido(pedId){
       return;
     }
     if(p.vendedor_id===VENDEDOR_ID){toast("Ya estaba asignado a vos","twarn");return;}
+    // NOTA: solo cambiamos vendedor_id. Si el pedido tenía transferida_por_id seteado
+    // (porque otro vendedor lo transfirió antes y quedó "sin asignar"), ese campo se mantiene
+    // para trazabilidad. Ej: Marcela transfirió → David toma → transferida_por_id queda en Marcela.
     return apiPatch("pedidos_catalogo",{vendedor_id:VENDEDOR_ID},"id=eq."+pedId).then(function(){
       // Verificar post-patch (por si RLS rechaza silenciosamente)
       return apiGet("pedidos_catalogo","select=id,vendedor_id&id=eq."+pedId+"&limit=1");
@@ -2786,8 +2789,14 @@ function _confirmarTransferirPedido(pedId,nuevoVendedorId,nuevoNombre){
       loadPedidosWeb();
       return;
     }
-    // Fix #3: hacer el patch y VERIFICAR que efectivamente se aplicó
-    return apiPatch("pedidos_catalogo",{vendedor_id:nuevoVendedorId},"id=eq."+pedId).then(function(){
+    // Trazabilidad: el que transfiere queda registrado en transferida_por_id
+    // (= quien hizo la última transferencia hacia el destino actual)
+    var _patchTransf = {
+      vendedor_id: nuevoVendedorId,
+      transferida_por_id: VENDEDOR_ID,
+      transferida_at: new Date().toISOString()
+    };
+    return apiPatch("pedidos_catalogo", _patchTransf, "id=eq."+pedId).then(function(){
       // Re-leer el pedido para confirmar
       return apiGet("pedidos_catalogo","select=id,vendedor_id&id=eq."+pedId+"&limit=1");
     }).then(function(rowsConfirm){
@@ -2797,12 +2806,10 @@ function _confirmarTransferirPedido(pedId,nuevoVendedorId,nuevoNombre){
         return;
       }
       if(pConfirm.vendedor_id!==nuevoVendedorId){
-        // ¡El patch falló silenciosamente! (probable problema de RLS en Supabase)
         toast("⚠️ La transferencia no se aplicó. Probable problema de permisos en BD.","terr");
         console.error("[transferir] patch falló: esperaba vendedor_id="+nuevoVendedorId+", BD tiene "+pConfirm.vendedor_id);
         return;
       }
-      // Patch confirmado: ahora el log y el toast
       _logEstadoPedidoV(pedId,"transferido","Transferido de "+VENDEDOR_NOMBRE+" a "+nuevoNombre);
       toast("Pedido "+(p.nro_orden||("#"+pedId))+" transferido a "+nuevoNombre,"tok");
       var moT=document.getElementById("_moTransferirPed");if(moT)moT.remove();
@@ -3135,6 +3142,8 @@ function _cobrarProductosCC(pedidoId, clienteId, totalPed){
         _logEstadoPedidoV(pedidoId,"asignado","Auto-asignado al cobrar (CC) por "+VENDEDOR_NOMBRE);
       } else {
         var _nA=_vendedorNombre(_vAnterior)||("Vendedor #"+_vAnterior);
+        _patchObj.transferida_por_id = _vAnterior;
+        _patchObj.transferida_at = new Date().toISOString();
         _logEstadoPedidoV(pedidoId,"transferido","Transferencia automática al cobrar (CC) — de "+_nA+" a "+VENDEDOR_NOMBRE);
       }
     }
@@ -3194,6 +3203,8 @@ function _confirmarCobrarCC(pedidoId, clienteId, totalPed, cobradoHasta){
         _logEstadoPedidoV(pedidoId,"asignado","Auto-asignado al cobrar parcial (CC) por "+VENDEDOR_NOMBRE);
       } else {
         var _nA=_vendedorNombre(_vAnt)||("Vendedor #"+_vAnt);
+        _patchPed.transferida_por_id = _vAnt;
+        _patchPed.transferida_at = new Date().toISOString();
         _logEstadoPedidoV(pedidoId,"transferido","Transferencia automática al cobrar parcial (CC) — de "+_nA+" a "+VENDEDOR_NOMBRE);
       }
     }
@@ -4143,6 +4154,8 @@ function _mgConfirmarCobro(){
     } else {
       // Caso B: transferencia automática de OTRO vendedor a quien cobra
       var _nomAnterior=_vendedorNombre(_vendedorAnterior)||("Vendedor #"+_vendedorAnterior);
+      _patchBase.transferida_por_id = _vendedorAnterior;
+      _patchBase.transferida_at = new Date().toISOString();
       _logEstadoPedidoV(id,"transferido","Transferencia automática al cobrar — de "+_nomAnterior+" a "+VENDEDOR_NOMBRE);
     }
   }
@@ -4320,6 +4333,13 @@ function renderPedCard(ped,cobrado){
       _asigBadge="<span class='badge' style='font-size:.55rem;margin-left:.4rem;background:rgba(74,159,216,.15);color:var(--blue);border:1px solid rgba(74,159,216,.4)'>👤 "+_vn+"</span>";
     }
   }
+  // Badge de TRAZABILIDAD: si fue transferida desde otro vendedor, mostrarlo
+  // (transferida_por_id ≠ vendedor_id actual)
+  var _transfBadge = "";
+  if(ped.transferida_por_id && ped.transferida_por_id !== ped.vendedor_id){
+    var _vTransf = _vendedorNombre(ped.transferida_por_id) || ("V#"+ped.transferida_por_id);
+    _transfBadge = "<span class='badge' style='font-size:.55rem;margin-left:.4rem;background:rgba(196,150,90,.15);color:var(--acc);border:1px solid rgba(196,150,90,.4)' title='Pedido originalmente de "+_vTransf+", transferido'>↪ Transferida por "+_vTransf+"</span>";
+  }
   // Badge "En reparto" — bien visible cuando el pedido salió en una ruta
   var _enReparto = ped.estado_envio==="en_reparto";
   var _repartoBadge = _enReparto
@@ -4329,6 +4349,7 @@ function renderPedCard(ped,cobrado){
   html+="<div class='ped-header'>";
   html+="<div><div style='font-size:.78rem;font-weight:500;color:var(--tx)'>Pedido web <span style='color:var(--acc);font-size:.7rem'>"+(ped.nro_orden||("#"+ped.id))+"</span>"+
     _asigBadge+
+    _transfBadge+
     _repartoBadge+
     (ped.estado==="entregado"?"<span class='badge bg-cyan' style='margin-left:.4rem;font-size:.55rem'>Entregado por Marcela</span>":"")+
     "</div>";
@@ -9948,6 +9969,34 @@ function loadRutas(){
     _rt.pedidosEnReparto = Array.isArray(res[2]) ? res[2] : [];
     _rt.borradores = Array.isArray(res[3]) ? res[3] : [];
 
+    // Detectar huérfanos: pedidos en estado_envio="en_reparto" que NO están referenciados
+    // por ningún borrador activo. Esto puede pasar si un borrador se eliminó antes de que
+    // el sistema limpiara correctamente los pedidos. Los reseteamos a estado_envio=null.
+    var idsEnBorradores = {};
+    _rt.borradores.forEach(function(br){
+      (br.pedidos_ids||[]).forEach(function(pid){idsEnBorradores[pid] = true;});
+    });
+    var huerfanos = _rt.pedidosEnReparto.filter(function(p){return !idsEnBorradores[p.id];});
+    if(huerfanos.length){
+      console.warn("[belle] limpiando "+huerfanos.length+" pedido(s) huérfanos en_reparto sin borrador:", huerfanos.map(function(p){return p.id;}));
+      huerfanos.forEach(function(p){
+        apiPatch("pedidos_catalogo", {
+          estado_envio: null, reparto_at: null, reparto_orden: null
+        }, "id=eq."+p.id).then(function(){
+          apiPost("pedidos_estados_log", {
+            pedido_id: p.id,
+            pedido_tabla: "pedidos_catalogo",
+            estado: "huerfano_limpiado",
+            nota: "Pedido en_reparto sin borrador asociado — auto-limpieza al cargar Rutas",
+            usuario: VENDEDOR_NOMBRE
+          }).catch(function(e){console.error("[belle] log huerfano:",e);});
+        }).catch(function(e){console.error("[belle] limpiar huerfano "+p.id+":",e);});
+      });
+      // Sacar los huérfanos de la lista en memoria para que no se muestren
+      _rt.pedidosEnReparto = _rt.pedidosEnReparto.filter(function(p){return idsEnBorradores[p.id];});
+      toast(huerfanos.length+" pedido"+(huerfanos.length===1?"":"s")+" huérfano"+(huerfanos.length===1?"":"s")+" en reparto fueron limpiados","tok");
+    }
+
     // Juntar pedidos referenciados por los borradores que NO estén en el cache
     var idsEnCache = {};
     _rt.pedidosTodos.forEach(function(p){idsEnCache[p.id]=true;});
@@ -12338,10 +12387,78 @@ function _rbRenombrarBorrador(id){
 function _rbEliminarBorrador(id){
   var br = (_rt.borradores||[]).find(function(x){return x.id===id;});
   if(!br) return;
-  if(!confirm("¿Eliminar el borrador '"+br.nombre+"'?\nLos pedidos NO se borran, solo el borrador.")) return;
-  apiDelete("rutas_borradores","id=eq."+id).then(function(){
-    toast("Borrador eliminado","tok");
-    if(_rt.borradorActivo===id) _rt.borradorActivo = null;
+
+  // Analizar qué pedidos hay y en qué estados
+  var estados = Array.isArray(br.pedidos_estados) ? br.pedidos_estados : [];
+  var ids = br.pedidos_ids || [];
+  // IDs por estado para resetear
+  var aResetear = []; // pendientes / activos / pausados / sin estado → estado_envio=null
+  var entregados = 0;
+  var cancelados = 0;
+  ids.forEach(function(pid){
+    var e = estados.find(function(x){return x.id===pid;});
+    var estado = e ? e.estado : null;
+    if(estado === 'entregado') entregados++;
+    else if(estado === 'cancelado') cancelados++;
+    else aResetear.push(pid); // activo / pausado / sin estado / pendiente
+  });
+
+  // Construir mensaje de confirmación claro
+  var msg = "¿Eliminar el borrador '"+br.nombre+"'?";
+  var detalles = [];
+  if(aResetear.length){
+    detalles.push("• "+aResetear.length+" parada"+(aResetear.length===1?"":"s")+" sin entregar → vuelve"+(aResetear.length===1?"":"n")+" a pendiente");
+  }
+  if(entregados){
+    detalles.push("• "+entregados+" entregada"+(entregados===1?"":"s")+" → se mantiene"+(entregados===1?"":"n")+" como entregada"+(entregados===1?"":"s"));
+  }
+  if(cancelados){
+    detalles.push("• "+cancelados+" cancelada"+(cancelados===1?"":"s")+" → se mantiene"+(cancelados===1?"":"n"));
+  }
+  if(detalles.length){
+    msg += "\n\n" + detalles.join("\n") + "\n\nEsta acción no se puede deshacer.";
+  }
+  if(!confirm(msg)) return;
+
+  // Promesas: resetear los que corresponden + log + eliminar borrador
+  var promesas = [];
+  aResetear.forEach(function(pid){
+    promesas.push(
+      apiPatch("pedidos_catalogo", {
+        estado_envio: null,
+        reparto_at: null,
+        reparto_orden: null
+      }, "id=eq."+pid).then(function(){
+        // Log silencioso para tener registro de por qué cambió
+        return apiPost("pedidos_estados_log", {
+          pedido_id: pid,
+          pedido_tabla: "pedidos_catalogo",
+          estado: "borrador_eliminado",
+          nota: "Borrador '"+br.nombre+"' eliminado por "+VENDEDOR_NOMBRE+" — pedido vuelve a pendiente",
+          usuario: VENDEDOR_NOMBRE
+        }).catch(function(e){console.error("[belle] log silencioso:",e);});
+      }).catch(function(e){
+        console.error("[belle] resetear pedido al eliminar borrador pedId="+pid+":",e);
+      })
+    );
+  });
+
+  // Eliminar el borrador después de que los patches estén en marcha
+  promesas.push(apiDelete("rutas_borradores","id=eq."+id));
+
+  Promise.all(promesas).then(function(){
+    toast("Borrador eliminado"+(aResetear.length?" — "+aResetear.length+" parada"+(aResetear.length===1?"":"s")+" volvieron a pendiente":""),"tok");
+    if(_rt.borradorActivo===id){
+      _rt.borradorActivo = null;
+      // Reset de estado de la ruta en memoria
+      _rt.pedidosOrdenados = null;
+      _rt.rutaResult = null;
+      _rt.rutaModificada = false;
+      _rt.etas = {};
+      _rt.puntoPartida = null;
+      _rt.puntoFinal = null;
+      _rt.subTab = "borradores";
+    }
     loadRutas();
   }).catch(function(e){
     console.error("[belle] eliminar borrador:",e);
