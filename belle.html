@@ -18878,15 +18878,27 @@ function _repNombreVendedor(id){
 // ════════════════════════════════════════════════════════════════════
 function _repCargarVendedores(){
   var r = _repCalcRango(window._repPeriodo);
+  var desdeISO = r.desde.toISOString();
+  var hastaISO = r.hasta.toISOString();
 
   Promise.all([
     _repObtenerCobrosPeriodo(),
     // Comisiones pendientes (gastos_vendedor con aprobado=false)
     apiGet("gastos_vendedor", "select=*&aprobado=is.false&order=created_at.desc&limit=2000").catch(function(){return [];}),
     // Lista de vendedores
-    apiGet("vendedores", "select=*&order=id.asc&limit=200").catch(function(){return [];})
+    apiGet("vendedores", "select=*&order=id.asc&limit=200").catch(function(){return [];}),
+    // TODOS los pedidos transferidos en el período (no necesariamente cobrados)
+    // Filtramos por transferida_at en el rango del período
+    apiGet("pedidos_catalogo",
+      "select=id,nro_orden,total,vendedor_id,transferida_por_id,transferida_at,estado,confirmado_cobro"+
+      "&transferida_por_id=not.is.null"+
+      "&transferida_at=gte."+desdeISO+
+      "&transferida_at=lt."+hastaISO+
+      "&order=transferida_at.desc&limit=5000"
+    ).catch(function(){return [];})
   ]).then(function(data){
     var cobros = data[0]; var comisPendientes = data[1]; var vendedores = data[2];
+    var transferencias = data[3] || [];
 
     // Mapa de vendedores desde BD (sin hardcoded fallbacks — los nombres vienen de la BD)
     var mapVendedores = {};
@@ -18898,7 +18910,10 @@ function _repCargarVendedores(){
       if(!statsPorVendedor[vid]){
         statsPorVendedor[vid] = { id: vid, nombre: (mapVendedores[vid]||{}).nombre || ("ID "+vid),
           cobrosCC: 0, montoCC: 0, ventas: 0, montoVentas: 0,
-          comisionPendiente: 0
+          comisionPendiente: 0,
+          // ── TRAZABILIDAD DE TRANSFERENCIAS ──
+          transfirio: { todos: 0, cobrados: 0, montoTodos: 0, montoCobrados: 0, aQuien: {} },
+          recibio:    { todos: 0, cobrados: 0, montoTodos: 0, montoCobrados: 0, deQuien: {} }
         };
       }
     }
@@ -18919,6 +18934,55 @@ function _repCargarVendedores(){
       var vid = g.vendedor_id; if(!vid) return;
       inicializar(vid);
       statsPorVendedor[vid].comisionPendiente += parseFloat(g.monto)||0;
+    });
+
+    // ── TRANSFERENCIAS: agrupar por vendedor que transfirió y por vendedor que recibió ──
+    transferencias.forEach(function(p){
+      var de = p.transferida_por_id;
+      var a = p.vendedor_id; // vendedor actual = quien recibió
+      if(!de || !a) return;
+      var monto = parseFloat(p.total)||0;
+      var cobrado = (p.estado === 'cobrado' || p.confirmado_cobro === true);
+
+      // Stats del que TRANSFIRIÓ
+      inicializar(de);
+      statsPorVendedor[de].transfirio.todos++;
+      statsPorVendedor[de].transfirio.montoTodos += monto;
+      if(cobrado){
+        statsPorVendedor[de].transfirio.cobrados++;
+        statsPorVendedor[de].transfirio.montoCobrados += monto;
+      }
+      // Desglose: a quién transfirió
+      var nA = (mapVendedores[a]||{}).nombre || ("V#"+a);
+      if(!statsPorVendedor[de].transfirio.aQuien[nA]){
+        statsPorVendedor[de].transfirio.aQuien[nA] = {todos:0, cobrados:0, montoTodos:0, montoCobrados:0};
+      }
+      statsPorVendedor[de].transfirio.aQuien[nA].todos++;
+      statsPorVendedor[de].transfirio.aQuien[nA].montoTodos += monto;
+      if(cobrado){
+        statsPorVendedor[de].transfirio.aQuien[nA].cobrados++;
+        statsPorVendedor[de].transfirio.aQuien[nA].montoCobrados += monto;
+      }
+
+      // Stats del que RECIBIÓ
+      inicializar(a);
+      statsPorVendedor[a].recibio.todos++;
+      statsPorVendedor[a].recibio.montoTodos += monto;
+      if(cobrado){
+        statsPorVendedor[a].recibio.cobrados++;
+        statsPorVendedor[a].recibio.montoCobrados += monto;
+      }
+      // Desglose: de quién recibió
+      var nDe = (mapVendedores[de]||{}).nombre || ("V#"+de);
+      if(!statsPorVendedor[a].recibio.deQuien[nDe]){
+        statsPorVendedor[a].recibio.deQuien[nDe] = {todos:0, cobrados:0, montoTodos:0, montoCobrados:0};
+      }
+      statsPorVendedor[a].recibio.deQuien[nDe].todos++;
+      statsPorVendedor[a].recibio.deQuien[nDe].montoTodos += monto;
+      if(cobrado){
+        statsPorVendedor[a].recibio.deQuien[nDe].cobrados++;
+        statsPorVendedor[a].recibio.deQuien[nDe].montoCobrados += monto;
+      }
     });
 
     var lista = Object.values(statsPorVendedor).sort(function(a,b){
@@ -18956,6 +19020,9 @@ function _repCargarVendedores(){
     }
     h += "</div>";
 
+    // ── SECCIÓN: Trazabilidad de transferencias por vendedor ──
+    h += _repRenderTransferenciasPorVendedor(lista, mapVendedores, transferencias);
+
     // Comisiones pendientes
     if(comisPendientes.length){
       h += "<div style='background:var(--sur);border:1px solid var(--bd);border-radius:10px;padding:1rem;margin-bottom:1rem'>";
@@ -18987,6 +19054,95 @@ function _repCargarVendedores(){
     var el = document.getElementById("_repContenido");
     if(el) el.innerHTML = "<div style='color:var(--red);padding:2rem;text-align:center'>Error al cargar reportes por vendedor</div>";
   });
+}
+
+// Renderiza la sección de trazabilidad de transferencias.
+// Por cada vendedor con actividad de transferencias muestra una tarjeta con:
+//   - Cuántos pedidos transfirió y a quién (cobrados / todos separados)
+//   - Cuántos pedidos recibió por transferencia y de quién
+function _repRenderTransferenciasPorVendedor(lista, mapVendedores, transferencias){
+  var conTrazabilidad = lista.filter(function(v){
+    return v.transfirio.todos > 0 || v.recibio.todos > 0;
+  });
+
+  var h = "<div style='background:var(--sur);border:1px solid var(--bd);border-radius:10px;padding:1rem;margin-bottom:1rem'>";
+  h += "<div style='display:flex;justify-content:space-between;align-items:center;margin-bottom:.5rem;flex-wrap:wrap;gap:.5rem'>";
+  h += "<div style='font-size:.85rem;font-weight:700'>↪ Transferencias del período</div>";
+  h += "<div style='font-size:.62rem;color:var(--tx3)'>" + transferencias.length + " transferencia" + (transferencias.length===1?"":"s") + " registrada" + (transferencias.length===1?"":"s") + "</div>";
+  h += "</div>";
+  h += "<div style='font-size:.66rem;color:var(--tx3);margin-bottom:.7rem;line-height:1.4'>Quién transfirió y quién recibió. <b style='color:var(--green)'>Cobrados</b> = pedidos transferidos que ya entraron como dinero. <b>Todos</b> = incluye pendientes de cobro.</div>";
+
+  if(!conTrazabilidad.length){
+    h += "<div style='text-align:center;padding:1.5rem;color:var(--tx3);font-style:italic;font-size:.78rem'>Sin transferencias registradas en este período.<br><span style='font-size:.65rem'>(Las transferencias previas a la actualización del sistema no aparecen aquí)</span></div>";
+    h += "</div>";
+    return h;
+  }
+
+  conTrazabilidad.forEach(function(v){
+    h += "<div style='background:var(--sur2);border:1px solid var(--bd);border-radius:8px;padding:.7rem .9rem;margin-bottom:.55rem'>";
+    h += "<div style='font-size:.92rem;font-weight:700;color:var(--tx);margin-bottom:.5rem'>"+_admEsc(v.nombre)+"</div>";
+    h += "<div style='display:grid;grid-template-columns:1fr 1fr;gap:.6rem'>";
+
+    // Columna 1: TRANSFIRIÓ
+    h += "<div>";
+    h += "<div style='font-size:.66rem;color:var(--acc);text-transform:uppercase;font-weight:700;letter-spacing:.04em;margin-bottom:.3rem'>↗ Transfirió</div>";
+    if(v.transfirio.todos > 0){
+      h += "<div style='font-size:.74rem;color:var(--tx);font-weight:600'>"+v.transfirio.todos+" pedido"+(v.transfirio.todos===1?"":"s")+" <span style='color:var(--tx3);font-size:.65rem;font-weight:400'>· "+fmt(v.transfirio.montoTodos)+"</span></div>";
+      if(v.transfirio.cobrados > 0){
+        h += "<div style='font-size:.7rem;color:var(--green);font-weight:600;margin-top:.15rem'>✓ "+v.transfirio.cobrados+" cobrado"+(v.transfirio.cobrados===1?"":"s")+" <span style='color:var(--tx3);font-size:.65rem;font-weight:400'>· "+fmt(v.transfirio.montoCobrados)+"</span></div>";
+      }
+      // Desglose por destino
+      var aQuien = Object.keys(v.transfirio.aQuien);
+      if(aQuien.length){
+        h += "<div style='margin-top:.4rem;padding-top:.35rem;border-top:1px solid rgba(255,255,255,.05)'>";
+        aQuien.forEach(function(n){
+          var d = v.transfirio.aQuien[n];
+          h += "<div style='font-size:.65rem;color:var(--tx2);margin-bottom:.15rem'>→ "+_admEsc(n)+": "+
+            "<span style='color:var(--tx)'>"+d.todos+" "+(d.todos===1?"pedido":"pedidos")+"</span>"+
+            (d.cobrados>0 ? " <span style='color:var(--green)'>("+d.cobrados+" cob.)</span>" : "")+
+            " <span style='color:var(--tx3)'>· "+fmt(d.montoTodos)+"</span>"+
+          "</div>";
+        });
+        h += "</div>";
+      }
+    } else {
+      h += "<div style='font-size:.7rem;color:var(--tx3);font-style:italic'>—</div>";
+    }
+    h += "</div>";
+
+    // Columna 2: RECIBIÓ
+    h += "<div>";
+    h += "<div style='font-size:.66rem;color:var(--blue);text-transform:uppercase;font-weight:700;letter-spacing:.04em;margin-bottom:.3rem'>↙ Recibió</div>";
+    if(v.recibio.todos > 0){
+      h += "<div style='font-size:.74rem;color:var(--tx);font-weight:600'>"+v.recibio.todos+" pedido"+(v.recibio.todos===1?"":"s")+" <span style='color:var(--tx3);font-size:.65rem;font-weight:400'>· "+fmt(v.recibio.montoTodos)+"</span></div>";
+      if(v.recibio.cobrados > 0){
+        h += "<div style='font-size:.7rem;color:var(--green);font-weight:600;margin-top:.15rem'>✓ "+v.recibio.cobrados+" cobrado"+(v.recibio.cobrados===1?"":"s")+" <span style='color:var(--tx3);font-size:.65rem;font-weight:400'>· "+fmt(v.recibio.montoCobrados)+"</span></div>";
+      }
+      // Desglose por origen
+      var deQuien = Object.keys(v.recibio.deQuien);
+      if(deQuien.length){
+        h += "<div style='margin-top:.4rem;padding-top:.35rem;border-top:1px solid rgba(255,255,255,.05)'>";
+        deQuien.forEach(function(n){
+          var d = v.recibio.deQuien[n];
+          h += "<div style='font-size:.65rem;color:var(--tx2);margin-bottom:.15rem'>← "+_admEsc(n)+": "+
+            "<span style='color:var(--tx)'>"+d.todos+" "+(d.todos===1?"pedido":"pedidos")+"</span>"+
+            (d.cobrados>0 ? " <span style='color:var(--green)'>("+d.cobrados+" cob.)</span>" : "")+
+            " <span style='color:var(--tx3)'>· "+fmt(d.montoTodos)+"</span>"+
+          "</div>";
+        });
+        h += "</div>";
+      }
+    } else {
+      h += "<div style='font-size:.7rem;color:var(--tx3);font-style:italic'>—</div>";
+    }
+    h += "</div>";
+
+    h += "</div>"; // grid
+    h += "</div>"; // tarjeta vendedor
+  });
+
+  h += "</div>";
+  return h;
 }
 
 // ════════════════════════════════════════════════════════════════════
