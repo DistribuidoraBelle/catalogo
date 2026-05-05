@@ -2600,10 +2600,22 @@ function _seleccionarClienteDrawer(id){
       // Si estamos en flujo de rutas, buscar primero las direcciones del cliente
       var enRutas = window._rtAsignandoEnRutas === modo.pedId;
       if(enRutas){
-        // Buscar direcciones del cliente. Si no tiene, avisar y abortar.
+        // Buscar direcciones del cliente. Si no tiene, asignar solo el cliente (la dirección la cargará después).
         apiGet("clientes_direcciones","select=id,etiqueta,direccion_completa,es_principal,lat,lng&cliente_id=eq."+c.id+"&order=es_principal.desc,id.asc").then(function(dirs){
           if(!Array.isArray(dirs)||!dirs.length){
-            toast("⚠ "+nom.trim()+" no tiene direcciones cargadas. Agregale una desde Clientes.","terr");
+            // Asignar cliente sin dirección — el vendedor podrá agregar dirección desde Rutas
+            if(!confirm(nom.trim()+" no tiene direcciones cargadas.\n\n¿Asignar el cliente igual? Después podés cargar la dirección desde la pantalla de rutas.")) return;
+            apiPatch("pedidos_catalogo",{cliente_id:c.id,estado_envio:"en_preparacion"},"id=eq."+modo.pedId).then(function(){
+              _logEstadoPedidoV(modo.pedId,"cliente_asignado","Cliente "+nom.trim()+" (#"+c.id+") asignado desde Rutas (sin dirección) por "+VENDEDOR_NOMBRE);
+              toast(nom.trim()+" asignado (falta dirección)","tok");
+              var moB=document.getElementById("_moBuscarCliente");if(moB)moB.remove();
+              window._rtAsignandoEnRutas = null;
+              if(_rt.borradorActivo) _rtMarcarRutaModificada();
+              if(typeof loadRutas==="function") loadRutas();
+            }).catch(function(e){
+              console.error("[belle] asignar cliente sin dir:",e);
+              toast("Error: "+(e&&e.message||""),"terr");
+            });
             return;
           }
           // Si tiene una sola, asignar directamente
@@ -10139,8 +10151,18 @@ function _rtRenderArmar(b){
   // Resumen de ruta calculada (distancia, tiempo total)
   h += "<div id='_rtResumen' style='font-size:.75rem;color:var(--tx2);margin-bottom:.7rem;text-align:center'></div>";
 
-  // Confirmar ruta (solo si está generada)
-  if(_rt.pedidosOrdenados && !_rt.rutaModificada){
+  // Estado del borrador: edición o ya en reparto
+  var borradorEnReparto = (br && br.estado === 'en_reparto');
+
+  if(borradorEnReparto){
+    // Borrador YA en reparto: mostrar botón "Completar reparto"
+    h += "<div style='display:flex;gap:.4rem;margin-bottom:1rem;flex-wrap:wrap'>";
+    h += "<button onclick='_rbCompletarBorradorManual()' style='flex:1;background:var(--green);color:#fff;border:none;border-radius:8px;padding:.7rem 1rem;font-size:.85rem;font-weight:700;cursor:pointer;min-width:200px'>✅ Completar reparto</button>";
+    h += "</div>";
+    // Aclaración
+    h += "<div style='font-size:.7rem;color:var(--tx3);text-align:center;margin-bottom:1rem;font-style:italic'>Marcá las paradas como entregadas/canceladas. Al completar el reparto se cierra el borrador.</div>";
+  } else if(_rt.pedidosOrdenados && !_rt.rutaModificada){
+    // Borrador en EDICIÓN con ruta generada: botón "Confirmar ruta y pasar a EN REPARTO"
     h += "<button onclick='_rtConfirmarRuta()' style='width:100%;background:var(--green);color:#fff;border:none;border-radius:8px;padding:.7rem 1rem;font-size:.85rem;font-weight:700;cursor:pointer;margin-bottom:1rem'>✓ Confirmar ruta y pasar a EN REPARTO</button>";
   }
 
@@ -10154,6 +10176,13 @@ function _rtRenderArmar(b){
 
   // Inicializar mapa después del render
   setTimeout(_rtInicializarMapaUnificado, 100);
+
+  // Cargar detalles de cada pedido (cliente, dirección) — los IDs están en el DOM listos para llenar
+  setTimeout(function(){
+    pedidosBorr.forEach(function(p){
+      _rtCargarDetallePedido(p);
+    });
+  }, 60);
 }
 
 // Marcar la ruta como modificada (cambió algo desde la última generación)
@@ -10731,6 +10760,12 @@ function _rtGenerarRutaOptima(){
     _rt.rutaModificada = false;
     _rtRenderSubTab();
     toast("Ruta generada — "+pedidosOrdenados.length+" paradas","tok");
+
+    // Si el borrador está en reparto, abrir Maps automáticamente con la ruta nueva
+    var brActual = (_rt.borradores||[]).find(function(x){return x.id===_rt.borradorActivo;});
+    if(brActual && brActual.estado === 'en_reparto'){
+      setTimeout(_rtAbrirEnGoogleMaps, 500);
+    }
   });
 }
 
@@ -11329,6 +11364,7 @@ function _rtConfirmarAsignacion(pedId, cliente, direccion, nombreCli){
     var moB=document.getElementById("_moBuscarCliente");if(moB)moB.remove();
     var moD=document.getElementById("_moRtSelDir");if(moD)moD.remove();
     window._rtAsignandoEnRutas = null;
+    if(_rt.borradorActivo) _rtMarcarRutaModificada();
     // Refrescar rutas (no pedidos) — recarga los datos y re-renderiza
     if(typeof loadRutas==="function") loadRutas();
   }).catch(function(e){
@@ -11444,11 +11480,11 @@ function _rtConfirmarRuta(){
     }
     toast("Ruta confirmada — "+_rt.pedidosOrdenados.length+" pedidos en reparto","tok");
     _rtAbrirEnGoogleMaps();
-    // El borrador queda en estado 'en_reparto' — el vendedor sigue gestionándolo
+    // El borrador queda en estado 'en_reparto' — el vendedor sigue gestionándolo desde la misma pantalla
+    // Mantenemos el borradorActivo y subTab="armar" para que vea el modo reparto
     _rt.pedidosSeleccionados = [];
-    _rt.pedidosOrdenados = null;
-    _rt.paso = 1;
-    _rt.subTab = "borradores"; // volver a la lista para ver el borrador en reparto
+    // _rt.pedidosOrdenados se mantiene para que se vea la ruta en el mapa
+    // _rt.rutaModificada queda en false porque acabamos de confirmar
     loadRutas();
   }).catch(function(e){
     console.error("[belle] _rtConfirmarRuta error:",e);
@@ -11918,165 +11954,12 @@ function _rbConfirmarDir(){
 
 // Abrir vista de gestión de un borrador en reparto
 function _rbAbrirEnReparto(borradorId){
-  _rt.borradorActivo = borradorId;
-  var b = document.getElementById("_rtBody");
-  if(!b) return;
-
-  // Asegurar que tenemos los pedidos del borrador en cache
-  var br = (_rt.borradores||[]).find(function(x){return x.id===borradorId;});
-  if(!br){toast("Borrador no encontrado","terr");return;}
-  var ids = br.pedidos_ids || [];
-  if(!ids.length){
-    _rbRenderEnReparto(b);
-    return;
-  }
-  var idsEnCache = (_rt.pedidosTodos||[]).map(function(p){return p.id;});
-  var idsFaltantes = ids.filter(function(x){return idsEnCache.indexOf(x)<0;});
-  if(!idsFaltantes.length){
-    _rbRenderEnReparto(b);
-    return;
-  }
-  // Cargar pedidos faltantes
-  apiGet("pedidos_catalogo",
-    "select=id,nro_orden,total,estado,estado_envio,cliente_id,direccion_entrega_id,direccion_entrega_texto,direccion_entrega_lat,direccion_entrega_lng,direccion_entrega_referencias,modo_entrega,distancia_km,created_at,items,vendedor_id"+
-    "&id=in.("+idsFaltantes.join(",")+")"
-  ).then(function(extras){
-    if(Array.isArray(extras) && extras.length){
-      extras.forEach(function(p){
-        if(!_rt.pedidosTodos.find(function(x){return x.id===p.id;})){
-          _rt.pedidosTodos.push(p);
-        }
-      });
-    }
-    _rbRenderEnReparto(b);
-  }).catch(function(e){
-    console.error("[belle] cargar pedidos en reparto:",e);
-    _rbRenderEnReparto(b);
-  });
+  // CAMBIO: ahora usa la pantalla unificada (igual que _rbEditarBorrador).
+  // Antes había una vista separada "_rbRenderEnReparto" que generaba inconsistencia.
+  _rbEditarBorrador(borradorId);
 }
 
-function _rbRenderEnReparto(b){
-  var br = (_rt.borradores||[]).find(function(x){return x.id===_rt.borradorActivo;});
-  if(!br){toast("Borrador no encontrado","terr");_rt.subTab="borradores";_renderRutasMain();return;}
-  var estados = Array.isArray(br.pedidos_estados) ? br.pedidos_estados : [];
-  // Mapa id→estado
-  var mapaEst = {};
-  estados.forEach(function(e){mapaEst[e.id]=e;});
-  // Pedidos con datos completos
-  var pedidos = (_rt.pedidosTodos||[]).filter(function(p){return (br.pedidos_ids||[]).indexOf(p.id)>=0;});
-
-  // Conteos
-  var nAct=0,nEnt=0,nCanc=0,nPau=0;
-  estados.forEach(function(e){
-    if(e.estado==='activo')nAct++;
-    else if(e.estado==='entregado')nEnt++;
-    else if(e.estado==='cancelado')nCanc++;
-    else if(e.estado==='pausado')nPau++;
-  });
-
-  var h = "";
-  // Header
-  h += "<div style='background:rgba(91,141,238,.1);border:1px solid var(--blue);border-radius:8px;padding:.65rem .85rem;margin-bottom:.7rem;display:flex;justify-content:space-between;align-items:center;gap:.5rem;flex-wrap:wrap'>";
-  h += "<div>";
-  h += "<div style='font-size:.65rem;color:var(--blue);text-transform:uppercase;letter-spacing:.06em'>🚚 Reparto en curso</div>";
-  h += "<div style='font-size:.95rem;font-weight:700;color:var(--tx)'>"+(br.nombre||"Sin nombre")+"</div>";
-  h += "</div>";
-  h += "<div style='display:flex;gap:.3rem;flex-wrap:wrap'>";
-  h += "<button class='btn btn-g' onclick='_rt.borradorActivo=null;_rt.subTab=\"borradores\";_renderRutasMain();' style='font-size:.7rem;padding:.3rem .55rem'>← Volver</button>";
-  h += "</div>";
-  h += "</div>";
-
-  // Resumen
-  h += "<div style='display:flex;gap:.4rem;flex-wrap:wrap;margin-bottom:.8rem'>";
-  if(nAct)  h += "<div style='font-size:.7rem;background:rgba(91,141,238,.15);color:var(--blue);padding:.2rem .5rem;border-radius:4px'>"+nAct+" activo"+(nAct===1?"":"s")+"</div>";
-  if(nPau)  h += "<div style='font-size:.7rem;background:rgba(240,180,41,.15);color:var(--yel);padding:.2rem .5rem;border-radius:4px'>⏸ "+nPau+" pausado"+(nPau===1?"":"s")+"</div>";
-  if(nEnt)  h += "<div style='font-size:.7rem;background:rgba(76,175,130,.15);color:var(--green);padding:.2rem .5rem;border-radius:4px'>✓ "+nEnt+" entregado"+(nEnt===1?"":"s")+"</div>";
-  if(nCanc) h += "<div style='font-size:.7rem;background:rgba(224,92,110,.15);color:var(--red);padding:.2rem .5rem;border-radius:4px'>✕ "+nCanc+" cancelado"+(nCanc===1?"":"s")+"</div>";
-  h += "</div>";
-
-  // Acciones globales
-  h += "<div style='display:flex;gap:.4rem;flex-wrap:wrap;margin-bottom:.8rem'>";
-  h += "<button class='btn btn-a' onclick='_rbRegenerarMaps()' style='font-size:.74rem' title='Volver a abrir Google Maps con la ruta de los pedidos activos'>🔄 Regenerar Maps</button>";
-  h += "<button class='btn btn-g' onclick='_rbAgregarMasPedidosAlBorrador()' style='font-size:.74rem' title='Agregar más pedidos a este borrador'>+ Agregar pedidos</button>";
-  h += "<button class='btn btn-acc' onclick='_rbCompletarBorradorManual()' style='font-size:.74rem;margin-left:auto' title='Marcar el reparto como completado'>✅ Completar reparto</button>";
-  h += "</div>";
-
-  // Listado de paradas, separadas por estado (activos arriba)
-  var ordenEstados = ['activo','pausado','entregado','cancelado'];
-  ordenEstados.forEach(function(estFiltro){
-    var grupo = pedidos.filter(function(p){return (mapaEst[p.id]||{}).estado===estFiltro;});
-    if(!grupo.length) return;
-    var labelGrupo = estFiltro==='activo'?'En ruta':
-      estFiltro==='pausado'?'⏸ Pausados':
-      estFiltro==='entregado'?'✓ Entregados':'✕ Cancelados';
-    var colorGrupo = estFiltro==='activo'?'var(--blue)':
-      estFiltro==='pausado'?'var(--yel)':
-      estFiltro==='entregado'?'var(--green)':'var(--red)';
-    h += "<div style='font-size:.65rem;color:"+colorGrupo+";text-transform:uppercase;font-weight:700;letter-spacing:.06em;margin:.6rem 0 .3rem'>"+labelGrupo+" ("+grupo.length+")</div>";
-    grupo.forEach(function(p){
-      h += _rbRenderParada(p, mapaEst[p.id]||{});
-    });
-  });
-
-  b.innerHTML = h;
-}
-
-// Render de una parada individual
-function _rbRenderParada(p, est){
-  var estado = est.estado || 'activo';
-  var esActivo = estado==='activo';
-  var esPausado = estado==='pausado';
-  var esEntregado = estado==='entregado';
-  var esCancelado = estado==='cancelado';
-  var op = (esEntregado||esCancelado) ? '.65' : '1';
-  var nro = p.nro_orden || ('#'+p.id);
-  var total = fmt(p.total||0);
-  var cliRef = p.cliente_id ? ("Cliente #"+p.cliente_id) : "Sin cliente";
-
-  // Detectar si tiene dirección (directa del pedido o ref a cliente)
-  var latPropio = parseFloat(p.direccion_entrega_lat);
-  var tieneCoordsPropias = !isNaN(latPropio) && latPropio!==0 && p.direccion_entrega_lng;
-  var tieneDir = tieneCoordsPropias || !!p.direccion_entrega_id;
-
-  var h = "";
-  h += "<div style='background:var(--sur);border:1px solid "+(tieneDir||esEntregado||esCancelado?'var(--bd)':'var(--yel)')+";border-radius:7px;padding:.55rem .7rem;margin-bottom:.4rem;opacity:"+op+"'>";
-  h += "<div style='display:flex;justify-content:space-between;align-items:center;gap:.5rem;flex-wrap:wrap'>";
-  h += "<div style='flex:1;min-width:160px'>";
-  h += "<div style='font-size:.78rem;color:var(--tx);font-weight:600'>"+nro+"</div>";
-  h += "<div style='font-size:.65rem;color:var(--tx3)'>"+cliRef+" · <b style='color:var(--acc)'>"+total+"</b></div>";
-  // Texto de la dirección si la tiene
-  if(p.direccion_entrega_texto){
-    h += "<div style='font-size:.65rem;color:var(--tx2);margin-top:.15rem'>📍 "+p.direccion_entrega_texto+"</div>";
-  }
-  // Aviso si no tiene dirección y está activa o pausada
-  if(!tieneDir && (esActivo||esPausado)){
-    h += "<div style='font-size:.65rem;color:var(--yel);margin-top:.2rem'>⚠ Falta dirección — esta parada no aparecerá en el Maps</div>";
-  }
-  h += "</div>";
-  h += "<div style='display:flex;gap:.3rem;flex-wrap:wrap'>";
-  if(esActivo){
-    h += "<button class='btn btn-a' onclick='_rbMarcarEntregado("+p.id+")' style='font-size:.65rem;padding:.25rem .5rem;background:#5a8a4a;border-color:#5a8a4a' title='Marcar como entregado'>✓ Entregado</button>";
-    if(!tieneDir){
-      h += "<button class='btn btn-g' onclick='_rbAsignarDirA("+p.id+")' style='font-size:.65rem;padding:.25rem .5rem;border-color:var(--yel);color:var(--yel)' title='Asignar dirección'>📍 Dirección</button>";
-    }
-    h += "<button class='btn btn-g' onclick='_rbPausarParada("+p.id+")' style='font-size:.65rem;padding:.25rem .5rem' title='Pausar (no aparece en la ruta)'>⏸</button>";
-    h += "<button class='btn btn-red' onclick='_rbCancelarParadaModal("+p.id+")' style='font-size:.65rem;padding:.25rem .5rem' title='Cancelar / mover'>✕</button>";
-  } else if(esPausado){
-    if(!tieneDir){
-      h += "<button class='btn btn-g' onclick='_rbAsignarDirA("+p.id+")' style='font-size:.65rem;padding:.25rem .5rem;border-color:var(--yel);color:var(--yel)' title='Asignar dirección'>📍 Dirección</button>";
-    }
-    h += "<button class='btn btn-a' onclick='_rbReanudarParada("+p.id+")' style='font-size:.65rem;padding:.25rem .5rem' title='Volver a ruta'>▶ Reanudar</button>";
-    h += "<button class='btn btn-red' onclick='_rbCancelarParadaModal("+p.id+")' style='font-size:.65rem;padding:.25rem .5rem'>✕</button>";
-  } else if(esEntregado){
-    h += "<span style='font-size:.65rem;color:var(--green);font-weight:700'>✓ Entregado</span>";
-  } else if(esCancelado){
-    h += "<span style='font-size:.65rem;color:var(--red);font-weight:700'>✕ Cancelado</span>";
-  }
-  h += "</div>";
-  h += "</div>";
-  h += "</div>";
-  return h;
-}
+// _rbRenderEnReparto y _rbRenderParada eliminadas — la pantalla unificada (_rtRenderArmar) maneja todo
 
 // Marcar como entregado
 function _rbMarcarEntregado(pedId){
@@ -12088,7 +11971,7 @@ function _rbMarcarEntregado(pedId){
   Promise.all([prom1, prom2]).then(function(){
     apiPost("pedidos_estados_log",{pedido_id:pedId,pedido_tabla:"pedidos_catalogo",estado:"entregado",nota:"Entregado en ruta por "+VENDEDOR_NOMBRE,usuario:VENDEDOR_NOMBRE}).catch(function(e){console.error("[belle] log:",e);});
     toast("Pedido #"+pedId+" entregado ✓","tok");
-    _rbRenderEnReparto(document.getElementById("_rtBody"));
+    _rtRenderSubTab();
     // Auto-completar si es el último
     _rbVerificarAutoCompletar();
   }).catch(function(e){
@@ -12101,7 +11984,7 @@ function _rbMarcarEntregado(pedId){
 function _rbPausarParada(pedId){
   _rbActualizarEstadoPedido(pedId, 'pausado').then(function(){
     toast("Parada pausada — regenerá Maps para actualizar la ruta","tok");
-    _rbRenderEnReparto(document.getElementById("_rtBody"));
+    _rtRenderSubTab();
   }).catch(function(e){
     console.error("[belle] pausar:",e);
     toast("Error al pausar","terr");
@@ -12112,7 +11995,7 @@ function _rbPausarParada(pedId){
 function _rbReanudarParada(pedId){
   _rbActualizarEstadoPedido(pedId, 'activo').then(function(){
     toast("Parada reanudada — regenerá Maps para incluirla","tok");
-    _rbRenderEnReparto(document.getElementById("_rtBody"));
+    _rtRenderSubTab();
   }).catch(function(e){
     console.error("[belle] reanudar:",e);
     toast("Error al reanudar","terr");
@@ -12162,7 +12045,7 @@ function _rbCancelarParadaConfirmar(pedId){
   ]).then(function(){
     apiPost("pedidos_estados_log",{pedido_id:pedId,pedido_tabla:"pedidos_catalogo",estado:"reparto_cancelado",nota:"Parada cancelada en ruta por "+VENDEDOR_NOMBRE,usuario:VENDEDOR_NOMBRE}).catch(function(e){console.error("[belle] log:",e);});
     toast("Parada cancelada","tok");
-    _rbRenderEnReparto(document.getElementById("_rtBody"));
+    _rtRenderSubTab();
     _rbVerificarAutoCompletar();
   }).catch(function(e){
     console.error("[belle] cancelar parada:",e);
@@ -12197,7 +12080,7 @@ function _rbMoverParadaAOtro(pedId, destinoBorradorId){
     brOrigen.pedidos_ids = idsOrigen; brOrigen.pedidos_estados = estadosOrigen;
     brDestino.pedidos_ids = idsDestino; brDestino.pedidos_estados = estadosDestino;
     toast("Parada movida a '"+brDestino.nombre+"'","tok");
-    _rbRenderEnReparto(document.getElementById("_rtBody"));
+    _rtRenderSubTab();
     _rbVerificarAutoCompletar();
   }).catch(function(e){
     console.error("[belle] mover parada:",e);
@@ -12265,7 +12148,7 @@ function _rbRegenerarMaps(){
       });
       Promise.all(promPausa).then(function(){
         toast(sinCoords.length+" parada"+(sinCoords.length===1?"":"s")+" sin dirección — se pausó "+(sinCoords.length===1?"esa":"esas")+" del Maps", "twarn");
-        _rbRenderEnReparto(document.getElementById("_rtBody"));
+        _rtRenderSubTab();
       });
     }
 
@@ -12343,29 +12226,68 @@ function _rbCompletarBorradorManual(){
   _rbCompletarBorradorEjecutar(true);
 }
 
-// Ejecuta la lógica de completar: limpia activos/pausados, marca borrador como completado
+// Ejecuta la lógica de completar: 
+//  - Pedidos entregados/cancelados → quedan con su estado_envio correcto en pedidos_catalogo
+//  - Pedidos activos/pausados → vuelven a estado_envio=null (sin ruta) si volverPendientes=true
+//  - Borrador → estado='completado' con timestamp (deja de aparecer en la lista)
 function _rbCompletarBorradorEjecutar(volverPendientes){
   var br = (_rt.borradores||[]).find(function(x){return x.id===_rt.borradorActivo;});
   if(!br) return;
   var estados = br.pedidos_estados || [];
-  var pendientes = estados.filter(function(e){
-    return e.estado==='activo' || e.estado==='pausado';
-  }).map(function(e){return e.id;});
+  var ahora = new Date().toISOString();
 
   var promesas = [];
-  // Para los pedidos que quedaron pendientes (activos/pausados al cerrar), volverlos a estado_envio=null
-  if(volverPendientes && pendientes.length){
-    pendientes.forEach(function(pid){
-      promesas.push(apiPatch("pedidos_catalogo",{estado_envio:null,reparto_at:null,reparto_orden:null},"id=eq."+pid));
-    });
-  }
+
+  estados.forEach(function(e){
+    if(e.estado === 'entregado'){
+      // Garantizar que el pedido en BD tenga estado_envio=entregado
+      promesas.push(
+        apiPatch("pedidos_catalogo", {
+          estado_envio: "entregado",
+          entregado_at: e.entregado_at || ahora
+        }, "id=eq."+e.id).catch(function(err){
+          console.error("[belle] limpieza entregado al completar pedId="+e.id+":",err);
+        })
+      );
+    } else if(e.estado === 'cancelado'){
+      // Pedidos cancelados de la ruta → vuelven al estado pre-reparto
+      promesas.push(
+        apiPatch("pedidos_catalogo", {
+          estado_envio: null,
+          reparto_at: null,
+          reparto_orden: null
+        }, "id=eq."+e.id).catch(function(err){
+          console.error("[belle] limpieza cancelado al completar pedId="+e.id+":",err);
+        })
+      );
+    } else if((e.estado === 'activo' || e.estado === 'pausado') && volverPendientes){
+      // Pedidos no resueltos al cerrar la ruta → vuelven a pendiente sin envío
+      promesas.push(
+        apiPatch("pedidos_catalogo", {
+          estado_envio: null,
+          reparto_at: null,
+          reparto_orden: null
+        }, "id=eq."+e.id).catch(function(err){
+          console.error("[belle] limpieza pendiente al completar pedId="+e.id+":",err);
+        })
+      );
+    }
+  });
+
   // Marcar borrador como completado y guardar timestamp
-  promesas.push(apiPatch("rutas_borradores",{estado:'completado',completada_at:new Date().toISOString()},"id=eq."+br.id));
+  promesas.push(apiPatch("rutas_borradores",{estado:'completado',completada_at:ahora},"id=eq."+br.id));
 
   Promise.all(promesas).then(function(){
     toast("Reparto completado ✓","tok");
     _rt.borradorActivo = null;
     _rt.subTab = "borradores";
+    // Reset de estado de la ruta en memoria
+    _rt.pedidosOrdenados = null;
+    _rt.rutaResult = null;
+    _rt.rutaModificada = false;
+    _rt.etas = {};
+    _rt.puntoPartida = null;
+    _rt.puntoFinal = null;
     loadRutas();
   }).catch(function(e){
     console.error("[belle] completar borrador:",e);
