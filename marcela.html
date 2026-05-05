@@ -272,7 +272,6 @@ select.sel{padding:.38rem .6rem;background:var(--sur);border:1px solid var(--bd)
   <div class="tabs">
     <div class="tab act" onclick="navTo('catalogo',this)">Catalogo</div>
     <div class="tab" onclick="navTo('pedidos-web',this)">Pedidos<span class="dot" id="dotPedidos"></span></div>
-    <div class="tab" onclick="navTo('transferidas',this)">Transferidas<span class="dot" id="dotTransf"></span></div>
     <div class="tab" onclick="navTo('historial',this)">Historial</div>
     <div class="tab" onclick="navTo('dinero',this)">Mi dinero</div>
     <div class="tab" onclick="navTo('comisiones',this)">Comisiones</div>
@@ -286,7 +285,6 @@ select.sel{padding:.38rem .6rem;background:var(--sur);border:1px solid var(--bd)
   <div class="content">
     <div class="page act" id="pg-catalogo"></div>
     <div class="page" id="pg-pedidos-web"></div>
-    <div class="page" id="pg-transferidas"></div>
     <div class="page" id="pg-historial"></div>
     <div class="page" id="pg-dinero"></div>
     <div class="page" id="pg-comisiones"></div>
@@ -649,9 +647,6 @@ function checkDots(){
       var d=document.getElementById("dotPedidos");if(d)d.classList.toggle("show",Array.isArray(data)&&data.length>0);
     });
   }
-  apiGet("ventas_transferidas","select=id&estado=eq.pendiente&asignada_a=eq."+VENDEDOR_ID).then(function(data){
-    var d=document.getElementById("dotTransf");if(d)d.classList.toggle("show",Array.isArray(data)&&data.length>0);
-  });
 }
 
 function fmt(n){return n?("$"+Math.round(n).toLocaleString("es-AR",{timeZone:"America/Argentina/Buenos_Aires"})):"-";}
@@ -1424,12 +1419,13 @@ function loadPedidosWeb(){
     apiGet("pedidos_catalogo","select=*&confirmado_cobro=eq.false&estado=neq.cancelado&order=created_at.desc&limit=200"+filtVend),
     apiGet("pedidos_catalogo","select=*&confirmado_cobro=eq.true&order=created_at.desc&limit=50"+filtVend),
     apiGet("pedidos_catalogo","select=*&estado=eq.cancelado&order=created_at.desc&limit=30"+filtVend),
-    apiGet("ventas_transferidas","select=*&order=created_at.desc&limit=100")
+    // UNIFICADO: las transferidas son pedidos_catalogo con transferida_por_id
+    apiGet("pedidos_catalogo","select=*&transferida_por_id=not.is.null&order=transferida_at.desc.nullslast,created_at.desc&limit=200")
   ]).then(function(res){
     var sinCobrar=(Array.isArray(res[0])?res[0]:[]).concat(Array.isArray(res[1])?res[1]:[]);
     var seen={}; sinCobrar=sinCobrar.filter(function(p){if(seen[p.id])return false;seen[p.id]=true;return true;});
     var pedidos=sinCobrar.concat(Array.isArray(res[2])?res[2]:[]).concat(Array.isArray(res[3])?res[3]:[]);
-    var transferidas=(Array.isArray(res[4])?res[4]:[]).map(function(t){t._esTransf=true;return t;});
+    var transferidas=Array.isArray(res[4])?res[4]:[];
     window._pedidosData=pedidos;
     window._transfData=transferidas;
     _renderPedidosFiltrados("todos");
@@ -1763,12 +1759,8 @@ function guardarEditPed(){
   var totalFinal=Math.max(0,total-desc);
 
   var savePromise;
-  if(pedId.indexOf("t_")===0){
-    var transfId=parseInt(pedId.replace("t_",""));
-    savePromise=apiPatch("ventas_transferidas",{items:JSON.stringify(newItems),total:totalFinal},"id=eq."+transfId);
-  } else {
-    savePromise=apiPatch("pedidos_catalogo",{items:JSON.stringify(newItems),total:totalFinal},"id=eq."+pedId);
-  }
+  // Sistema unificado: todo en pedidos_catalogo
+  savePromise=apiPatch("pedidos_catalogo",{items:JSON.stringify(newItems),total:totalFinal},"id=eq."+pedId);
 
   var allPromises=stockPromises.concat([savePromise]);
 
@@ -1787,7 +1779,7 @@ function guardarEditPed(){
     if(devueltos.length) msg+="\n✅ Volvió al stock:\n"+devueltos.join("\n");
     toast(msg,"tok");
     document.getElementById("moEditPed").classList.remove("open");
-    if(pedId.indexOf("t_")===0){loadTransferidas();}else{loadPedidosWeb();}
+    loadPedidosWeb();
     renderCat();
   }).catch(function(){toast("Error al guardar","terr");});
 }
@@ -1795,224 +1787,31 @@ function guardarEditPed(){
 
 // TRANSFERIDAS
 
-function cancelarTransf(id,conReserva,btn){
-  if(!confirm("Cancelar esta transferencia?"+(conReserva?" El stock reservado vuelve al inventario.":"")))return;
-  if(btn)btn.disabled=true;
-  apiGet("ventas_transferidas","select=*&id=eq."+id).then(function(data){
-    if(!Array.isArray(data)||!data.length)return;
-    var v=data[0];var items=[];
-    try{items=typeof v.items==="string"?JSON.parse(v.items):v.items;}catch(e){}
-    var promises=[apiPatch("ventas_transferidas",{estado:"cancelada"},"id=eq."+id)];
-    if(conReserva&&Array.isArray(items)){
-      items.forEach(function(it){
-        var pid=it.producto_id;
-        if(!pid||it.isDecan)return;
-        // FIX: sin prods.find() — siempre leer BD fresca
-        promises.push(
-          apiGet("productos","select=id,stock_actual,reserva&id=eq."+pid).then(function(rows){
-            var fp=rows&&rows[0];
-            if(!fp)return;
-            var reservaReal=fp.reserva||0;
-            if(reservaReal<=0)return;
-            var devQty=Math.min(it.qty||1,reservaReal);
-            return patchStockFresco(pid,{stock_actual:+devQty,reserva:-devQty},'Cancelar transf')
-              .then(function(){
-                return apiPost("movimientos_stock",{producto_id:pid,producto_nombre:it.nombre||"",tipo:"cancelacion_transferencia",cantidad:devQty,motivo:"Transferencia cancelada - stock devuelto",usuario:VENDEDOR_NOMBRE||"vendedor",periodo:periodoActual}).catch(function(e){console.error("[belle] error silencioso:",e);});
-              });
-          })
-        );
-      });
-    }
-    Promise.all(promises).then(function(){
-      toast("Transferencia cancelada"+(conReserva?" - stock devuelto":""),"twarn");
-      loadTransferidas();renderCat();
-    }).catch(function(){if(btn)btn.disabled=false;});
-  });
-}
 
-function editarTransf(id){
-  // Load transfer and open edit modal (reuse moEditPed)
-  apiGet("ventas_transferidas","select=*&id=eq."+id).then(function(data){
-    if(!Array.isArray(data)||!data.length)return;
-    var v=data[0];var items=[];
-    try{items=typeof v.items==="string"?JSON.parse(v.items):v.items;}catch(e){}
-    var mo=document.getElementById("moEditPed");if(!mo)return;
-    document.getElementById("editPedId").value="t_"+id; // prefix t_ = transferida
-    document.getElementById("editPedOrden").textContent=(v.nro_orden||"#"+id)+" (Transferida)";
-    window._editTransfId=id;
-    window._editTransfConReserva=v.con_reserva;
-    var tbody=document.getElementById("editPedItems");
-    if(tbody){
-      tbody.innerHTML=items.map(function(it,i){
-        var prodId=it.producto_id||null;
-        // Normalizar segmento: si quedó "Precio unico" del bug viejo, tratarlo como "pi"
-        var segReal=it.segmento||"pi";
-        if(segReal==="Precio unico"||segReal==="precio unico"||segReal==="Precio único")segReal="pi";
-        var segLbl={pm:"x10",pe:"x3",pi:"x1",mayorista:"x10",mediano:"x3",minorista:"x1",x1:"x1",x3:"x3",x10:"x10",decan:"decan",combo:"combo",especial:"especial",bonificado:"bonif"}[segReal]||segReal;
-        return"<tr data-orig-qty='"+(it.qty||1)+"' data-prod-id='"+(prodId||"")+"' data-is-decan='"+(it.isDecan?"1":"0")+"' data-segmento='"+segReal+"'>"+
-          "<td style='font-size:.78rem;color:var(--tx)'>"+it.nombre+"</td>"+
-          "<td><input type='number' min='0' value='"+(it.qty||1)+"' data-idx='"+i+"' data-prod-id='"+(prodId||"")+"' data-orig-precio='"+(it.precio||0)+"' data-is-decan='"+(it.isDecan?"1":"0")+"' data-segmento='"+segReal+"' class='edit-qty-inp' style='width:55px;padding:.28rem .4rem;background:var(--sur3);border:1px solid var(--bd);border-radius:4px;color:var(--tx);font-size:.78rem;text-align:center' onchange='recalcEditPed()'></td>"+
-          "<td style='font-size:.78rem;color:var(--acc);text-align:right' id='epit-"+i+"'>"+fmt((it.qty||1)*(it.precio||0))+"</td>"+
-          "<td style='font-size:.72rem;color:var(--tx3);text-align:center' id='epseg-"+i+"'>"+segLbl+"</td>"+
-          "<td><button onclick='removeEditItem("+i+")' style='background:var(--rdim);border:1px solid var(--red);color:var(--red);border-radius:3px;width:22px;height:22px;cursor:pointer;font-size:.75rem'>X</button></td>"+
-        "</tr>";
-      }).join("");
-    }
-    recalcEditPed();
-    mo.classList.add("open");
-  });
-}
-
-function eliminarTransf(id,btn){
-  if(!confirm("Eliminar esta transferencia definitivamente?"))return;
-  if(btn)btn.disabled=true;
-  apiDelete("ventas_transferidas","id=eq."+id).then(function(){
-    toast("Transferencia eliminada","twarn");loadTransferidas();
-  }).catch(function(){if(btn)btn.disabled=false;});
-}
+// cancelarTransf eliminada — sistema legacy
 
 
-function loadTransferidas(){
-  var pg=document.getElementById("pg-transferidas");
-  pg.innerHTML="<div class='loading'><div class='spin'></div>Cargando...</div>";
-  apiGet("ventas_transferidas","select=*&creada_por=ilike."+encodeURIComponent(VENDEDOR_NOMBRE)+"&order=created_at.desc&limit=200").then(function(all){
-    if(!Array.isArray(all)||!all.length){pg.innerHTML="<div class='empty'>Sin ventas transferidas</div>";return;}
-    var pend=all.filter(function(v){return v.estado==="pendiente";});
-    var conf=all.filter(function(v){return v.estado==="confirmada";});
-    var canc=all.filter(function(v){return v.estado==="cancelada";});
-    var html="";
-    if(pend.length){
-      html+="<div class='sec-title' style='color:var(--yel)'>⏳ Pendientes de cobro <span style='color:var(--acc)'>"+pend.length+"</span></div>";
-      pend.forEach(function(v){html+=renderTransfCard(v,false);});
-    }
-    if(canc.length){
-      html+="<div class='sec-title' style='margin-top:1rem;color:var(--red)'>Canceladas</div>";
-      canc.forEach(function(v){html+=renderTransfCard(v,true);});
-    }
-    if(!html)html="<div class='empty'>Sin transferencias</div>";
-    pg.innerHTML=html;
-    var d=document.getElementById("dotTransf");
-    if(d)d.classList.toggle("show",pend.length>0);
-  });
-}
 
-function renderTransfCard(v,done){
-  var items=[];try{items=typeof v.items==="string"?JSON.parse(v.items):v.items;}catch(e){}
-  var fecha=new Date(v.created_at).toLocaleString("es-AR",{day:"2-digit",month:"2-digit",year:"2-digit",hour:"2-digit",minute:"2-digit",timeZone:"America/Argentina/Buenos_Aires"});
-  var reservaTag=v.con_reserva?"<span class='badge bg-cyan' style='margin-left:.3rem;font-size:.55rem'>Con reserva</span>":"<span class='badge bg-yel' style='margin-left:.3rem;font-size:.55rem'>Sin reserva</span>";
-  var cancelado=v.estado==="cancelada";
-  var html="<div class='ped-card"+(done||cancelado?"":(" nuevo"))+"'>";
-  html+="<div class='ped-header'>";
-  html+="<div><div style='font-size:.78rem;font-weight:500;color:var(--tx)'>Para: <b style='color:var(--acc)'>David</b>"+reservaTag+"</div>";
-  html+="<div class='ped-fecha'>"+fecha+" &bull; "+(v.nro_orden||"TRF-"+v.id)+"</div></div>";
-  html+="<div class='ped-total'>"+fmt(v.total)+"</div></div>";
-  html+="<div style='font-size:.73rem;color:var(--tx2);line-height:1.7;margin-bottom:.5rem'>";
-  if(Array.isArray(items))items.forEach(function(it){
-    var _itSeg=it.segmento||"";var _itPrecio=it.precio||0;var _itBadge=(_itSeg==="especial"&&_itPrecio===0)?"<span style='font-size:.56rem;color:var(--blue);background:rgba(74,159,216,.12);padding:.08rem .3rem;border-radius:3px;margin-right:.25rem'>🎁 Bonificado</span>":_itSeg==="especial"?"<span style='font-size:.56rem;color:var(--red);background:rgba(220,60,60,.12);padding:.08rem .3rem;border-radius:3px;margin-right:.25rem'>Especial</span>":_itSeg==="pm"?"<span style='font-size:.56rem;color:var(--green);margin-right:.25rem'>x10</span>":_itSeg==="pe"?"<span style='font-size:.56rem;color:var(--cyan);margin-right:.25rem'>x3</span>":_itSeg==="decan"?"<span style='font-size:.56rem;color:var(--tx3);margin-right:.25rem'>Decan</span>":"";
-    html+="<div style='display:flex;justify-content:space-between;align-items:center;padding:.05rem 0'><span>"+_itBadge+it.nombre+" x"+(it.qty||1)+(_itPrecio>0?" <span style='font-size:.62rem;color:var(--tx3)'>— "+fmt(_itPrecio)+"/u</span>":"")+"</span><span style='font-weight:600'>"+fmt(it.total||0)+"</span></div>";
-  });
-  html+="</div>";
-  if(cancelado){
-    html+="<span class='badge bg-red'>Cancelada"+(v.con_reserva?" — stock devuelto":"")+"</span>";
-  } else if(done){
-    html+="<span class='badge bg-green'>Confirmada por David</span>";
-  } else {
-    html+="<div style='display:flex;gap:.4rem;align-items:center'>";
-    html+="<span style='font-size:.68rem;color:var(--yel);flex:1'>&#9201; Pendiente de cobro por David</span>";
-    html+="<button class='btn btn-red' onclick='cancelarTransf("+v.id+","+v.con_reserva+",this)' style='padding:.3rem .6rem;font-size:.65rem'>Cancelar</button>";
-    html+="</div>";
-  }
-  html+="</div>";return html;
-}
+// editarTransf eliminada — sistema legacy
 
 
-function confirmarTransf(id,btn){
-  if(btn)btn.disabled=true;
-  apiGet("ventas_transferidas","select=*&id=eq."+id).then(function(data){
-    if(!Array.isArray(data)||!data.length)return;
-    var v=data[0];var items=[];
-    try{items=typeof v.items==="string"?JSON.parse(v.items):v.items;}catch(e){}
 
-    // FIX CRÍTICO: primero stock, DESPUÉS estado=confirmada
-    var stockPromises=[];
-    if(Array.isArray(items))items.forEach(function(it){
-      stockPromises.push(apiPost("ventas",{
-        vendedor_id:VENDEDOR_ID,producto_id:it.producto_id||null,
-        producto_nombre:it.nombre,cantidad:it.qty||1,
-        precio_unitario:it.precio||0,segmento:it.segmento||"x1",
-        total:it.total||0,periodo:periodoActual,estado:"confirmada",
-        origen:"vendedor",nro_orden:v.nro_orden,
-        descuento:0,descuento_motivo:"",forma_cobro:getFormaCobro()||"efectivo"
-      }));
-    });
-    if(v.con_reserva){
-      if(Array.isArray(items))items.forEach(function(it){
-        var pid=it.producto_id;
-        if(!pid||it.isDecan)return;
-        stockPromises.push(patchStockFresco(pid,{reserva:-(it.qty||1),vendido_david:+(it.qty||1)},'Confirmar transf reserva Marcela'));
-        stockPromises.push(apiPost("movimientos_stock",{
-          producto_id:pid,producto_nombre:it.nombre,tipo:"venta",
-          cantidad:it.qty||1,
-          motivo:"Transferencia "+v.nro_orden+" (desde reserva)",
-          usuario:"Marcela",periodo:periodoActual
-        }).catch(function(e){console.error("[belle] error silencioso:",e);}));
-      });
-    } else {
-      if(Array.isArray(items))items.forEach(function(it){
-        var pid=it.producto_id||it.id;
-        if(!pid||it.isDecan)return;
-        stockPromises.push(patchStockFresco(pid,{stock_actual:-(it.qty||1),vendido_david:+(it.qty||1)},'Confirmar transf Marcela'));
-        stockPromises.push(apiPost("movimientos_stock",{
-          producto_id:pid,producto_nombre:it.nombre,tipo:"venta",
-          cantidad:it.qty||1,
-          motivo:"Transferencia "+v.nro_orden+" (sin reserva)",
-          usuario:"Marcela",periodo:periodoActual
-        }).catch(function(e){console.error("[belle] error silencioso:",e);}));
-      });
-    }
+// eliminarTransf eliminada — sistema legacy
 
-    // Stock y ventas primero — estado confirmada DESPUÉS
-    Promise.all(stockPromises).then(function(){
-      return apiPatch("ventas_transferidas",{estado:"confirmada",confirmada_at:new Date().toISOString()},"id=eq."+id);
-    }).then(function(){
-      // If this transfer was from Marcela (deposito), handle commissions
-      if(v.creada_por==='Marcela'&&v.nro_orden){
-        // Calculate commission from items
-        var comItems=Array.isArray(items)?items:[];
-        var perfs=comItems.filter(function(it){return !it.isDecan;});
-        var decans=comItems.filter(function(it){return it.isDecan;});
-        var totalUn=perfs.reduce(function(s,it){return s+(it.qty||1);},0);
-        var totalDecansUn=decans.reduce(function(s,it){return s+(it.qty||1);},0);
-        var segTotal=totalUn>=10?'pm':totalUn>=3?'pe':'pi';
-        var comUnBase=segTotal==='pi'?_comisiones.minorista:_comisiones.perfume;
-        var comUn=totalDecansUn>0?(comUnBase+_comisiones.decan):comUnBase;
-        var totalCom=Math.round((totalUn*comUn)+(totalDecansUn*_comisiones.decan));
-        var comDesc='Comision Marcela — '+v.nro_orden+' ('+totalUn+'u x $'+comUn.toLocaleString('es-AR',{timeZone:"America/Argentina/Buenos_Aires"})+')';
 
-        // 1. Register commission debit for David
-        apiPost('gastos_vendedor',{
-          vendedor_id:VENDEDOR_ID,
-          concepto:comDesc,
-          monto:totalCom,
-          periodo:periodoActual,
-          aprobado:true,  // auto-approved: David already confirmed the sale
-          periodo_cerrado:false
-        }).catch(function(e){console.warn('Error registrando comision David:',e);});
 
-        // 2. Approve Marcela's commission gasto
-        apiGet('gastos_vendedor','select=id&vendedor_id=eq.3&aprobado=eq.false&concepto=like.%25'+v.nro_orden+'%25').then(function(gastos){
-          if(Array.isArray(gastos)&&gastos.length){
-            return Promise.all(gastos.map(function(g){
-              return apiPatch('gastos_vendedor',{aprobado:true},'id=eq.'+g.id);
-            }));
-          }
-        }).catch(function(e){console.warn('Error aprobando comision Marcela:',e);});
-      }
-      toast("Cobro confirmado!"+(v.con_reserva?" (reserva liberada)":" (stock descontado)"),"tok");
-      loadTransferidas();loadDineroData();renderCat();
-    }).catch(function(){if(btn)btn.disabled=false;});
-  });
-}
+
+// loadTransferidas eliminada — pestaña obsoleta
+
+
+
+// renderTransfCard eliminada — sistema legacy
+
+
+
+
+// confirmarTransf eliminada — sistema legacy
+
 
 // HISTORIAL
 function loadHistorial(){
@@ -3822,7 +3621,6 @@ function navTo(pg,el){
   if(ov)ov.style.display='none';
   if(pg==="catalogo"){if(!document.getElementById("prodList"))buildCatalogo();renderCat();loadCombosVendedor();loadQuickPanels();}
   if(pg==="pedidos-web")loadPedidosWeb();
-  if(pg==="transferidas")loadTransferidas();
   if(pg==="historial")loadHistorial();
   if(pg==="dinero")loadDineroData();
   if(pg==="comisiones"){loadDepositoMarcela();}
@@ -3932,36 +3730,37 @@ function ejecutarTransfer(targetId,targetNombre){
   }
   Promise.all(stockPromises).then(function(){
     var reservaEjecutadaOk=conReserva&&reservasOk>0&&reservasOk===reservasTotal;
-    return apiPost("ventas_transferidas",{
-      creada_por:VENDEDOR_NOMBRE,asignada_a:targetId,
-      reserva_ejecutada:reservaEjecutadaOk,
-      items:itemsData,total:total,estado:"pendiente",
-      periodo:periodoActual,nro_orden:nroOrden,con_reserva:conReserva,
-      forma_cobro:getFormaCobro()||"pendiente",
-      notas:"De "+VENDEDOR_NOMBRE+" para "+targetNombre+(conReserva?" [CON RESERVA]":"")
+    // UNIFICACIÓN: escribir en pedidos_catalogo (sistema único)
+    return apiPost("pedidos_catalogo",{
+      nro_orden: nroOrden,
+      items: itemsData,
+      total: total,
+      vendedor_id: targetId,
+      transferida_por_id: VENDEDOR_ID,
+      transferida_at: new Date().toISOString(),
+      con_reserva: conReserva,
+      reserva_ejecutada: conReserva && reservaEjecutadaOk,
+      estado: 'pendiente',
+      confirmado_cobro: null,
+      origen: 'transferencia',
+      periodo: periodoActual,
+      forma_cobro: getFormaCobro()||"pendiente",
+      notas_transferencia: "De "+VENDEDOR_NOMBRE+" para "+targetNombre+(conReserva?" [CON RESERVA]":"")
     });
-  }).then(function(){
-    // Create commission gasto for Marcela (vendedor_id=3) as PENDING
-    var comPerfs=perfs;
-    var comDecans=items.filter(function(i){return i.isDecan;});
-    var totalUn=comPerfs.reduce(function(s,i){return s+(i.qty||1);},0);
-    var totalDec=comDecans.reduce(function(s,i){return s+(i.qty||1);},0);
-    if(totalUn>0||totalDec>0){
-      var segTot=totalUn>=10?'pm':totalUn>=3?'pe':'pi';
-      var comBase=segTot==='pi'?_comisiones.minorista:_comisiones.perfume;
-      var totalCom=Math.round(totalUn*comBase+totalDec*(_comisiones.decan||500));
-      var comUn=totalDec>0?(comBase+(_comisiones.decan||500)):comBase;
-      var comDesc="Comision Marcela: "+nroOrden+" ("+totalUn+"u x $"+comUn.toLocaleString("es-AR",{timeZone:"America/Argentina/Buenos_Aires"})+")";
-      apiPost("gastos_vendedor",{
-        vendedor_id:3,
-        concepto:comDesc,
-        monto:totalCom,
-        periodo:periodoActual||"general",
-        aprobado:false,
-        periodo_cerrado:false,
-        nro_operacion:nroOrden
-      }).catch(function(e){console.warn("Error creando comision:",e);});
+  }).then(function(rows){
+    var pedNew = Array.isArray(rows) && rows[0];
+    if(pedNew && pedNew.id){
+      apiPost("pedidos_estados_log",{
+        pedido_id: pedNew.id,
+        pedido_tabla: "pedidos_catalogo",
+        estado: "transferido",
+        nota: "Transferido de "+VENDEDOR_NOMBRE+" a "+targetNombre,
+        usuario: VENDEDOR_NOMBRE
+      }).catch(function(e){console.error("[belle] log silencioso:",e);});
     }
+    // NOTA: La comisión de Marcela ya NO se crea acá. Se crea cuando David cobra
+    // el pedido (helper _crearComisionMarcelaSiAplica en ventas.html).
+    // Esto evita duplicados y mantiene el sistema unificado.
     document.getElementById("moTransfer").classList.remove("open");
     cart={};cstate={};decanState={};
     updateCartBar();closeDrawer();renderCat();

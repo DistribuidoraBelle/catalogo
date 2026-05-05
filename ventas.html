@@ -576,14 +576,6 @@ function checkDots(){
   apiGet("pedidos_catalogo","select=id&estado=eq.pendiente&confirmado_cobro=is.false").then(function(data){
     var d=document.getElementById("dotPedidos");if(d)d.classList.toggle("show",Array.isArray(data)&&data.length>0);
   });
-  // Check deposito pending too
-  apiGet("ventas","select=id&estado=eq.pendiente_aprobacion&origen=eq.deposito").then(function(dep){
-    var d=document.getElementById("dotTransf");
-    if(d&&Array.isArray(dep)&&dep.length>0) d.classList.add("show");
-  });
-  apiGet("ventas_transferidas","select=id&estado=eq.pendiente&asignada_a=eq."+VENDEDOR_ID).then(function(data){
-    var d=document.getElementById("dotTransf");if(d)d.classList.toggle("show",Array.isArray(data)&&data.length>0);
-  });
   apiGet("cotizaciones","select=id&vendedor_id=eq."+VENDEDOR_ID+"&estado=eq.cotizacion").then(function(data){
     var d=document.getElementById("dotCotiz");if(d)d.classList.toggle("show",Array.isArray(data)&&data.length>0);
   });
@@ -3950,9 +3942,8 @@ function _gestionarPedido(tipo,id){
   ov.addEventListener('click',function(e){if(e.target===ov)ov.remove();});
   document.body.appendChild(ov);
 
-  // Load data based on type
-  var table=tipo==='transferida'?'ventas_transferidas':'pedidos_catalogo';
-  apiGet(table,'select=*&id=eq.'+id).then(function(data){
+  // Sistema unificado: todo en pedidos_catalogo (ya no más ventas_transferidas)
+  apiGet('pedidos_catalogo','select=*&id=eq.'+id).then(function(data){
     if(!Array.isArray(data)||!data.length){
       document.getElementById('_mgBody').innerHTML="<div class='empty'>No encontrado</div>";return;
     }
@@ -4080,8 +4071,6 @@ function _gestionarPedido(tipo,id){
     // Edit (load into cart/drawer)
     if(tipo==='web'||tipo==='reserva'){
       html+='<button class="btn btn-g" style="padding:.4rem .7rem" onclick="document.getElementById(\'_moGestionar\').remove();editarPedido('+id+')">✏️ Editar</button>';
-    } else if(tipo==='transferida'){
-      html+='<button class="btn btn-g" style="padding:.4rem .7rem" onclick="document.getElementById(\'_moGestionar\').remove();editarTransf('+id+')">✏️ Editar</button>';
     }
 
     // Cancel
@@ -4089,8 +4078,6 @@ function _gestionarPedido(tipo,id){
       html+='<button class="btn btn-red" style="padding:.4rem .7rem" onclick="document.getElementById(\'_moGestionar\').remove();cancelarPedidoWeb('+id+',null)">Cancelar</button>';
     } else if(tipo==='reserva'){
       html+='<button class="btn btn-red" style="padding:.4rem .7rem" onclick="document.getElementById(\'_moGestionar\').remove();cancelarPedReservado('+id+',null)">Cancelar</button>';
-    } else if(tipo==='transferida'){
-      html+='<button class="btn btn-red" style="padding:.4rem .7rem" onclick="document.getElementById(\'_moGestionar\').remove();cancelarTransf('+id+','+(rec.con_reserva||false)+',null)">Cancelar</button>';
     }
 
     html+='</div>';
@@ -4184,13 +4171,7 @@ function _mgConfirmarCobro(){
   var rec=window._mgRec||{};
   var items=window._mgItems||[];
 
-  if(tipo==='transferida'){
-    // Cobrar venta transferida
-    var btn=document.getElementById('_mgBtnCobrar');
-    if(btn)btn.disabled=true;
-    confirmarTransfConForma(id,forma,seleccionados,rec);
-    return;
-  }
+  // Sistema unificado: todo va por pedidos_catalogo (no más tipo='transferida' legacy)
 
   // pedidos_catalogo (web o reserva)
   var cobradosExist=[];try{cobradosExist=Array.isArray(rec.items_cobrados)?rec.items_cobrados:(rec.items_cobrados?JSON.parse(rec.items_cobrados):[]);}catch(ex){}
@@ -4323,65 +4304,9 @@ function _mgConfirmarCobro(){
   }).catch(function(e){toast('Error: '+(e.message||'ver consola'),'terr');});
 }
 
-function confirmarTransfConForma(id,forma,seleccionados,rec){
-  var items=window._mgItems||[];
-  // FIX: stock PRIMERO — estado confirmada DESPUÉS
-  var proms=[];
 
-  // Only register the selected items as ventas
-  seleccionados.forEach(function(s){
-    var it=items[s.idx];if(!it)return;
-    proms.push(apiPost('ventas',{
-      vendedor_id:VENDEDOR_ID,
-      producto_id:it.producto_id||null,
-      producto_nombre:it.nombre,
-      cantidad:s.qty,
-      precio_unitario:it.precio||0,
-      segmento:it.segmento||'x1',
-      total:s.total,
-      periodo:periodoActual||'general',
-      estado:'confirmada',
-      origen:'vendedor',
-      nro_orden:rec.nro_orden||('TRF-'+id),
-      forma_cobro:forma,
-      descuento:0,
-      descuento_motivo:''
-    }));
-    // Update stock — siempre desde BD fresca
-    var pid=it.producto_id||it.id;
-    if(pid&&!it.isDecan){
-      if(rec.con_reserva){
-        proms.push(patchStockFresco(pid,{reserva:-s.qty,vendido_david:+s.qty},'Transf con reserva')
-          .then(function(r){if(!r)_alertaStock("Stock de "+it.nombre+" no actualizó al confirmar "+rec.nro_orden);}));
-      } else {
-        proms.push(patchStockFresco(pid,{stock_actual:-s.qty,vendido_david:+s.qty},'Transf stock libre')
-          .then(function(r){if(!r)_alertaStock("Stock de "+it.nombre+" no actualizó al confirmar "+rec.nro_orden);}));
-      }
-    }
-  });
+// confirmarTransfConForma eliminada — flujo legacy ventas_transferidas
 
-  // Marcela commission if applicable
-  if(rec.creada_por==='Marcela'&&rec.nro_orden){
-    var comItems=items.filter(function(it){return !it.isDecan;});
-    var comDecans=items.filter(function(it){return it.isDecan;});
-    var totalUn=comItems.reduce(function(s,it){return s+(it.qty||1);},0);
-    var totalDec=comDecans.reduce(function(s,it){return s+(it.qty||1);},0);
-    var segTot=totalUn>=10?'pm':totalUn>=3?'pe':'pi';
-    var comBase=segTot==='pi'?_comisiones.minorista:_comisiones.perfume;
-    var totalCom=Math.round(totalUn*comBase+totalDec*(_comisiones.decan||500));
-    apiPost('gastos_vendedor',{vendedor_id:VENDEDOR_ID,concepto:'Comision Marcela — '+rec.nro_orden,monto:totalCom,periodo:periodoActual||'general',aprobado:true,periodo_cerrado:false,nro_operacion:rec.nro_orden}).catch(function(e){console.error("[belle] error silencioso:",e);});
-    // FIX BUG C: Ya no actualizamos el registro de Marcela (vendedor_id=3) porque ya no existe.
-    // Marcela ve sus comisiones leyendo ventas_transferidas directamente.
-  }
-
-  Promise.all(proms).then(function(){
-    return apiPatch('ventas_transferidas',{estado:'confirmada',confirmada_at:new Date().toISOString()},'id=eq.'+id);
-  }).then(function(){
-    toast('Cobro confirmado ('+forma+')'+(rec.con_reserva?' — reserva liberada':''),'tok');
-    document.getElementById('_moGestionar').remove();
-    loadTransferidas();loadDineroData();renderCat();
-  }).catch(function(){toast('Error al confirmar cobro','terr');});
-}
 
 function renderPedCard(ped,cobrado){
   var fecha=new Date(ped.created_at).toLocaleString("es-AR",{day:"2-digit",month:"2-digit",year:"2-digit",hour:"2-digit",minute:"2-digit",timeZone:"America/Argentina/Buenos_Aires"});
@@ -4406,6 +4331,21 @@ function renderPedCard(ped,cobrado){
     var _vTransf = _vendedorNombre(ped.transferida_por_id) || ("V#"+ped.transferida_por_id);
     _transfBadge = "<span class='badge' style='font-size:.55rem;margin-left:.4rem;background:rgba(196,150,90,.15);color:var(--acc);border:1px solid rgba(196,150,90,.4)' title='Pedido originalmente de "+_vTransf+", transferido'>↪ Transferida por "+_vTransf+"</span>";
   }
+  // Badge de RESERVA DE STOCK: solo se muestra si el pedido es una transferencia (transferida_por_id != null)
+  // Distingue 4 casos: con reserva ejecutada / con reserva pendiente / sin reserva explícito / null (no asume).
+  var _reservaBadge = "";
+  if(ped.transferida_por_id){
+    if(ped.con_reserva === true){
+      if(ped.reserva_ejecutada !== false){
+        _reservaBadge = "<span class='badge bg-cyan' style='font-size:.55rem;margin-left:.4rem' title='Stock ya reservado para este pedido'>✅ Con reserva</span>";
+      } else {
+        _reservaBadge = "<span style='font-size:.55rem;margin-left:.4rem;background:#e8a020;color:#fff;border-radius:4px;padding:.1rem .4rem;font-weight:600' title='El pedido se marcó como con reserva pero el stock no se logró reservar'>⚠️ Reserva pendiente</span>";
+      }
+    } else if(ped.con_reserva === false){
+      _reservaBadge = "<span style='font-size:.55rem;margin-left:.4rem;background:rgba(140,140,140,.2);color:var(--tx2);border-radius:4px;padding:.1rem .4rem' title='Sin reserva: el stock se descuenta cuando cobres'>Sin reserva</span>";
+    }
+    // si null/undefined → sin badge
+  }
   // Badge "En reparto" — bien visible cuando el pedido salió en una ruta
   var _enReparto = ped.estado_envio==="en_reparto";
   var _repartoBadge = _enReparto
@@ -4416,6 +4356,7 @@ function renderPedCard(ped,cobrado){
   html+="<div><div style='font-size:.78rem;font-weight:500;color:var(--tx)'>Pedido web <span style='color:var(--acc);font-size:.7rem'>"+(ped.nro_orden||("#"+ped.id))+"</span>"+
     _asigBadge+
     _transfBadge+
+    _reservaBadge+
     _repartoBadge+
     (ped.estado==="entregado"?"<span class='badge bg-cyan' style='margin-left:.4rem;font-size:.55rem'>Entregado por Marcela</span>":"")+
     "</div>";
@@ -4743,14 +4684,8 @@ function guardarEditPed(){
   var totalFinal=Math.max(0,total-desc);
 
   var savePromise;
-  if(pedId.indexOf("t_")===0){
-    // Es una transferida — guardar en ventas_transferidas
-    var transfId=parseInt(pedId.replace("t_",""));
-    savePromise=apiPatch("ventas_transferidas",{items:JSON.stringify(newItems),total:totalFinal},"id=eq."+transfId);
-  } else {
-    // Es un pedido web — guardar en pedidos_catalogo
-    savePromise=apiPatch("pedidos_catalogo",{items:JSON.stringify(newItems),total:totalFinal,descuento:desc,notas_descuento:motDesc},"id=eq."+pedId);
-  }
+  // Sistema unificado: todo en pedidos_catalogo (sin más prefijo "t_" legacy)
+  savePromise=apiPatch("pedidos_catalogo",{items:JSON.stringify(newItems),total:totalFinal,descuento:desc,notas_descuento:motDesc},"id=eq."+pedId);
 
   var allPromises=stockPromises.concat([savePromise]);
 
@@ -4769,7 +4704,7 @@ function guardarEditPed(){
     if(devueltos.length) msg+="\n✅ Volvió al stock:\n"+devueltos.join("\n");
     toast(msg,"tok");
     document.getElementById("moEditPed").classList.remove("open");
-    if(pedId.indexOf("t_")===0){loadTransferidas();}else{loadPedidosWeb();}
+    loadPedidosWeb();
     renderCat();
   }).catch(function(){toast("Error al guardar","terr");});
 }
@@ -4777,318 +4712,22 @@ function guardarEditPed(){
 
 // TRANSFERIDAS
 
-function cancelarTransf(id,conReserva,btn,esUnificado){
-  if(!confirm("Cancelar esta transferencia?"+(conReserva?" El stock reservado vuelve al inventario.":"")))return;
-  if(btn)btn.disabled=true;
-  // Sistema unificado (pedidos_catalogo) o legacy (ventas_transferidas)
-  var tabla = esUnificado ? "pedidos_catalogo" : "ventas_transferidas";
-  apiGet(tabla,"select=*&id=eq."+id).then(function(data){
-    if(!Array.isArray(data)||!data.length)return;
-    var v=data[0];var items=[];
-    try{items=typeof v.items==="string"?JSON.parse(v.items):v.items;}catch(e){}
-    var promises=[];
-    if(esUnificado){
-      // pedidos_catalogo: marcar como cancelado
-      promises.push(apiPatch("pedidos_catalogo",{estado:"cancelado"},"id=eq."+id));
-    } else {
-      promises.push(apiPatch("ventas_transferidas",{estado:"cancelada"},"id=eq."+id));
-    }
-    if(conReserva&&Array.isArray(items)){
-      items.forEach(function(it){
-        var pid=it.producto_id;
-        if(!pid||it.isDecan)return;
-        promises.push(
-          apiGet("productos","select=id,stock_actual,reserva&id=eq."+pid).then(function(rows){
-            var fp=rows&&rows[0];
-            if(!fp)return;
-            var reservaReal=fp.reserva||0;
-            if(reservaReal<=0)return;
-            var devQty=Math.min(it.qty||1, reservaReal);
-            return patchStockFresco(pid,{stock_actual:+devQty,reserva:-devQty},"Cancelar transf")
-              .then(function(){
-                return apiPost("movimientos_stock",{producto_id:pid,
-                  producto_nombre:it.nombre||"",tipo:"cancelacion_transferencia",
-                  cantidad:devQty,motivo:"Transferencia cancelada - stock devuelto",
-                  usuario:VENDEDOR_NOMBRE||"vendedor",periodo:periodoActual}).catch(function(e){console.error("[belle] error silencioso:",e);});
-              });
-          })
-        );
-      });
-    }
-    Promise.all(promises).then(function(){
-      // If from Marcela (legacy), delete her pending commission
-      if(!esUnificado && v.creada_por==='Marcela'&&v.nro_orden){
-        apiGet('gastos_vendedor','select=id,concepto&vendedor_id=eq.3&aprobado=eq.false&concepto=like.%25'+v.nro_orden+'%25').then(function(gastos){
-          if(Array.isArray(gastos)&&gastos.length){
-            Promise.all(gastos.map(function(g){
-              return apiPatch('gastos_vendedor',{aprobado:false,concepto:g.concepto+' [CANCELADA]'},'id=eq.'+g.id);
-            })).catch(function(e){});
-          }
-        }).catch(function(e){});
-      }
-      toast("Transferencia cancelada"+(conReserva?" - stock devuelto":""),"twarn");
-      loadTransferidas();renderCat();
-    }).catch(function(){if(btn)btn.disabled=false;});
-  });
-}
 
-function editarTransf(id){
-  // Load transfer and open edit modal (reuse moEditPed)
-  apiGet("ventas_transferidas","select=*&id=eq."+id).then(function(data){
-    if(!Array.isArray(data)||!data.length)return;
-    var v=data[0];var items=[];
-    try{items=typeof v.items==="string"?JSON.parse(v.items):v.items;}catch(e){}
-    var mo=document.getElementById("moEditPed");if(!mo)return;
-    document.getElementById("editPedId").value="t_"+id; // prefix t_ = transferida
-    document.getElementById("editPedOrden").textContent=(v.nro_orden||"#"+id)+" (Transferida)";
-    window._editTransfId=id;
-    window._editTransfConReserva=v.con_reserva;
-    var tbody=document.getElementById("editPedItems");
-    if(tbody){
-      tbody.innerHTML=items.map(function(it,i){
-        var prodId=it.producto_id||null;
-        // Normalizar segmento: si quedó "Precio unico" del bug viejo, tratarlo como "pi"
-        var segReal=it.segmento||"pi";
-        if(segReal==="Precio unico"||segReal==="precio unico"||segReal==="Precio único")segReal="pi";
-        var segLbl={pm:"x10",pe:"x3",pi:"x1",mayorista:"x10",mediano:"x3",minorista:"x1",x1:"x1",x3:"x3",x10:"x10",decan:"decan",combo:"combo",especial:"especial",bonificado:"bonif"}[segReal]||segReal;
-        return"<tr data-orig-qty='"+(it.qty||1)+"' data-prod-id='"+(prodId||"")+"' data-is-decan='"+(it.isDecan?"1":"0")+"' data-segmento='"+segReal+"'>"+
-          "<td style='font-size:.78rem;color:var(--tx)'>"+it.nombre+"</td>"+
-          "<td><input type='number' min='0' value='"+(it.qty||1)+"' data-idx='"+i+"' data-prod-id='"+(prodId||"")+"' data-orig-precio='"+(it.precio||0)+"' data-is-decan='"+(it.isDecan?"1":"0")+"' data-segmento='"+segReal+"' class='edit-qty-inp' style='width:55px;padding:.28rem .4rem;background:var(--sur3);border:1px solid var(--bd);border-radius:4px;color:var(--tx);font-size:.78rem;text-align:center' onchange='recalcEditPed()'></td>"+
-          "<td style='font-size:.78rem;color:var(--acc);text-align:right' id='epit-"+i+"'>"+fmt((it.qty||1)*(it.precio||0))+"</td>"+
-          "<td style='font-size:.72rem;color:var(--tx3);text-align:center' id='epseg-"+i+"'>"+segLbl+"</td>"+
-          "<td><button onclick='removeEditItem("+i+")' style='background:var(--rdim);border:1px solid var(--red);color:var(--red);border-radius:3px;width:22px;height:22px;cursor:pointer;font-size:.75rem'>X</button></td>"+
-        "</tr>";
-      }).join("");
-    }
-    recalcEditPed();
-    mo.classList.add("open");
-  });
-}
-
-function eliminarTransf(id,btn,esUnificado){
-  bellConfirm("Eliminar esta transferencia definitivamente?",function(){
-    if(btn)btn.disabled=true;
-    var tabla = esUnificado ? "pedidos_catalogo" : "ventas_transferidas";
-    apiDelete(tabla,"id=eq."+id).then(function(){
-      toast("Transferencia eliminada","twarn");loadTransferidas();
-    }).catch(function(){if(btn)btn.disabled=false;});
-  });
-}
+// cancelarTransf eliminada — sistema legacy
 
 
-function loadTransferidas(){
-  var pg=document.getElementById("pg-transferidas");
-  pg.innerHTML="<div class='loading'><div class='spin'></div>Cargando...</div>";
-  // ═══════════════════════════════════════════════════════════════════
-  // UNIFICACIÓN: ahora leemos de DOS fuentes:
-  //   1) ventas_transferidas (histórico — pendientes y confirmadas previas a la migración)
-  //   2) pedidos_catalogo con transferida_por_id != null (sistema unificado actual)
-  // 
-  // Mapeamos los pedidos_catalogo al formato ventas_transferidas para que la
-  // lógica de render existente (que es muy larga) funcione sin cambios.
-  // ═══════════════════════════════════════════════════════════════════
-  var mapVendedoresIdNombre = {1:'david', 2:'facu', 3:'marcela'};
-  Promise.all([
-    apiGet("ventas_transferidas","select=*&estado=neq.migrada_a_pedidos&order=created_at.desc&limit=500"),
-    apiGet("ventas","select=*&estado=eq.pendiente_aprobacion&origen=eq.deposito&order=created_at.desc"),
-    apiGet("ventas_transferidas","select=*&order=created_at.desc&limit=1"),
-    // Sistema unificado: pedidos_catalogo con transferencia
-    apiGet("pedidos_catalogo","select=*&transferida_por_id=not.is.null&order=transferida_at.desc.nullslast,created_at.desc&limit=300")
-  ]).then(function(res){
-    var legacyTransf = Array.isArray(res[0])?res[0]:[];
-    var deposito=Array.isArray(res[1])?res[1]:[];
-    var pedidosTransf = Array.isArray(res[3])?res[3]:[];
 
-    // Mapear pedidos_catalogo → formato ventas_transferidas para el render
-    var mapped = pedidosTransf.map(function(p){
-      var creadaPor = mapVendedoresIdNombre[p.transferida_por_id] || ('V#'+p.transferida_por_id);
-      // Estado equivalente: si está cobrado → 'confirmada', cancelado → 'cancelada', resto → 'pendiente'
-      var est = (p.estado === 'cobrado' || p.confirmado_cobro === true) ? 'confirmada'
-              : (p.estado === 'cancelado') ? 'cancelada'
-              : 'pendiente';
-      return {
-        id: p.id,
-        nro_orden: p.nro_orden,
-        creada_por: creadaPor,
-        asignada_a: p.vendedor_id,
-        items: p.items,
-        total: p.total,
-        estado: est,
-        con_reserva: p.con_reserva,
-        reserva_ejecutada: p.reserva_ejecutada,
-        notas: p.notas_transferencia || ('De '+creadaPor),
-        created_at: p.transferida_at || p.created_at,
-        confirmada_at: p.confirmado_at,
-        forma_cobro: p.forma_cobro,
-        periodo: p.periodo,
-        _esUnificado: true,           // flag para diferenciar el origen
-        _pedidoOriginal: p             // referencia al pedido_catalogo completo
-      };
-    });
-    // Combinar legacy + nuevos. Los nuevos van primero (más recientes)
-    var _todasTransf = mapped.concat(legacyTransf);
+// editarTransf eliminada — sistema legacy
 
-    // Filtrar recibidas y enviadas del mismo resultado
-    var _allTransf=_todasTransf.filter(function(t){
-      return String(t.asignada_a)===String(VENDEDOR_ID);
-    });
-    var _enviadas=_todasTransf.filter(function(t){
-      return t.creada_por&&t.creada_por.toLowerCase()===VENDEDOR_NOMBRE.toLowerCase();
-    });
-    // Recibidas: solo pendientes del periodo actual
-    var data=_allTransf.filter(function(t){
-      if(t.estado==='pendiente') return true;
-      return false;
-    });
-    // Enviadas: solo pendientes del periodo actual
-    var enviadas=_enviadas.filter(function(t){
-      if(t.estado==='pendiente') return true;
-      return false;
-    });
 
-    // ── STATS DE TRANSFERENCIAS ──────────────────────────────────────
-    // Combinar recibidas + enviadas para las stats
-    var _todas=data.concat(enviadas.filter(function(t){
-      return !data.some(function(d){return d.id===t.id;});
-    }));
-    var tConf=_todas.filter(function(t){return t.estado==='confirmada';});
-    var tPend=_todas.filter(function(t){return t.estado==='pendiente';});
-    var tCanc=_todas.filter(function(t){return t.estado==='cancelada';});
-    var tTotal=_todas.reduce(function(s,t){return s+(t.total||0);},0);
-    var tConfTotal=tConf.reduce(function(s,t){return s+(t.total||0);},0);
-    var tPendTotal=tPend.reduce(function(s,t){return s+(t.total||0);},0);
-    // Calcular unidades y productos
-    var _prodMap={};
-    _todas.forEach(function(t){
-      var items=[];try{items=typeof t.items==='string'?JSON.parse(t.items):t.items||[];}catch(e){}
-      items.forEach(function(it){
-        var key=it.nombre||'?';
-        if(!_prodMap[key])_prodMap[key]={nombre:key,qty:0,total:0};
-        _prodMap[key].qty+=(it.qty||1);
-        _prodMap[key].total+=(it.total||0);
-      });
-    });
-    var totalUnidades=Object.values(_prodMap).reduce(function(s,p){return s+p.qty;},0);
-    var topProds=Object.values(_prodMap).sort(function(a,b){return b.qty-a.qty;}).slice(0,5);
-    var html="";
-    // Stats siempre visibles (incluso con 0 transferencias)
-    html+="<div class='tbl-wrap' style='padding:.8rem;margin-bottom:.8rem'>"+
-      "<div style='font-size:.78rem;font-weight:700;color:var(--blue);margin-bottom:.6rem'>↔ Transferencias del período</div>"+
-      "<div style='display:grid;grid-template-columns:repeat(2,1fr);gap:.4rem;margin-bottom:.6rem'>"+
-        "<div style='background:var(--sur2);border:1px solid var(--blue);border-radius:8px;padding:.55rem .7rem;text-align:center'>"+
-          "<div style='font-size:.58rem;color:var(--tx3);text-transform:uppercase;letter-spacing:.04em'>Total enviado</div>"+
-          "<div style='font-size:1rem;font-weight:700;color:var(--blue)'>"+"$"+Math.round(tTotal).toLocaleString("es-AR",{timeZone:"America/Argentina/Buenos_Aires"})+"</div>"+
-          "<div style='font-size:.6rem;color:var(--tx3)'>"+_todas.length+" oper. &bull; "+totalUnidades+"u</div>"+
-        "</div>"+
-        "<div style='background:var(--sur2);border:1px solid var(--green);border-radius:8px;padding:.55rem .7rem;text-align:center'>"+
-          "<div style='font-size:.58rem;color:var(--tx3);text-transform:uppercase;letter-spacing:.04em'>Confirmadas</div>"+
-          "<div style='font-size:1rem;font-weight:700;color:var(--green)'>"+"$"+Math.round(tConfTotal).toLocaleString("es-AR",{timeZone:"America/Argentina/Buenos_Aires"})+"</div>"+
-          "<div style='font-size:.6rem;color:var(--tx3)'>"+tConf.length+" confirmadas</div>"+
-        "</div>"+
-        "<div style='background:var(--sur2);border:1px solid var(--yel);border-radius:8px;padding:.55rem .7rem;text-align:center'>"+
-          "<div style='font-size:.58rem;color:var(--tx3);text-transform:uppercase;letter-spacing:.04em'>Pendiente cobro</div>"+
-          "<div style='font-size:1rem;font-weight:700;color:var(--yel)'>"+"$"+Math.round(tPendTotal).toLocaleString("es-AR",{timeZone:"America/Argentina/Buenos_Aires"})+"</div>"+
-          "<div style='font-size:.6rem;color:var(--tx3)'>"+tPend.length+" pendientes</div>"+
-        "</div>"+
-        "<div style='background:var(--sur2);border:1px solid var(--bd);border-radius:8px;padding:.55rem .7rem;text-align:center'>"+
-          "<div style='font-size:.58rem;color:var(--tx3);text-transform:uppercase;letter-spacing:.04em'>Canceladas</div>"+
-          "<div style='font-size:1rem;font-weight:700;color:var(--red)'>"+tCanc.length+"</div>"+
-          "<div style='font-size:.6rem;color:var(--tx3)'>"+tCanc.reduce(function(s,t){return s+(t.total||0);},0)/1000>0?fmt(tCanc.reduce(function(s,t){return s+(t.total||0);},0)):"-"+"</div>"+
-        "</div>"+
-      "</div>"+
-      (topProds.length?
-        "<div style='font-size:.68rem;font-weight:600;color:var(--tx3);margin-bottom:.3rem;text-transform:uppercase;letter-spacing:.04em'>Top productos enviados</div>"+
-        topProds.map(function(p){
-          var pct=totalUnidades>0?Math.round(p.qty/totalUnidades*100):0;
-          return "<div style='display:flex;align-items:center;gap:.5rem;margin-bottom:.25rem'>"+
-            "<div style='flex:1;min-width:0'>"+
-              "<div style='font-size:.7rem;color:var(--tx);overflow:hidden;text-overflow:ellipsis;white-space:nowrap'>"+p.nombre+"</div>"+
-              "<div style='background:var(--sur3);border-radius:3px;height:4px;margin-top:.15rem'>"+
-                "<div style='background:var(--blue);height:4px;border-radius:3px;width:"+pct+"%'></div>"+
-              "</div>"+
-            "</div>"+
-            "<div style='font-size:.7rem;font-weight:700;color:var(--blue);flex-shrink:0'>"+p.qty+"u</div>"+
-            "<div style='font-size:.65rem;color:var(--tx3);flex-shrink:0'>"+fmt(p.total)+"</div>"+
-          "</div>";
-        }).join('')
-      :"")+
-      (!_todas.length?"<div class='empty' style='padding:.4rem'>Sin transferencias en este período</div>":"")+
-    "</div>";
 
-    // Show Marcela's pending transfers first
-    if(deposito.length){
-      html+="<div class='sec-title' style='color:var(--yel)'>&#127968; Dep. Marcela - Pendientes de aprobacion <span style='color:var(--acc)'>"+deposito.length+"</span></div>";
-      // Group deposito ventas by nro_orden
-      var _dg={},_do=[];
-      deposito.forEach(function(v){
-        var k=v.nro_orden||('s_'+v.id);
-        if(!_dg[k]){_dg[k]={ord:v.nro_orden,fecha:v.created_at,rows:[],total:0,ids:[]};_do.push(k);}
-        _dg[k].rows.push(v);_dg[k].total+=(v.total||0);_dg[k].ids.push(v.id);
-      });
-      _do.forEach(function(k){
-        var g=_dg[k];
-        var fecha=new Date(g.fecha).toLocaleDateString('es-AR',{timeZone:"America/Argentina/Buenos_Aires"});
-        html+="<div class='rend-card' style='border-left:3px solid var(--yel)'>";
-        if(g.ord)html+="<div style='font-size:.62rem;color:var(--tx3);margin-bottom:.25rem'>"+g.ord+"</div>";
-        html+="<div style='margin-bottom:.4rem'>";
-        g.rows.forEach(function(v){
-          var segLabel=v.segmento==="decan"?" 🧪":v.segmento==="minorista"?" x1":v.segmento==="mayorista"?" x10":"";
-          html+="<div style='display:flex;justify-content:space-between;font-size:.74rem'>";
-          html+="<span>"+v.producto_nombre+" x"+(v.cantidad||1)+segLabel+"</span>";
-          html+="<span>"+fmt(v.total)+"</span></div>";
-        });
-        html+="</div>";
-        html+="<div style='display:flex;gap:.4rem;align-items:center;flex-wrap:wrap'>";
-        html+="<div class='rc-monto'>"+fmt(g.total)+"</div>";
-        html+="<span style='font-size:.65rem;color:var(--tx3)'>"+fecha+"</span>";
-        html+="<button class='btn btn-a' onclick='aprobarGrupoDep("+JSON.stringify(g.ids)+",this)' style='padding:.22rem .5rem;font-size:.7rem'>Aprobar</button>";
-        html+="<button class='btn btn-red' onclick='rechazarGrupoDep("+JSON.stringify(g.ids)+",this)' style='padding:.22rem .5rem;font-size:.7rem'>Rechazar</button>";
-        html+="<button onclick='editarGrupoDeposito("+JSON.stringify(g.ids)+")'style='padding:.22rem .5rem;font-size:.68rem;background:transparent;border:1px solid var(--bd2);color:var(--tx3);border-radius:var(--rs);cursor:pointer'>Editar</button>";
-        html+="</div></div>";
-      });
-    }
-    // Then regular transfers — separadas por estado
-    var pend=data.filter(function(v){return v.estado==="pendiente";});
-    var conf=data.filter(function(v){return v.estado==="confirmada";});
-    var canc=data.filter(function(v){return v.estado==="cancelada";});
-    if(pend.length||!deposito.length){
-      html+="<div class='sec-title' style='margin-top:"+(deposito.length?"1rem":"0")+"'>Transferidas pendientes <span style='color:var(--acc)'>"+pend.length+"</span></div>";
-      if(!pend.length)html+="<div class='empty' style='padding:.8rem'>Sin transferencias pendientes</div>";
-      pend.forEach(function(v){html+=renderTransfCard(v,false);});
-    }
-    if(conf.length){
-      html+="<div class='sec-title' style='margin-top:1rem'>✅ Cobradas por mí <span style='color:var(--green)'>"+conf.length+"</span></div>";
-      conf.forEach(function(v){html+=renderTransfCard(v,true);});
-    }
-    if(canc.length){
-      html+="<div class='sec-title' style='margin-top:1rem;color:var(--red)'>Canceladas</div>";
-      canc.forEach(function(v){html+=renderTransfCard(v,true);});
-    }
-    // ── ENVIADAS POR MÍ ────────────────────────────────────────────────
-    if(enviadas.length){
-      html+="<div class='sec-title' style='margin-top:1rem;color:var(--blue)'>↗ Enviadas por mí <span style='color:var(--acc)'>"+enviadas.length+"</span></div>";
-      var envPend=enviadas.filter(function(t){return t.estado==='pendiente';});
-      var envConf=enviadas.filter(function(t){return t.estado==='confirmada';});
-      var envCanc=enviadas.filter(function(t){return t.estado==='cancelada';});
-      if(envPend.length){
-        html+="<div style='font-size:.68rem;color:var(--yel);margin:.3rem 0 .2rem'>⏳ Pendientes de cobro ("+envPend.length+")</div>";
-        envPend.forEach(function(v){html+=renderEnviadaCard(v);});
-      }
-      if(envConf.length){
-        html+="<div style='font-size:.68rem;color:var(--green);margin:.5rem 0 .2rem'>✅ Cobradas ("+envConf.length+")</div>";
-        envConf.forEach(function(v){html+=renderEnviadaCard(v);});
-      }
-      if(envCanc.length){
-        html+="<div style='font-size:.68rem;color:var(--red);margin:.5rem 0 .2rem'>✕ Canceladas</div>";
-        envCanc.forEach(function(v){html+=renderEnviadaCard(v);});
-      }
-    }
-    if(!html)html="<div class='empty'>Sin transferencias</div>";
-    pg.innerHTML=html;
-    var total_pend=pend.length+deposito.length+enviadas.filter(function(t){return t.estado==='pendiente';}).length;
-    var d=document.getElementById("dotTransf");if(d)d.classList.toggle("show",total_pend>0);
-  });
-}
+// eliminarTransf eliminada — sistema legacy
+
+
+
+
+// loadTransferidas eliminada — pestaña obsoleta tras unificación
+
 
 function editarVentaDeposito(ventaId){
   // Load single venta - find nro_orden then load all of the group
@@ -5155,253 +4794,26 @@ function _cargarGrupoEnCarrito(ventas, nroOrden){
   toast("Pedido cargado en carrito — editá y confirmá normalmente","ok");
 }
 
-function aprobarDepDeposito(ventaId){
-  // Load venta, reduce stock, mark as confirmed
-  apiGet("ventas","select=*&id=eq."+ventaId+"&limit=1").then(function(data){
-    if(!Array.isArray(data)||!data.length){toast("Venta no encontrada","err");return;}
-    var v=data[0];
-    var proms=[];
-    // Mark venta as confirmed
-    proms.push(api("PATCH","ventas",{estado:"confirmada",vendedor_id:VENDEDOR_ID},"id=eq."+ventaId));
-    // Reduce stock
-    if(v.producto_id){
-      var p=prods.find(function(x){return x.id===v.producto_id;});
-      if(p){
-        var ns=Math.max(0,(p.stock_actual||0)-v.cantidad);
-        proms.push(patchStockFresco(v.producto_id,{stock_actual:-v.cantidad,vendido_david:+v.cantidad},'Aprobar deposito'));
-      }
-    }
-    // Approve commission
-    proms.push(api("PATCH","gastos_vendedor",{aprobado:true},
-      "vendedor_id=eq."+VENDEDOR_ID+"&aprobado=eq.false&periodo_cerrado=eq.false&concepto=like.Comision%20Marcela%25"));
-    return Promise.all(proms);
-  }).then(function(){
-    toast("Venta aprobada y stock actualizado","ok");
-    loadTransferidas();
-    // Refresh prods
-    apiGet("productos","select=id,stock_actual,vendido_david&activo=is.true&limit=2000").then(function(d){
-      if(Array.isArray(d)) d.forEach(function(p){
-        var ex=prods.find(function(x){return x.id===p.id;});
-        if(ex){ex.stock_actual=p.stock_actual;ex.vendido_david=p.vendido_david;}
-      });
-    });
-  }).catch(function(e){toast("Error: "+e.message,"err");});
-}
 
-function rechazarDepDeposito(ventaId){
-  bellConfirm("Rechazar esta venta del deposito?",function(){
-  api("PATCH","ventas",{estado:"cancelada"},"id=eq."+ventaId).then(function(){
-    toast("Venta rechazada","ok");
-    loadTransferidas();
-  }).catch(function(e){toast("Error: "+e.message,"err");});  });
-}
-
-function renderEnviadaCard(v){
-  var items=[];try{items=typeof v.items==="string"?JSON.parse(v.items):v.items;}catch(e){}
-  var fecha=new Date(v.created_at).toLocaleString("es-AR",{day:"2-digit",month:"2-digit",year:"2-digit",hour:"2-digit",minute:"2-digit",timeZone:"America/Argentina/Buenos_Aires"});
-  var dest=v.asignada_a===1?"David":v.asignada_a===2?"Facu":"Vendedor "+v.asignada_a;
-  var estC=v.estado==="confirmada"?"var(--green)":v.estado==="cancelada"?"var(--red)":"var(--yel)";
-  var html="<div class='ped-card' style='border-left:3px solid "+estC+"'>";
-  html+="<div class='ped-header'>";
-  html+="<div><div style='font-size:.78rem;font-weight:500;color:var(--tx)'>→ Para: <b>"+dest+"</b>"+(v.con_reserva?"<span class='badge bg-cyan' style='margin-left:.3rem'>Con reserva</span>":"")+"</div>";
-  html+="<div class='ped-fecha'>"+fecha+(v.nro_orden?" | "+v.nro_orden:"")+"</div></div>";
-  html+="<div style='text-align:right'>";
-  html+="<div class='ped-total'>"+fmt(v.total)+"</div>";
-  html+="<span style='font-size:.65rem;color:"+estC+"'>"+v.estado+"</span>";
-  html+="</div></div>";
-  html+="<div style='font-size:.73rem;color:var(--tx2);line-height:1.7;margin-bottom:.3rem'>";
-  if(Array.isArray(items))items.forEach(function(it){
-    html+="<div style='display:flex;justify-content:space-between;padding:.05rem 0'><span>"+it.nombre+" x"+(it.qty||1)+"</span><span style='font-weight:600'>"+fmt(it.total||0)+"</span></div>";
-  });
-  html+="</div></div>";
-  return html;
-}
-
-function renderTransfCard(v,done){
-  var items=[];try{items=typeof v.items==="string"?JSON.parse(v.items):v.items;}catch(e){}
-  var fecha=new Date(v.created_at).toLocaleString("es-AR",{day:"2-digit",month:"2-digit",year:"2-digit",hour:"2-digit",minute:"2-digit",timeZone:"America/Argentina/Buenos_Aires"});
-  // Badge de reserva: distingue 4 casos para no asustar al usuario con datos viejos sin info clara.
-  //   - con_reserva=true + reserva_ejecutada=true → ✅ "Con reserva de stock"
-  //   - con_reserva=true + reserva_ejecutada=false → ⚠️ "Reserva NO ejecutada" (error real)
-  //   - con_reserva=false (explícito) → "Sin reserva (se descuenta al cobrar)"
-  //   - con_reserva=null/undefined → no mostrar nada (registro legacy, no asumir)
-  var reservaTag = "";
-  if(v.con_reserva === true){
-    if(v.reserva_ejecutada !== false){
-      reservaTag = "<span class='badge bg-cyan' style='margin-left:.3rem'>✅ Con reserva de stock</span>";
-    } else {
-      reservaTag = "<span style='margin-left:.3rem;font-size:.62rem;background:#e8a020;color:#fff;border-radius:4px;padding:.15rem .4rem;font-weight:600'>⚠️ Reserva NO ejecutada</span>";
-    }
-  } else if(v.con_reserva === false){
-    reservaTag = "<span style='margin-left:.3rem;font-size:.62rem;background:rgba(140,140,140,.2);color:var(--tx2);border-radius:4px;padding:.15rem .4rem'>Sin reserva (se descuenta al cobrar)</span>";
-  }
-  // si v.con_reserva es null/undefined → reservaTag queda vacío (no se muestra nada)
-  var cancelado=v.estado==="cancelada";
-  var html="<div class='ped-card"+(done||cancelado?"":(" nuevo"))+"'>";
-  html+="<div class='ped-header'>";
-  var formaLabel={'efectivo':'💵 Efectivo','transferencia':'🏦 Transferencia','qr':'📱 QR','pendiente':'⏳ Pendiente'};
-  var formaTag=v.forma_cobro&&v.forma_cobro!=='pendiente'?"<span style='font-size:.58rem;color:var(--cyan);background:rgba(74,159,216,.12);padding:.08rem .3rem;border-radius:3px;margin-left:.3rem'>"+(formaLabel[v.forma_cobro]||v.forma_cobro)+"</span>":"";
-  html+="<div><div style='font-size:.78rem;font-weight:500;color:var(--tx)'>De: "+(v.creada_por||"Admin")+reservaTag+formaTag+"</div>";
-  html+="<div class='ped-fecha'>"+fecha+(v.notas?" | "+v.notas.replace(" [CON RESERVA]",""):"")+"</div></div>";
-  html+="<div class='ped-total'>"+fmt(v.total)+"</div></div>";
-  html+="<div style='font-size:.73rem;color:var(--tx2);line-height:1.7;margin-bottom:.5rem'>";
-  if(Array.isArray(items))items.forEach(function(it){
-    var _itSeg=it.segmento||"";var _itPrecio=it.precio||0;var _itBadge=(_itSeg==="especial"&&_itPrecio===0)?"<span style='font-size:.56rem;color:var(--blue);background:rgba(74,159,216,.12);padding:.08rem .3rem;border-radius:3px;margin-right:.25rem'>🎁 Bonificado</span>":_itSeg==="especial"?"<span style='font-size:.56rem;color:var(--red);background:rgba(220,60,60,.12);padding:.08rem .3rem;border-radius:3px;margin-right:.25rem'>Especial</span>":_itSeg==="pm"?"<span style='font-size:.56rem;color:var(--green);margin-right:.25rem'>x10</span>":_itSeg==="pe"?"<span style='font-size:.56rem;color:var(--cyan);margin-right:.25rem'>x3</span>":_itSeg==="decan"?"<span style='font-size:.56rem;color:var(--tx3);margin-right:.25rem'>Decan</span>":"";
-    html+="<div style='display:flex;justify-content:space-between;align-items:center;padding:.05rem 0'><span>"+_itBadge+it.nombre+" x"+(it.qty||1)+(_itPrecio>0?" <span style='font-size:.62rem;color:var(--tx3)'>— "+fmt(_itPrecio)+"/u</span>":"")+"</span><span style='font-weight:600'>"+fmt(it.total||0)+"</span></div>";
-  });
-  html+="</div>";
-  if(cancelado){
-    html+="<span class='badge bg-red'>Cancelada - stock devuelto</span>";
-  } else if(!done){
-    // Show commission notice if from Marcela
-    if(v.creada_por==='Marcela'||v.creada_por==='deposito'||v.creada_por==='Marcela (deposito)'){
-      // Estimate commission from items
-      var comItems=Array.isArray(items)?items:[];
-      var comPerfs=comItems.filter(function(it){return !it.isDecan;});
-      var comDecans=comItems.filter(function(it){return it.isDecan;});
-      var comUn=comPerfs.reduce(function(s,it){return s+(it.qty||1);},0);
-      var comDUn=comDecans.reduce(function(s,it){return s+(it.qty||1);},0);
-      var comBase=comUn>=3?(_comisiones.perfume||2000):(_comisiones.minorista||5000);
-      var comEst=Math.round(comUn*comBase+comDUn*(_comisiones.decan||500));
-      if(comEst>0){
-        html+="<div style='background:rgba(var(--acc-rgb,232,184,109),.1);border:1px solid rgba(232,184,109,.35);border-radius:7px;padding:.4rem .7rem;margin-bottom:.5rem;display:flex;justify-content:space-between;align-items:center'>"+
-          "<span style='font-size:.7rem;color:var(--acc)'>💰 Comisión Marcela estimada: <b>"+fmt(comEst)+"</b></span>"+
-          "<span style='font-size:.62rem;color:var(--tx3)'>Se aprueba al confirmar cobro</span>"+
-        "</div>";
-      }
-    }
-    // Show full action buttons
-    // Tipo: si es del sistema unificado (pedidos_catalogo) → "web", sino → "transferida" (legacy)
-    var _tipoGest = v._esUnificado ? "web" : "transferida";
-    html+="<div style='display:flex;gap:.4rem;flex-wrap:wrap'>";
-    html+="<button class='btn btn-a' onclick='_gestionarPedido(\""+_tipoGest+"\","+v.id+")' style='flex:1;min-width:130px;justify-content:center'>🗂 Gestionar</button>";
-    html+="<button class='btn btn-red' onclick='cancelarTransf("+v.id+","+v.con_reserva+",this,"+(v._esUnificado?"true":"false")+")' style='padding:.4rem .7rem'>Cancelar</button>";
-    html+="<button class='btn btn-g' style='padding:.4rem .7rem;border-color:var(--red);color:var(--red)' onclick='eliminarTransf("+v.id+",this,"+(v._esUnificado?"true":"false")+")'>Eliminar</button>";
-    html+="</div>";
-  } else {
-    if(cancelado){
-      html+="<span class='badge bg-red'>Cancelada</span>";
-    } else {
-      html+="<div style='display:flex;align-items:center;gap:.5rem;flex-wrap:wrap'>"+
-        "<span class='badge bg-green'>✅ Cobrada</span>"+
-        (v.nro_orden?"<span style='font-size:.65rem;color:var(--tx3)'>"+v.nro_orden+"</span>":"")+
-        (v.confirmada_at?"<span style='font-size:.62rem;color:var(--tx3)'>"+new Date(v.confirmada_at).toLocaleDateString('es-AR',{timeZone:'America/Argentina/Buenos_Aires'})+"</span>":"")+
-      "</div>";
-    }
-  }
-  html+="</div>";return html;
-}
+// aprobarDepDeposito eliminada — flujo deposito legacy
 
 
-function confirmarTransf(id,btn){
-  if(btn)btn.disabled=true;
-  apiGet("ventas_transferidas","select=*&id=eq."+id).then(function(data){
-    if(!Array.isArray(data)||!data.length)return;
-    var v=data[0];var items=[];
-    try{items=typeof v.items==="string"?JSON.parse(v.items):v.items;}catch(e){}
 
-    // FIX CRÍTICO: primero ejecutar los patches de stock, DESPUÉS marcar como confirmada
-    // Antes el estado='confirmada' iba junto con los patches en Promise.all
-    // Si un patch fallaba después de que Supabase guardaba el estado,
-    // la transferida quedaba confirmada sin stock actualizado
+// rechazarDepDeposito eliminada — sistema legacy
 
-    var stockPromises=[];
 
-    // Registrar ventas individuales por producto
-    if(Array.isArray(items))items.forEach(function(it){
-      stockPromises.push(apiPost("ventas",{
-        vendedor_id:VENDEDOR_ID,producto_id:it.producto_id||null,
-        producto_nombre:it.nombre,cantidad:it.qty||1,
-        precio_unitario:it.precio||0,segmento:it.segmento||"x1",
-        total:it.total||0,periodo:periodoActual,estado:"confirmada",
-        origen:"vendedor",nro_orden:v.nro_orden,
-        descuento:0,descuento_motivo:"",forma_cobro:v.forma_cobro||getFormaCobro()||"efectivo"
-      }));
-    });
 
-    if(v.con_reserva){
-      if(Array.isArray(items))items.forEach(function(it){
-        var pid=it.producto_id;
-        if(!pid||it.isDecan)return;
-        stockPromises.push(
-          patchStockFresco(pid,{reserva:-(it.qty||1),vendido_david:+(it.qty||1)},'Confirmar transf reservada')
-          .then(function(){
-            return apiPost("movimientos_stock",{
-              producto_id:pid,producto_nombre:it.nombre||("Prod #"+pid),tipo:"venta",
-              cantidad:it.qty||1,
-              motivo:"Transferencia confirmada "+(v.nro_orden||"")+" (desde reserva)",
-              usuario:VENDEDOR_NOMBRE||"vendedor",periodo:periodoActual
-            }).catch(function(e){console.error("[belle] error silencioso:",e);});
-          })
-        );
-      });
-    } else {
-      if(Array.isArray(items))items.forEach(function(it){
-        var pid=it.producto_id||it.id;
-        if(!pid||it.isDecan)return;
-        stockPromises.push(
-          patchStockFresco(pid,{stock_actual:-(it.qty||1),vendido_david:+(it.qty||1)},'Confirmar transf sin reserva')
-          .then(function(){
-            return apiPost("movimientos_stock",{
-              producto_id:pid,producto_nombre:it.nombre||("Prod #"+pid),tipo:"venta",
-              cantidad:it.qty||1,
-              motivo:"Transferencia confirmada "+(v.nro_orden||""),
-              usuario:VENDEDOR_NOMBRE||"vendedor",periodo:periodoActual
-            }).catch(function(e){console.error("[belle] error silencioso:",e);});
-          })
-        );
-      });
-    }
+// renderEnviadaCard eliminada — sistema legacy
 
-    // Esperar que TODOS los patches de stock terminen correctamente
-    // SOLO ENTONCES marcar la transferida como confirmada
-    Promise.all(stockPromises).then(function(){
-      return apiPatch("ventas_transferidas",{estado:"confirmada",confirmada_at:new Date().toISOString()},"id=eq."+id);
-    }).then(function(){
-      // If this transfer was from Marcela (deposito), handle commissions
-      if(v.creada_por==='Marcela'&&v.nro_orden){
-        // Calculate commission from items
-        var comItems=Array.isArray(items)?items:[];
-        var perfs=comItems.filter(function(it){return !it.isDecan;});
-        var decans=comItems.filter(function(it){return it.isDecan;});
-        var totalUn=perfs.reduce(function(s,it){return s+(it.qty||1);},0);
-        var totalDecansUn=decans.reduce(function(s,it){return s+(it.qty||1);},0);
-        var segTotal=totalUn>=10?'pm':totalUn>=3?'pe':'pi';
-        var comUnBase=segTotal==='pi'?_comisiones.minorista:_comisiones.perfume;
-        var comUn=totalDecansUn>0?(comUnBase+_comisiones.decan):comUnBase;
-        var totalCom=Math.round((totalUn*comUn)+(totalDecansUn*_comisiones.decan));
-        var comDesc='Comision Marcela — '+v.nro_orden+' ('+totalUn+'u x $'+comUn.toLocaleString('es-AR',{timeZone:"America/Argentina/Buenos_Aires"})+')';
 
-        // 1. Register commission debit for David
-        apiPost('gastos_vendedor',{
-          vendedor_id:VENDEDOR_ID,
-          concepto:comDesc,
-          monto:totalCom,
-          periodo:periodoActual,
-          aprobado:true,  // auto-approved: David already confirmed the sale
-          periodo_cerrado:false
-        }).catch(function(e){});
 
-        // 2. Approve Marcela's commission gasto — buscar por nro_operacion (exacto) o concepto (fallback)
-        apiGet('gastos_vendedor','select=id,concepto,monto&vendedor_id=eq.3&aprobado=eq.false&nro_operacion=eq.'+encodeURIComponent(v.nro_orden)).then(function(gastos){
-          if(!Array.isArray(gastos)||!gastos.length){
-            // Fallback: buscar por concepto like
-            return apiGet('gastos_vendedor','select=id&vendedor_id=eq.3&aprobado=eq.false&concepto=like.%25'+encodeURIComponent(v.nro_orden)+'%25');
-          }
-          return gastos;
-        }).then(function(gastos){
-          if(Array.isArray(gastos)&&gastos.length){
-            return Promise.all(gastos.map(function(g){
-              return apiPatch('gastos_vendedor',{aprobado:true},'id=eq.'+g.id);
-            }));
-          }
-        }).catch(function(e){});
-      }
-      toast("Cobro confirmado!"+(v.con_reserva?" (reserva liberada)":" (stock descontado)"),"tok");
-      loadTransferidas();loadDineroData();renderCat();
-    }).catch(function(){if(btn)btn.disabled=false;});
-  });
-}
+// renderTransfCard eliminada — sistema legacy
+
+
+
+
+// confirmarTransf eliminada — sistema legacy
+
 
 // HISTORIAL
 function loadHistorial(){
@@ -5441,8 +4853,23 @@ function loadHistorial(){
     window._hvVentas=ventas; // para filtros
 
     // ── Stats completas del vendedor ─────────────────────────────
-    // Traer también transferidas enviadas por este vendedor
-    var _svTransfProm=apiGet("ventas_transferidas","select=asignada_a,creada_por,total,estado,items,nro_orden,created_at&creada_por=ilike."+encodeURIComponent(VENDEDOR_NOMBRE)+"&order=created_at.desc&limit=200");
+    // Traer transferidas enviadas por este vendedor desde AMBOS sistemas:
+    //   - pedidos_catalogo con transferida_por_id = VENDEDOR_ID (sistema unificado)
+    //   - ventas_transferidas legacy con creada_por = VENDEDOR_NOMBRE (histórico)
+    var _svTransfProm=Promise.all([
+      apiGet("pedidos_catalogo","select=vendedor_id,transferida_por_id,total,estado,confirmado_cobro,items,nro_orden,transferida_at,created_at&transferida_por_id=eq."+VENDEDOR_ID+"&order=transferida_at.desc.nullslast,created_at.desc&limit=300"),
+      apiGet("ventas_transferidas","select=asignada_a,creada_por,total,estado,items,nro_orden,created_at&creada_por=ilike."+encodeURIComponent(VENDEDOR_NOMBRE)+"&estado=neq.migrada_a_pedidos&order=created_at.desc&limit=200")
+    ]).then(function(arr){
+      var nuevos=Array.isArray(arr[0])?arr[0]:[];
+      var legacy=Array.isArray(arr[1])?arr[1]:[];
+      // Mapear pedidos_catalogo al formato del legacy (estado: confirmada/pendiente/cancelada)
+      var nuevosMapped = nuevos.map(function(p){
+        var est = (p.estado === 'cobrado' || p.confirmado_cobro === true) ? 'confirmada'
+                : (p.estado === 'cancelado') ? 'cancelada' : 'pendiente';
+        return {asignada_a:p.vendedor_id, total:p.total, estado:est, items:p.items, nro_orden:p.nro_orden, created_at:p.transferida_at||p.created_at};
+      });
+      return nuevosMapped.concat(legacy);
+    });
     _svTransfProm.then(function(tEnvAll){
       var tEnvAll2=Array.isArray(tEnvAll)?tEnvAll.filter(function(t){return t.estado!=='cancelada';}):[];
       var tEnvConf=tEnvAll2.filter(function(t){return t.estado==='confirmada';});
@@ -7943,7 +7370,6 @@ function navTo(pg,el){
   if(pg==="catalogo"){if(!document.getElementById("prodList"))buildCatalogo();renderCat();loadCombosVendedor();loadQuickPanels();}
   if(pg==="pedidos-web")loadPedidosWeb();
   if(pg==="rutas")loadRutas();
-  if(pg==="transferidas")loadTransferidas();
   if(pg==="historial")loadHistorial();
   if(pg==="movimientos")loadMovimientos();
   if(pg==="dinero")loadDineroData();
@@ -8071,19 +7497,40 @@ function ejecutarTransfer(targetId,targetNombre){
   Promise.all(stockPromises).then(function(){
     // reserva_ejecutada=true solo si TODOS los productos se reservaron
     var reservaEjecutadaOk=conReserva&&reservasOk>0&&reservasOk===reservasTotal;
-    return apiPost("ventas_transferidas",{
-      creada_por:VENDEDOR_NOMBRE,asignada_a:targetId,
-      reserva_ejecutada:conReserva&&reservaEjecutadaOk,
-      items:JSON.stringify(itemsData),total:total,estado:"pendiente",
-      periodo:periodoActual,nro_orden:nroOrden,con_reserva:conReserva,
-      notas:"De "+VENDEDOR_NOMBRE+" para "+targetNombre+(conReserva?" [CON RESERVA]":"")
+    // ═══════════════════════════════════════════════════════════════════
+    // UNIFICACIÓN: ahora escribe en pedidos_catalogo en lugar de ventas_transferidas.
+    // ═══════════════════════════════════════════════════════════════════
+    return apiPost("pedidos_catalogo",{
+      nro_orden: nroOrden,
+      items: itemsData,
+      total: total,
+      vendedor_id: targetId,                          // a quién se transfiere
+      transferida_por_id: VENDEDOR_ID,                // quien transfirió
+      transferida_at: new Date().toISOString(),
+      con_reserva: conReserva,
+      reserva_ejecutada: conReserva && reservaEjecutadaOk,
+      estado: 'pendiente',
+      confirmado_cobro: null,
+      origen: 'transferencia',
+      periodo: periodoActual,
+      notas_transferencia: "De "+VENDEDOR_NOMBRE+" para "+targetNombre+(conReserva?" [CON RESERVA]":"")
     });
   }).then(function(res){
     if(!res||res.error){toast("Error al guardar transferencia: "+(res&&res.message?res.message:"intenta de nuevo"),"terr");return;}
+    var pedNew = Array.isArray(res) && res[0];
+    if(pedNew && pedNew.id){
+      apiPost("pedidos_estados_log",{
+        pedido_id: pedNew.id,
+        pedido_tabla: "pedidos_catalogo",
+        estado: "transferido",
+        nota: "Transferido de "+VENDEDOR_NOMBRE+" a "+targetNombre,
+        usuario: VENDEDOR_NOMBRE
+      }).catch(function(e){console.error("[belle] log silencioso:",e);});
+    }
     document.getElementById("moTransfer").classList.remove("open");
     cart={};cstate={};decanState={};
     updateCartBar();closeDrawer();renderCat();
-    loadTransferidas();
+    loadPedidosWeb();
     toast("Venta transferida a "+targetNombre+" - "+nroOrden+(conReserva?" (stock reservado)":""),"tok");
   }).catch(function(e){toast("Error al transferir: "+(e&&e.message?e.message:""),"terr");});
 }
@@ -9330,19 +8777,12 @@ function hvFilter(tab){
   }
 }
 
-function aprobarGrupoDep(ids,btn){
-  if(btn)btn.disabled=true;
-  Promise.all(ids.map(function(id){return apiPatch("ventas",{estado:"confirmada",origen:"deposito_aprobado"},"id=eq."+id);}))
-  .then(function(){toast("Aprobado","tok");loadTransferidas();})
-  .catch(function(){if(btn)btn.disabled=false;});
-}
-function rechazarGrupoDep(ids,btn){
-  if(!confirm("Rechazar este pedido?"))return;
-  if(btn)btn.disabled=true;
-  Promise.all(ids.map(function(id){return apiPatch("ventas",{estado:"rechazada"},"id=eq."+id);}))
-  .then(function(){toast("Rechazado","tok");loadTransferidas();})
-  .catch(function(){if(btn)btn.disabled=false;});
-}
+
+// aprobarGrupoDep eliminada — sistema legacy
+
+
+// rechazarGrupoDep eliminada — sistema legacy
+
 
 function compartirProducto(prodId){
   var p=(prods||allProds||[]).find(function(x){return x.id===prodId;});
@@ -13079,7 +12519,6 @@ function _rtBorrarDir(id){
     <div class="tab act" onclick="navTo('catalogo',this)">Catalogo</div>
     <div class="tab" onclick="navTo('pedidos-web',this)">Pedidos<span class="dot" id="dotPedidos"></span></div>
     <div class="tab" onclick="navTo('rutas',this)">Rutas<span class="dot" id="dotRutas"></span></div>
-    <div class="tab" onclick="navTo('transferidas',this)">Transferidas<span class="dot" id="dotTransf"></span></div>
     <div class="tab" onclick="navTo('historial',this)">Historial</div>
     <div class="tab" onclick="navTo('movimientos',this)">Movimientos</div>
     <div class="tab" onclick="navTo('dinero',this)">Mi dinero</div>
@@ -13097,7 +12536,6 @@ function _rtBorrarDir(id){
     <div class="page act" id="pg-catalogo"></div>
     <div class="page" id="pg-pedidos-web"></div>
     <div class="page" id="pg-rutas" style="padding:.9rem 1rem"></div>
-    <div class="page" id="pg-transferidas"></div>
     <div class="page" id="pg-historial"></div>
     <div class="page" id="pg-movimientos"></div>
     <div class="page" id="pg-dinero"></div>
