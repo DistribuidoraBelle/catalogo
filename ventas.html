@@ -2713,6 +2713,40 @@ function _logEstadoPedidoV(pedidoId, estado, nota){
   apiPost('pedidos_estados_log',{pedido_id:pedidoId,pedido_tabla:'pedidos_catalogo',estado:estado,nota:nota||null,usuario:VENDEDOR_NOMBRE||'vendedor'}).catch(function(e){console.error('[belle] error silencioso:',e);});
 }
 
+// ── Helper: si el pedido vino transferido por Marcela (id=3),
+// crear la comisión correspondiente en gastos_vendedor.
+// Idempotente: si ya existe el registro para ese nro_orden, no duplica.
+function _crearComisionMarcelaSiAplica(pedido){
+  if(!pedido) return;
+  if(pedido.transferida_por_id !== 3) return;
+  if(!pedido.nro_orden) return;
+  var items=[];
+  try{ items = typeof pedido.items==='string' ? JSON.parse(pedido.items) : (pedido.items||[]); }catch(e){ items=[]; }
+  if(!items.length) return;
+  var comItems = items.filter(function(it){return !it.isDecan;});
+  var comDecans = items.filter(function(it){return it.isDecan;});
+  var totalUn = comItems.reduce(function(s,it){return s+(it.qty||1);},0);
+  var totalDec = comDecans.reduce(function(s,it){return s+(it.qty||1);},0);
+  var segTot = totalUn>=10?'pm':totalUn>=3?'pe':'pi';
+  var comBase = segTot==='pi' ? (_comisiones && _comisiones.minorista || 5000) : (_comisiones && _comisiones.perfume || 2000);
+  var comDec = (_comisiones && _comisiones.decan) || 500;
+  var totalCom = Math.round(totalUn*comBase + totalDec*comDec);
+  if(totalCom <= 0) return;
+  // Verificar idempotencia: ¿ya existe esta comisión?
+  apiGet('gastos_vendedor','select=id&vendedor_id=eq.'+VENDEDOR_ID+'&nro_operacion=eq.'+encodeURIComponent(pedido.nro_orden)+'&concepto=ilike.%25Comision%20Marcela%25').then(function(existentes){
+    if(Array.isArray(existentes) && existentes.length) return;
+    apiPost('gastos_vendedor',{
+      vendedor_id: VENDEDOR_ID,
+      concepto: 'Comision Marcela — '+pedido.nro_orden,
+      monto: totalCom,
+      periodo: periodoActual||'general',
+      aprobado: true,
+      periodo_cerrado: false,
+      nro_operacion: pedido.nro_orden
+    }).catch(function(e){console.error("[belle] crear comision marcela:",e);});
+  }).catch(function(e){console.error("[belle] check comision marcela:",e);});
+}
+
 // ══════════════════════════════════════════════════════════════
 // ASIGNACIÓN DE PEDIDOS — Tomar / Transferir
 // ══════════════════════════════════════════════════════════════
@@ -3123,14 +3157,18 @@ function _cobrarProductosCC(pedidoId, clienteId, totalPed){
   var idxs=[];
   checks.forEach(function(c){totalCobrar+=parseFloat(c.dataset.total)||0;idxs.push(parseInt(c.dataset.idx));});
   if(!confirm("Cobrar "+fmt(totalCobrar)+" por "+checks.length+" producto(s)?"))return;
-  // Obtener items_cobrados actuales + vendedor_id para Fix #2
-  apiGet("pedidos_catalogo","select=items_cobrados,cobrado_parcial,total,items,vendedor_id&id=eq."+pedidoId).then(function(rows){
+  // Obtener datos completos del pedido (incl. transferida_por_id, nro_orden) para Fix #2 y comisión Marcela
+  var _pedSnapshotCC = null;
+  var _esSaldadoCC = false;
+  apiGet("pedidos_catalogo","select=items_cobrados,cobrado_parcial,total,items,vendedor_id,transferida_por_id,nro_orden&id=eq."+pedidoId).then(function(rows){
     var p=rows&&rows[0];if(!p)return;
+    _pedSnapshotCC = p;
     var cobrados=[];try{cobrados=typeof p.items_cobrados==="string"?JSON.parse(p.items_cobrados):p.items_cobrados||[];}catch(e){}
     var nuevoCobrados=cobrados.concat(idxs);
     var items=[];try{items=typeof p.items==="string"?JSON.parse(p.items):p.items||[];}catch(e){}
     var nuevoCobrado=(p.cobrado_parcial||0)+totalCobrar;
     var esSaldado=nuevoCobrado>=totalPed-1;
+    _esSaldadoCC = esSaldado;
 
     // Fix #2: si el pedido no es del vendedor que cobra, transferirlo
     var _patchObj={items_cobrados:JSON.stringify(nuevoCobrados),cobrado_parcial:nuevoCobrado};
@@ -3176,6 +3214,16 @@ function _cobrarProductosCC(pedidoId, clienteId, totalPed){
     );
     return Promise.all(promises);
   }).then(function(){
+    // Si el pedido se saldó completo y vino transferido por Marcela, crear comisión
+    if(_esSaldadoCC && _pedSnapshotCC){
+      var itemsCom = [];
+      try{ itemsCom = typeof _pedSnapshotCC.items==='string' ? JSON.parse(_pedSnapshotCC.items) : (_pedSnapshotCC.items||[]); }catch(e){}
+      _crearComisionMarcelaSiAplica({
+        transferida_por_id: _pedSnapshotCC.transferida_por_id,
+        nro_orden: _pedSnapshotCC.nro_orden,
+        items: itemsCom
+      });
+    }
     toast("Cobro registrado","tok");
     var mo=document.getElementById("_moCobrarCC");if(mo)mo.remove();
     loadClientesVendedor();
@@ -3192,9 +3240,11 @@ function _confirmarCobrarCC(pedidoId, clienteId, totalPed, cobradoHasta){
   var nuevoCobrado=cobradoHasta+monto;
   var esSaldado=nuevoCobrado>=totalPed-1;
 
-  // Fix #2: leer vendedor_id actual y auto-asignar si no es de este vendedor
-  apiGet("pedidos_catalogo","select=vendedor_id&id=eq."+pedidoId+"&limit=1").then(function(rowsV){
+  // Fix #2: leer vendedor_id, transferida_por_id, nro_orden, items para auto-asignar y comisión Marcela
+  var _pedSnapshot = null; // se completará dentro del primer .then para usar al final
+  apiGet("pedidos_catalogo","select=vendedor_id,transferida_por_id,nro_orden,items&id=eq."+pedidoId+"&limit=1").then(function(rowsV){
     var pV=rowsV&&rowsV[0];
+    _pedSnapshot = pV; // guardar snapshot para usar después
     var _vAnt=pV?pV.vendedor_id:null;
     var _patchPed=Object.assign({cobrado_parcial:nuevoCobrado},esSaldado?{estado:"cobrado",confirmado_cobro:true}:{});
     if(!_vAnt||_vAnt!==VENDEDOR_ID){
@@ -3233,6 +3283,16 @@ function _confirmarCobrarCC(pedidoId, clienteId, totalPed, cobradoHasta){
     })
   ]);
   }).then(function(){
+    // Si se saldó completo y vino transferido por Marcela → crear comisión
+    if(esSaldado && _pedSnapshot){
+      var items = [];
+      try{ items = typeof _pedSnapshot.items==='string' ? JSON.parse(_pedSnapshot.items) : (_pedSnapshot.items||[]); }catch(e){}
+      _crearComisionMarcelaSiAplica({
+        transferida_por_id: _pedSnapshot.transferida_por_id,
+        nro_orden: _pedSnapshot.nro_orden,
+        items: items
+      });
+    }
     toast("Cobro de "+fmt(monto)+" registrado"+(esSaldado?" — ¡Pedido saldado!":""),"tok");
     var mo=document.getElementById("_moCobrarCC");if(mo)mo.remove();
     loadClientesVendedor();
@@ -4251,6 +4311,8 @@ function _mgConfirmarCobro(){
         if(rec.cliente_id){
           _logEstadoPedidoV(id,'entregado','Pedido cobrado y entregado por '+VENDEDOR_NOMBRE);
         }
+        // Si vino transferido por Marcela → crear comisión en gastos_vendedor
+        _crearComisionMarcelaSiAplica(rec);
       });
     }
   }).then(function(){
@@ -5158,13 +5220,22 @@ function renderEnviadaCard(v){
 function renderTransfCard(v,done){
   var items=[];try{items=typeof v.items==="string"?JSON.parse(v.items):v.items;}catch(e){}
   var fecha=new Date(v.created_at).toLocaleString("es-AR",{day:"2-digit",month:"2-digit",year:"2-digit",hour:"2-digit",minute:"2-digit",timeZone:"America/Argentina/Buenos_Aires"});
-  // Badge de reserva: azul si confirmada, naranja si no ejecutada, nada si sin reserva
-  var reservaEjecutada=v.con_reserva&&v.reserva_ejecutada!==false;
-  var reservaTag=!v.con_reserva?"":
-    (reservaEjecutada
-      ?"<span class='badge bg-cyan' style='margin-left:.3rem'>✅ Con reserva de stock</span>"
-      :"<span style='margin-left:.3rem;font-size:.62rem;background:#e8a020;color:#fff;border-radius:4px;padding:.15rem .4rem;font-weight:600'>⚠️ Sin reserva de stock</span>"
-    );
+  // Badge de reserva: distingue 4 casos para no asustar al usuario con datos viejos sin info clara.
+  //   - con_reserva=true + reserva_ejecutada=true → ✅ "Con reserva de stock"
+  //   - con_reserva=true + reserva_ejecutada=false → ⚠️ "Reserva NO ejecutada" (error real)
+  //   - con_reserva=false (explícito) → "Sin reserva (se descuenta al cobrar)"
+  //   - con_reserva=null/undefined → no mostrar nada (registro legacy, no asumir)
+  var reservaTag = "";
+  if(v.con_reserva === true){
+    if(v.reserva_ejecutada !== false){
+      reservaTag = "<span class='badge bg-cyan' style='margin-left:.3rem'>✅ Con reserva de stock</span>";
+    } else {
+      reservaTag = "<span style='margin-left:.3rem;font-size:.62rem;background:#e8a020;color:#fff;border-radius:4px;padding:.15rem .4rem;font-weight:600'>⚠️ Reserva NO ejecutada</span>";
+    }
+  } else if(v.con_reserva === false){
+    reservaTag = "<span style='margin-left:.3rem;font-size:.62rem;background:rgba(140,140,140,.2);color:var(--tx2);border-radius:4px;padding:.15rem .4rem'>Sin reserva (se descuenta al cobrar)</span>";
+  }
+  // si v.con_reserva es null/undefined → reservaTag queda vacío (no se muestra nada)
   var cancelado=v.estado==="cancelada";
   var html="<div class='ped-card"+(done||cancelado?"":(" nuevo"))+"'>";
   html+="<div class='ped-header'>";
