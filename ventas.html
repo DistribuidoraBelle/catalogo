@@ -485,6 +485,171 @@ function _lockClick(btn, fn, opts){
 }
 
 
+// ════════════════════════════════════════════════════════════════════
+// BÚSQUEDA GLOBAL (Ctrl+K / Cmd+K)
+// Para vendedores: solo busca en sus clientes asignados y sus pedidos.
+// ════════════════════════════════════════════════════════════════════
+window._gsResults = { pedidos:[], clientes:[], productos:[] };
+window._gsTimer = null;
+
+function _gsAbrir(){
+  var mo = document.getElementById('_gsModal');
+  if(!mo){
+    mo = document.createElement('div');
+    mo.id = '_gsModal';
+    mo.style.cssText = 'position:fixed;inset:0;z-index:99999;background:rgba(0,0,0,.6);display:flex;align-items:flex-start;justify-content:center;padding-top:8vh';
+    mo.innerHTML = "<div style='background:var(--sur);border:1px solid var(--bd);border-radius:12px;width:92%;max-width:600px;box-shadow:0 12px 48px rgba(0,0,0,.5);overflow:hidden'>"+
+      "<div style='display:flex;align-items:center;gap:.5rem;padding:.7rem 1rem;border-bottom:1px solid var(--bd)'>"+
+        "<span style='font-size:1.1rem'>🔍</span>"+
+        "<input type='text' id='_gsInput' placeholder='Buscar pedido, cliente o producto...' style='flex:1;background:transparent;border:none;outline:none;color:var(--tx);font-size:.95rem' autocomplete='off'>"+
+        "<span style='font-size:.65rem;color:var(--tx3);background:var(--sur3);padding:.2rem .4rem;border-radius:4px'>ESC</span>"+
+      "</div>"+
+      "<div id='_gsResults' style='max-height:60vh;overflow-y:auto'></div>"+
+      "<div style='padding:.5rem 1rem;font-size:.65rem;color:var(--tx3);border-top:1px solid var(--bd);background:var(--sur2)'>Tip: probá con <code>ORD-123456</code>, nombre del cliente o producto</div>"+
+    "</div>";
+    mo.addEventListener('click', function(e){
+      if(e.target===mo) _gsCerrar();
+    });
+    document.body.appendChild(mo);
+    var inp = document.getElementById('_gsInput');
+    inp.addEventListener('input', function(){
+      if(window._gsTimer) clearTimeout(window._gsTimer);
+      window._gsTimer = setTimeout(_gsBuscar, 250);
+    });
+    inp.addEventListener('keydown', function(e){
+      if(e.key === 'Escape') _gsCerrar();
+    });
+  }
+  setTimeout(function(){
+    var inp = document.getElementById('_gsInput');
+    if(inp){inp.value=''; inp.focus();}
+    var res = document.getElementById('_gsResults');
+    if(res) res.innerHTML = "<div style='padding:1.5rem;text-align:center;color:var(--tx3);font-size:.8rem'>Empezá a escribir para buscar</div>";
+  }, 50);
+}
+
+function _gsCerrar(){
+  var mo = document.getElementById('_gsModal');
+  if(mo) mo.remove();
+}
+
+function _gsBuscar(){
+  var q = ((document.getElementById('_gsInput')||{}).value||'').trim();
+  var res = document.getElementById('_gsResults');
+  if(!res) return;
+  if(q.length<2){
+    res.innerHTML = "<div style='padding:1.5rem;text-align:center;color:var(--tx3);font-size:.8rem'>Escribí al menos 2 caracteres</div>";
+    return;
+  }
+  res.innerHTML = "<div style='padding:1rem;text-align:center;color:var(--tx3);font-size:.8rem'><div class='spin' style='display:inline-block'></div> Buscando...</div>";
+
+  var qEsc = encodeURIComponent(q);
+  // Vendedor solo busca: SUS pedidos + SUS clientes (o sin asignar) + productos del catálogo
+  // No incluyo telefono_principal porque puede no tener acceso por RLS futuro
+
+  Promise.all([
+    apiGet('pedidos_catalogo', "select=id,nro_orden,total,estado,cliente_id,vendedor_id,created_at&vendedor_id=eq."+VENDEDOR_ID+"&or=(nro_orden.ilike.*"+qEsc+"*)&order=created_at.desc&limit=15").catch(function(){return [];}),
+    apiGet('clientes', "select=id,nombre,apellido,email,telefono_principal,bloqueado,vendedor_id&or=(vendedor_id.eq."+VENDEDOR_ID+",vendedor_id.is.null)&or=(nombre.ilike.*"+qEsc+"*,apellido.ilike.*"+qEsc+"*,email.ilike.*"+qEsc+"*)&limit=20").catch(function(){return [];}),
+    apiGet('productos', "select=id,nombre,empresa,stock_actual,activo&activo=is.true&or=(nombre.ilike.*"+qEsc+"*,empresa.ilike.*"+qEsc+"*)&limit=20").catch(function(){return [];})
+  ]).then(function(data){
+    var pedidos = Array.isArray(data[0]) ? data[0] : [];
+    var clientes = Array.isArray(data[1]) ? data[1] : [];
+    var productos = Array.isArray(data[2]) ? data[2] : [];
+    window._gsResults = { pedidos:pedidos, clientes:clientes, productos:productos };
+    _gsRender();
+  }).catch(function(e){
+    res.innerHTML = "<div style='padding:1.5rem;text-align:center;color:var(--red);font-size:.8rem'>Error: "+(e&&e.message||'')+"</div>";
+  });
+}
+
+function _gsRender(){
+  var res = document.getElementById('_gsResults');
+  if(!res) return;
+  var r = window._gsResults;
+  var html = '';
+
+  if(r.pedidos.length){
+    html += "<div style='padding:.4rem 1rem;font-size:.65rem;font-weight:700;color:var(--tx3);background:var(--sur2);text-transform:uppercase;letter-spacing:.05em'>📋 Mis pedidos ("+r.pedidos.length+")</div>";
+    r.pedidos.forEach(function(p){
+      var fecha = p.created_at ? new Date(p.created_at).toLocaleDateString("es-AR",{day:"2-digit",month:"2-digit",year:"2-digit"}) : '';
+      var estC = p.estado==='cobrado'?'#5a8a4a':p.estado==='cancelado'?'#c5443a':'#c4965a';
+      html += "<div onclick='_gsIrA(\"pedido\","+p.id+")' style='padding:.55rem 1rem;cursor:pointer;border-bottom:1px solid var(--bd);display:flex;justify-content:space-between;align-items:center;gap:.5rem' onmouseover='this.style.background=\"var(--sur2)\"' onmouseout='this.style.background=\"\"'>"+
+        "<div style='flex:1;min-width:0'>"+
+          "<div style='font-size:.78rem;color:var(--acc);font-weight:600'>"+(p.nro_orden||'#'+p.id)+"</div>"+
+          "<div style='font-size:.65rem;color:var(--tx3)'>"+fecha+" · "+(p.estado||'')+"</div>"+
+        "</div>"+
+        "<div style='font-weight:600;color:"+estC+";font-size:.75rem'>"+fmt(p.total||0)+"</div>"+
+      "</div>";
+    });
+  }
+
+  if(r.clientes.length){
+    html += "<div style='padding:.4rem 1rem;font-size:.65rem;font-weight:700;color:var(--tx3);background:var(--sur2);text-transform:uppercase;letter-spacing:.05em'>👤 Mis clientes ("+r.clientes.length+")</div>";
+    r.clientes.forEach(function(c){
+      var blocked = c.bloqueado ? " <span style='color:var(--red);font-size:.6rem'>BLOQUEADO</span>" : "";
+      var sinAsignar = !c.vendedor_id ? " <span style='color:var(--yel);font-size:.6rem'>(sin asignar)</span>" : "";
+      html += "<div onclick='_gsIrA(\"cliente\","+c.id+")' style='padding:.55rem 1rem;cursor:pointer;border-bottom:1px solid var(--bd)' onmouseover='this.style.background=\"var(--sur2)\"' onmouseout='this.style.background=\"\"'>"+
+        "<div style='font-size:.8rem;font-weight:500'>"+(c.nombre||'')+(c.apellido?' '+c.apellido:'')+blocked+sinAsignar+"</div>"+
+        "<div style='font-size:.65rem;color:var(--tx3)'>"+(c.email||'')+(c.telefono_principal?' · '+c.telefono_principal:'')+"</div>"+
+      "</div>";
+    });
+  }
+
+  if(r.productos.length){
+    html += "<div style='padding:.4rem 1rem;font-size:.65rem;font-weight:700;color:var(--tx3);background:var(--sur2);text-transform:uppercase;letter-spacing:.05em'>📦 Productos ("+r.productos.length+")</div>";
+    r.productos.forEach(function(p){
+      var stockTxt = p.stock_actual!=null ? p.stock_actual+'u' : '?';
+      var stockC = (p.stock_actual||0)>0 ? '#5a8a4a' : '#c5443a';
+      html += "<div onclick='_gsIrA(\"producto\","+p.id+")' style='padding:.55rem 1rem;cursor:pointer;border-bottom:1px solid var(--bd);display:flex;justify-content:space-between;align-items:center;gap:.5rem' onmouseover='this.style.background=\"var(--sur2)\"' onmouseout='this.style.background=\"\"'>"+
+        "<div style='flex:1;min-width:0'>"+
+          "<div style='font-size:.78rem;font-weight:500'>"+(p.nombre||'')+"</div>"+
+          "<div style='font-size:.65rem;color:var(--tx3)'>"+(p.empresa||'')+"</div>"+
+        "</div>"+
+        "<div style='font-weight:600;color:"+stockC+";font-size:.7rem;white-space:nowrap'>"+stockTxt+"</div>"+
+      "</div>";
+    });
+  }
+
+  if(!html){
+    html = "<div style='padding:1.5rem;text-align:center;color:var(--tx3);font-size:.8rem'>Sin resultados</div>";
+  }
+  res.innerHTML = html;
+}
+
+function _gsIrA(tipo, id){
+  _gsCerrar();
+  if(tipo === 'pedido'){
+    if(typeof navTo === 'function') navTo('pedidos-web', null);
+    setTimeout(function(){
+      // En ventas, el modal de gestionar pedido es _abrirPedidoMo o similar
+      if(typeof gestionarPedido === 'function') gestionarPedido(id);
+    }, 300);
+  } else if(tipo === 'cliente'){
+    if(typeof navTo === 'function') navTo('clientes', null);
+    setTimeout(function(){
+      if(typeof _vcAbrirCliente === 'function') _vcAbrirCliente(id);
+    }, 300);
+  } else if(tipo === 'producto'){
+    // En ventas no hay modal de producto, ir al catálogo y buscarlo
+    if(typeof navTo === 'function') navTo('catalogo', null);
+    setTimeout(function(){
+      var srch = document.getElementById('catSearch');
+      if(srch){
+        srch.value = (window._gsResults.productos.find(function(p){return p.id===id;})||{}).nombre || '';
+        if(typeof renderCat === 'function') renderCat();
+      }
+    }, 300);
+  }
+}
+
+document.addEventListener('keydown', function(e){
+  if((e.ctrlKey||e.metaKey) && (e.key==='k'||e.key==='K')){
+    e.preventDefault();
+    _gsAbrir();
+  }
+});
+
+
 function api(method,table,data,filters){
   var url=SB_URL+"/rest/v1/"+table+(filters?"?"+filters:"");
   var h={"Content-Type":"application/json","apikey":SB_KEY,"Authorization":"Bearer "+SB_KEY};
@@ -12775,6 +12940,8 @@ function _rtBorrarDir(id){
   <header>
     <div class="h-logo">Distribuidora <span style="color:var(--acc)">Belle</span></div>
     <div class="h-right">
+      <button onclick="_gsAbrir()" title="Búsqueda global (Ctrl+K)" style="background:rgba(196,150,90,.15);border:1px solid rgba(196,150,90,.3);border-radius:6px;padding:.3rem .55rem;color:var(--acc);cursor:pointer;font-size:.78rem;display:inline-flex;align-items:center;gap:.3rem">🔍</button>
+      <button onclick="_notifToggleSound()" title="Activar/silenciar sonido de pedidos web" style="background:transparent;border:1px solid var(--bd);border-radius:6px;padding:.3rem .5rem;color:var(--tx3);cursor:pointer;font-size:.78rem">🔔</button>
       <span id="hUser">David</span>
       <span class="h-periodo" id="hPeriodo"></span>
       <span class="h-notif" onclick="toggleVNotif()" title="Notificaciones">&#128276;<span class="h-notif-badge" id="vNotifBadge" style="display:none">0</span></span><span class="h-out" onclick="doLogout()">Salir</span>
@@ -13065,12 +13232,124 @@ function _rtDebounce(key, fn, delay) {
   _rtDebounceTimers[key] = setTimeout(fn, delay || 600);
 }
 
+// ════════════════════════════════════════════════════════════════════
+// MEJORA 7: Notificación de pedido web nuevo
+// Sonido + toast + (opcional) Web Notification del navegador
+// ════════════════════════════════════════════════════════════════════
+window._notifLastIds = new Set(); // antiduplicado: ids ya notificados en esta sesión
+window._notifSoundEnabled = true; // se puede desactivar con localStorage
+
+function _notifInit(){
+  // Pedir permiso de notificaciones del navegador (no bloquea)
+  if('Notification' in window && Notification.permission === 'default'){
+    // No pedir automáticamente — esperar a que el usuario active explícitamente
+  }
+  // Restaurar preferencia de sonido
+  try {
+    var pref = localStorage.getItem('belle_notif_sound');
+    if(pref === '0') window._notifSoundEnabled = false;
+  } catch(e){}
+}
+
+function _notifToggleSound(){
+  window._notifSoundEnabled = !window._notifSoundEnabled;
+  try { localStorage.setItem('belle_notif_sound', window._notifSoundEnabled ? '1' : '0'); } catch(e){}
+  toast(window._notifSoundEnabled ? '🔔 Sonido activado' : '🔕 Sonido silenciado', 'tok');
+}
+
+function _notifPedirPermiso(){
+  if('Notification' in window){
+    Notification.requestPermission().then(function(perm){
+      toast(perm === 'granted' ? '✅ Notificaciones activadas' : 'Permiso no concedido',
+            perm === 'granted' ? 'tok' : 'twarn');
+    });
+  } else {
+    toast('Tu navegador no soporta notificaciones','twarn');
+  }
+}
+
+function _notifPlaySound(){
+  if(!window._notifSoundEnabled) return;
+  try {
+    // Sonido sintético usando Web Audio (sin archivo externo)
+    var ctx = new (window.AudioContext || window.webkitAudioContext)();
+    function _bip(freq, start, dur){
+      var osc = ctx.createOscillator();
+      var gain = ctx.createGain();
+      osc.connect(gain); gain.connect(ctx.destination);
+      osc.frequency.value = freq;
+      osc.type = 'sine';
+      gain.gain.setValueAtTime(0, ctx.currentTime + start);
+      gain.gain.linearRampToValueAtTime(0.15, ctx.currentTime + start + 0.02);
+      gain.gain.linearRampToValueAtTime(0, ctx.currentTime + start + dur);
+      osc.start(ctx.currentTime + start);
+      osc.stop(ctx.currentTime + start + dur);
+    }
+    // Dos tonos ascendentes — campanita amistosa
+    _bip(880, 0, 0.15);
+    _bip(1320, 0.13, 0.20);
+  } catch(e){
+    console.warn('[belle] sonido no disponible:', e);
+  }
+}
+
+function _notifPedidoWebNuevo(p){
+  if(!p || !p.id) return;
+  // Antiduplicado: si ya notifiqué este id en esta sesión, ignorar
+  if(window._notifLastIds.has(p.id)) return;
+  window._notifLastIds.add(p.id);
+
+  // Toast informativo grande
+  var lineas = ['Nro: '+(p.nro_orden||'#'+p.id)];
+  if(p.total) lineas.push('Total: '+fmt(p.total));
+  if(p.cliente_id) lineas.push('Cliente ID: '+p.cliente_id);
+  lineas.push('Tocá la campana para ver →');
+  toastInfo({titulo:'🛒 ¡Nuevo pedido web!', lineas:lineas, dur:8000}, 'tok');
+
+  // Sonido
+  _notifPlaySound();
+
+  // Notificación nativa del navegador (si tiene permiso)
+  if('Notification' in window && Notification.permission === 'granted'){
+    try {
+      var n = new Notification('🛒 Nuevo pedido web — Belle', {
+        body: (p.nro_orden||'#'+p.id) + ' · ' + (p.total ? fmt(p.total) : ''),
+        tag: 'pedido-'+p.id,
+        requireInteraction: false
+      });
+      n.onclick = function(){
+        window.focus();
+        if(typeof navTo === 'function') navTo('pedidos-web', null);
+        n.close();
+      };
+      // Auto-cerrar en 10s
+      setTimeout(function(){try{n.close();}catch(e){}}, 10000);
+    } catch(e){}
+  }
+
+  // Loguear
+  if(typeof _logAct === 'function'){
+    _logAct('notif_pedido_web', {
+      pedido_id: p.id,
+      nro_orden: p.nro_orden,
+      monto: p.total,
+      cliente_id: p.cliente_id,
+      vendedor_notificado: VENDEDOR_ID
+    });
+  }
+}
+
+// Llamar al cargar la app
+document.addEventListener('DOMContentLoaded', function(){
+  setTimeout(_notifInit, 1000);
+});
+
+
 function initRealtime() {
   if (!window.supabase || _rtReady) return;
   try {
     _sbClient = window.supabase.createClient(SB_URL, SB_KEY);
     _rtReady = true;
-
     // ── productos: stock, precios, reservas ──
     _sbClient.channel('rt-productos')
       .on('postgres_changes', { event: '*', schema: 'public', table: 'productos' },
@@ -13094,6 +13373,17 @@ function initRealtime() {
     _sbClient.channel('rt-pedidos')
       .on('postgres_changes', { event: '*', schema: 'public', table: 'pedidos_catalogo' },
         function(payload) {
+          // Mejora 7: Notificación cuando llega pedido web NUEVO
+          // Solo si es INSERT y origen del catálogo (no de transferencias internas)
+          if(payload.eventType === 'INSERT' && payload.new){
+            var p = payload.new;
+            // Filtrar: solo pedidos del catálogo público (origen=catalogo) Y no asignados aún o asignados a este vendedor
+            var esWeb = p.origen === 'catalogo' || (p.nro_orden||'').indexOf('WEB-') === 0;
+            var paraMi = !p.vendedor_id || p.vendedor_id === VENDEDOR_ID;
+            if(esWeb && paraMi){
+              _notifPedidoWebNuevo(p);
+            }
+          }
           _rtDebounce('pedidos', function() { loadPedidosWeb(); }, 500);
         })
       .subscribe();
