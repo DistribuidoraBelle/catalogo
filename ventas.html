@@ -390,6 +390,101 @@ function registrarComisionMarcela(){
 }
 
 
+// ════════════════════════════════════════════════════════════════════
+// _lockBtn — guard global contra doble-click en botones críticos.
+// Uso: _lockBtn(btnElement, function(){ return promesaQueDevuelveAlgo; }, { texto:"Procesando..." })
+//   - Deshabilita el botón mientras la promesa corre
+//   - Cambia el texto (opcional)
+//   - Re-habilita en finally
+//   - Timeout de seguridad: 8 segundos por defecto (configurable)
+// Si la fn no devuelve promesa, el guard solo agrega una micro-pausa.
+// ════════════════════════════════════════════════════════════════════
+// ════════════════════════════════════════════════════════════════════
+// _logAct — Log persistente de acciones críticas en tabla actividad_log
+// Uso:
+//   _logAct('cobro', { nro_orden:'ORD-X', monto:1000, items:[...] })
+//   _logAct('eliminar_producto', { producto_id:5, nombre:'X' }, { exito:false, error:e.message })
+// Es fire-and-forget: NO bloquea el flujo. Si falla el log, se loguea en consola.
+// ════════════════════════════════════════════════════════════════════
+function _logAct(accion, detalle, opts){
+  opts = opts || {};
+  detalle = detalle || {};
+  var record = {
+    usuario: (typeof VENDEDOR_NOMBRE !== 'undefined' && VENDEDOR_NOMBRE) || 'desconocido',
+    vendedor_id: (typeof VENDEDOR_ID !== 'undefined') ? VENDEDOR_ID : null,
+    accion: accion,
+    detalle: detalle,
+    pedido_id: detalle.pedido_id || opts.pedido_id || null,
+    cliente_id: detalle.cliente_id || opts.cliente_id || null,
+    producto_id: detalle.producto_id || opts.producto_id || null,
+    monto: (typeof detalle.monto === 'number' ? detalle.monto : null) || opts.monto || null,
+    nro_orden: detalle.nro_orden || opts.nro_orden || null,
+    exito: opts.exito !== false,
+    error_msg: opts.error_msg || null
+  };
+  // Fire-and-forget: nunca bloquea, errores solo a consola
+  try {
+    apiPost('actividad_log', record).catch(function(e){
+      console.error('[belle] _logAct fallo silencioso:', e, record);
+    });
+  } catch(e) {
+    console.error('[belle] _logAct exception:', e);
+  }
+}
+
+
+function _lockBtn(btn, fn, opts){
+  opts = opts || {};
+  var timeout = opts.timeout || 8000;
+  var textoProcesando = opts.texto || "Procesando...";
+  // Si no hay botón válido, ejecutar igual sin guard (defensivo)
+  if(!btn || !btn.tagName){
+    try { return Promise.resolve(fn()); } catch(e){ return Promise.reject(e); }
+  }
+  // Si ya está deshabilitado → ya está corriendo, ignorar este click
+  if(btn.disabled) return Promise.resolve();
+  var textoOriginal = btn.textContent;
+  btn.disabled = true;
+  btn.textContent = textoProcesando;
+  // Re-habilitar de emergencia con timeout (por si la promesa nunca resuelve)
+  var timer = setTimeout(function(){
+    btn.disabled = false;
+    btn.textContent = textoOriginal;
+    console.warn("[belle] _lockBtn timeout —", textoOriginal);
+  }, timeout);
+  function _restore(){
+    clearTimeout(timer);
+    btn.disabled = false;
+    btn.textContent = textoOriginal;
+  }
+  try {
+    var res = fn();
+    if(res && typeof res.then === 'function'){
+      return res.then(function(v){ _restore(); return v; },
+                      function(e){ _restore(); throw e; });
+    } else {
+      // Función sincrónica: liberar de inmediato (con micro-delay para que el doble-click no pase)
+      setTimeout(_restore, 250);
+      return Promise.resolve(res);
+    }
+  } catch(e){
+    _restore();
+    throw e;
+  }
+}
+
+// Versión por id de botón (cuando solo tenés el id)
+function _lockBtnById(btnId, fn, opts){
+  return _lockBtn(document.getElementById(btnId), fn, opts);
+}
+
+// Wrapper para onclick inline: _lockClick(this, function(){...})
+// Se puede usar directamente en onclick='_lockClick(this, function(){fnReal()})'
+function _lockClick(btn, fn, opts){
+  return _lockBtn(btn, fn, opts);
+}
+
+
 function api(method,table,data,filters){
   var url=SB_URL+"/rest/v1/"+table+(filters?"?"+filters:"");
   var h={"Content-Type":"application/json","apikey":SB_KEY,"Authorization":"Bearer "+SB_KEY};
@@ -1991,8 +2086,8 @@ function _vcCargarPedidoModalViejo(clienteId, clienteNombre, listaPre){
   h+="<div id='_vcPedLista' style='flex:1;overflow-y:auto;padding:.5rem 1rem'></div>";
   h+="<div style='padding:.8rem 1rem;border-top:1px solid var(--bd);display:flex;gap:.5rem;align-items:center;flex-wrap:wrap'>";
   h+="<div style='flex:1;min-width:120px'><div style='font-size:.68rem;color:var(--tx3)'>Total</div><div id='_vcPedTotal' style='font-size:1.1rem;font-weight:700;color:var(--acc)'>$0</div></div>";
-  h+="<button class='btn btn-a' style='font-size:.78rem' onclick='_vcConfirmarPedido("+clienteId+",\""+clienteNombre.replace(/"/g,"'")+"\",\"reservar\")'>📋 Reservar</button>";
-  h+="<button class='btn btn-green' style='font-size:.78rem' onclick='_vcConfirmarPedido("+clienteId+",\""+clienteNombre.replace(/"/g,"'")+"\",\"cobrar\")'>💰 Cobrar al toque</button>";
+  h+="<button class='btn btn-a' style='font-size:.78rem' onclick='_lockClick(this,function(){return _vcConfirmarPedido("+clienteId+",\""+clienteNombre.replace(/"/g,"'")+"\",\"reservar\");})'>📋 Reservar</button>";
+  h+="<button class='btn btn-green' style='font-size:.78rem' onclick='_lockClick(this,function(){return _vcConfirmarPedido("+clienteId+",\""+clienteNombre.replace(/"/g,"'")+"\",\"cobrar\");})'>💰 Cobrar al toque</button>";
   h+="</div></div>";
   mo.innerHTML=h;
   document.body.appendChild(mo);
@@ -2098,7 +2193,8 @@ function _vcConfirmarPedido(clienteId,clienteNombre,accion){
     pedidoData.estado_envio="en_preparacion";
   }
 
-  apiPost("pedidos_catalogo",pedidoData).then(function(){
+  // Retornar la promesa para que _lockBtn pueda esperarla
+  return apiPost("pedidos_catalogo",pedidoData).then(function(){
     // SIEMPRE reservar primero (luego, si "cobrar", consumir reserva en una segunda pasada)
     // Esto unifica el flujo y deja trazabilidad en movimientos_stock
     var reservaChain=Promise.resolve();
@@ -2155,13 +2251,41 @@ function _vcConfirmarPedido(clienteId,clienteNombre,accion){
   }).then(function(){
     // Actualizar ultimo_pedido_at del cliente
     apiPatch("clientes",{ultimo_pedido_at:new Date().toISOString()},"id=eq."+clienteId).catch(function(e){console.error("[belle] error silencioso:",e);});
-    toast("Pedido "+nroOrden+" "+(accion==="cobrar"?"cobrado":"reservado"),"tok");
+    // Toast informativo con detalle
+    var lineasInfo = [];
+    lineasInfo.push(items.length+' producto'+(items.length!==1?'s':'')+' por '+fmt(total));
+    lineasInfo.push('Cliente: '+clienteNombre);
+    if(accion==="cobrar"){
+      lineasInfo.push('Stock descontado y vendido');
+    } else {
+      lineasInfo.push('Reserva creada (stock apartado)');
+    }
+    toastInfo({
+      titulo: (accion==="cobrar"?"💰 Cobrado":"📋 Reservado")+" — "+nroOrden,
+      lineas: lineasInfo
+    }, "tok");
+    // Log persistente
+    _logAct(accion==="cobrar"?'cobro_al_toque':'reserva_pedido', {
+      nro_orden: nroOrden,
+      cliente_id: clienteId,
+      cliente_nombre: clienteNombre,
+      monto: total,
+      cant_items: items.length,
+      items: items.map(function(it){return {producto_id:it.producto_id, qty:it.qty, total:it.total};}),
+      origen: 'mis_clientes'
+    });
     mo.remove();
     loadClientesVendedor();
     renderCat();
     if(typeof loadPedidosWeb==="function")loadPedidosWeb();
     if(typeof loadDineroData==="function")loadDineroData();
-  }).catch(function(e){console.error("[belle] _vcConfirmarPedido error:",e);toast("Error al crear pedido","terr");});
+  }).catch(function(e){
+    console.error("[belle] _vcConfirmarPedido error:",e);
+    toast("Error al crear pedido","terr");
+    _logAct(accion==="cobrar"?'cobro_al_toque':'reserva_pedido', {
+      nro_orden: nroOrden, cliente_id: clienteId, monto: total
+    }, { exito:false, error_msg: e&&e.message||String(e) });
+  });
 }
 
 // ── Historial de pedidos del cliente ──────────────────────────
@@ -3694,7 +3818,27 @@ function executeVenta(items,reservaDecs){
     renderCat();loadDineroData();
     var _btn=document.getElementById("drawerConfirmBtn");
     if(_btn){_btn.disabled=false;_btn.textContent="Registrar venta";}
-    toast("✅ Venta registrada","tok");
+    // Toast informativo con detalle
+    var nPerf = _itemsVenta.filter(function(it){return !it.isDecan && !it.isCombo;}).length;
+    var nDec = _itemsVenta.filter(function(it){return it.isDecan;}).length;
+    var nCom = _itemsVenta.filter(function(it){return it.isCombo;}).length;
+    var lineasV = [];
+    if(nPerf) lineasV.push(nPerf+' perfume'+(nPerf!==1?'s':''));
+    if(nDec) lineasV.push(nDec+' decan'+(nDec!==1?'s':''));
+    if(nCom) lineasV.push(nCom+' combo'+(nCom!==1?'s':''));
+    lineasV.push('Total: '+fmt(_totalVenta));
+    if(_clienteVenta) lineasV.push('Cliente: '+(_clienteVenta.nombre||'(sin nombre)'));
+    toastInfo({titulo: '✅ Venta registrada — '+_nroOrdenVenta, lineas: lineasV}, "tok");
+    // Log persistente (incluye lista de items para reconstruir bugs)
+    _logAct('venta_carrito', {
+      nro_orden: _nroOrdenVenta,
+      monto: _totalVenta,
+      cant_items: _itemsVenta.length,
+      cliente_id: _clienteVenta && _clienteVenta.id || null,
+      items: _itemsVenta.map(function(it){
+        return {id:it.id, nombre:(it.nombre||'').slice(0,60), qty:it.qty, isDecan:!!it.isDecan, isCombo:!!it.isCombo, price:it.price};
+      })
+    });
     // Vincular cliente y CC si corresponde
     if(_clienteVenta)_postVentaCliente(_nroOrdenVenta,_itemsVenta,_totalVenta);
     if(window._pendingDepositoIds&&window._pendingDepositoIds.length){
@@ -3715,7 +3859,11 @@ function executeVenta(items,reservaDecs){
   }).catch(function(e){console.error("enGuardar error:",e);
     var _btnE=document.getElementById("drawerConfirmBtn");
     if(_btnE){_btnE.disabled=false;_btnE.textContent="Registrar venta";}
-    toast("Error al guardar: "+(e.message||"ver consola"),"terr");});
+    toast("Error al guardar: "+(e.message||"ver consola"),"terr");
+    _logAct('venta_carrito', {
+      nro_orden: _nroOrdenVenta, monto: _totalVenta
+    }, { exito:false, error_msg: e&&e.message||String(e) });
+  });
 }
 
 
@@ -4120,7 +4268,7 @@ function _gestionarPedido(tipo,id){
 
     // Cobrar seleccionados (parcial o total)
     window._mgTipo=tipo;window._mgId=id;window._mgCobradoYa=cobradoYa;window._mgTotalPed=total;
-    html+='<button id="_mgBtnCobrar" class="btn btn-green" style="flex:1;justify-content:center;min-width:130px" onclick="_mgConfirmarCobro()">💰 Cobrar seleccionados</button>';
+    html+='<button id="_mgBtnCobrar" class="btn btn-green" style="flex:1;justify-content:center;min-width:130px" onclick="_lockClick(this,function(){return _mgConfirmarCobro();})">💰 Cobrar seleccionados</button>';
 
     // Edit (load into cart/drawer)
     if(tipo==='web'||tipo==='reserva'){
@@ -4314,7 +4462,8 @@ function _mgConfirmarCobro(){
     }
   });
 
-  Promise.all(proms).then(function(){
+  // Retornar la promesa para que _lockBtn pueda esperarla
+  return Promise.all(proms).then(function(){
     // FIX BUG A: Si es cliente CC, registrar el pago en cc_pagos SIEMPRE
     // (sea cobro total o parcial). Antes solo se registraba el cobro saldado.
     if(rec.es_cc && rec.cliente_id){
@@ -4351,11 +4500,28 @@ function _mgConfirmarCobro(){
       });
     }
   }).then(function(){
-    toast('Cobro de '+fmt(montoCobrar)+' registrado'+(esSaldado?' — ¡Pedido saldado!':''),'tok');
+    var lineasC = ['Monto: '+fmt(montoCobrar)+' ('+forma+')'];
+    if(esSaldado) lineasC.push('✅ Pedido saldado');
+    else lineasC.push('Cobrado parcial: '+fmt(nuevoCobrado)+' / '+fmt(totalPed));
+    if(rec.cliente_id && rec.es_cc) lineasC.push('Registrado en CC del cliente');
+    toastInfo({titulo: '💵 Cobro registrado — '+nroOrden, lineas: lineasC}, "tok");
+    // Log persistente
+    _logAct('cobro_gestion', {
+      pedido_id: id, nro_orden: nroOrden, monto: montoCobrar,
+      es_saldado: esSaldado, forma_pago: forma,
+      cobrado_total_antes: cobradoYa, cobrado_total_despues: nuevoCobrado, total_pedido: totalPed,
+      cliente_id: rec.cliente_id||null, es_cc: !!rec.es_cc,
+      items_seleccionados: idxs.length
+    });
     document.getElementById('_moGestionar').remove();
     loadPedidosWeb();
     loadDineroData();renderCat();
-  }).catch(function(e){toast('Error: '+(e.message||'ver consola'),'terr');});
+  }).catch(function(e){
+    toast('Error: '+(e.message||'ver consola'),'terr');
+    _logAct('cobro_gestion', {
+      pedido_id: id, nro_orden: nroOrden, monto: montoCobrar
+    }, { exito:false, error_msg: e&&e.message||String(e) });
+  });
 }
 
 
@@ -5673,8 +5839,12 @@ function confirmarPedReservado(pedId,btn){
 }
 
 function _ejecutarCobrarReservado(pedId,btn,formaCobro){
+  // Guard contra doble click
+  if(btn && btn.disabled) return;
+  if(btn){ btn.disabled=true; btn.dataset._origText=btn.textContent; btn.textContent="Procesando..."; }
+  function _restoreBtn(){if(btn){btn.disabled=false;btn.textContent=btn.dataset._origText||"Cobrar";}}
   apiGet("pedidos_catalogo","select=*&id=eq."+pedId).then(function(data){
-    if(!Array.isArray(data)||!data.length)return;
+    if(!Array.isArray(data)||!data.length){_restoreBtn();return;}
     var ped=data[0];var items=[];
     try{items=typeof ped.items==="string"?JSON.parse(ped.items):ped.items;}catch(ex){}
     var nroOrden=ped.nro_orden||("RES-"+pedId);
@@ -5691,8 +5861,8 @@ function _ejecutarCobrarReservado(pedId,btn,formaCobro){
     });
     Promise.all(promises).then(function(){
       toast("Pedido confirmado! ("+formaCobro+")","tok");loadPedidosWeb();loadDineroData();renderCat();
-    }).catch(function(){if(btn)btn.disabled=false;});
-  });
+    }).catch(function(){_restoreBtn();});
+  }).catch(function(){_restoreBtn();});
 }
 
 function cancelarPedReservado(pedId,btn){
@@ -7444,6 +7614,30 @@ function toast(msg,cls,dur){
   t._toastTimer=setTimeout(function(){t.classList.remove("show");},dur||2500);
 }
 
+// Toast "rico" — muestra múltiples líneas, dura más, más visible.
+// Útil después de acciones críticas para confirmar al usuario qué pasó exactamente.
+// Uso: toastInfo({titulo:'Cobrado $56.000', lineas:['5 decants descontados','Comisión Marcela $2.500','Cliente saldado']}, 'tok')
+function toastInfo(opts, cls){
+  if(typeof opts==='string'){return toast(opts,cls);}
+  opts = opts || {};
+  var t = document.getElementById("toast");
+  if(!t) return;
+  var titulo = opts.titulo || '';
+  var lineas = Array.isArray(opts.lineas) ? opts.lineas : [];
+  var dur = opts.dur || 5000; // 5 segundos por defecto, info importante
+  var html = "";
+  if(titulo) html += "<div style='font-weight:700;margin-bottom:.25rem'>"+String(titulo).replace(/[<>]/g,'')+"</div>";
+  if(lineas.length){
+    html += "<div style='font-size:.78em;line-height:1.4;opacity:.92'>";
+    lineas.forEach(function(l){ html += "<div>· "+String(l).replace(/[<>]/g,'')+"</div>"; });
+    html += "</div>";
+  }
+  t.innerHTML = html || (opts.titulo||'OK');
+  t.className = "toast "+(cls||"tok")+" show";
+  clearTimeout(t._toastTimer);
+  t._toastTimer = setTimeout(function(){t.classList.remove("show");}, dur);
+}
+
 
 // -- NUMERO DE ORDEN ------------------------------------
 function genOrden(){
@@ -7479,7 +7673,7 @@ function openTransferModal(){
     "</div>"+
     "<div style='font-size:.72rem;color:var(--tx3);margin-bottom:.5rem'>Selecciona a quien transferir:</div>"+
     lista.map(function(u){
-      return"<button class='btn btn-g' style='width:100%;justify-content:center;padding:.6rem;margin-bottom:.3rem' onclick='ejecutarTransfer("+u.id+",\""+u.nombre+"\")'><span style='font-size:.9rem'>"+u.nombre+"</span></button>";
+      return"<button class='btn btn-g' style='width:100%;justify-content:center;padding:.6rem;margin-bottom:.3rem' onclick='_lockClick(this,function(){return ejecutarTransfer("+u.id+",\""+u.nombre+"\");})'><span style='font-size:.9rem'>"+u.nombre+"</span></button>";
     }).join("");
   document.getElementById("moTransfer").classList.add("open");
 }
@@ -7548,7 +7742,8 @@ function ejecutarTransfer(targetId,targetNombre){
       );
     });
   }
-  Promise.all(stockPromises).then(function(){
+  // Retornar la promesa para que _lockBtn pueda esperarla
+  return Promise.all(stockPromises).then(function(){
     // reserva_ejecutada=true solo si TODOS los productos se reservaron
     var reservaEjecutadaOk=conReserva&&reservasOk>0&&reservasOk===reservasTotal;
     // ═══════════════════════════════════════════════════════════════════
@@ -7585,8 +7780,25 @@ function ejecutarTransfer(targetId,targetNombre){
     cart={};cstate={};decanState={};
     updateCartBar();closeDrawer();renderCat();
     loadPedidosWeb();
-    toast("Venta transferida a "+targetNombre+" - "+nroOrden+(conReserva?" (stock reservado)":""),"tok");
-  }).catch(function(e){toast("Error al transferir: "+(e&&e.message?e.message:""),"terr");});
+    var lineasT = [items.length+' producto'+(items.length!==1?'s':'')+' por '+fmt(total)];
+    lineasT.push('Para: '+targetNombre);
+    if(conReserva){
+      lineasT.push(reservaEjecutadaOk?'✅ Stock reservado':'⚠️ Reserva incompleta');
+    }
+    toastInfo({titulo:'↗️ Transferencia enviada — '+nroOrden, lineas:lineasT}, "tok");
+    // Log persistente
+    _logAct('transferencia_pedido', {
+      nro_orden: nroOrden, monto: total, cant_items: items.length,
+      con_reserva: conReserva, reserva_ejecutada: reservaEjecutadaOk,
+      transferida_por_id: VENDEDOR_ID, transferida_a_id: targetId, transferida_a_nombre: targetNombre,
+      pedido_origen_id: _pedOrigId
+    });
+  }).catch(function(e){
+    toast("Error al transferir: "+(e&&e.message?e.message:""),"terr");
+    _logAct('transferencia_pedido', {
+      nro_orden: nroOrden, monto: total, transferida_a_id: targetId
+    }, { exito:false, error_msg: e&&e.message||String(e) });
+  });
 }
 
 // -- OVERRIDE executeVenta to include forma_cobro and nro_orden --------
@@ -13397,11 +13609,25 @@ function _vcFIFOConfirmarPago(clienteId){
 
     return chain;
   }).then(function(){
-    var resumen = "Pago de "+fmt(monto)+" registrado";
-    if(window._vcFIFOSaldoFavor > 0.01){
-      resumen += " · "+fmt(window._vcFIFOSaldoFavor)+" a favor";
+    var lineasF = ['Monto: '+fmt(monto)+' ('+forma+')'];
+    if(aplicaciones.length){
+      var totalAplicado = aplicaciones.reduce(function(s,a){return s+(a.monto||0);},0);
+      var nSaldados = aplicaciones.filter(function(a){return a.cubrio_completo;}).length;
+      lineasF.push('Aplicado a '+aplicaciones.length+' pedido'+(aplicaciones.length!==1?'s':'')+' (FIFO): '+fmt(totalAplicado));
+      if(nSaldados>0) lineasF.push('✅ '+nSaldados+' pedido'+(nSaldados!==1?'s':'')+' saldado'+(nSaldados!==1?'s':''));
     }
-    toast(resumen, "tok");
+    if(window._vcFIFOSaldoFavor > 0.01){
+      lineasF.push('💰 Saldo a favor: '+fmt(window._vcFIFOSaldoFavor));
+    }
+    toastInfo({titulo:'🔄 Pago FIFO registrado', lineas:lineasF}, "tok");
+    // Log persistente FIFO
+    _logAct('pago_fifo', {
+      cliente_id: clienteId,
+      monto: monto, forma_pago: forma, fecha: fecha, nota: nota,
+      saldo_favor: window._vcFIFOSaldoFavor || 0,
+      cant_aplicaciones: aplicaciones.length,
+      aplicaciones: aplicaciones.map(function(a){return {pedido_id:a.pedido_id, nro_orden:a.nro_orden, monto:a.monto, cubrio_completo:a.cubrio_completo};})
+    });
     // Si veníamos desde el modal "Registrar pago" de la ficha, cerrarlo
     var mo = document.getElementById("_moVcPagoFIFO");
     if(mo) mo.remove();
