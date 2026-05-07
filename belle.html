@@ -249,7 +249,6 @@ td{padding:.35rem .5rem;font-size:.78rem;color:var(--tx2);vertical-align:middle;
     <div class="sb-item act" onclick="navTo('dashboard',this)"><span>&#128202;</span><span>Dashboard</span></div>
     <div class="sb-sec">Catalogo</div>
     <div class="sb-item" onclick="navTo('stock',this)"><span>&#128230;</span><span>Stock y Precios</span></div>
-    <div class="sb-item admin-only" onclick="navTo('eliminados',this)"><span>&#128465;</span><span>Productos Eliminados</span></div>
 
     <div class="sb-item admin-only" onclick="navTo('destacados',this)"><span>⭐</span><span>Destacados</span></div>
     <div class="sb-item admin-only" onclick="navTo('fichas',this)"><span>📋</span><span>Fichas</span></div>
@@ -1542,13 +1541,6 @@ td{padding:.35rem .5rem;font-size:.78rem;color:var(--tx2);vertical-align:middle;
 
     <div class="page" id="page-cotizaciones"></div>
     <div class="page" id="page-reservas"></div>
-    <div class="page" id="page-eliminados">
-      <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:1rem">
-        <div style="font-size:1.1rem;font-weight:700">Productos Eliminados</div>
-        <button class="btn btn-g" style="font-size:.75rem" onclick="loadEliminados()">Recargar</button>
-      </div>
-      <div id="eliminadosContainer"></div>
-    </div>
 
   </div>
 </div>
@@ -3879,85 +3871,124 @@ function adjField(id,field,delta){
 }
 
 
+// ════════════════════════════════════════════════════════════════════
+// ELIMINAR PRODUCTO — HARD DELETE con validaciones
+// Borra: producto + ficha técnica.
+// Mantiene: ventas históricas y movimientos_stock (con producto_id huérfano,
+// pero conservan producto_nombre como texto, así no se rompen los reportes).
+// Avisa: combos afectados, reservas activas, stock en viaje.
+// ════════════════════════════════════════════════════════════════════
 function deleteProd(id){
   var p=prods.find(function(x){return x.id===id;});
   if(!p){toast("Producto no encontrado","terr");return;}
-  var motivo=prompt("Motivo de eliminacion de "+p.nombre+":");
-  if(motivo===null)return;
-  if(!motivo.trim()){toast("Ingresa un motivo","twarn");return;}
-  // B2 fix: sanitizar motivo para evitar inyección en notas (que se renderiza como HTML)
-  var motivoSan = motivo.replace(/[<>]/g,'').replace(/\|/g,'/').trim();
-  apiPatch("productos",{
-    activo:false,
-    notas:(p.notas?p.notas+" | ":"")+"[ELIMINADO "+new Date().toLocaleString("es-AR",{timeZone:"America/Argentina/Buenos_Aires"})+"] Motivo: "+motivoSan
-  },"id=eq."+id).then(function(){
-    // B1 fix: agregar catch para que un fallo en el log no rompa el flujo
-    apiPost("movimientos_stock",{
-      producto_id:id,producto_nombre:p.nombre,
-      tipo:"eliminacion",cantidad:0,
-      stock_antes:p.stock_actual||0,stock_despues:0,
-      motivo:"Eliminado: "+motivoSan,usuario:"admin"
-    }).catch(function(e){console.error("[belle] log eliminación silencioso:",e);});
-    toast("Producto eliminado","tok");loadProds();
-  }).catch(function(){toast("Error al eliminar","terr");});
-}
 
-function loadEliminados(){
-  var cont=document.getElementById("eliminadosContainer");
-  if(!cont)return;
-  cont.innerHTML="<div class='loading'><div class='spin'></div>Cargando...</div>";
-  // Helper local de escape HTML — defensivo contra notas viejas con caracteres peligrosos
-  function _eEsc(s){return String(s||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;').replace(/'/g,'&#39;');}
-  apiGet("productos","select=*&activo=is.false&order=nombre").then(function(data){
-    if(!Array.isArray(data)||!data.length){
-      cont.innerHTML="<div class='empty'>No hay productos eliminados</div>";return;
+  toast("Verificando dependencias...","tok");
+
+  // Verificar dependencias en paralelo
+  Promise.all([
+    apiGet("combo_items","select=combo_id,cantidad&producto_id=eq."+id+"&limit=200").catch(function(){return [];}),
+    apiGet("reservas","select=id,cantidad,cliente_id&producto_id=eq."+id+"&estado=eq.activa&limit=100").catch(function(){return [];}),
+    apiGet("fichas_perfume","select=id&producto_id=eq."+id+"&limit=10").catch(function(){return [];})
+  ]).then(function(deps){
+    var combos = deps[0]||[];
+    var reservasActivas = deps[1]||[];
+    var fichas = deps[2]||[];
+    var stockViaje = p.en_viaje||0;
+
+    // ── Bloqueo duro: reservas activas ──
+    if(reservasActivas.length){
+      var totalReserv=reservasActivas.reduce(function(s,r){return s+(r.cantidad||0);},0);
+      toast("⛔ No se puede eliminar: tiene "+reservasActivas.length+" reserva"+(reservasActivas.length!==1?"s":"")+" activa"+(reservasActivas.length!==1?"s":"")+" ("+totalReserv+"u). Cancelá las reservas primero.","terr");
+      return;
     }
-    var rows=data.map(function(p){
-      var nota=p.notas||"";
-      // B5: tomar la ÚLTIMA marca de eliminación, no la primera
-      var matches = nota.match(/\[ELIMINADO ([^\]]+)\] Motivo: ([^|\[]*)/g) || [];
-      var ultimoMatch = matches.length ? matches[matches.length-1] : null;
-      var fecha="Sin fecha", motivo="Sin motivo registrado";
-      if(ultimoMatch){
-        var m = ultimoMatch.match(/\[ELIMINADO ([^\]]+)\] Motivo: ([^|\[]*)/);
-        if(m){ fecha = m[1].trim(); motivo = m[2].trim() || motivo; }
-      }
-      return "<div class='tbl-wrap' style='padding:.7rem 1rem;display:flex;align-items:center;gap:.7rem;flex-wrap:wrap;margin-bottom:.4rem'>"+
-        "<div style='flex:1;min-width:180px'>"+
-          "<div style='font-size:.8rem;font-weight:600;color:var(--tx)'>"+_eEsc(p.nombre)+"</div>"+
-          "<div style='font-size:.65rem;color:var(--tx3);margin-top:.15rem'>Eliminado: "+_eEsc(fecha)+"</div>"+
-          "<div style='font-size:.65rem;color:var(--yel);margin-top:.1rem'>Motivo: "+_eEsc(motivo)+"</div>"+
-          "<div style='font-size:.63rem;color:var(--tx3)'>"+_eEsc(p.empresa||"")+"</div>"+
-        "</div>"+
-        "<div style='display:flex;gap:.4rem'>"+
-          "<button class='btn btn-a' style='font-size:.7rem' onclick='restaurarProducto("+p.id+")'>Restaurar al catalogo</button>"+
-          "<button class='btn btn-g' style='font-size:.7rem' onclick='openProdModal("+p.id+")'>Ver/Editar</button>"+
-        "</div>"+
-      "</div>";
-    }).join("");
-    cont.innerHTML=rows;
-  }).catch(function(){cont.innerHTML="<div class='empty'>Error cargando</div>";});
-}
 
-function restaurarProducto(id){
-  bellConfirm("¿Restaurar este producto al catálogo?",function(){
-    // B4 fix: leer notas actuales para limpiar las marcas [ELIMINADO ...] Motivo: ...
-    apiGet("productos","select=notas&id=eq."+id+"&limit=1").then(function(rows){
-      var notasOrig = (rows&&rows[0]&&rows[0].notas) || "";
-      // Quitar TODAS las marcas de eliminación (puede haber varias si se eliminó/restauró varias veces)
-      var notasLimpias = notasOrig
-        .replace(/\s*\|?\s*\[ELIMINADO [^\]]+\] Motivo: [^|\[]*/g, '')
-        .replace(/^\s*\|\s*/, '')      // arrancar con "|" suelto
-        .replace(/\s*\|\s*$/, '')      // terminar con "|" suelto
-        .replace(/\s*\|\s*\|\s*/g, ' | ') // doble "||" colapsado
-        .trim();
-      return apiPatch("productos",{activo:true, notas:notasLimpias},"id=eq."+id);
-    }).then(function(){
-      toast("Producto restaurado","tok");loadProds();loadEliminados();
-    }).catch(function(e){
-      console.error("[belle] restaurarProducto error:",e);
-      toast("Error al restaurar","terr");
+    // ── Si está en combos → cargar nombres para informar ──
+    var promCombos = combos.length
+      ? apiGet("combos","select=id,nombre&id=in.("+combos.map(function(c){return c.combo_id;}).join(",")+")&limit=50").catch(function(){return [];})
+      : Promise.resolve([]);
+
+    promCombos.then(function(combosData){
+      // Construir mensaje de confirm
+      var msg = "🗑 ELIMINAR PERMANENTEMENTE: \""+p.nombre+"\"?\n\n";
+      msg += "Se eliminará:\n";
+      msg += "  • El producto del catálogo\n";
+      if(fichas.length) msg += "  • Su ficha técnica\n";
+      msg += "\n";
+
+      var advertencias = [];
+      if(combosData && combosData.length){
+        advertencias.push("⚠️ Está en "+combosData.length+" combo"+(combosData.length!==1?"s":"")+":");
+        combosData.forEach(function(c){
+          var ci=combos.find(function(x){return x.combo_id===c.id;});
+          advertencias.push("    - "+(c.nombre||"(combo #"+c.id+")")+(ci?" (cantidad: "+ci.cantidad+")":""));
+        });
+        advertencias.push("    Estos combos quedarán con un componente faltante.");
+      }
+      if(stockViaje > 0){
+        advertencias.push("⚠️ Tiene "+stockViaje+"u en viaje pendientes de recibir.");
+        advertencias.push("    Se perderá esa información.");
+      }
+      if(p.stock_actual > 0){
+        advertencias.push("⚠️ Tiene "+p.stock_actual+"u en stock físico.");
+        advertencias.push("    Se perderá esa información de stock.");
+      }
+      if(advertencias.length){
+        msg += "ADVERTENCIAS:\n" + advertencias.join("\n") + "\n\n";
+      }
+
+      msg += "Las ventas históricas y movimientos de stock se conservarán\n";
+      msg += "(quedarán con producto_id huérfano pero con nombre legible).\n\n";
+      msg += "Esta acción NO se puede deshacer. ¿Continuar?";
+
+      if(!confirm(msg)) return;
+
+      // Pedir motivo (para registrar en movimientos_stock como auditoría)
+      var motivo = prompt("Motivo de eliminación (queda en historial):");
+      if(motivo===null) return; // canceló
+      if(!motivo.trim()){toast("Ingresá un motivo","twarn");return;}
+      var motivoSan = motivo.replace(/[<>]/g,'').replace(/\|/g,'/').trim();
+
+      // ── EJECUTAR HARD DELETE ──
+      // Orden:
+      //   1. Registrar evento en movimientos_stock (auditoría)
+      //   2. DELETE en fichas_perfume (cascada manual)
+      //   3. DELETE en productos
+      // Las ventas y movs históricos NO se tocan (quedan huérfanos pero con nombre).
+
+      apiPost("movimientos_stock",{
+        producto_id:id, producto_nombre:p.nombre,
+        tipo:"eliminacion", cantidad:0,
+        stock_antes:p.stock_actual||0, stock_despues:0,
+        motivo:"HARD DELETE: "+motivoSan +
+               (combosData.length?" | en "+combosData.length+" combo(s)":"") +
+               (stockViaje?" | "+stockViaje+"u en viaje":""),
+        usuario:"admin"
+      }).catch(function(e){console.error("[belle] log eliminación silencioso:",e);})
+      .then(function(){
+        // Borrar fichas (puede haber 0 o más)
+        if(fichas.length){
+          return apiDelete("fichas_perfume","producto_id=eq."+id).catch(function(e){
+            console.error("[belle] error eliminando fichas:",e);
+            // No abortar — seguir y borrar el producto igual
+          });
+        }
+      })
+      .then(function(){
+        return apiDelete("productos","id=eq."+id);
+      })
+      .then(function(){
+        var resumen = "Producto eliminado";
+        if(fichas.length) resumen += " + "+fichas.length+" ficha"+(fichas.length!==1?"s":"");
+        toast(resumen,"tok");
+        loadProds();
+      })
+      .catch(function(e){
+        toast("Error al eliminar: "+(e&&e.message||""),"terr");
+        console.error("[belle] hard delete error:",e);
+      });
     });
+  }).catch(function(e){
+    toast("Error verificando dependencias: "+(e&&e.message||""),"terr");
   });
 }
 
@@ -20284,7 +20315,6 @@ function navTo(pg,el){
   if(pg==="reservas")loadReservasAdmin();
     if(pg==="destacados"){if(typeof destLoadPaneles==="function")destLoadPaneles();}
   if(pg==="fichas"){setTimeout(fichaLoadPage,50);}
-  if(pg==="eliminados")loadEliminados();
 }
 
 
