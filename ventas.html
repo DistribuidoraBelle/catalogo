@@ -2211,7 +2211,7 @@ function vcVerCC(clienteId, clienteNombre){
   // Cargar todo: cliente entero, pedidos activos, pagos nuevos, movimientos viejos
   Promise.all([
     apiGet("clientes","select=*&id=eq."+clienteId+"&limit=1"),
-    apiGet("pedidos_catalogo","select=id,nro_orden,total,cobrado_total,estado,created_at&cliente_id=eq."+clienteId+"&estado=neq.cancelado&estado=neq.cobrado&order=created_at.asc"),
+    apiGet("pedidos_catalogo","select=id,nro_orden,total,cobrado_total,estado,created_at,vendedor_id,transferida_por_id,items&cliente_id=eq."+clienteId+"&estado=neq.cancelado&estado=neq.cobrado&order=created_at.asc"),
     apiGet("cc_pagos","select=*&cliente_id=eq."+clienteId+"&order=fecha.desc,created_at.desc&limit=10").catch(function(){return [];}),
     apiGet("cuenta_corriente_movimientos","select=*&cliente_id=eq."+clienteId+"&order=created_at.desc&limit=10").catch(function(){return [];})
   ]).then(function(res){
@@ -2959,8 +2959,10 @@ function _postVentaCliente(nroOrden, items, total){
       }
       // ── FLUJO CC con FIFO automático ──
       // Buscar deudas previas del cliente (pedidos pendientes de cobro)
+      // INCLUYE vendedor_id/transferida_por_id/items para transferir el pedido al vendedor
+      // que está cobrando y crear comisión Marcela si aplica.
       return apiGet("pedidos_catalogo",
-        "select=id,nro_orden,total,cobrado_total,created_at&cliente_id=eq."+clienteId+
+        "select=id,nro_orden,total,cobrado_total,created_at,vendedor_id,transferida_por_id,items&cliente_id=eq."+clienteId+
         "&es_cc=eq.true&estado=neq.cancelado&estado=neq.cobrado&id=neq."+pedId+
         "&order=created_at.asc"
       ).then(function(deudas){
@@ -2987,7 +2989,7 @@ function _postVentaCliente(nroOrden, items, total){
         // El cliente acaba de pagar `total` (lo del carrito).
         // Aplicar primero a deudas viejas, lo que sobre va al pedido nuevo, lo que sobre saldo a favor.
         var dineroDisponible = total;
-        var aplicaciones = []; // {pedido_id, monto, cubrio_completo}
+        var aplicaciones = []; // {pedido_id, monto, cubrio_completo, ...}
         // 1. Aplicar a deudas viejas (FIFO)
         deudasConSaldo.forEach(function(d){
           if(dineroDisponible <= 0) return;
@@ -2997,7 +2999,12 @@ function _postVentaCliente(nroOrden, items, total){
             monto: aplicar,
             cubrio_completo: aplicar >= d.pendiente - 0.01,
             nuevo_cobrado: (parseFloat(d.cobrado_total)||0) + aplicar,
-            total_pedido: parseFloat(d.total)||0
+            total_pedido: parseFloat(d.total)||0,
+            // Datos extra para auto-transferir el pedido al cobrador
+            vendedor_anterior: d.vendedor_id,
+            transferida_por_anterior: d.transferida_por_id,
+            nro_orden: d.nro_orden,
+            items: d.items
           });
           dineroDisponible -= aplicar;
         });
@@ -3031,6 +3038,41 @@ function _postVentaCliente(nroOrden, items, total){
               patchOld.estado = 'cobrado';
               patchOld.confirmado_cobro = true;
               patchOld.confirmado_at = new Date().toISOString();
+              // ───────────────────────────────────────────────────────────
+              // AUTO-TRANSFERENCIA AL COBRAR FIFO:
+              // Si el pedido viejo NO era de quien está cobrando, transferirlo.
+              // El vendedor que cobra se queda con el pedido cuando lo salda.
+              // ───────────────────────────────────────────────────────────
+              if(a.vendedor_anterior && a.vendedor_anterior !== VENDEDOR_ID){
+                patchOld.vendedor_id = VENDEDOR_ID;
+                patchOld.transferida_por_id = a.vendedor_anterior;
+                patchOld.transferida_at = new Date().toISOString();
+                // Log de la transferencia automática
+                var _nA = _vendedorNombre(a.vendedor_anterior) || ("V#"+a.vendedor_anterior);
+                _logEstadoPedidoV(a.pedido_id, "transferido",
+                  "Transferencia automática al cobrar (FIFO) — de "+_nA+" a "+VENDEDOR_NOMBRE);
+                // Si el pedido venía originalmente transferido por Marcela (id=3),
+                // mantener ese rastro: aún si pasó por otro vendedor, la comisión sigue siendo de ella.
+                // Como reescribimos transferida_por_id arriba, restablecemos si era Marcela.
+                if(a.transferida_por_anterior === 3){
+                  patchOld.transferida_por_id = 3;
+                }
+              } else if(!a.vendedor_anterior){
+                // Pedido sin asignar — el cobro lo asigna automáticamente
+                patchOld.vendedor_id = VENDEDOR_ID;
+                _logEstadoPedidoV(a.pedido_id, "asignado",
+                  "Auto-asignado al cobrar (FIFO) por "+VENDEDOR_NOMBRE);
+              }
+              // Si vino transferido por Marcela → crear comisión correspondiente
+              if(a.transferida_por_anterior === 3 && a.nro_orden){
+                var itemsCom = [];
+                try{ itemsCom = typeof a.items==='string' ? JSON.parse(a.items) : (a.items||[]); }catch(e){}
+                _crearComisionMarcelaSiAplica({
+                  transferida_por_id: 3,
+                  nro_orden: a.nro_orden,
+                  items: itemsCom
+                });
+              }
             }
             apiPatch("pedidos_catalogo", patchOld, "id=eq."+a.pedido_id).catch(function(e){console.error('[belle] error silencioso:',e);});
             return apiPost("cc_pagos_aplicaciones",{
@@ -13036,7 +13078,7 @@ function vcAbrirRegistrarPagoFIFO(clienteId, clienteNombre){
   // Cargar pedidos activos del cliente para mostrar a qué se va a aplicar
   Promise.all([
     apiGet("clientes","select=*&id=eq."+clienteId+"&limit=1"),
-    apiGet("pedidos_catalogo","select=id,nro_orden,total,cobrado_total,estado,created_at&cliente_id=eq."+clienteId+"&estado=neq.cancelado&estado=neq.cobrado&order=created_at.asc")
+    apiGet("pedidos_catalogo","select=id,nro_orden,total,cobrado_total,estado,created_at,vendedor_id,transferida_por_id,items&cliente_id=eq."+clienteId+"&estado=neq.cancelado&estado=neq.cobrado&order=created_at.asc")
   ]).then(function(res){
     var c = (res[0]&&res[0][0]) || null;
     var pedidos = Array.isArray(res[1]) ? res[1] : [];
@@ -13253,7 +13295,7 @@ function _vcFIFOConfirmarPago(clienteId){
         });
       }).then(function(){
         // 2b) Actualizar pedido — RE-LEER cobrado_total de BD para evitar conflictos
-        return apiGet("pedidos_catalogo","select=id,cobrado_total,total,estado&id=eq."+a.pedido.id+"&limit=1").then(function(rows){
+        return apiGet("pedidos_catalogo","select=id,cobrado_total,total,estado,vendedor_id,transferida_por_id,nro_orden,items&id=eq."+a.pedido.id+"&limit=1").then(function(rows){
           if(!rows||!rows[0]) return null;
           var fresh = rows[0];
           var nuevoCobrado = (parseFloat(fresh.cobrado_total)||0) + a.aplica;
@@ -13263,7 +13305,39 @@ function _vcFIFOConfirmarPago(clienteId){
           if(quedaCompleto){
             patch.estado = "cobrado";
             patch.cobrado_at = new Date().toISOString();
+            patch.confirmado_cobro = true;
+            patch.confirmado_at = new Date().toISOString();
             pedidosCobrados.push(a.pedido);
+            // ───────────────────────────────────────────────────────────
+            // AUTO-TRANSFERENCIA AL COBRAR FIFO (modal):
+            // Si el pedido viejo NO era de quien cobra, transferirlo.
+            // ───────────────────────────────────────────────────────────
+            if(fresh.vendedor_id && fresh.vendedor_id !== VENDEDOR_ID){
+              patch.vendedor_id = VENDEDOR_ID;
+              patch.transferida_por_id = fresh.vendedor_id;
+              patch.transferida_at = new Date().toISOString();
+              var _nA = _vendedorNombre(fresh.vendedor_id) || ("V#"+fresh.vendedor_id);
+              _logEstadoPedidoV(a.pedido.id, "transferido",
+                "Transferencia automática al cobrar (FIFO modal) — de "+_nA+" a "+VENDEDOR_NOMBRE);
+              // Si venía originalmente de Marcela → preservar trazabilidad
+              if(fresh.transferida_por_id === 3){
+                patch.transferida_por_id = 3;
+              }
+            } else if(!fresh.vendedor_id){
+              patch.vendedor_id = VENDEDOR_ID;
+              _logEstadoPedidoV(a.pedido.id, "asignado",
+                "Auto-asignado al cobrar (FIFO modal) por "+VENDEDOR_NOMBRE);
+            }
+            // Comisión Marcela si aplica
+            if(fresh.transferida_por_id === 3 && fresh.nro_orden){
+              var itemsCom = [];
+              try{ itemsCom = typeof fresh.items==='string' ? JSON.parse(fresh.items) : (fresh.items||[]); }catch(e){}
+              _crearComisionMarcelaSiAplica({
+                transferida_por_id: 3,
+                nro_orden: fresh.nro_orden,
+                items: itemsCom
+              });
+            }
           } else if(fresh.estado !== "cobrado_parcial"){
             // si todavía no estaba marcado como parcial, marcarlo
             patch.estado = "cobrado_parcial";
