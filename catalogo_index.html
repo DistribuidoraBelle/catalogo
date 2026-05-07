@@ -730,6 +730,95 @@ function apiPost(t,d){
   return fetch(SB_URL+"/rest/v1/"+t,{method:"POST",headers:{"Content-Type":"application/json","apikey":SB_KEY,"Authorization":auth,"Prefer":"return=representation"},body:JSON.stringify(d)}).then(function(r){return r.json();});
 }
 
+// ════════════════════════════════════════════════════════════════════
+// _lockBtn — guard global contra doble-click en botones críticos.
+// Mismo helper que belle/ventas/marcela. En el catálogo público es
+// especialmente importante: si el cliente toca 2x "Confirmar pedido"
+// se generan 2 pedidos en BD, doble reserva, doble WhatsApp.
+// ════════════════════════════════════════════════════════════════════
+function _lockBtn(btn, fn, opts){
+  opts = opts || {};
+  var timeout = opts.timeout || 8000;
+  var textoProcesando = opts.texto || "Procesando...";
+  if(!btn || !btn.tagName){
+    try { return Promise.resolve(fn()); } catch(e){ return Promise.reject(e); }
+  }
+  if(btn.disabled) return Promise.resolve();
+  var textoOriginal = btn.textContent;
+  btn.disabled = true;
+  btn.style.opacity = "0.6";
+  btn.textContent = textoProcesando;
+  var timer = setTimeout(function(){
+    btn.disabled = false;
+    btn.style.opacity = "";
+    btn.textContent = textoOriginal;
+    console.warn("[catalogo] _lockBtn timeout");
+  }, timeout);
+  function _restore(){
+    clearTimeout(timer);
+    btn.disabled = false;
+    btn.style.opacity = "";
+    btn.textContent = textoOriginal;
+  }
+  try {
+    var res = fn();
+    if(res && typeof res.then === 'function'){
+      return res.then(function(v){ _restore(); return v; },
+                      function(e){ _restore(); throw e; });
+    } else {
+      setTimeout(_restore, 250);
+      return Promise.resolve(res);
+    }
+  } catch(e){
+    _restore();
+    throw e;
+  }
+}
+
+function _lockBtnById(btnId, fn, opts){
+  return _lockBtn(document.getElementById(btnId), fn, opts);
+}
+
+function _lockClick(btn, fn, opts){
+  return _lockBtn(btn, fn, opts);
+}
+
+// ════════════════════════════════════════════════════════════════════
+// _logAct — Log persistente de acciones críticas en tabla actividad_log
+// En el catálogo público, el "usuario" es 'cliente_web' o el email del cliente
+// si está logueado. Útil para reconstruir flujos de pedidos web problemáticos.
+// ════════════════════════════════════════════════════════════════════
+function _logAct(accion, detalle, opts){
+  opts = opts || {};
+  detalle = detalle || {};
+  var usuarioStr = 'cliente_web';
+  try {
+    if(_catCliente && _catCliente.email) usuarioStr = 'cliente:'+_catCliente.email;
+    else if(_catCliente && _catCliente.nombre) usuarioStr = 'cliente:'+_catCliente.nombre;
+  } catch(e) {}
+  var record = {
+    usuario: usuarioStr,
+    vendedor_id: null,
+    accion: accion,
+    detalle: detalle,
+    pedido_id: detalle.pedido_id || opts.pedido_id || null,
+    cliente_id: detalle.cliente_id || opts.cliente_id || (_catCliente && _catCliente.id) || null,
+    producto_id: detalle.producto_id || opts.producto_id || null,
+    monto: (typeof detalle.monto === 'number' ? detalle.monto : null) || opts.monto || null,
+    nro_orden: detalle.nro_orden || opts.nro_orden || null,
+    exito: opts.exito !== false,
+    error_msg: opts.error_msg || null
+  };
+  try {
+    apiPost('actividad_log', record).catch(function(e){
+      console.error('[catalogo] _logAct fallo silencioso:', e, record);
+    });
+  } catch(e) {
+    console.error('[catalogo] _logAct exception:', e);
+  }
+}
+
+
 var allProds=[],curTab="inicio",genF="",kitF=false,hideSS=false;
 var pestanasCatalogo=[];
 var combosPublicos=[];
@@ -1753,6 +1842,29 @@ function updateCartCount(){
 
 function showToast(msg){var t=document.getElementById("toast");t.textContent=msg;t.classList.add("show");setTimeout(function(){t.classList.remove("show");},2000);}
 
+// Toast "rico" — múltiples líneas, dura más, info para acciones críticas
+// Útil cuando se confirma un pedido para que el cliente vea exactamente qué se procesó.
+function showToastInfo(opts){
+  if(typeof opts === 'string'){return showToast(opts);}
+  opts = opts || {};
+  var t = document.getElementById("toast");
+  if(!t) return;
+  var titulo = opts.titulo || '';
+  var lineas = Array.isArray(opts.lineas) ? opts.lineas : [];
+  var dur = opts.dur || 5000;
+  var html = "";
+  if(titulo) html += "<div style='font-weight:700;margin-bottom:.3rem'>"+String(titulo).replace(/[<>]/g,'')+"</div>";
+  if(lineas.length){
+    html += "<div style='font-size:.78em;line-height:1.4;opacity:.95'>";
+    lineas.forEach(function(l){html += "<div>· "+String(l).replace(/[<>]/g,'')+"</div>";});
+    html += "</div>";
+  }
+  t.innerHTML = html || (opts.titulo||'OK');
+  t.classList.add("show");
+  clearTimeout(t._catToastTimer);
+  t._catToastTimer = setTimeout(function(){t.classList.remove("show");}, dur);
+}
+
 function toggleCart(){document.getElementById("drawer").classList.toggle("open");document.getElementById("ov").classList.toggle("open");renderDrawer();}
 
 // ═══════════════════════════════════════════════════════
@@ -1979,6 +2091,15 @@ function sendWA(){
   // Validaciones rápidas antes de involucrar al cliente
   var items=Object.values(cart);
   if(!items.length) return;
+
+  // Guard temprano contra doble click rápido (debounce corto).
+  // Si el cliente toca el botón 2 veces en menos de 1.5s, ignorar el segundo.
+  // Esto evita que se dispare el flujo dos veces antes de que se setee _sendingOrder.
+  var ahora = Date.now();
+  if(window._sendWALastClick && (ahora - window._sendWALastClick) < 1500){
+    return; // doble click muy rápido, ignorar
+  }
+  window._sendWALastClick = ahora;
 
   // Si no hay sesión activa, sugerir crear cuenta pero permitir seguir
   if(!_catSession || !_catCliente){
@@ -2406,14 +2527,32 @@ function _sendWAOriginal(){
     updateCartCount();
     document.getElementById("drawer").classList.remove("open");
     document.getElementById("ov").classList.remove("open");
-    showToast("Pedido enviado! Orden: "+nroOrden);
+    // Toast informativo con detalle
+    var lineasTok = [pedidoItems.length+' producto'+(pedidoItems.length!==1?'s':'')+' por '+fmt(total)];
+    if(_catCliente && _catCliente.nombre) lineasTok.push('Cliente: '+_catCliente.nombre);
+    lineasTok.push('Stock reservado · WhatsApp abierto');
+    showToastInfo({titulo:'✅ Pedido enviado — '+nroOrden, lineas:lineasTok});
+    // Log persistente
+    _logAct('pedido_web', {
+      nro_orden: nroOrden,
+      monto: total,
+      cant_items: pedidoItems.length,
+      cliente_id: _catCliente && _catCliente.id || null,
+      cliente_nombre: _catCliente && _catCliente.nombre || null,
+      modo_entrega: ctx.modo_entrega || null,
+      direccion_id: ctx.direccion_id || null,
+      items: pedidoItems.map(function(it){return {producto_id:it.producto_id, qty:it.qty, total:it.total, isDecan:!!it.isDecan};})
+    });
     // Limpiar contexto
     window._sendWAContext = null;
-  }).catch(function(){
+  }).catch(function(e){
     window._sendingOrder=false;
     var waBtn=document.getElementById('waBtn');
     if(waBtn){waBtn.disabled=false;waBtn.style.opacity='';}
     showToast('Error al registrar pedido. Intentá de nuevo.');
+    _logAct('pedido_web', {
+      nro_orden: nroOrden, monto: total, cant_items: pedidoItems.length
+    }, { exito:false, error_msg: e&&e.message||String(e) });
   });
 }
 
@@ -4815,7 +4954,7 @@ function _catRenderLogin(body){
   h += "<a href='javascript:void(0)' onclick='_catCambiarVista(&quot;recuperar&quot;)' style='font-size:.72rem;color:var(--accent);text-decoration:none'>¿Olvidaste tu contraseña?</a>";
   h += "</div>";
 
-  h += "<button id='_catLoginBtn' onclick='catLogin()' style='background:var(--accent);color:#fff;border:none;padding:.7rem;border-radius:8px;font-size:.92rem;font-weight:600;cursor:pointer;margin-top:.5rem;letter-spacing:.02em'>Iniciar sesión</button>";
+  h += "<button id='_catLoginBtn' onclick='_lockClick(this,function(){return catLogin();},{texto:\"Iniciando...\"})' style='background:var(--accent);color:#fff;border:none;padding:.7rem;border-radius:8px;font-size:.92rem;font-weight:600;cursor:pointer;margin-top:.5rem;letter-spacing:.02em'>Iniciar sesión</button>";
 
   h += "<div style='text-align:center;margin:.8rem 0;display:flex;align-items:center;gap:.6rem'>";
   h += "<div style='flex:1;height:1px;background:#e8d9bf'></div>";
@@ -4891,7 +5030,7 @@ function _catRenderRegistro(body){
   h += "<div><label style='font-size:.7rem;color:var(--mid);text-transform:uppercase;font-weight:600'>Repetir contraseña *</label>";
   h += "<input type='password' id='_catRegPwd2' autocomplete='new-password' onkeydown='if(event.key===&quot;Enter&quot;)catRegistro()' style='width:100%;padding:.55rem .7rem;border:1px solid #e8d9bf;border-radius:8px;font-size:.88rem;background:#fff;color:var(--dark);margin-top:.25rem;box-sizing:border-box;font-family:inherit'></div>";
 
-  h += "<button id='_catRegBtn' onclick='catRegistro()' style='background:var(--accent);color:#fff;border:none;padding:.7rem;border-radius:8px;font-size:.92rem;font-weight:600;cursor:pointer;margin-top:.6rem;letter-spacing:.02em'>Crear cuenta</button>";
+  h += "<button id='_catRegBtn' onclick='_lockClick(this,function(){return catRegistro();},{texto:\"Creando cuenta...\"})' style='background:var(--accent);color:#fff;border:none;padding:.7rem;border-radius:8px;font-size:.92rem;font-weight:600;cursor:pointer;margin-top:.6rem;letter-spacing:.02em'>Crear cuenta</button>";
 
   h += "<div style='text-align:center;margin-top:.5rem;font-size:.74rem;color:var(--mid)'>";
   h += "¿Ya tenés cuenta? <a href='javascript:void(0)' onclick='_catCambiarVista(&quot;login&quot;)' style='color:var(--accent);text-decoration:none;font-weight:600'>Iniciar sesión</a>";
@@ -4974,18 +5113,15 @@ function catLogin(){
   if(!email || !pwd){_catToast("Completá email y contraseña","twarn");return;}
   if(!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)){_catToast("El email no es válido","twarn");return;}
 
-  var btn = document.getElementById("_catLoginBtn");
-  if(btn){btn.disabled = true; btn.textContent = "Iniciando sesión...";}
+  if(!_sbAuth){_catToast("Sistema cargando, esperá un segundo","twarn");return;}
 
-  if(!_sbAuth){_catToast("Sistema cargando, esperá un segundo","twarn");if(btn){btn.disabled=false;btn.textContent="Iniciar sesión";}return;}
-
-  _sbAuth.auth.signInWithPassword({email: email, password: pwd}).then(function(res){
+  // Retornar la promesa para que _lockClick pueda esperarla
+  return _sbAuth.auth.signInWithPassword({email: email, password: pwd}).then(function(res){
     if(res.error){
       var msg = res.error.message || "Error al iniciar sesión";
       if(/invalid login credentials/i.test(msg)) msg = "Email o contraseña incorrectos";
       else if(/email not confirmed/i.test(msg)) msg = "Confirmá tu email primero (revisá tu bandeja de entrada)";
       _catToast(msg, "terr");
-      if(btn){btn.disabled=false;btn.textContent="Iniciar sesión";}
       return;
     }
     _catToast("¡Bienvenido!","tok");
@@ -4994,7 +5130,6 @@ function catLogin(){
   }).catch(function(e){
     console.error("[belle-cat] catLogin error:",e);
     _catToast("Error de conexión","terr");
-    if(btn){btn.disabled=false;btn.textContent="Iniciar sesión";}
   });
 }
 
@@ -5017,16 +5152,12 @@ function catRegistro(){
   if(!pwd || pwd.length < 6){_catToast("La contraseña debe tener al menos 6 caracteres","twarn");return;}
   if(pwd !== pwd2){_catToast("Las contraseñas no coinciden","twarn");return;}
 
-  var btn = document.getElementById("_catRegBtn");
-  if(btn){btn.disabled = true; btn.textContent = "Creando cuenta...";}
+  if(!_sbAuth){_catToast("Sistema cargando, esperá un segundo","twarn");return;}
 
-  if(!_sbAuth){_catToast("Sistema cargando, esperá un segundo","twarn");if(btn){btn.disabled=false;btn.textContent="Crear cuenta";}return;}
-
-  // Verificar primero si el email ya está en la tabla clientes
-  apiGet("clientes","select=id,email&email=eq."+encodeURIComponent(email)+"&limit=1").then(function(rows){
+  // Retornar la promesa para que _lockClick pueda esperarla
+  return apiGet("clientes","select=id,email&email=eq."+encodeURIComponent(email)+"&limit=1").then(function(rows){
     if(rows && rows.length){
       _catToast("Ya hay una cuenta con ese email. ¿Olvidaste la contraseña?","twarn");
-      if(btn){btn.disabled=false;btn.textContent="Crear cuenta";}
       return;
     }
     // Registrar en Supabase Auth
@@ -5045,7 +5176,6 @@ function catRegistro(){
           msg = "La contraseña es muy débil. Probá una más larga.";
         }
         _catToast(msg, "terr");
-        if(btn){btn.disabled=false;btn.textContent="Crear cuenta";}
         return;
       }
       // Crear fila en tabla `clientes`
@@ -5087,7 +5217,6 @@ function catRegistro(){
   }).catch(function(e){
     console.error("[belle-cat] catRegistro error:",e);
     _catToast("Error al crear la cuenta. Intentá de nuevo.","terr");
-    if(btn){btn.disabled=false;btn.textContent="Crear cuenta";}
   });
 }
 
