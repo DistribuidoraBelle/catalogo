@@ -730,6 +730,25 @@ function apiPost(t,d){
   return fetch(SB_URL+"/rest/v1/"+t,{method:"POST",headers:{"Content-Type":"application/json","apikey":SB_KEY,"Authorization":auth,"Prefer":"return=representation"},body:JSON.stringify(d)}).then(function(r){return r.json();});
 }
 
+// PATCH y DELETE con token de sesión (no anon key) — para operaciones de un cliente sobre sus propios datos.
+// Cuando se active RLS, usar siempre estos en lugar de fetch() directo con SB_KEY.
+function apiPatch(t,d,f){
+  var tok = _sbToken();
+  var auth = tok ? "Bearer "+tok : "Bearer "+SB_KEY;
+  return fetch(SB_URL+"/rest/v1/"+t+(f?"?"+f:""),{method:"PATCH",headers:{"Content-Type":"application/json","apikey":SB_KEY,"Authorization":auth,"Prefer":"return=minimal"},body:JSON.stringify(d)}).then(function(r){
+    if(!r.ok){return r.text().then(function(txt){throw new Error("HTTP "+r.status+": "+txt.slice(0,100));});}
+    return r;
+  });
+}
+function apiDelete(t,f){
+  var tok = _sbToken();
+  var auth = tok ? "Bearer "+tok : "Bearer "+SB_KEY;
+  return fetch(SB_URL+"/rest/v1/"+t+(f?"?"+f:""),{method:"DELETE",headers:{"apikey":SB_KEY,"Authorization":auth}}).then(function(r){
+    if(!r.ok){return r.text().then(function(txt){throw new Error("HTTP "+r.status+": "+txt.slice(0,100));});}
+    return r;
+  });
+}
+
 // ════════════════════════════════════════════════════════════════════
 // _lockBtn — guard global contra doble-click en botones críticos.
 // Mismo helper que belle/ventas/marcela. En el catálogo público es
@@ -1621,15 +1640,14 @@ function renderCard(p,totalUnits){
   var stockLibre = stockTotal; // ya descontada reserva
   var stockReservado = (p.reserva||0);
   var stockTotalReal = stockLibre + stockReservado; // total físico
-  // Indicador "quedan pocas" — SOLO para clientes CC (tienen cuenta corriente habilitada).
-  // Razón: los clientes regulares y los no-logueados no necesitan ver esta alerta;
-  // es información operativa que solo interesa a quien tiene relación comercial habitual.
-  // Importante: NO mostramos "X disponibles (Y apartadas)" — las reservas son info interna,
-  // el cliente no debe saber el stock apartado para otros pedidos.
+  // Indicador "queda 1" — SOLO para clientes CC, y SOLO cuando queda exactamente 1.
+  // Razón: los clientes regulares y no-logueados no necesitan ver esta alerta;
+  // y solo cuando es la última unidad genera urgencia genuina (no falsa).
+  // No mostramos info de reservas/apartadas — eso es interno, no para el cliente.
   var _isCCStock = !!(typeof _catCliente !== "undefined" && _catCliente && _catCliente.cuenta_corriente_habilitada);
   var stockBajoHtml = "";
-  if(_isCCStock && stockLibre > 0 && stockLibre <= 5){
-    stockBajoHtml = "<div style='font-size:.62rem;color:#c5443a;font-weight:600;margin-top:.15rem'>⚠️ ¡Quedan solo "+stockLibre+"!</div>";
+  if(_isCCStock && stockLibre === 1){
+    stockBajoHtml = "<div style='font-size:.62rem;color:#c5443a;font-weight:600;margin-top:.15rem'>⚠️ ¡Queda solo 1!</div>";
   }
   // Acordes chart
   var acordesHtml="";
@@ -1950,9 +1968,11 @@ function renderDrawer(){
       var pImg = allProds.find(function(x){return x.id === (item.isDecan ? item.prodId : item.id);});
       if(pImg && pImg.imagen_url) imgUrl = pImg.imagen_url;
     }
+    var fallbackEmoji = item.isDecan?'💧':item.isCombo?'🎁':'🌸';
+    var fallbackHtml = "<div style=\"width:48px;height:48px;border-radius:6px;background:#faf6ee;border:1px solid #e8d9bf;flex-shrink:0;display:flex;align-items:center;justify-content:center;font-size:1.1rem\">"+fallbackEmoji+"</div>";
     var imgHtml = imgUrl
-      ? "<img src='"+imgUrl+"' alt='' style='width:48px;height:48px;border-radius:6px;object-fit:cover;flex-shrink:0;background:#faf6ee;border:1px solid #e8d9bf' onerror='this.style.display=\"none\"'>"
-      : "<div style='width:48px;height:48px;border-radius:6px;background:#faf6ee;border:1px solid #e8d9bf;flex-shrink:0;display:flex;align-items:center;justify-content:center;font-size:1.1rem'>"+(item.isDecan?'💧':item.isCombo?'🎁':'🌸')+"</div>";
+      ? "<img src='"+imgUrl+"' alt='' style='width:48px;height:48px;border-radius:6px;object-fit:cover;flex-shrink:0;background:#faf6ee;border:1px solid #e8d9bf' onerror='this.outerHTML="+JSON.stringify(fallbackHtml)+"'>"
+      : fallbackHtml;
 
     if(item.isCombo){
       sub=item.precio*item.qty;total+=sub;segLabel="precio unico combo";
@@ -2099,20 +2119,39 @@ loadAnnBar();
 
 function _reservarProducto(pid, qty, intentos){
   intentos=intentos||0;
-  apiGet("productos","select=id,stock_actual,reserva&id=eq."+pid)
+  // Devuelve una promesa que resuelve con {ok:true} o {ok:false, error:...}
+  // para poder agregar manejo de errores en el flujo principal.
+  return apiGet("productos","select=id,stock_actual,reserva&id=eq."+pid)
     .then(function(rows){
       var fp=rows&&rows[0];
-      if(!fp){console.error('reserva: producto no encontrado id='+pid);return;}
+      if(!fp){
+        console.error('reserva: producto no encontrado id='+pid);
+        return {ok:false, error:'producto no encontrado'};
+      }
       var ns=Math.max(0,(fp.stock_actual||0)-qty);
       var nr=(fp.reserva||0)+qty;
       return fetch(SB_URL+"/rest/v1/productos?id=eq."+pid,{
         method:"PATCH",
         headers:{"Content-Type":"application/json","apikey":SB_KEY,"Authorization":"Bearer "+SB_KEY,"Prefer":"return=minimal"},
         body:JSON.stringify({stock_actual:ns,reserva:nr})
+      }).then(function(r){
+        if(!r.ok){
+          throw new Error('HTTP '+r.status);
+        }
+        return {ok:true};
       });
     }).catch(function(e){
       console.error('reserva stock error pid='+pid+' intento='+intentos,e);
-      if(intentos<2){setTimeout(function(){_reservarProducto(pid,qty,intentos+1);},1500);}
+      if(intentos<2){
+        // Reintentar con backoff
+        return new Promise(function(resolve){
+          setTimeout(function(){
+            _reservarProducto(pid,qty,intentos+1).then(resolve);
+          }, 1500);
+        });
+      }
+      // Falló definitivamente
+      return {ok:false, error:(e && e.message) || String(e)};
     });
 }
 
@@ -2238,12 +2277,7 @@ function _catGuardarTelefono(){
   if(d.length !== 10){
     _catToast("El teléfono debe tener 10 dígitos (ej: 3515121193, sin 0 ni 15)","twarn"); return;
   }
-  fetch(SB_URL+"/rest/v1/clientes?id=eq."+_catCliente.id, {
-    method: "PATCH",
-    headers:{"Content-Type":"application/json","apikey":SB_KEY,"Authorization":"Bearer "+SB_KEY,"Prefer":"return=minimal"},
-    body: JSON.stringify({telefono_principal: d, updated_at: new Date().toISOString()})
-  }).then(function(r){
-    if(!r.ok) throw new Error("HTTP "+r.status);
+  apiPatch("clientes", {telefono_principal: d, updated_at: new Date().toISOString()}, "id=eq."+_catCliente.id).then(function(){
     _catCliente.telefono_principal = d;
     _catToast("Teléfono guardado","tok");
     var mo = document.getElementById("_catMoTelefono");
@@ -2257,18 +2291,20 @@ function _catGuardarTelefono(){
   });
 }
 
-// Cartelito invitando a crear cuenta antes de pedir (no obliga, deja seguir)
+// Modal: cliente sin sesión NO puede comprar — forzamos registro o login.
+// Razón: sin cuenta no podemos guardar dirección, método de pago, ni hacer seguimiento.
+// Genera pedidos incompletos que después complican operativamente.
 function _catSugerirRegistroAntesPedido(){
   var mo = document.createElement("div");
   mo.style.cssText = "position:fixed;inset:0;background:rgba(20,15,8,.7);z-index:1300;display:flex;align-items:center;justify-content:center;padding:1rem";
-  mo.innerHTML = "<div style='background:#fff;border-radius:14px;max-width:420px;width:100%;padding:1.4rem;box-shadow:0 8px 40px rgba(0,0,0,.3);text-align:center'>"+
+  mo.innerHTML = "<div style='background:#fff;border-radius:14px;max-width:420px;width:100%;padding:1.4rem;box-shadow:0 8px 40px rgba(0,0,0,.3);text-align:center;position:relative'>"+
+    "<button id='_btnCerrarModal' style='position:absolute;top:.5rem;right:.7rem;background:none;border:none;font-size:1.4rem;cursor:pointer;color:var(--mid);line-height:1;padding:.2rem'>&times;</button>"+
     "<div style='font-size:2.5rem;margin-bottom:.4rem'>&#128100;</div>"+
-    "<div style='font-size:1.05rem;font-weight:700;color:var(--dark);margin-bottom:.4rem'>¿Crear una cuenta?</div>"+
-    "<div style='font-size:.85rem;color:var(--mid);margin-bottom:1.1rem;line-height:1.45'>Si te registrás vas a poder ver el seguimiento de tu pedido en tiempo real y guardar tus direcciones para próximas compras.</div>"+
+    "<div style='font-size:1.05rem;font-weight:700;color:var(--dark);margin-bottom:.4rem'>Necesitás una cuenta</div>"+
+    "<div style='font-size:.85rem;color:var(--mid);margin-bottom:1.1rem;line-height:1.45'>Para hacer un pedido tenés que estar registrado. Es rápido y gratis: te permite guardar tus direcciones, ver el estado de tus pedidos y comprar más rápido la próxima vez.</div>"+
     "<div style='display:flex;flex-direction:column;gap:.45rem'>"+
-      "<button id='_btnAbrirReg' style='background:var(--accent);color:#fff;border:none;padding:.65rem;border-radius:8px;font-size:.88rem;font-weight:600;cursor:pointer'>Crear cuenta gratis</button>"+
-      "<button id='_btnLoginExist' style='background:transparent;color:var(--accent);border:1px solid var(--accent);padding:.55rem;border-radius:8px;font-size:.82rem;cursor:pointer'>Ya tengo cuenta</button>"+
-      "<button id='_btnSeguirSinCuenta' style='background:transparent;color:var(--mid);border:none;padding:.5rem;font-size:.78rem;cursor:pointer;margin-top:.2rem'>Seguir sin cuenta &rarr;</button>"+
+      "<button id='_btnAbrirReg' style='background:var(--accent);color:#fff;border:none;padding:.7rem;border-radius:8px;font-size:.9rem;font-weight:600;cursor:pointer'>Crear cuenta gratis</button>"+
+      "<button id='_btnLoginExist' style='background:transparent;color:var(--accent);border:1px solid var(--accent);padding:.6rem;border-radius:8px;font-size:.85rem;font-weight:600;cursor:pointer'>Ya tengo cuenta · Iniciar sesión</button>"+
     "</div>"+
     "</div>";
   document.body.appendChild(mo);
@@ -2278,55 +2314,13 @@ function _catSugerirRegistroAntesPedido(){
     if(b1) b1.onclick = function(){mo.remove();_catDrawerView="registro";if(!document.getElementById("drawerCuenta").classList.contains("open"))toggleMiCuenta();else catRenderDrawer();};
     var b2 = document.getElementById("_btnLoginExist");
     if(b2) b2.onclick = function(){mo.remove();_catDrawerView="login";if(!document.getElementById("drawerCuenta").classList.contains("open"))toggleMiCuenta();else catRenderDrawer();};
-    var b3 = document.getElementById("_btnSeguirSinCuenta");
-    if(b3) b3.onclick = function(){mo.remove();_continuarSendWA(null);};
+    var b3 = document.getElementById("_btnCerrarModal");
+    if(b3) b3.onclick = function(){mo.remove();};
   }, 50);
 }
 
-// Modal "Elegir dirección" cuando hay varias
-function _catElegirDireccionParaPedido(dirs){
-  var mo = document.createElement("div");
-  mo.id = "_catMoElegirDir";
-  mo.style.cssText = "position:fixed;inset:0;background:rgba(20,15,8,.75);z-index:1300;display:flex;align-items:center;justify-content:center;padding:1rem";
-  var h = "<div style='background:#fff;border-radius:14px;max-width:480px;width:100%;max-height:88vh;display:flex;flex-direction:column;box-shadow:0 8px 40px rgba(0,0,0,.3)'>"+
-    "<div style='padding:1rem 1.1rem;border-bottom:1px solid #e8d9bf;display:flex;justify-content:space-between;align-items:center'>"+
-      "<div style='font-size:.95rem;font-weight:700;color:var(--dark)'>¿Dónde lo enviamos?</div>"+
-      "<button onclick='document.getElementById(&quot;_catMoElegirDir&quot;).remove()' style='background:none;border:none;font-size:1.3rem;cursor:pointer;color:var(--mid);padding:0;line-height:1'>&times;</button>"+
-    "</div>"+
-    "<div style='overflow-y:auto;padding:1rem 1.1rem;flex:1'>";
-  dirs.forEach(function(d){
-    var modoLabel = d.modo_entrega === "correo" ? "&#128230; Correo (Paq.ar)" : "&#128666; Entrega vendedor";
-    var modoColor = d.modo_entrega === "correo" ? "#7a5a1a" : "#3a6f2a";
-    var modoBg    = d.modo_entrega === "correo" ? "#fef9e8" : "#e8f5e0";
-    var esPrinc = d.es_principal || d.principal;
-    h += "<div onclick='_catSeleccionarDirPedido("+d.id+")' style='border:1px solid #e8d9bf;border-radius:9px;padding:.8rem;margin-bottom:.55rem;cursor:pointer;transition:border-color .15s' onmouseover='this.style.borderColor=&quot;var(--accent)&quot;' onmouseout='this.style.borderColor=&quot;#e8d9bf&quot;'>"+
-      "<div style='display:flex;align-items:center;gap:.4rem;flex-wrap:wrap;margin-bottom:.3rem'>"+
-        "<span style='font-size:.9rem;font-weight:700;color:var(--dark)'>"+_catEsc(d.etiqueta||"Sin etiqueta")+"</span>"+
-        (esPrinc?"<span style='font-size:.6rem;background:var(--accent);color:#fff;padding:.1rem .4rem;border-radius:10px;font-weight:600'>PRINCIPAL</span>":"")+
-      "</div>"+
-      "<div style='font-size:.78rem;color:var(--dark);margin-bottom:.3rem;line-height:1.4'>"+_catEsc(d.direccion_completa || ((d.calle||"")+" "+(d.numero||"")))+"</div>"+
-      "<div style='background:"+modoBg+";display:inline-block;border-radius:5px;padding:.2rem .55rem;font-size:.66rem;color:"+modoColor+";font-weight:500'>"+modoLabel+(d.distancia_km?" · "+d.distancia_km+" km":"")+"</div>"+
-      "</div>";
-  });
-  h += "<button onclick='document.getElementById(&quot;_catMoElegirDir&quot;).remove();_catNuevaDir()' style='width:100%;background:transparent;color:var(--accent);border:1px dashed var(--accent);padding:.55rem;border-radius:7px;font-size:.82rem;cursor:pointer;margin-top:.3rem'>+ Agregar nueva dirección</button>";
-  h += "</div></div>";
-  mo.innerHTML = h;
-  mo.addEventListener("click", function(e){if(e.target===mo)mo.remove();});
-  document.body.appendChild(mo);
-}
-
-function _catSeleccionarDirPedido(id){
-  var mo = document.getElementById("_catMoElegirDir");
-  if(mo) mo.remove();
-  apiGet("clientes_direcciones","select=*&id=eq."+id+"&limit=1").then(function(rows){
-    var d = rows && rows[0];
-    if(!d){_catToast("Dirección no encontrada","terr");return;}
-    _continuarSendWA(d);
-  }).catch(function(e){
-    console.error("[belle-cat] seleccionar dir error:",e);
-    _catToast("Error","terr");
-  });
-}
+// (eliminado: el modal "Elegir dirección" viejo y _catSeleccionarDirPedido fueron reemplazados
+// por el nuevo modal de cobro completo _catAbrirModalCobro)
 
 // ════════════════════════════════════════════════════════════════════
 // MODAL DE COBRO COMPLETO (pago + dirección + entrega + total)
@@ -2371,10 +2365,27 @@ function _catCobCalcSubtotal(){
   return total;
 }
 
+// Cierra el modal de cobro de manera limpia: remueve listener huérfano del evento
+// 'belle:pedido-enviado' (si quedó pendiente), limpia el timeout de 30s, y elimina
+// el DOM del modal. Usar SIEMPRE en lugar de hacer .remove() directamente sobre el modal.
+function _catCobCerrarModal(){
+  // Limpiar listener si todavía está activo
+  if(window._catCobOnPedidoListener){
+    try { window.removeEventListener('belle:pedido-enviado', window._catCobOnPedidoListener); } catch(e){}
+    window._catCobOnPedidoListener = null;
+  }
+  // Limpiar timeout pendiente
+  if(window._catCobTimeoutId){
+    clearTimeout(window._catCobTimeoutId);
+    window._catCobTimeoutId = null;
+  }
+  var mo = document.getElementById('_catMoCobro');
+  if(mo) mo.remove();
+}
+
 function _catAbrirModalCobro(dirs){
-  // Cerrar modal previo si existe
-  var prev = document.getElementById('_catMoCobro');
-  if(prev) prev.remove();
+  // Cerrar modal previo (con limpieza de listener)
+  _catCobCerrarModal();
 
   // Resetear estado
   window._catCobState = {
@@ -2428,7 +2439,7 @@ function _catRenderModalCobro(){
         "<div style='font-size:1rem;font-weight:700;color:var(--dark)'>Confirmá tu pedido</div>"+
         "<div style='font-size:.7rem;color:var(--mid);margin-top:.1rem'>Completá los datos para enviarlo</div>"+
       "</div>"+
-      "<button onclick='document.getElementById(\"_catMoCobro\").remove()' style='background:none;border:none;font-size:1.4rem;cursor:pointer;color:var(--mid);padding:0;line-height:1'>&times;</button>"+
+      "<button onclick='_catCobCerrarModal()' style='background:none;border:none;font-size:1.4rem;cursor:pointer;color:var(--mid);padding:0;line-height:1'>&times;</button>"+
     "</div>"+
 
     "<div style='overflow-y:auto;padding:1rem 1.1rem;flex:1;display:grid;gap:.9rem'>";
@@ -2451,7 +2462,7 @@ function _catRenderModalCobro(){
         "</div>";
       });
     }
-    h += "<button onclick='document.getElementById(\"_catMoCobro\").remove();_catNuevaDir()' style='width:100%;background:transparent;color:var(--accent);border:1px dashed var(--accent);padding:.5rem;border-radius:7px;font-size:.78rem;cursor:pointer'>+ Agregar nueva dirección</button>";
+    h += "<button onclick='_catCobCerrarModal();_catNuevaDir()' style='width:100%;background:transparent;color:var(--accent);border:1px dashed var(--accent);padding:.5rem;border-radius:7px;font-size:.78rem;cursor:pointer'>+ Agregar nueva dirección</button>";
     h += "</div></div>";
 
     // ── SECCIÓN 2: TELÉFONO ─────────────────────────────────────
@@ -2512,7 +2523,12 @@ function _catRenderModalCobro(){
 
   h += "</div>";  // cierra modal box
   mo.innerHTML = h;
-  mo.addEventListener('click', function(e){if(e.target===mo) mo.remove();});
+  // Click fuera del modal: solo cerrar si NO hay overlay "Procesando" activo (no cancelar mid-flight).
+  mo.addEventListener('click', function(e){
+    if(e.target !== mo) return;
+    if(document.getElementById('_catCobOverlay')) return; // procesando: ignorar click fuera
+    _catCobCerrarModal();  // limpia listener huérfano + cierra
+  });
   document.body.appendChild(mo);
 
   // Pre-seleccionar dirección: principal si la hay, sino la única, sino la primera
@@ -2586,11 +2602,13 @@ function _catCobRefrescarEntregas(){
   var match = _cobMatchZonaAndreaniCat(d.provincia, d.localidad, d.codigo_postal, zonas, cfg);
   var sel2 = window._catCobState.modo_entrega==='andreani';
   if(!match.a_confirmar){
+    // Info útil para el cliente: su localidad/provincia (no el nombre interno de la zona admin)
+    var infoEntrega = (d.localidad||'') + (d.localidad && d.provincia ? ', ' : '') + (d.provincia||'');
     html += "<div onclick='_catCobSelEntrega(\"andreani\","+match.tarifa+",false,"+match.zona_id+")' style='border:2px solid "+(sel2?'var(--accent)':'#e8d9bf')+";background:"+(sel2?'rgba(196,150,90,.08)':'#fff')+";border-radius:8px;padding:.6rem .8rem;cursor:pointer;transition:all .15s'>"+
       "<div style='display:flex;justify-content:space-between;align-items:center'>"+
         "<div>"+
           "<div style='font-size:.85rem;font-weight:600;color:var(--dark)'>📦 Andreani</div>"+
-          "<div style='font-size:.65rem;color:var(--mid);margin-top:.1rem'>Zona: "+_catEsc(match.nombre||'')+"</div>"+
+          (infoEntrega ? "<div style='font-size:.65rem;color:var(--mid);margin-top:.1rem'>Envío a "+_catEsc(infoEntrega)+"</div>" : "")+
         "</div>"+
         "<div style='font-size:.95rem;font-weight:700;color:var(--accent)'>"+fmt(match.tarifa)+"</div>"+
       "</div>"+
@@ -2628,7 +2646,7 @@ function _catRenderModalCobroDirs(){
       "<div style='font-size:.65rem;color:var(--mid);margin-top:.1rem'>"+_catEsc(locTxt)+"</div>"+
     "</div>";
   });
-  h += "<button onclick='document.getElementById(\"_catMoCobro\").remove();_catNuevaDir()' style='width:100%;background:transparent;color:var(--accent);border:1px dashed var(--accent);padding:.5rem;border-radius:7px;font-size:.78rem;cursor:pointer'>+ Agregar nueva dirección</button>";
+  h += "<button onclick='_catCobCerrarModal();_catNuevaDir()' style='width:100%;background:transparent;color:var(--accent);border:1px dashed var(--accent);padding:.5rem;border-radius:7px;font-size:.78rem;cursor:pointer'>+ Agregar nueva dirección</button>";
   cont.innerHTML = h;
 }
 
@@ -2767,6 +2785,18 @@ function _catCobConfirmar(){
   var d = dirs.find(function(x){return x.id===st.direccion_id;});
   if(!d){_catToast('Dirección no encontrada','terr'); return Promise.resolve();}
 
+  // Guard de re-entrancia: si ya hay un listener activo o un timeout pendiente,
+  // limpiarlos antes de armar nuevos. Esto evita acumulación si el cliente reintenta
+  // después de un error (botón "⚠️ Reintentar").
+  if(window._catCobOnPedidoListener){
+    try { window.removeEventListener('belle:pedido-enviado', window._catCobOnPedidoListener); } catch(e){}
+    window._catCobOnPedidoListener = null;
+  }
+  if(window._catCobTimeoutId){
+    clearTimeout(window._catCobTimeoutId);
+    window._catCobTimeoutId = null;
+  }
+
   // Mostrar overlay "Procesando..." DENTRO del modal (no cerrarlo todavía)
   var modal = document.getElementById('_catMoCobro');
   if(modal){
@@ -2795,9 +2825,17 @@ function _catCobConfirmar(){
     }
   }
 
-  // Listener UNA SOLA vez al evento de fin
+  // Listener UNA SOLA vez al evento de fin.
+  // Lo guardamos en window._catCobOnPedidoListener para poder limpiarlo desde _catCobCerrarModal
+  // en caso que el cliente cierre el modal manualmente antes que termine el flujo.
   function _onPedidoEnviado(e){
     window.removeEventListener('belle:pedido-enviado', _onPedidoEnviado);
+    window._catCobOnPedidoListener = null;
+    // Limpiar timeout ya que recibimos respuesta
+    if(window._catCobTimeoutId){
+      clearTimeout(window._catCobTimeoutId);
+      window._catCobTimeoutId = null;
+    }
     // Sacar overlay
     var ov = document.getElementById('_catCobOverlay');
     if(e && e.detail && e.detail.exito){
@@ -2818,16 +2856,19 @@ function _catCobConfirmar(){
       }
     }
   }
+  window._catCobOnPedidoListener = _onPedidoEnviado;
   window.addEventListener('belle:pedido-enviado', _onPedidoEnviado);
 
   // Timeout de seguridad: si pasan 30s y no recibimos el evento, sacamos el overlay
-  setTimeout(function(){
+  window._catCobTimeoutId = setTimeout(function(){
+    window._catCobTimeoutId = null;
     var ov = document.getElementById('_catCobOverlay');
     if(ov){
       window.removeEventListener('belle:pedido-enviado', _onPedidoEnviado);
+      window._catCobOnPedidoListener = null;
       ov.innerHTML = "<div style='font-size:1rem;font-weight:700;color:#c5443a;margin-bottom:.4rem'>⚠️ Tardó más de lo esperado</div>"+
         "<div style='font-size:.8rem;color:var(--mid);max-width:300px;line-height:1.5;margin-bottom:.9rem'>Verificá tu conexión. Si ya se abrió WhatsApp, tu pedido se envió.</div>"+
-        "<button onclick='document.getElementById(\"_catMoCobro\").remove()' style='background:var(--accent);color:#fff;border:none;border-radius:7px;padding:.55rem 1.2rem;font-size:.82rem;cursor:pointer'>Cerrar</button>";
+        "<button onclick='_catCobCerrarModal()' style='background:var(--accent);color:#fff;border:none;border-radius:7px;padding:.55rem 1.2rem;font-size:.82rem;cursor:pointer'>Cerrar</button>";
     }
   }, 30000);
 
@@ -2925,8 +2966,17 @@ function _continuarSendWA(direccion, ctxCobro){
   // Si viene del modal de cobro nuevo, todos los datos están ahí.
   // Si viene de un flujo legacy (cliente sin sesión), ctxCobro será undefined → usar defaults.
   ctxCobro = ctxCobro || {};
+
+  // Forzar recálculo de precios x10/x3/x1 según el total actual del cart antes de procesar.
+  // renderDrawer recorre todos los items y actualiza cart[id].precio al segmento correcto.
+  // Esto cubre el edge case en que el cliente agregó items en distintos momentos
+  // y los precios del cart quedaron desactualizados respecto del total actual.
+  try { if(typeof renderDrawer === 'function') renderDrawer(); } catch(e){}
+
   var costoEnvio = ctxCobro.costo_envio || 0;
-  var modoEntrega = ctxCobro.modo_entrega || (direccion && direccion.modo_entrega) || 'vendedor';
+  // Default 'domicilio' si no viene del modal (caso edge: cliente con flujo legacy/sin sesión).
+  // Nota: 'vendedor' era el valor viejo, ahora es 'domicilio' (mismo significado: entrega manual del vendedor).
+  var modoEntrega = ctxCobro.modo_entrega || (direccion && direccion.modo_entrega) || 'domicilio';
   var formaPago = ctxCobro.forma_pago || null;
   var envioAConfirmar = !!ctxCobro.envio_a_confirmar;
   var envioZonaId = ctxCobro.envio_zona_id || null;
@@ -3172,12 +3222,53 @@ function _sendWAOriginal(){
     });
     var qtxProd={};
     todosIds.forEach(function(x){qtxProd[x.id]=(qtxProd[x.id]||0)+x.qty;});
-    Object.keys(qtxProd).forEach(function(pid){
-      _reservarProducto(parseInt(pid),qtxProd[pid],0);
+    // Recolectar promesas para detectar fallas y loggear (importante para no quedar con
+    // pedidos sin stock reservado).
+    var reservasPromesas = Object.keys(qtxProd).map(function(pid){
+      return _reservarProducto(parseInt(pid), qtxProd[pid], 0).then(function(res){
+        return Object.assign({pid:pid, qty:qtxProd[pid]}, res || {});
+      });
+    });
+    Promise.all(reservasPromesas).then(function(resultados){
+      var fallidas = resultados.filter(function(r){return !r.ok;});
+      if(fallidas.length){
+        // Algunas reservas fallaron — loggear para que el admin pueda revisar manualmente.
+        console.error('[belle-cat] Reservas fallidas:', fallidas);
+        _logAct('reservas_fallidas_pedido_web', {
+          nro_orden: nroOrden,
+          cant_fallidas: fallidas.length,
+          cant_total: resultados.length,
+          fallidas: fallidas.map(function(f){return {pid:f.pid, qty:f.qty, error:f.error};})
+        }, {exito:false, error_msg:'Reservas no pudieron aplicarse: '+fallidas.length+'/'+resultados.length});
+      }
     });
     // FIX: window.open y vaciado del carrito DENTRO del .then() — solo si el pedido se guardó
     notificarVendedoresNuevoPedido(nroOrden, pedidoItems, total);
-    window.open("https://wa.me/"+waNumber+"?text="+encodeURIComponent(msg),"_blank");
+    var urlWA = "https://wa.me/"+waNumber+"?text="+encodeURIComponent(msg);
+    // Intentar abrir WhatsApp. Si el navegador bloquea (mobile Safari especialmente lo hace
+    // cuando pasa demasiado tiempo entre el click del usuario y la apertura), mostrar un
+    // modal con un botón grande para que el cliente lo abra manualmente.
+    var winWA = window.open(urlWA, "_blank");
+    var bloqueado = !winWA || winWA.closed || typeof winWA.closed === 'undefined';
+    if(bloqueado){
+      // Mostrar modal con link manual
+      try {
+        var moBlock = document.createElement('div');
+        moBlock.id = '_catMoWaFallback';
+        moBlock.style.cssText = 'position:fixed;inset:0;background:rgba(20,15,8,.85);z-index:1600;display:flex;align-items:center;justify-content:center;padding:1rem';
+        moBlock.innerHTML =
+          "<div style='background:#fff;border-radius:14px;max-width:420px;width:100%;padding:1.5rem;text-align:center;box-shadow:0 8px 40px rgba(0,0,0,.4)'>"+
+            "<div style='font-size:2.5rem;margin-bottom:.5rem'>✅</div>"+
+            "<div style='font-size:1.05rem;font-weight:700;color:var(--dark);margin-bottom:.3rem'>Tu pedido se guardó</div>"+
+            "<div style='font-size:.85rem;color:var(--mid);margin-bottom:1.1rem;line-height:1.4'>Ahora tocá el botón para terminar de enviarlo por WhatsApp:</div>"+
+            "<a href='"+urlWA+"' target='_blank' rel='noopener' style='display:block;background:#25D366;color:#fff;text-decoration:none;padding:.85rem;border-radius:9px;font-size:1rem;font-weight:700;margin-bottom:.5rem'>🟢 Abrir WhatsApp</a>"+
+            "<button onclick='document.getElementById(\"_catMoWaFallback\").remove()' style='background:transparent;color:var(--mid);border:none;padding:.4rem;font-size:.78rem;cursor:pointer'>Cerrar</button>"+
+          "</div>";
+        document.body.appendChild(moBlock);
+      } catch(e){
+        console.error('[belle-cat] no pude armar fallback WA:', e);
+      }
+    }
     cart={};cstate={};decanState={};
     updateCartCount();
     document.getElementById("drawer").classList.remove("open");
@@ -3185,7 +3276,7 @@ function _sendWAOriginal(){
     // Toast informativo con detalle
     var lineasTok = [pedidoItems.length+' producto'+(pedidoItems.length!==1?'s':'')+' por '+fmt(total)];
     if(_catCliente && _catCliente.nombre) lineasTok.push('Cliente: '+_catCliente.nombre);
-    lineasTok.push('Stock reservado · WhatsApp abierto');
+    lineasTok.push(bloqueado ? 'Stock reservado · Tocá el botón verde' : 'Stock reservado · WhatsApp abierto');
     showToastInfo({titulo:'✅ Pedido enviado — '+nroOrden, lineas:lineasTok});
     // Log persistente
     _logAct('pedido_web', {
@@ -3206,12 +3297,23 @@ function _sendWAOriginal(){
     window._sendingOrder=false;
     var waBtn=document.getElementById('waBtn');
     if(waBtn){waBtn.disabled=false;waBtn.style.opacity='';}
-    showToast('Error al registrar pedido. Intentá de nuevo.');
+    // Detectar si es error de columna inexistente (SQL no ejecutado)
+    var errMsg = (e && e.message) || String(e);
+    var msgUsuario;
+    if(/column\s|does not exist|undefined column/i.test(errMsg)){
+      msgUsuario = 'Hay una actualización pendiente del sistema. Por favor coordiná tu pedido por WhatsApp directamente.';
+      console.error('[belle-cat] Error de columna BD — admin debe ejecutar cobros_envios.sql:', errMsg);
+    } else if(/network|fetch|failed/i.test(errMsg)){
+      msgUsuario = 'Error de conexión. Revisá tu internet e intentá de nuevo.';
+    } else {
+      msgUsuario = 'Error al registrar pedido. Intentá de nuevo.';
+    }
+    showToast(msgUsuario);
     _logAct('pedido_web', {
       nro_orden: nroOrden, monto: total, cant_items: pedidoItems.length
-    }, { exito:false, error_msg: e&&e.message||String(e) });
+    }, { exito:false, error_msg: errMsg });
     // Notificar al modal del error
-    try { window.dispatchEvent(new CustomEvent('belle:pedido-enviado', {detail:{exito:false, error:(e&&e.message)||'Error de red'}})); } catch(ev){}
+    try { window.dispatchEvent(new CustomEvent('belle:pedido-enviado', {detail:{exito:false, error:msgUsuario}})); } catch(ev){}
   });
 }
 
@@ -5891,7 +5993,7 @@ function catRecuperarPwd(){
   if(!_sbAuth){_catToast("Sistema cargando","twarn");if(btn){btn.disabled=false;btn.textContent="Enviar email de recuperación";}return;}
 
   _sbAuth.auth.resetPasswordForEmail(email, {
-    redirectTo: window.location.origin + "/catalogo"
+    redirectTo: window.location.origin + window.location.pathname  // URL actual (sea catalogo_index.html o /catalogo)
   }).then(function(res){
     if(res.error){
       console.error("[belle-cat] resetPassword error:",res.error);
@@ -5918,6 +6020,13 @@ function catLogout(){
     _catSession = null;
     _catFavs = [];
     _catDrawerView = "login";
+    // Limpiar carrito al cerrar sesión: si otra persona usa el dispositivo,
+    // no debe heredar los productos del cliente anterior.
+    cart = {};
+    cstate = {};
+    decanState = {};
+    if(typeof updateCartCount === 'function') updateCartCount();
+    if(typeof renderDrawer === 'function') renderDrawer();
     if(typeof catActualizarBoton === 'function') catActualizarBoton();
     catRenderDrawer();
     _catToast("Sesión cerrada","tok");
@@ -6060,12 +6169,7 @@ function _catGuardarPerfil(){
     telefono_principal: tel || null,
     updated_at: new Date().toISOString()
   };
-  fetch(SB_URL+"/rest/v1/clientes?id=eq."+_catCliente.id, {
-    method: "PATCH",
-    headers: {"Content-Type":"application/json","apikey":SB_KEY,"Authorization":"Bearer "+SB_KEY,"Prefer":"return=minimal"},
-    body: JSON.stringify(data)
-  }).then(function(r){
-    if(!r.ok) throw new Error("HTTP "+r.status);
+  apiPatch("clientes", data, "id=eq."+_catCliente.id).then(function(){
     // Actualizar cache local
     _catCliente.nombre = nombre;
     _catCliente.apellido = apellido || null;
@@ -6079,19 +6183,51 @@ function _catGuardarPerfil(){
 }
 
 function _catCambiarPwd(){
-  var nueva = prompt("Ingresá tu nueva contraseña (mínimo 6 caracteres):");
-  if(nueva===null) return;
-  nueva = String(nueva||"");
-  if(nueva.length < 6){_catToast("Mínimo 6 caracteres","twarn");return;}
-  var nueva2 = prompt("Repetí la nueva contraseña:");
-  if(nueva2===null) return;
-  if(nueva !== nueva2){_catToast("No coinciden","terr");return;}
-  if(!_sbAuth){_catToast("Sistema cargando","twarn");return;}
-  _sbAuth.auth.updateUser({password: nueva}).then(function(res){
+  // Modal con dos inputs en lugar de prompts del navegador (que se ven feos en mobile).
+  var prev = document.getElementById('_catMoCambiarPwd');
+  if(prev) prev.remove();
+  var mo = document.createElement('div');
+  mo.id = '_catMoCambiarPwd';
+  mo.style.cssText = 'position:fixed;inset:0;background:rgba(20,15,8,.75);z-index:1400;display:flex;align-items:center;justify-content:center;padding:1rem';
+  mo.innerHTML =
+    "<div style='background:#fff;border-radius:14px;max-width:380px;width:100%;padding:1.4rem;box-shadow:0 8px 40px rgba(0,0,0,.3)'>"+
+      "<div style='display:flex;justify-content:space-between;align-items:center;margin-bottom:1rem'>"+
+        "<div style='font-size:1rem;font-weight:700;color:var(--dark)'>🔑 Cambiar contraseña</div>"+
+        "<button onclick='document.getElementById(\"_catMoCambiarPwd\").remove()' style='background:none;border:none;font-size:1.4rem;cursor:pointer;color:var(--mid);padding:0;line-height:1'>&times;</button>"+
+      "</div>"+
+      "<div style='display:grid;gap:.6rem'>"+
+        "<div>"+
+          "<label style='font-size:.7rem;color:var(--mid);display:block;margin-bottom:.2rem'>Nueva contraseña (mín. 6 caracteres)</label>"+
+          "<input type='password' id='_catPwdNueva' autocomplete='new-password' style='width:100%;padding:.55rem .7rem;background:#faf6ee;border:1px solid #e8d9bf;border-radius:7px;font-size:.85rem;color:var(--dark);box-sizing:border-box'>"+
+        "</div>"+
+        "<div>"+
+          "<label style='font-size:.7rem;color:var(--mid);display:block;margin-bottom:.2rem'>Repetir contraseña</label>"+
+          "<input type='password' id='_catPwdNueva2' autocomplete='new-password' style='width:100%;padding:.55rem .7rem;background:#faf6ee;border:1px solid #e8d9bf;border-radius:7px;font-size:.85rem;color:var(--dark);box-sizing:border-box'>"+
+        "</div>"+
+      "</div>"+
+      "<div style='display:flex;gap:.5rem;justify-content:flex-end;margin-top:1rem'>"+
+        "<button onclick='document.getElementById(\"_catMoCambiarPwd\").remove()' style='background:transparent;color:var(--mid);border:1px solid #e8d9bf;padding:.55rem 1rem;border-radius:7px;font-size:.82rem;cursor:pointer'>Cancelar</button>"+
+        "<button id='_catBtnCambiarPwd' onclick='_lockClick(this,_catCambiarPwdConfirmar,{texto:\"Guardando...\"})' style='background:var(--accent);color:#fff;border:none;padding:.55rem 1.1rem;border-radius:7px;font-size:.82rem;font-weight:600;cursor:pointer'>Guardar</button>"+
+      "</div>"+
+    "</div>";
+  mo.addEventListener('click', function(e){if(e.target===mo) mo.remove();});
+  document.body.appendChild(mo);
+  setTimeout(function(){var f=document.getElementById('_catPwdNueva');if(f)f.focus();}, 100);
+}
+
+function _catCambiarPwdConfirmar(){
+  var nueva = (document.getElementById('_catPwdNueva')||{value:''}).value;
+  var nueva2 = (document.getElementById('_catPwdNueva2')||{value:''}).value;
+  if(!nueva || nueva.length < 6){_catToast("Mínimo 6 caracteres","twarn");return Promise.resolve();}
+  if(nueva !== nueva2){_catToast("Las contraseñas no coinciden","terr");return Promise.resolve();}
+  if(!_sbAuth){_catToast("Sistema cargando","twarn");return Promise.resolve();}
+  return _sbAuth.auth.updateUser({password: nueva}).then(function(res){
     if(res.error){_catToast(res.error.message||"Error","terr");return;}
     _catToast("Contraseña actualizada","tok");
+    var mo = document.getElementById('_catMoCambiarPwd');
+    if(mo) mo.remove();
   }).catch(function(e){
-    console.error("[belle-cat] _catCambiarPwd error:",e);
+    console.error("[belle-cat] _catCambiarPwdConfirmar error:",e);
     _catToast("Error","terr");
   });
 }
@@ -6690,15 +6826,15 @@ function _catTimelinePedido(ped, logs){
 }
 
 // ════════════════════════════════════════════════════════════════════
-// FASE B Sub-bloque 4 — DIRECCIONES (Google Maps + Paq.ar)
+// FASE B Sub-bloque 4 — DIRECCIONES (Google Maps + Andreani)
 // ════════════════════════════════════════════════════════════════════
 
 // Coordenadas de referencia: centro de Córdoba Capital, Argentina
 // Cambiar después por la dirección exacta del depósito de Belle
 var BELLE_DEPOSITO_LAT = -31.4201;
 var BELLE_DEPOSITO_LNG = -64.1888;
-var BELLE_RADIO_KM = 40;       // Si está más lejos: Paq.ar
-var BELLE_PAQAR_MIN_UNIDADES = 5; // 5+ unidades = envío gratis por Paq.ar
+var BELLE_RADIO_KM = 40;       // Si está más lejos: envío por Andreani
+// (BELLE_PAQAR_MIN_UNIDADES eliminada — el sistema viejo de Paq.ar fue reemplazado por Andreani con tarifas por zona)
 
 // Estado del selector de direcciones (se reinicia cada vez que se abre)
 var _catDir = {
@@ -6762,7 +6898,9 @@ function _catAbrirSelectorDomicilio(opts){
   } : {};
   _catDir.direccionFmt = direccionExistente ? (direccionExistente.direccion_completa || "") : "";
   _catDir.distanciaKm = direccionExistente ? direccionExistente.distancia_km : null;
-  _catDir.modoEntrega = direccionExistente ? (direccionExistente.modo_entrega || "vendedor") : "vendedor";
+  // Si edita una dirección existente, conservar su modo_entrega (puede ser 'vendedor' legacy).
+  // Si crea una nueva, default 'domicilio' — _catActualizarAvisoDistancia lo sobreescribirá según radio.
+  _catDir.modoEntrega = direccionExistente ? (direccionExistente.modo_entrega || "domicilio") : "domicilio";
 
   var mo = document.getElementById("_catMoDir");
   if(!mo){
@@ -7059,24 +7197,23 @@ function _catActualizarCamposUI(){
   });
 }
 
-// Calcula distancia y muestra aviso (verde / amarillo Paq.ar / rojo)
+// Calcula distancia y muestra aviso (verde dentro del radio / amarillo fuera del radio)
 function _catActualizarAvisoDistancia(){
   var avi = document.getElementById("_catDirAviso");
   if(!avi || !_catDir.pos) return;
   var dist = _catDistKm(BELLE_DEPOSITO_LAT, BELLE_DEPOSITO_LNG, _catDir.pos.lat, _catDir.pos.lng);
   _catDir.distanciaKm = Math.round(dist * 10) / 10;
   if(dist <= BELLE_RADIO_KM){
-    _catDir.modoEntrega = "vendedor";
+    _catDir.modoEntrega = "domicilio";
     avi.innerHTML = "<div style='background:#e8f5e0;border:1px solid #b8d8a8;border-radius:7px;padding:.55rem .75rem;font-size:.78rem;color:#3a6f2a;display:flex;align-items:center;gap:.5rem'>"+
       "<span style='font-size:1.1rem'>&check;</span>"+
-      "<div><b>Entrega a domicilio disponible</b><br><span style='font-size:.7rem'>Estás a "+_catDir.distanciaKm+" km del centro de distribución</span></div>"+
+      "<div><b>Envío a domicilio disponible (gratis)</b><br><span style='font-size:.7rem'>Estás a "+_catDir.distanciaKm+" km del centro</span></div>"+
       "</div>";
   } else {
-    _catDir.modoEntrega = "correo";
+    _catDir.modoEntrega = "andreani";
     avi.innerHTML = "<div style='background:#fef9e8;border:1px solid #f4d987;border-radius:7px;padding:.6rem .75rem;font-size:.78rem;color:#7a5a1a'>"+
-      "<div style='font-weight:600;margin-bottom:.2rem'>&#128230; Envío por Correo Argentino (Paq.ar)</div>"+
-      "<div style='font-size:.72rem;line-height:1.4'>Estás a "+_catDir.distanciaKm+" km del centro de distribución, fuera del radio de entrega a domicilio del vendedor.</div>"+
-      "<div style='font-size:.72rem;margin-top:.3rem;line-height:1.4'>&#128230; <b>A partir de "+BELLE_PAQAR_MIN_UNIDADES+" unidades el envío es GRATIS.</b> Con menos unidades vas a ver el costo al confirmar el pedido.</div>"+
+      "<div style='font-weight:600;margin-bottom:.2rem'>&#128230; Envío por Andreani</div>"+
+      "<div style='font-size:.72rem;line-height:1.4'>Estás a "+_catDir.distanciaKm+" km del centro, fuera del radio de envío a domicilio. El costo del envío se calcula al confirmar el pedido según tu zona.</div>"+
       "<div style='font-size:.7rem;margin-top:.3rem;color:#8a6f3a'>Asegurate de completar bien todos los campos: calle, número, ciudad, provincia y código postal.</div>"+
       "</div>";
   }
@@ -7188,9 +7325,11 @@ function _catRenderTabDirecciones(box){
 }
 
 function _catCardDireccion(d){
-  var modoLabel = d.modo_entrega === "correo" ? "&#128230; Envío por Correo (Paq.ar)" : "&#128666; Entrega a domicilio";
-  var modoColor = d.modo_entrega === "correo" ? "#7a5a1a" : "#3a6f2a";
-  var modoBg    = d.modo_entrega === "correo" ? "#fef9e8" : "#e8f5e0";
+  // Modo de entrega: actualizado a domicilio/andreani (legacy 'correo' = Andreani fuera de radio)
+  var esDomicilio = d.modo_entrega === "domicilio" || d.modo_entrega === "vendedor"; // legacy 'vendedor'
+  var modoLabel = esDomicilio ? "&#128666; Envío a domicilio" : "&#128230; Envío por Andreani";
+  var modoColor = esDomicilio ? "#3a6f2a" : "#7a5a1a";
+  var modoBg    = esDomicilio ? "#e8f5e0" : "#fef9e8";
   var esPrinc = d.es_principal || d.principal; // compat: BD tiene ambas
 
   var h = "";
@@ -7239,12 +7378,7 @@ function _catNuevaDir(opts){
       }).then(function(){
         // Si capturamos teléfono nuevo, guardarlo en el cliente
         if(telefonoNuevo){
-          return fetch(SB_URL+"/rest/v1/clientes?id=eq."+_catCliente.id, {
-            method: "PATCH",
-            headers:{"Content-Type":"application/json","apikey":SB_KEY,"Authorization":"Bearer "+SB_KEY,"Prefer":"return=minimal"},
-            body: JSON.stringify({telefono_principal: telefonoNuevo, updated_at: new Date().toISOString()})
-          }).then(function(r){
-            if(!r.ok) throw new Error("HTTP "+r.status);
+          return apiPatch("clientes", {telefono_principal: telefonoNuevo, updated_at: new Date().toISOString()}, "id=eq."+_catCliente.id).then(function(){
             // Actualizar el objeto cliente local
             _catCliente.telefono_principal = telefonoNuevo;
           });
@@ -7271,12 +7405,7 @@ function _catEditarDir(id){
       direccion: d,
       cb: function(datos){
         if(!datos) return;
-        fetch(SB_URL+"/rest/v1/clientes_direcciones?id=eq."+id, {
-          method: "PATCH",
-          headers:{"Content-Type":"application/json","apikey":SB_KEY,"Authorization":"Bearer "+SB_KEY,"Prefer":"return=minimal"},
-          body: JSON.stringify(Object.assign({}, datos, {updated_at:new Date().toISOString()}))
-        }).then(function(r){
-          if(!r.ok) throw new Error("HTTP "+r.status);
+        apiPatch("clientes_direcciones", Object.assign({}, datos, {updated_at:new Date().toISOString()}), "id=eq."+id).then(function(){
           _catToast("Dirección actualizada","tok");
           _catRenderTab();
         }).catch(function(e){
@@ -7290,11 +7419,7 @@ function _catEditarDir(id){
 
 function _catEliminarDir(id){
   if(!confirm("¿Eliminar esta dirección?")) return;
-  fetch(SB_URL+"/rest/v1/clientes_direcciones?id=eq."+id, {
-    method: "DELETE",
-    headers:{"apikey":SB_KEY,"Authorization":"Bearer "+SB_KEY}
-  }).then(function(r){
-    if(!r.ok) throw new Error("HTTP "+r.status);
+  apiDelete("clientes_direcciones", "id=eq."+id).then(function(){
     _catToast("Dirección eliminada","tok");
     _catRenderTab();
   }).catch(function(e){
@@ -7305,18 +7430,10 @@ function _catEliminarDir(id){
 
 function _catMarcarPrincipal(id){
   if(!_catCliente) return;
-  // Primero, desmarcar todas
-  fetch(SB_URL+"/rest/v1/clientes_direcciones?cliente_id=eq."+_catCliente.id, {
-    method: "PATCH",
-    headers:{"Content-Type":"application/json","apikey":SB_KEY,"Authorization":"Bearer "+SB_KEY,"Prefer":"return=minimal"},
-    body: JSON.stringify({es_principal: false})
-  }).then(function(){
+  // Primero, desmarcar todas las del cliente
+  apiPatch("clientes_direcciones", {es_principal: false}, "cliente_id=eq."+_catCliente.id).then(function(){
     // Después marcar la elegida
-    return fetch(SB_URL+"/rest/v1/clientes_direcciones?id=eq."+id, {
-      method: "PATCH",
-      headers:{"Content-Type":"application/json","apikey":SB_KEY,"Authorization":"Bearer "+SB_KEY,"Prefer":"return=minimal"},
-      body: JSON.stringify({es_principal: true})
-    });
+    return apiPatch("clientes_direcciones", {es_principal: true}, "id=eq."+id);
   }).then(function(){
     _catToast("Dirección principal actualizada","tok");
     _catRenderTab();
@@ -7413,11 +7530,7 @@ function catToggleFav(productoId){
   var idx = _catFavs.indexOf(productoId);
   if(idx >= 0){
     _catFavs.splice(idx, 1);
-    fetch(SB_URL+"/rest/v1/clientes_favoritos?cliente_id=eq."+_catCliente.id+"&producto_id=eq."+productoId, {
-      method: "DELETE",
-      headers: {"apikey":SB_KEY,"Authorization":"Bearer "+SB_KEY}
-    }).then(function(r){
-      if(!r.ok) throw new Error("HTTP "+r.status);
+    apiDelete("clientes_favoritos", "cliente_id=eq."+_catCliente.id+"&producto_id=eq."+productoId).then(function(){
       _catToast("Quitado de favoritos","tok");
       if(typeof catActualizarCorazones === 'function') catActualizarCorazones();
       if(_catPanelTab === "favoritos"){
