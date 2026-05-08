@@ -2765,6 +2765,70 @@ function _catCobConfirmar(){
   var d = dirs.find(function(x){return x.id===st.direccion_id;});
   if(!d){_catToast('Dirección no encontrada','terr'); return Promise.resolve();}
 
+  // Mostrar overlay "Procesando..." DENTRO del modal (no cerrarlo todavía)
+  var modal = document.getElementById('_catMoCobro');
+  if(modal){
+    var overlay = document.createElement('div');
+    overlay.id = '_catCobOverlay';
+    overlay.style.cssText = 'position:absolute;inset:0;background:rgba(255,255,255,.92);z-index:10;display:flex;flex-direction:column;align-items:center;justify-content:center;border-radius:14px;padding:1.5rem;text-align:center';
+    overlay.innerHTML =
+      "<div style='width:48px;height:48px;border:4px solid #e8d9bf;border-top-color:var(--accent);border-radius:50%;animation:_catCobSpin 0.9s linear infinite;margin-bottom:1rem'></div>"+
+      "<div style='font-size:1rem;font-weight:700;color:var(--dark);margin-bottom:.3rem'>Procesando tu pedido...</div>"+
+      "<div style='font-size:.78rem;color:var(--mid);max-width:300px'>Estamos guardando el pedido y preparando WhatsApp. No cierres esta ventana.</div>";
+    // Animación spinner (solo si no existe la regla ya)
+    if(!document.getElementById('_catCobSpinStyle')){
+      var st2 = document.createElement('style');
+      st2.id = '_catCobSpinStyle';
+      st2.textContent = '@keyframes _catCobSpin{to{transform:rotate(360deg)}}';
+      document.head.appendChild(st2);
+    }
+    // Asegurar que el modal tiene position:relative para que el overlay absolute funcione
+    var modalBox = modal.querySelector('div');
+    if(modalBox){
+      modalBox.style.position = 'relative';
+      modalBox.appendChild(overlay);
+    } else {
+      modal.style.position = 'relative';
+      modal.appendChild(overlay);
+    }
+  }
+
+  // Listener UNA SOLA vez al evento de fin
+  function _onPedidoEnviado(e){
+    window.removeEventListener('belle:pedido-enviado', _onPedidoEnviado);
+    // Sacar overlay
+    var ov = document.getElementById('_catCobOverlay');
+    if(e && e.detail && e.detail.exito){
+      // Éxito: cerrar el modal completo
+      var moCerrar = document.getElementById('_catMoCobro');
+      if(moCerrar) moCerrar.remove();
+    } else {
+      // Error: ocultar overlay y dejar el modal abierto para que el cliente reintente
+      if(ov) ov.remove();
+      // Mensaje en el botón
+      var btn = document.getElementById('_catCobBtn');
+      if(btn){
+        btn.disabled = false;
+        btn.style.cursor = 'pointer';
+        btn.style.background = '#c5443a';
+        btn.style.color = '#fff';
+        btn.textContent = '⚠️ Reintentar';
+      }
+    }
+  }
+  window.addEventListener('belle:pedido-enviado', _onPedidoEnviado);
+
+  // Timeout de seguridad: si pasan 30s y no recibimos el evento, sacamos el overlay
+  setTimeout(function(){
+    var ov = document.getElementById('_catCobOverlay');
+    if(ov){
+      window.removeEventListener('belle:pedido-enviado', _onPedidoEnviado);
+      ov.innerHTML = "<div style='font-size:1rem;font-weight:700;color:#c5443a;margin-bottom:.4rem'>⚠️ Tardó más de lo esperado</div>"+
+        "<div style='font-size:.8rem;color:var(--mid);max-width:300px;line-height:1.5;margin-bottom:.9rem'>Verificá tu conexión. Si ya se abrió WhatsApp, tu pedido se envió.</div>"+
+        "<button onclick='document.getElementById(\"_catMoCobro\").remove()' style='background:var(--accent);color:#fff;border:none;border-radius:7px;padding:.55rem 1.2rem;font-size:.82rem;cursor:pointer'>Cerrar</button>";
+    }
+  }, 30000);
+
   // Si el teléfono cambió, actualizarlo en el cliente
   var telActualizar = Promise.resolve();
   if(st.telefono && st.telefono !== _catCliente.telefono_principal){
@@ -2773,10 +2837,8 @@ function _catCobConfirmar(){
     }).catch(function(e){console.error('[belle-cat] tel update silencioso:',e);});
   }
 
-  // Cerrar el modal y arrancar el flujo viejo con los datos completos
+  // Arrancar el flujo SIN cerrar el modal — el evento 'belle:pedido-enviado' lo cerrará al terminar
   return telActualizar.then(function(){
-    var mo = document.getElementById('_catMoCobro');
-    if(mo) mo.remove();
     _continuarSendWA(d, {
       forma_pago: st.forma_pago,
       modo_entrega: st.modo_entrega,
@@ -2878,17 +2940,34 @@ function _sendWAOriginal(){
     return;
   }
   var minErrors=validarGruposMinimos(Object.values(cart),allProds);
-  if(minErrors.length){showToast(minErrors[0]);return;}
+  if(minErrors.length){
+    showToast(minErrors[0]);
+    window._sendingOrder=false;
+    if(waBtn){waBtn.disabled=false;waBtn.style.opacity='';}
+    try{window.dispatchEvent(new CustomEvent('belle:pedido-enviado',{detail:{exito:false, error:minErrors[0]}}));}catch(e){}
+    return;
+  }
   var perfs=items.filter(function(i){return !i.isDecan;});
   var decans=items.filter(function(i){return i.isDecan;});
   var totalUnits=perfs.reduce(function(s,i){return s+i.qty;},0);
   var totalDecans=decans.reduce(function(s,i){return s+i.qty;},0);
-  if(totalDecans>0&&totalUnits===0&&totalDecans<5){showToast("Si lleva unicamente Decans el minimo es 5. Con un perfume no hay minimo.");return;}
+  if(totalDecans>0&&totalUnits===0&&totalDecans<5){
+    showToast("Si lleva unicamente Decans el minimo es 5. Con un perfume no hay minimo.");
+    window._sendingOrder=false;
+    if(waBtn){waBtn.disabled=false;waBtn.style.opacity='';}
+    try{window.dispatchEvent(new CustomEvent('belle:pedido-enviado',{detail:{exito:false, error:'Mínimo 5 decants si no hay perfume'}}));}catch(e){}
+    return;
+  }
   // Validar stock disponible para cada producto individual
   for(var xi=0;xi<perfs.length;xi++){
     var pcheck=allProds.find(function(x){return x.id===perfs[xi].id;});
     if(pcheck&&perfs[xi].qty>((pcheck.stock_actual||0)+(pcheck.reserva||0))){
-      showToast("Stock insuficiente: "+pcheck.nombre.split(" - ").pop());return;
+      var msgStock="Stock insuficiente: "+pcheck.nombre.split(" - ").pop();
+      showToast(msgStock);
+      window._sendingOrder=false;
+      if(waBtn){waBtn.disabled=false;waBtn.style.opacity='';}
+      try{window.dispatchEvent(new CustomEvent('belle:pedido-enviado',{detail:{exito:false, error:msgStock}}));}catch(e){}
+      return;
     }
   }
   // Validar stock de productos dentro de combos
@@ -2903,9 +2982,11 @@ function _sendWAOriginal(){
         var pCombo=allProds.find(function(x){return x.id===ci2.producto_id;});
         var cantNecesaria=(ci2.cantidad||1)*(comboItem.qty||1);
         if(pCombo&&cantNecesaria>((pCombo.stock_actual||0)+(pCombo.reserva||0))){
-          showToast("Stock insuficiente para combo "+comboRef.nombre+": "+ci2.producto_nombre);
+          var msgComboStock="Stock insuficiente para combo "+comboRef.nombre+": "+ci2.producto_nombre;
+          showToast(msgComboStock);
           window._sendingOrder=false;
           if(waBtn){waBtn.disabled=false;waBtn.style.opacity='';}
+          try{window.dispatchEvent(new CustomEvent('belle:pedido-enviado',{detail:{exito:false, error:msgComboStock}}));}catch(e){}
           return;
         }
       }
@@ -3101,6 +3182,8 @@ function _sendWAOriginal(){
     });
     // Limpiar contexto
     window._sendWAContext = null;
+    // Notificar al modal de cobro (si está abierto) que el flujo terminó OK
+    try { window.dispatchEvent(new CustomEvent('belle:pedido-enviado', {detail:{exito:true, nroOrden:nroOrden}})); } catch(e){}
   }).catch(function(e){
     window._sendingOrder=false;
     var waBtn=document.getElementById('waBtn');
@@ -3109,6 +3192,8 @@ function _sendWAOriginal(){
     _logAct('pedido_web', {
       nro_orden: nroOrden, monto: total, cant_items: pedidoItems.length
     }, { exito:false, error_msg: e&&e.message||String(e) });
+    // Notificar al modal del error
+    try { window.dispatchEvent(new CustomEvent('belle:pedido-enviado', {detail:{exito:false, error:(e&&e.message)||'Error de red'}})); } catch(ev){}
   });
 }
 
