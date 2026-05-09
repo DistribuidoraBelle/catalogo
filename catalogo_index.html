@@ -2581,16 +2581,37 @@ function sendWA(){
   }
 
   // ─── Validación de crédito disponible (solo CC) ───
-  // Si el cliente tiene CC habilitada y un límite de crédito definido,
-  // NO puede hacer pedidos que excedan su crédito disponible.
+  // Hago fetch FRESCO del cliente para usar el límite actualizado
+  // (por si admin modificó el límite mientras el cliente navegaba)
   if(_catCliente.cuenta_corriente_habilitada){
-    var limiteCredito = parseFloat(_catCliente.limite_credito) || 0;
-    if(limiteCredito > 0){
-      // Calcular crédito ya usado: total de pedidos activos no completamente cobrados
-      // Hacemos un fetch sincrónico con apiGet — flujo: validar crédito antes de continuar
+    apiGet("clientes","select=cuenta_corriente_habilitada,limite_credito,bloqueado&id=eq."+_catCliente.id+"&limit=1").then(function(rowsCli){
+      var cliFresh = (Array.isArray(rowsCli)&&rowsCli[0]) ? rowsCli[0] : null;
+      if(!cliFresh){
+        // No se pudo verificar: continuar (no bloquear)
+        _sendWAContinuar();
+        return;
+      }
+      // Refrescar bloqueo si cambió
+      if(cliFresh.bloqueado){
+        _catToast("Tu cuenta fue bloqueada. Contactá a tu vendedor.","twarn");
+        return;
+      }
+      // Refrescar habilitación CC si cambió
+      if(!cliFresh.cuenta_corriente_habilitada){
+        // Ya no es CC: continuar como cliente normal
+        _sendWAContinuar();
+        return;
+      }
+      var limiteCredito = parseFloat(cliFresh.limite_credito) || 0;
+      if(limiteCredito <= 0){
+        // Sin límite definido: continuar
+        _sendWAContinuar();
+        return;
+      }
+      // Calcular crédito ya usado
       apiGet("pedidos_catalogo",
         "select=total,cobrado_total,estado&cliente_id=eq."+_catCliente.id+
-        "&estado=in.(pendiente,reservado,en_preparacion,en_reparto,cobrado_parcial)"
+        "&estado=not.in.(cancelado,cobrado)"
       ).then(function(pedActivos){
         var totalActivos = 0, totalCobrado = 0;
         if(Array.isArray(pedActivos)){
@@ -2616,17 +2637,19 @@ function sendWA(){
           });
           return;
         }
-        // Pasó la validación: continuar con el flujo normal
+        // Pasó la validación
         _sendWAContinuar();
       }).catch(function(e){
         console.error("[CC] error validando crédito:", e);
-        // Si falla la consulta, dejar pasar (no bloquear por error técnico)
         _sendWAContinuar();
       });
-      return; // detener flujo aquí — _sendWAContinuar() lo retoma
-    }
+    }).catch(function(e){
+      console.error("[CC] error consultando cliente:", e);
+      _sendWAContinuar();
+    });
+    return; // detener flujo aquí — _sendWAContinuar() lo retoma
   }
-  // No tiene CC habilitada o no tiene límite: flujo normal
+  // No tiene CC habilitada: flujo normal
   _sendWAContinuar();
 }
 

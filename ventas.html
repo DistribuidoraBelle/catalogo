@@ -2433,10 +2433,10 @@ function _vcConfirmarPedido(clienteId,clienteNombre,accion){
     }
     var limite=parseFloat(cli.limite_credito)||0;
     if(limite<=0) return _vcContinuarPedido(clienteId,clienteNombre,accion,items,total,segKey);
-    // Calcular crédito ya usado
+    // Calcular crédito ya usado — incluye TODOS los pedidos no cancelados ni cobrados completos
     return apiGet("pedidos_catalogo",
       "select=total,cobrado_total&cliente_id=eq."+clienteId+
-      "&estado=in.(pendiente,reservado,en_preparacion,en_reparto,cobrado_parcial)"
+      "&estado=not.in.(cancelado,cobrado)"
     ).then(function(activos){
       var totalAct=0,totalCob=0;
       if(Array.isArray(activos)){
@@ -2464,7 +2464,8 @@ function _vcConfirmarPedido(clienteId,clienteNombre,accion){
         if(!confirm(msg)){
           return; // Cancelado
         }
-        // Si el admin/vendedor confirma forzar, continúa
+        // Forzó: saltar el segundo confirm para no duplicar
+        return _vcContinuarPedido(clienteId,clienteNombre,accion,items,total,segKey,/*skipConfirm=*/true);
       }
       return _vcContinuarPedido(clienteId,clienteNombre,accion,items,total,segKey);
     });
@@ -2472,10 +2473,10 @@ function _vcConfirmarPedido(clienteId,clienteNombre,accion){
 }
 
 // _vcContinuarPedido: continúa el flujo después de validación CC
-function _vcContinuarPedido(clienteId,clienteNombre,accion,items,total,segKey){
+function _vcContinuarPedido(clienteId,clienteNombre,accion,items,total,segKey,skipConfirm){
   var nroOrden="ORD-"+Math.floor(100000+Math.random()*900000);
   var labelAccion=accion==="cobrar"?"Cobrar al toque":"Reservar para entregar";
-  if(!confirm(labelAccion+" - "+fmt(total)+" para "+clienteNombre+"?"))return;
+  if(!skipConfirm && !confirm(labelAccion+" - "+fmt(total)+" para "+clienteNombre+"?"))return;
 
   // Estado del pedido según acción
   // reservar → estado='reservado', estado_envio='en_preparacion', confirmado_cobro=false
@@ -2604,13 +2605,13 @@ function vcVerHistorial(clienteId, clienteNombre){
   document.body.appendChild(mo);
   mo.addEventListener("click",function(e){if(e.target===mo)mo.remove();});
   // Cargar pedidos_catalogo vinculados a este cliente
-  apiGet("pedidos_catalogo","select=id,nro_orden,total,estado,cobrado_parcial,es_cc,created_at&cliente_id=eq."+clienteId+"&order=created_at.desc&limit=20").then(function(peds){
+  apiGet("pedidos_catalogo","select=id,nro_orden,total,estado,cobrado_parcial,cobrado_total,es_cc,created_at&cliente_id=eq."+clienteId+"&order=created_at.desc&limit=20").then(function(peds){
     var el=document.getElementById("_vcHistContenido");if(!el)return;
     if(!Array.isArray(peds)||!peds.length){el.innerHTML="<div class='empty'>Sin pedidos</div>";return;}
     var labels={pendiente:"Pendiente",confirmado:"Confirmado",en_preparacion:"En prep.",en_reparto:"En reparto",entregado:"Entregado",cancelado:"Cancelado",cobrado:"Cobrado"};
     el.innerHTML=peds.map(function(p){
       var fecha=new Date(p.created_at).toLocaleDateString("es-AR",{day:"2-digit",month:"2-digit",year:"2-digit"});
-      var cobrado=p.cobrado_parcial||0;
+      var cobrado=Math.max(parseFloat(p.cobrado_total)||0, parseFloat(p.cobrado_parcial)||0);
       var pendiente=p.total-cobrado;
       var esCC=p.es_cc;
       return "<div style='border:1px solid var(--bd);border-radius:8px;padding:.6rem .8rem;margin-bottom:.5rem'>"+
@@ -2619,7 +2620,7 @@ function vcVerHistorial(clienteId, clienteNombre){
         "<div style='font-size:.68rem;color:var(--tx3)'>"+fecha+" — "+(labels[p.estado]||p.estado)+"</div></div>"+
         "<div style='text-align:right'><div style='font-size:.82rem;font-weight:600;color:var(--acc)'>"+fmt(p.total)+"</div>"+
         (esCC&&pendiente>0?"<div style='font-size:.68rem;color:var(--red)'>Debe: "+fmt(pendiente)+"</div>":"")+"</div></div>"+
-        (esCC&&p.estado!=="cobrado"?"<button class='btn btn-a' style='width:100%;font-size:.72rem;padding:.3rem' onclick='vcCobrarPedidoCC("+p.id+",\""+p.nro_orden+"\","+p.total+","+(p.cobrado_parcial||0)+","+clienteId+")'>💰 Cobrar</button>":"")+"</div>";
+        (esCC&&p.estado!=="cobrado"?"<button class='btn btn-a' style='width:100%;font-size:.72rem;padding:.3rem' onclick='vcCobrarPedidoCC("+p.id+",\""+p.nro_orden+"\","+p.total+","+cobrado+","+clienteId+")'>💰 Cobrar</button>":"")+"</div>";
     }).join("");
   });
 }
@@ -3624,19 +3625,23 @@ function _cobrarProductosCC(pedidoId, clienteId, totalPed){
   // Obtener datos completos del pedido (incl. transferida_por_id, nro_orden) para Fix #2 y comisión Marcela
   var _pedSnapshotCC = null;
   var _esSaldadoCC = false;
-  apiGet("pedidos_catalogo","select=items_cobrados,cobrado_parcial,total,items,vendedor_id,transferida_por_id,nro_orden&id=eq."+pedidoId).then(function(rows){
+  apiGet("pedidos_catalogo","select=items_cobrados,cobrado_parcial,cobrado_total,total,items,vendedor_id,transferida_por_id,nro_orden&id=eq."+pedidoId).then(function(rows){
     var p=rows&&rows[0];if(!p)return;
     _pedSnapshotCC = p;
     var cobrados=[];try{cobrados=typeof p.items_cobrados==="string"?JSON.parse(p.items_cobrados):p.items_cobrados||[];}catch(e){}
     var nuevoCobrados=cobrados.concat(idxs);
     var items=[];try{items=typeof p.items==="string"?JSON.parse(p.items):p.items||[];}catch(e){}
-    var nuevoCobrado=(p.cobrado_parcial||0)+totalCobrar;
+    // Leer el cobrado más reciente (puede venir de cobrado_total si admin ya cobró)
+    var cobradoActual=Math.max(parseFloat(p.cobrado_parcial)||0, parseFloat(p.cobrado_total)||0);
+    var nuevoCobrado=cobradoActual+totalCobrar;
     var esSaldado=nuevoCobrado>=totalPed-1;
     _esSaldadoCC = esSaldado;
 
     // Fix #2: si el pedido no es del vendedor que cobra, transferirlo
-    var _patchObj={items_cobrados:JSON.stringify(nuevoCobrados),cobrado_parcial:nuevoCobrado};
+    // ESCRIBIR AMBOS campos para mantener consistencia con el sistema admin
+    var _patchObj={items_cobrados:JSON.stringify(nuevoCobrados),cobrado_parcial:nuevoCobrado,cobrado_total:nuevoCobrado};
     if(esSaldado){_patchObj.estado="cobrado";_patchObj.confirmado_cobro=true;}
+    else _patchObj.estado="cobrado_parcial";
     var _vAnterior=p.vendedor_id||null;
     if(!_vAnterior||_vAnterior!==VENDEDOR_ID){
       _patchObj.vendedor_id=VENDEDOR_ID;
@@ -3710,7 +3715,7 @@ function _confirmarCobrarCC(pedidoId, clienteId, totalPed, cobradoHasta){
     var pV=rowsV&&rowsV[0];
     _pedSnapshot = pV; // guardar snapshot para usar después
     var _vAnt=pV?pV.vendedor_id:null;
-    var _patchPed=Object.assign({cobrado_parcial:nuevoCobrado},esSaldado?{estado:"cobrado",confirmado_cobro:true}:{});
+    var _patchPed=Object.assign({cobrado_parcial:nuevoCobrado,cobrado_total:nuevoCobrado},esSaldado?{estado:"cobrado",confirmado_cobro:true}:{estado:"cobrado_parcial"});
     if(!_vAnt||_vAnt!==VENDEDOR_ID){
       _patchPed.vendedor_id=VENDEDOR_ID;
       if(!_vAnt){
@@ -4218,8 +4223,10 @@ function _renderPedidosFiltrados(filtroEstado){
   var transf=window._transfData||[];
 
   function esCobrado(p){
-    return p.confirmado_cobro||p.estado==="cobrado"||(p.cobrado_parcial&&p.total&&p.cobrado_parcial>=p.total);
+    var cob=Math.max(parseFloat(p.cobrado_parcial)||0, parseFloat(p.cobrado_total)||0);
+    return p.confirmado_cobro||p.estado==="cobrado"||(cob&&p.total&&cob>=p.total);
   }
+  function _cobMax(p){return Math.max(parseFloat(p.cobrado_parcial)||0, parseFloat(p.cobrado_total)||0);}
   function esWeb(p){ return p.nro_orden&&p.nro_orden.indexOf("WEB-")===0; }
   function esPropio(p){ return p.nro_orden&&p.nro_orden.indexOf("ORD-")===0; }
 
@@ -4251,7 +4258,7 @@ function _renderPedidosFiltrados(filtroEstado){
   var cTodos=dataFiltAsig.length+transf.length;
   var cPend=dataFiltAsig.filter(function(p){return !esCobrado(p)&&p.estado!=="cancelado";}).length;
   var cRes=dataFiltAsig.filter(function(p){return p.estado==="reservado"&&!esCobrado(p);}).length;
-  var cParc=dataFiltAsig.filter(function(p){return p.estado==="cobrado_parcial"||(!esCobrado(p)&&(p.cobrado_parcial||0)>0);}).length;
+  var cParc=dataFiltAsig.filter(function(p){return p.estado==="cobrado_parcial"||(!esCobrado(p)&&_cobMax(p)>0);}).length;
   var cCob=dataFiltAsig.filter(function(p){return esCobrado(p);}).length;
   var cWeb=dataFiltAsig.filter(function(p){return esWeb(p);}).length;
   var cProp=dataFiltAsig.filter(function(p){return esPropio(p);}).length;
@@ -4325,7 +4332,7 @@ function _renderPedidosFiltrados(filtroEstado){
   if(fE==="todos"){filtered=dataFiltAsig;}
   else if(fE==="pendientes"){filtered=dataFiltAsig.filter(function(p){return !esCobrado(p)&&p.estado!=="cancelado";});}
   else if(fE==="reservados"){filtered=dataFiltAsig.filter(function(p){return p.estado==="reservado"&&!esCobrado(p);});}
-  else if(fE==="parcial"){filtered=dataFiltAsig.filter(function(p){return p.estado==="cobrado_parcial"||(!esCobrado(p)&&(p.cobrado_parcial||0)>0);});}
+  else if(fE==="parcial"){filtered=dataFiltAsig.filter(function(p){return p.estado==="cobrado_parcial"||(!esCobrado(p)&&_cobMax(p)>0);});}
   else if(fE==="cobrados"){filtered=dataFiltAsig.filter(function(p){return esCobrado(p);});}
   else if(fE==="web"){filtered=dataFiltAsig.filter(esWeb);}
   else if(fE==="propios"){filtered=dataFiltAsig.filter(esPropio);}
@@ -4362,7 +4369,7 @@ function _renderPedidosFiltrados(filtroEstado){
   if(fE==="todos"){
     var pend=filtered.filter(function(p){return !esCobrado(p)&&p.estado!=="cancelado"&&p.estado!=="reservado";});
     var resv=filtered.filter(function(p){return p.estado==="reservado"&&!esCobrado(p);});
-    var parc=filtered.filter(function(p){return p.estado==="cobrado_parcial"||(!esCobrado(p)&&(p.cobrado_parcial||0)>0);});
+    var parc=filtered.filter(function(p){return p.estado==="cobrado_parcial"||(!esCobrado(p)&&_cobMax(p)>0);});
     var cob=filtered.filter(function(p){return esCobrado(p);});
     var canc=filtered.filter(function(p){return p.estado==="cancelado";});
     if(pend.length){html+="<div class='sec-title'>Pendientes <span style='color:var(--red)'>"+pend.length+"</span></div>";pend.forEach(function(p){html+=renderPedCard(p,false);});}
@@ -4459,7 +4466,7 @@ function _gestionarPedido(tipo,id){
     var items=[];try{items=typeof rec.items==='string'?JSON.parse(rec.items):rec.items||[];}catch(ex){}
     var total=rec.total||0;
     var nroOrden=rec.nro_orden||('#'+id);
-    var cobradoYa=rec.cobrado_parcial||0;
+    var cobradoYa=Math.max(parseFloat(rec.cobrado_parcial)||0, parseFloat(rec.cobrado_total)||0);
     var saldo=Math.max(0,total-cobradoYa);
 
     // Title
@@ -4691,7 +4698,8 @@ function _mgConfirmarCobro(){
 
   // FIX: separar patch de estado del patch de stock
   // Si esSaldado, el estado cobrado se aplica DESPUÉS de que todos los patches de stock terminen
-  var _patchBase={cobrado_parcial:nuevoCobrado,items_cobrados:JSON.stringify(merged)};
+  // Escribir AMBOS campos (cobrado_parcial y cobrado_total) para consistencia con sistema admin
+  var _patchBase={cobrado_parcial:nuevoCobrado,cobrado_total:nuevoCobrado,items_cobrados:JSON.stringify(merged)};
   // Fix #2 (atribución automática al cobrar):
   // Si el pedido NO está asignado a este vendedor, transferirlo automáticamente.
   // Cubre 2 casos:
@@ -4712,7 +4720,7 @@ function _mgConfirmarCobro(){
       _logEstadoPedidoV(id,"transferido","Transferencia automática al cobrar — de "+_nomAnterior+" a "+VENDEDOR_NOMBRE);
     }
   }
-  var _patchSaldo=esSaldado?{estado:'cobrado',confirmado_cobro:true,confirmado_at:new Date().toISOString(),periodo:periodoActual}:{};
+  var _patchSaldo=esSaldado?{estado:'cobrado',confirmado_cobro:true,confirmado_at:new Date().toISOString(),periodo:periodoActual}:{estado:'cobrado_parcial'};
   var proms=[];
   // El patch base (cobrado_parcial + items_cobrados) siempre va junto con los stocks
   proms.push(apiPatch('pedidos_catalogo',_patchBase,'id=eq.'+id));
@@ -6348,7 +6356,7 @@ function confirmarReservarPed(){
       }
       apiGet("pedidos_catalogo",
         "select=total,cobrado_total&cliente_id=eq."+clienteIdCC+
-        "&estado=in.(pendiente,reservado,en_preparacion,en_reparto,cobrado_parcial)"
+        "&estado=not.in.(cancelado,cobrado)"
       ).then(function(activos){
         var totalAct=0,totalCob=0;
         if(Array.isArray(activos)){

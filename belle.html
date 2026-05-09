@@ -3267,7 +3267,7 @@ function _verComoCliente(clienteId){
 
     // Calcular saldo CC si tiene
     var totalActivos = pedidos.filter(function(p){return p.es_cc && p.estado!=='cobrado' && p.estado!=='cancelado';}).reduce(function(s,p){return s+(p.total||0);},0);
-    var totalCobrado = pedidos.filter(function(p){return p.es_cc;}).reduce(function(s,p){return s+(p.cobrado_total||p.cobrado_parcial||0);},0);
+    var totalCobrado = pedidos.filter(function(p){return p.es_cc;}).reduce(function(s,p){return s+Math.max(parseFloat(p.cobrado_total)||0, parseFloat(p.cobrado_parcial)||0);},0);
     var saldoActivo = totalActivos - totalCobrado;
 
     var mo = document.createElement('div');
@@ -8075,7 +8075,7 @@ function reciboPedidoPDF(pedId){
     var nro=ped.nro_orden||("R-"+pedId);
     var w=window.open("","_blank","width=680,height=900");
     if(!w){toast("Permití popups para generar el PDF","twarn");return;}
-    var cobrado=ped.cobrado_parcial||0;
+    var cobrado=Math.max(parseFloat(ped.cobrado_total)||0, parseFloat(ped.cobrado_parcial)||0);
     var total=ped.total||0;
     var saldo=total-cobrado;
     var h="<!DOCTYPE html><html><head><meta charset='utf-8'><title>Remito "+nro+"</title>";
@@ -11885,7 +11885,7 @@ function _gestionarPedido(tipo,id){
     var items=[];try{items=typeof rec.items==='string'?JSON.parse(rec.items):rec.items||[];}catch(ex){}
     var total=rec.total||0;
     var nroOrden=rec.nro_orden||('#'+id);
-    var cobradoYa=rec.cobrado_parcial||0;
+    var cobradoYa=Math.max(parseFloat(rec.cobrado_parcial)||0, parseFloat(rec.cobrado_total)||0);
     var saldo=Math.max(0,total-cobradoYa);
 
     // Title
@@ -12100,6 +12100,43 @@ function _mgConfirmarCobro(){
       }));}catch(e){}
     }
   });
+
+  // ── Si es pedido CC, registrar cc_pago + aplicación ──
+  // Esto mantiene consistencia con el sistema FIFO y el panel CC del cliente.
+  if(rec.es_cc && rec.cliente_id){
+    var ccProm = apiPost('cc_pagos',{
+      cliente_id: rec.cliente_id,
+      monto: montoCobrar,
+      forma_pago: forma,
+      fecha: new Date().toISOString().split('T')[0],
+      vendedor_id: rec.vendedor_id || null,
+      registrado_por: 'admin (gestión)',
+      nota: 'Cobro desde gestión — pedido '+nroOrden,
+      saldo_a_favor: 0
+    }).then(function(rowsP){
+      var pago = Array.isArray(rowsP)&&rowsP.length ? rowsP[0] : null;
+      if(pago && pago.id){
+        return apiPost('cc_pagos_aplicaciones',{
+          pago_id: pago.id,
+          pedido_id: id,
+          monto_aplicado: montoCobrar,
+          cubrio_pedido_completo: !!esSaldado
+        });
+      }
+    }).catch(function(e){console.error('cc_pagos en _mgConfirmarCobro:',e);});
+    proms.push(ccProm);
+  }
+
+  // ── Si pedido vino transferido por Marcela y se saldó completo, crear comisión ──
+  if(esSaldado && rec.transferida_por_id === 3 && rec.nro_orden){
+    var itemsCom = [];
+    try { itemsCom = typeof rec.items==='string' ? JSON.parse(rec.items) : (rec.items||[]); } catch(e){}
+    _admCrearComisionMarcelaSiAplica({
+      transferida_por_id: 3,
+      nro_orden: rec.nro_orden,
+      items: itemsCom
+    }, rec.vendedor_id, periodoActual);
+  }
 
   Promise.all(proms).then(function(){
     toast('Cobro de '+fmt(montoCobrar)+' registrado'+(esSaldado?' — ¡Pedido saldado!':''),'tok');
