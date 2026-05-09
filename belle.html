@@ -11233,7 +11233,11 @@ function abrirModalCampania(id){
       '<hr style="border:0;border-top:1px solid var(--bd);margin:.8rem 0">'+
       '<div style="font-weight:600;color:var(--acc);margin-bottom:.5rem;font-size:.85rem">📂 Pestaña asociada (opcional)</div>'+
       '<div class="fg" style="margin-bottom:.5rem"><label>Asignar a pestaña del catálogo</label>'+
-        '<select class="fi" id="campPestanaId">'+pestanasOpts+'</select></div>'+
+        '<select class="fi" id="campPestanaId" onchange="campRefreshPreview()">'+pestanasOpts+'</select></div>'+
+      '<div id="campAvisoPestana" style="display:none;background:rgba(255,193,7,.12);border:1px solid rgba(255,193,7,.5);border-radius:6px;padding:.5rem .7rem;margin-top:.4rem;font-size:.7rem;color:#b58900;line-height:1.5">'+
+        '⚠️ <b>Tenés apariencia visual configurada pero sin pestaña asignada.</b> Sin pestaña, los cambios visuales no se verán. '+
+        'Al guardar, te ofreceré crear una pestaña automáticamente con el nombre de la campaña.'+
+      '</div>'+
       '<label style="display:flex;align-items:center;gap:.4rem;cursor:pointer;margin-top:.4rem">'+
         '<input type="checkbox" id="campAbrirAlEntrar"'+(camp&&camp.abrir_pestana_al_entrar?' checked':'')+'>'+
         '<span style="font-size:.78rem">🚪 Abrir esta pestaña por defecto al entrar al catálogo</span>'+
@@ -11376,22 +11380,54 @@ function guardarCampania(id){
     toast('La fecha "hasta" debe ser posterior a "desde"','terr');return;
   }
   ofData.etiqueta = (document.getElementById('campEtiqueta').value||'').trim() || null;
-  // Datos campaña
-  var campData = {
-    nombre: nombre,
-    descripcion: desc || null,
-    pestana_id: pestId ? parseInt(pestId) : null,
-    abrir_pestana_al_entrar: !!abrir,
-    activa: true,
-    // Campos visuales
-    tab_logo_url: (document.getElementById('campTabLogoUrl').value||'').trim() || null,
-    tab_color_fondo: (document.getElementById('campTabColorFondo').value||'').trim() || null,
-    tab_color_acento: (document.getElementById('campTabColorAcento').value||'').trim() || null,
-    tab_color_texto: (document.getElementById('campTabColorTexto').value||'').trim() || null,
-    tab_destacada: !!document.getElementById('campTabDestacada').checked,
-    tab_preset: (document.getElementById('campTabPreset').value||'').trim() || null
-  };
-  // 1) Crear o editar campaña
+
+  // ── Detectar si la campaña tiene apariencia visual configurada pero NO pestaña asignada ──
+  var tieneVisual = !!(
+    (document.getElementById('campTabLogoUrl').value||'').trim() ||
+    !!document.getElementById('campTabDestacada').checked ||
+    document.getElementById('campTabPreset').value
+  );
+
+  // Si tiene visual pero sin pestaña → ofrecer crear una automáticamente
+  if(tieneVisual && !pestId){
+    var msg = '🎨 Esta campaña tiene apariencia visual configurada (logo, colores, destacada) '+
+              'pero no está asignada a ninguna pestaña del catálogo.\n\n'+
+              'Sin pestaña, los cambios visuales NO se van a ver.\n\n'+
+              '¿Querés que cree automáticamente una pestaña llamada "'+nombre+'" '+
+              'y se la asigne a esta campaña?\n\n'+
+              '(Después podés asignar productos a esa pestaña desde el admin de productos)';
+    if(confirm(msg)){
+      _campCrearPestanaYGuardar(id, nombre, abrir, ofData, campData_construir);
+      return;
+    }
+    // Si elige NO, le advierto pero deja seguir
+    toast('⚠️ La campaña se guardará sin pestaña — los cambios visuales no se verán', 'twarn');
+  }
+
+  // Construir campData (función para reutilizar)
+  function campData_construir(pestanaIdForzada){
+    return {
+      nombre: nombre,
+      descripcion: desc || null,
+      pestana_id: pestanaIdForzada !== undefined ? pestanaIdForzada : (pestId ? parseInt(pestId) : null),
+      abrir_pestana_al_entrar: !!abrir,
+      activa: true,
+      // Campos visuales
+      tab_logo_url: (document.getElementById('campTabLogoUrl').value||'').trim() || null,
+      tab_color_fondo: (document.getElementById('campTabColorFondo').value||'').trim() || null,
+      tab_color_acento: (document.getElementById('campTabColorAcento').value||'').trim() || null,
+      tab_color_texto: (document.getElementById('campTabColorTexto').value||'').trim() || null,
+      tab_destacada: !!document.getElementById('campTabDestacada').checked,
+      tab_preset: (document.getElementById('campTabPreset').value||'').trim() || null
+    };
+  }
+
+  // Camino normal: ya tiene pestaña asignada o no tiene visual
+  _campGuardarConData(id, campData_construir(), ofData);
+}
+
+// Helper: guardar la campaña + oferta asociada
+function _campGuardarConData(id, campData, ofData){
   var campProm = id
     ? apiPatch('ofertas_campanias', campData, 'id=eq.'+id)
     : apiPost('ofertas_campanias', campData);
@@ -11413,6 +11449,55 @@ function guardarCampania(id){
   }).catch(function(e){
     console.error('[ofertas] guardar campaña:', e);
     toast('Error: '+(e.message||'desconocido'),'terr');
+  });
+}
+
+// Helper: crear pestaña automáticamente y luego guardar la campaña
+function _campCrearPestanaYGuardar(id, nombreCamp, abrirAlEntrar, ofData, buildCampData){
+  // Generar slug a partir del nombre
+  var slugBase = (nombreCamp||'campania').toLowerCase()
+    .normalize('NFD').replace(/[\u0300-\u036f]/g,'')
+    .replace(/[^a-z0-9]+/g,'-')
+    .replace(/^-+|-+$/g,'')
+    .substring(0, 40);
+  if(!slugBase) slugBase = 'campania-'+Date.now();
+
+  toast('Verificando que el slug "'+slugBase+'" sea único...', 'twarn');
+
+  // Verificar que el slug no exista
+  apiGet('pestanas_catalogo','select=id,slug').then(function(existentes){
+    var slugsActuales = (Array.isArray(existentes) ? existentes : []).map(function(p){return p.slug;});
+    var slugFinal = slugBase;
+    var i = 2;
+    while(slugsActuales.indexOf(slugFinal) >= 0){
+      slugFinal = slugBase + '-' + i;
+      i++;
+    }
+    // Calcular siguiente orden disponible (al final)
+    var maxOrden = 0;
+    (existentes||[]).forEach(function(p){
+      var o = parseInt(p.orden)||0;
+      if(o > maxOrden) maxOrden = o;
+    });
+    return apiPost('pestanas_catalogo', {
+      nombre: nombreCamp,
+      slug: slugFinal,
+      orden: maxOrden + 1,
+      activa: true
+    });
+  }).then(function(res){
+    var nueva = Array.isArray(res) && res.length ? res[0] : res;
+    if(!nueva || !nueva.id){
+      throw new Error('No se pudo crear la pestaña');
+    }
+    var pestanaIdNueva = parseInt(nueva.id);
+    toast('✅ Pestaña "'+nombreCamp+'" creada — guardando campaña...', 'tok');
+    // Ahora guardar la campaña con el pestana_id correcto
+    var campData = buildCampData(pestanaIdNueva);
+    return _campGuardarConData(id, campData, ofData);
+  }).catch(function(e){
+    console.error('[campañas] crear pestaña automática:', e);
+    toast('Error creando pestaña: '+(e.message||'desconocido'), 'terr');
   });
 }
 
@@ -11508,6 +11593,16 @@ function campRefreshPreview(){
   var logoUrl = (document.getElementById('campTabLogoUrl')||{value:''}).value || '';
   var destacada = !!(document.getElementById('campTabDestacada')||{checked:false}).checked;
   var nombreCamp = (document.getElementById('campNombre')||{value:''}).value || 'Campaña';
+  var pestId = (document.getElementById('campPestanaId')||{value:''}).value;
+  var preset = (document.getElementById('campTabPreset')||{value:''}).value;
+
+  // ── Mostrar/ocultar aviso amarillo según haya pestaña asignada ──
+  var aviso = document.getElementById('campAvisoPestana');
+  if(aviso){
+    var tieneVisual = !!(logoUrl || destacada || preset);
+    aviso.style.display = (tieneVisual && !pestId) ? 'block' : 'none';
+  }
+
   var contenidoTab = logoUrl
     ? '<img src="'+_ofEsc(logoUrl)+'" style="max-height:32px;max-width:120px;object-fit:contain" onerror="this.outerHTML=\'<span style=&quot;color:'+texto+';font-weight:700;font-size:.85rem&quot;>'+_ofEsc(nombreCamp)+'</span>\'">'
     : '<span style="color:'+texto+';font-weight:700;font-size:.85rem;text-shadow:0 1px 2px rgba(0,0,0,.15)">'+_ofEsc(nombreCamp)+'</span>';
