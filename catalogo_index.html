@@ -17,7 +17,7 @@
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Cormorant+Garamond:ital,wght@0,300;0,400;0,600;1,300&family=DM+Sans:wght@300;400;500&display=swap" rel="stylesheet">
 <style>
-:root{--cream:#faf8f4;--white:#fff;--charcoal:#1a1a1a;--mid:#555;--light:#999;--border:#e8e3db;--accent:#c4965a;--accent-light:#fdf5ea;--bg-body:var(--cream);--bg-header:var(--white);--bg-card:#fff;--bg-input:#fff;--bg-cimg:#f5f2ee;--tx-main:var(--charcoal);--tx-mid:var(--mid);--border-color:var(--border);}[data-theme="dark"]{--cream:#0f1117;--white:#181c27;--charcoal:#f0ede8;--mid:#a0a8b8;--light:#667;--border:#2a3045;--accent:#e8b86d;--accent-light:rgba(232,184,109,.08);--bg-body:#0f1117;--bg-header:#181c27;--bg-card:#1e2333;--bg-input:#252a3a;--bg-cimg:#252a3a;--tx-main:#f0ede8;--tx-mid:#a0a8b8;--border-color:#2a3045;}
+:root{--cream:#faf8f4;--white:#fff;--charcoal:#1a1a1a;--mid:#555;--light:#999;--border:#e8e3db;--accent:#c4965a;--accent-light:#fdf5ea;--bg-body:var(--cream);--bg-header:var(--white);--bg-card:#fff;--bg-input:#fff;--bg-cimg:#f5f2ee;--tx-main:var(--charcoal);--tx-mid:var(--mid);--border-color:var(--border);--card-oferta-bg:#fff5f0;--card-oferta-border:#f0c8b0;}[data-theme="dark"]{--cream:#0f1117;--white:#181c27;--charcoal:#f0ede8;--mid:#a0a8b8;--light:#667;--border:#2a3045;--accent:#e8b86d;--accent-light:rgba(232,184,109,.08);--bg-body:#0f1117;--bg-header:#181c27;--bg-card:#1e2333;--bg-input:#252a3a;--bg-cimg:#252a3a;--tx-main:#f0ede8;--tx-mid:#a0a8b8;--border-color:#2a3045;--card-oferta-bg:rgba(196,90,58,.10);--card-oferta-border:rgba(196,90,58,.35);}
 *{box-sizing:border-box;margin:0;padding:0}.card,.drawer,.cimg,.tabs,.filters,header,.sw,.popt,.qb,.abtn,.cart-btn,.tab,.ntext,.toast{transition:background .25s,border-color .25s,color .25s}
 body{background:var(--bg-body);font-family:"DM Sans",sans-serif;color:var(--tx-main);min-height:100vh}
 header{background:var(--bg-header);border-bottom:1px solid var(--border-color);padding:0 2rem;position:sticky;top:0;z-index:1000;display:flex;align-items:center;justify-content:space-between;height:64px}
@@ -920,6 +920,72 @@ document.addEventListener("DOMContentLoaded",function(){
   setTimeout(function(){if(slides.length)carRender();},100);
 });
 
+// Si hay alguna campaña vigente con `abrir_pestana_al_entrar=true`, redirige curTab
+// a la pestaña asociada. Solo se ejecuta una vez al cargar y solo si el cliente
+// no tocó manualmente otra pestaña aún.
+function abrirPestanaCampaniaSiCorresponde(){
+  if(window._catTabManual)return; // si el usuario ya navegó, no forzar
+  var camps=window._ofertaCampanias||[];
+  var ahora=Date.now();
+  // Buscar campaña vigente con flag y pestana asignada
+  var match=camps.find(function(c){
+    if(!c.abrir_pestana_al_entrar||!c.activa||!c.pestana_id)return false;
+    // Vigente: tiene al menos una oferta activa de campaña en rango
+    var ofs=(window._ofertas||[]).filter(function(o){return o.campania_id===c.id&&o.activa;});
+    return ofs.some(function(o){
+      if(o.fecha_desde&&new Date(o.fecha_desde).getTime()>ahora)return false;
+      if(o.fecha_hasta&&new Date(o.fecha_hasta).getTime()<=ahora)return false;
+      return true;
+    });
+  });
+  if(!match)return;
+  var pestana=(pestanasCatalogo||[]).find(function(t){return t.id===match.pestana_id;});
+  if(pestana&&pestana.slug){
+    curTab=pestana.slug;
+    if(typeof buildTabs==='function')buildTabs();
+    if(typeof applyFilters==='function')applyFilters();
+  }
+}
+
+function iniciarWatchdogOfertas(){
+  // ── Watchdog de ofertas ──
+  // Cada 60 segundos evalúa si alguna oferta cambió de estado de vigencia.
+  // Si cambió, dispara un re-render del catálogo. Si una oferta venció,
+  // los items en el carrito que ya tenían snapshot conservan su precio (decisión de Ger).
+  if(!window._ofertasWatchdog){
+    window._ofertasWatchdogState='';
+    window._ofertasWatchdog=setInterval(function(){
+      if(!Array.isArray(window._ofertas)||!window._ofertas.length)return;
+      // Calcular un "estado" simple: lista de IDs de ofertas que están vigentes ahora
+      var ahora=Date.now();
+      var vigentes=window._ofertas.filter(function(o){
+        if(!o.activa)return false;
+        if(o.fecha_desde&&new Date(o.fecha_desde).getTime()>ahora)return false;
+        if(o.fecha_hasta&&new Date(o.fecha_hasta).getTime()<=ahora)return false;
+        return true;
+      }).map(function(o){return o.id;}).sort().join(',');
+      if(vigentes!==window._ofertasWatchdogState){
+        window._ofertasWatchdogState=vigentes;
+        // Cambió el estado: re-renderizar catálogo y avisar si se agregó/quitó algo
+        if(typeof applyFilters==='function')applyFilters();
+        if(typeof renderDestacados==='function')renderDestacados(curTab);
+      }
+    },60000);
+  }
+}
+
+// Llamado al primer fetch — inicializa el state inicial
+function _ofertasWatchdogInit(){
+  if(!Array.isArray(window._ofertas))return;
+  var ahora=Date.now();
+  window._ofertasWatchdogState=window._ofertas.filter(function(o){
+    if(!o.activa)return false;
+    if(o.fecha_desde&&new Date(o.fecha_desde).getTime()>ahora)return false;
+    if(o.fecha_hasta&&new Date(o.fecha_hasta).getTime()<=ahora)return false;
+    return true;
+  }).map(function(o){return o.id;}).sort().join(',');
+}
+
 function loadProds(){
   // Load productos first (critical), then extras with fallback
   apiGet("productos","select=id,genero,empresa,nombre,stock_actual,reserva,cat_catalogo,precio_may_ars,precio_med_ars,precio_min_ars,precio_ml,precio_pestana,imagen_url,notas,acordes,activo,etiqueta,descripcion,precio_decan,destacado,pestana_id,pestanas_extra,orden_destacado,panel_destacado_id,orden_en_panel,costo_ind,costo_log,gan_usd_may,gan_usd_med,cotiz_hist&activo=is.true&order=empresa,nombre&limit=2000").then(function(data){
@@ -936,12 +1002,32 @@ function loadProds(){
     },3000);
     Promise.all([
       apiGet('paneles_destacados','select=*&order=orden'),
-      apiGet('pestanas_catalogo','select=*&activa=is.true&order=orden')
+      apiGet('pestanas_catalogo','select=*&activa=is.true&order=orden'),
+      // ── Cargar ofertas activas + campañas + asignaciones campania→productos ──
+      apiGet('ofertas','select=*&activa=is.true').catch(function(){return [];}),
+      apiGet('ofertas_campanias','select=*&activa=is.true').catch(function(){return [];}),
+      apiGet('ofertas_campania_productos','select=*').catch(function(){return [];})
     ]).then(function(pr){
       window._catPaneles=Array.isArray(pr[0])?pr[0]:[];
       window._catPanelesLoading=false;
       if(Array.isArray(pr[1])&&pr[1].length){pestanasCatalogo=pr[1];buildTabs();}
+      // Indexar ofertas y campañas
+      window._ofertas=Array.isArray(pr[2])?pr[2]:[];
+      window._ofertaCampanias=Array.isArray(pr[3])?pr[3]:[];
+      window._ofertaCampaniaProductos={};
+      if(Array.isArray(pr[4])){
+        pr[4].forEach(function(rel){
+          if(!window._ofertaCampaniaProductos[rel.campania_id])
+            window._ofertaCampaniaProductos[rel.campania_id]=[];
+          window._ofertaCampaniaProductos[rel.campania_id].push(rel.producto_id);
+        });
+      }
+      // Si hay una campaña vigente con "abrir_pestana_al_entrar", redirigir a esa pestaña
+      try{abrirPestanaCampaniaSiCorresponde();}catch(e){console.error('[ofertas] tab inicial:',e);}
+      // Inicializar watchdog (re-render automático cuando una oferta vence/empieza)
+      try{_ofertasWatchdogInit();iniciarWatchdogOfertas();}catch(e){console.error('[ofertas] watchdog:',e);}
       renderDestacados(curTab);
+      applyFilters(); // re-render para que aparezcan precios con ofertas
     }).catch(function(){window._catPanelesLoading=false;renderDestacados(curTab);});
     // Precargar combos y home_sections en paralelo al init
     Promise.all([
@@ -989,6 +1075,96 @@ function buildTabs(){
 
 function fmt(n){return n?("$"+Math.round(n).toLocaleString("es-AR")):"-";}
 
+// ════════════════════════════════════════════════════════════════════
+// SISTEMA DE OFERTAS — helpers compartidos
+// ════════════════════════════════════════════════════════════════════
+// window._ofertas = array de ofertas vigentes (cargadas al boot del catálogo)
+// window._ofertaCampaniaProductos = { campania_id: [producto_id, ...] }
+//
+// Una oferta puede ser:
+//   - Individual:  o.producto_id != null
+//   - De campaña:  o.campania_id != null  (aplica a productos de _ofertaCampaniaProductos[campania_id])
+// ════════════════════════════════════════════════════════════════════
+
+// Devuelve la oferta vigente para un producto (objeto o null).
+// Si hay más de una vigente (rara vez), prioriza la más específica:
+//   1. Oferta individual del producto
+//   2. Oferta de campaña que incluya el producto
+function ofertaParaProducto(prodId){
+  if(!window._ofertas||!window._ofertas.length)return null;
+  var ahora=Date.now();
+  function vigente(o){
+    if(!o.activa)return false;
+    if(o.fecha_desde){var d=new Date(o.fecha_desde).getTime();if(ahora<d)return false;}
+    if(o.fecha_hasta){var h=new Date(o.fecha_hasta).getTime();if(ahora>=h)return false;}
+    return true;
+  }
+  // 1. Oferta individual
+  var ind=window._ofertas.find(function(o){return o.producto_id===prodId&&vigente(o);});
+  if(ind)return ind;
+  // 2. Oferta de campaña
+  var camps=window._ofertaCampaniaProductos||{};
+  var campOferta=window._ofertas.find(function(o){
+    if(!o.campania_id||!vigente(o))return false;
+    var prods=camps[o.campania_id]||[];
+    return prods.indexOf(prodId)>=0;
+  });
+  return campOferta||null;
+}
+
+// Aplica una oferta a un cálculo de precios r={pm,pe,pi,decan} y devuelve
+// un objeto modificado: { pm, pe, pi, decan, oferta_aplicada, etiqueta, ... }
+//
+// `forzarMejor` (default true) compara con CC: si el cliente CC ya pagaba menos
+// que la oferta, no la aplicamos (el cliente CC ve siempre el precio más barato).
+function aplicarOferta(r, oferta, esCC){
+  if(!oferta||!r)return r;
+  var out={pm:r.pm,pe:r.pe,pi:r.pi,decan:r.decan,
+           pm_orig:r.pm,pe_orig:r.pe,pi_orig:r.pi,
+           ct:r.ct,rM:r.rM,rE:r.rE,
+           oferta:oferta,oferta_tipo:oferta.tipo,
+           oferta_etiqueta:oferta.etiqueta||''};
+  switch(oferta.tipo){
+    case 'precio_unico':
+      // Un solo precio plano. x10/x3/x1 todos al mismo valor (los tachados manejados por el render).
+      out.precio_unico=parseFloat(oferta.precio_unico)||0;
+      out.pm=out.precio_unico;out.pe=out.precio_unico;out.pi=out.precio_unico;
+      break;
+    case 'descuento_pct':
+      var pct=parseFloat(oferta.descuento_pct)||0;
+      var f=1-pct/100;
+      out.pm=Math.round(r.pm*f);
+      out.pe=Math.round(r.pe*f);
+      out.pi=Math.round(r.pi*f);
+      out.descuento_pct=pct;
+      break;
+    case 'x10_sin_minimo':
+      // El precio aplicado siempre es el x10 (mayorista), sin importar la cantidad.
+      // No tocamos los valores de pm/pe/pi (el render se encarga de mostrar pm como activo).
+      out.precio_efectivo='pm';
+      break;
+    case 'x3_sin_minimo':
+      out.precio_efectivo='pe';
+      break;
+    case 'multixmenos':
+      out.multi_paga=parseInt(oferta.multi_paga)||1;
+      out.multi_lleva=parseInt(oferta.multi_lleva)||2;
+      // No modifica precios unitarios — la lógica del 2x1/3x2 se aplica al sumar al carrito
+      break;
+  }
+  // Si es cliente CC y el precio CC normal (pm) sigue siendo más barato que la oferta,
+  // dejamos el CC. Decisión de Ger: el cliente CC siempre ve el precio más barato.
+  if(esCC&&r.pm){
+    var precioConOferta=(out.precio_unico||out.pm);
+    if(r.pm<precioConOferta){
+      // Volver al estado pre-oferta (CC gana)
+      out.pm=r.pm;out.pe=r.pe;out.pi=r.pi;
+      out.oferta_descartada_por_cc=true;
+    }
+  }
+  return out;
+}
+
 function calcP(p){
   var ci=p.costo_ind||0, cl=p.costo_log||0;
   // MULTIPLO.SUPERIOR al entero (igual que Google Sheet)
@@ -1005,15 +1181,32 @@ function calcP(p){
   var rM=pm>0&&ct>0?((pm-ct*cotiz)/pm*100):0;
   var rE=pe>0&&ct>0?((pe-ct*cotiz)/pe*100):0;
   var decan=p.precio_decan>0?p.precio_decan:(pi>0?(Math.ceil(pi*0.1/1000)*1000+3000):0);
-  return{ct:ct,pm:pm,pe:pe,pi:pi,rM:rM,rE:rE,decan:decan};
+  var r={ct:ct,pm:pm,pe:pe,pi:pi,rM:rM,rE:rE,decan:decan};
+  // ── INTEGRACIÓN CON OFERTAS ──
+  // Si el producto tiene una oferta vigente, aplicarla.
+  // El cliente CC siempre ve el precio más barato (decisión de Ger).
+  if(typeof ofertaParaProducto==='function'){
+    var oferta=ofertaParaProducto(p.id);
+    if(oferta){
+      var esCC=!!(typeof _catCliente!=='undefined' && _catCliente && _catCliente.cuenta_corriente_habilitada);
+      r=aplicarOferta(r,oferta,esCC);
+    }
+  }
+  return r;
 }
 
 function getCartTotalUnits(){return Object.values(cart).filter(function(i){return !i.isDecan;}).reduce(function(s,i){return s+i.qty;},0);}
 function hasPerf(){return Object.values(cart).some(function(i){return !i.isDecan;});}
 
 function getBestSeg(total,r){
+  // Si la oferta indica un precio fijo a aplicar (x10/x3 sin mínimo), respetarlo.
+  if(r&&r.precio_efectivo){
+    if(r.precio_efectivo==='pm'&&r.pm)return 'pm';
+    if(r.precio_efectivo==='pe'&&r.pe)return 'pe';
+  }
+  // Si tiene oferta de descuento %, mantener la lógica de tramos pero sobre los precios ya descontados
+  // (no necesita rama nueva, ya cae en el flujo normal).
   // Cliente con CC habilitada → SIEMPRE precio mayorista (x10), sin importar la cantidad.
-  // Solo aplica si el producto realmente tiene precio mayorista calculable (r.pm).
   if(typeof _catCliente!=="undefined" && _catCliente && _catCliente.cuenta_corriente_habilitada && r && r.pm) return "pm";
   if(total>=10&&r.pm)return"pm";
   if(total>=3&&r.pe)return"pe";
@@ -1106,6 +1299,8 @@ function loadContacto(){
 
 
 function switchTab(tab,el){
+  // Marcar que el usuario navegó manualmente — no forzar pestaña de campaña al cargar
+  window._catTabManual=true;
   curTab=tab;
   document.querySelectorAll(".tab").forEach(function(t){t.classList.remove("act");});
   el.classList.add("act");
@@ -1684,10 +1879,57 @@ function renderCard(p,totalUnits){
   var minNoticeHtml=minMsg?"<div style='font-style:italic;font-size:.78rem;color:#b89e6e;border:1px solid rgba(184,158,110,.3);border-radius:7px;padding:.35rem .55rem;text-align:center;background:rgba(184,158,110,.05);line-height:1.3'>"+minMsg+"</div>":"";
   // Si tiene precio unico (precio_pestana), mostrar un solo recuadro
   var _pUnico=p.precio_pestana||0;
+  // Detectar si hay oferta vigente (la oferta ya está aplicada en r — ver calcP)
+  var _hasOferta=!!(r.oferta&&!r.oferta_descartada_por_cc);
+  var _oferta=_hasOferta?r.oferta:null;
   var popts;
   // Sin stock: no mostrar precios
   if(nostock){
     popts="";
+  } else if(_hasOferta && r.oferta_tipo==='precio_unico'){
+    // Oferta de precio único: mostrar un solo recuadro grande con el precio plano + tachado el original
+    var precioOriginal=r.pi_orig||r.pe_orig||r.pm_orig||0;
+    popts="<div class='popt lit' style='grid-column:1/-1;justify-content:center;border:2px solid #c45a3a;background:linear-gradient(135deg,rgba(196,90,58,.12),rgba(196,90,58,.06))'>"+
+      "<span class='pol' style='color:#c45a3a;font-weight:700;letter-spacing:.04em'>"+(_oferta.etiqueta||'OFERTA')+"</span>"+
+      "<span class='pov' style='font-weight:700;color:#c45a3a'>"+fmt(r.precio_unico)+"</span>"+
+      (precioOriginal>r.precio_unico?"<div style='font-size:.62rem;color:#999;text-decoration:line-through;margin-top:.15rem'>"+fmt(precioOriginal)+"</div>":"")+
+    "</div>";
+  } else if(_hasOferta && (r.oferta_tipo==='x10_sin_minimo'||r.oferta_tipo==='x3_sin_minimo')){
+    // x10/x3 sin mínimo: muestra el precio efectivo destacado, los demás tachados (estilo CC)
+    var efectivo=r.precio_efectivo||'pm';
+    popts=segs.map(function(s,i){
+      if(s==="pi"&&minGrupo&&minCant>=3)return"";
+      if(s==="pe"&&minGrupo&&minCant>=10)return"";
+      var v=r[s];
+      if(!v)return"<div class='popt dis'><span class='pol'>"+segLabels[i]+"</span><span class='pov'>-</span></div>";
+      if(s===efectivo){
+        return "<div class='popt lit' style='border:2px solid #c45a3a;background:linear-gradient(135deg,rgba(196,90,58,.14),rgba(196,90,58,.06))'>"+
+          "<span class='pol' style='color:#c45a3a;font-weight:700;letter-spacing:.04em'>"+(_oferta.etiqueta||'OFERTA')+"</span>"+
+          "<span class='pov' style='font-weight:700;color:#c45a3a'>"+fmt(v)+"</span>"+
+        "</div>";
+      } else {
+        return "<div class='popt' style='opacity:.6'>"+
+          "<span class='pol'>"+segLabels[i]+"</span>"+
+          "<span class='pov' style='color:#c97a82;text-decoration:line-through;text-decoration-color:#c97a82;text-decoration-thickness:1px'>"+fmt(v)+"</span>"+
+        "</div>";
+      }
+    }).join("");
+  } else if(_hasOferta && r.oferta_tipo==='descuento_pct'){
+    // Descuento %: mantiene los 3 tramos pero pinta cada uno con tachado del precio original
+    popts=segs.map(function(s,i){
+      if(s==="pi"&&minGrupo&&minCant>=3)return"";
+      if(s==="pe"&&minGrupo&&minCant>=10)return"";
+      var v=r[s];
+      var vOrig=r[s+'_orig']||v;
+      if(!v)return"<div class='popt dis'><span class='pol'>"+segLabels[i]+"</span><span class='pov'>-</span></div>";
+      var lit=(bestSeg===s)?" lit":"";
+      var litStyle=(bestSeg===s)?"border:2px solid #c45a3a;background:rgba(196,90,58,.08);":"";
+      return "<div class='popt"+lit+"' style='"+litStyle+"'>"+
+        "<span class='pol'>"+segLabels[i]+"</span>"+
+        "<span class='pov' style='color:#c45a3a;font-weight:700'>"+fmt(v)+"</span>"+
+        (vOrig>v?"<div style='font-size:.55rem;color:#999;text-decoration:line-through'>"+fmt(vOrig)+"</div>":"")+
+      "</div>";
+    }).join("");
   } else if(_pUnico>0){
     popts="<div class='popt lit' style='grid-column:1/-1;justify-content:center'>"+"<span class='pol'>Precio único</span><span class='pov'>"+fmt(_pUnico)+"</span></div>";
   } else if(_isCC){
@@ -1767,8 +2009,27 @@ if(!nostock&&r.decan>0&&p.precio_decan!==-1){
   var _etBg=_etColors[_etiq]||"#5b8dee";
   var _etBadge=_etiq?"<div style='position:absolute;top:-1px;left:10px;z-index:5;background:"+_etBg+";color:#fff;font-size:.5rem;font-weight:700;letter-spacing:.1em;padding:.14rem .42rem;border-radius:0 0 5px 5px;text-transform:uppercase;white-space:nowrap;box-shadow:0 2px 5px rgba(0,0,0,.3)'>"+_etiq+"</div>":"";
 
+  // Badge de oferta (arriba a la derecha) — más prominente que la etiqueta normal
+  var _ofertaBadge="";
+  var _cardOfertaStyle="";
+  if(_hasOferta){
+    var lblOferta=_oferta.etiqueta||"";
+    if(!lblOferta){
+      // Generar etiqueta automática según tipo
+      if(r.oferta_tipo==='descuento_pct'&&r.descuento_pct)lblOferta=Math.round(r.descuento_pct)+'% OFF';
+      else if(r.oferta_tipo==='precio_unico')lblOferta='OFERTA';
+      else if(r.oferta_tipo==='x10_sin_minimo')lblOferta='PRECIO MAYOR';
+      else if(r.oferta_tipo==='x3_sin_minimo')lblOferta='PRECIO X3';
+      else if(r.oferta_tipo==='multixmenos'&&r.multi_lleva&&r.multi_paga)lblOferta=r.multi_lleva+'x'+r.multi_paga;
+      else lblOferta='OFERTA';
+    }
+    _ofertaBadge="<div style='position:absolute;top:-1px;right:10px;z-index:5;background:linear-gradient(135deg,#c45a3a,#a73a32);color:#fff;font-size:.55rem;font-weight:800;letter-spacing:.08em;padding:.18rem .5rem;border-radius:0 0 5px 5px;text-transform:uppercase;white-space:nowrap;box-shadow:0 2px 6px rgba(196,90,58,.4)'>🔥 "+lblOferta+"</div>";
+    // Tinte salmón claro en la card (var --card-oferta-bg se define en CSS por tema light/dark)
+    _cardOfertaStyle="background:var(--card-oferta-bg,#fff5f0);border:1px solid var(--card-oferta-border,#f0c8b0);";
+  }
+
   var _imgSrc = fixImgUrl(p.imagen_url||'');
-  return"<div class='card"+(nostock?" nostock":"")+"' style='position:relative' id='card_"+id+"'>"+_etBadge+"<div class='cimg' style='position:relative'>"+
+  return"<div class='card"+(nostock?" nostock":"")+(_hasOferta?" oferta":"")+"' style='position:relative;"+_cardOfertaStyle+"' id='card_"+id+"'>"+_etBadge+_ofertaBadge+"<div class='cimg' style='position:relative'>"+
     "<button onclick='compartirProducto("+id+")' title='Compartir' class='share-btn'>&#128257;</button>"+
     "<button onclick='catToggleFav("+id+")' title='Agregar a favoritos' class='fav-heart"+(_catFavs.indexOf(id)>=0?" activo":"")+"' data-pid='"+id+"' style='color:"+(_catFavs.indexOf(id)>=0?"#c5443a":"#bbb")+"'>"+(_catFavs.indexOf(id)>=0?"&hearts;":"&#9825;")+"</button>"+
     (nostock?"<div class='ssrib'>Sin stock</div>":"")+
@@ -1871,8 +2132,26 @@ function addCart(id){
   var _puA=p.precio_pestana||0;
   var seg=_puA>0?'pi':getBestSeg(totalUnits,r);
   var price=_puA>0?_puA:(r[seg]||r.pi);
-  cart[id]={id:id,nombre:p.nombre,qty:st.qty,seg:seg,precio:price,pData:{pm:r.pm,pe:r.pe,pi:r.pi},isDecan:false};
-  updateCartCount();showToast("Agregado: "+fmt(price)+" x "+st.qty);applyFilters();
+  // Snapshot del precio: si la oferta venciera mientras el cliente tiene el producto en
+  // el carrito, queremos respetar el precio que vio al agregarlo (decisión de Ger).
+  var ofertaSnapshot=null;
+  if(r.oferta){
+    ofertaSnapshot={
+      id:r.oferta.id,
+      tipo:r.oferta_tipo,
+      etiqueta:r.oferta_etiqueta||'',
+      precio_aplicado:price,
+      multi_paga:r.multi_paga||null,
+      multi_lleva:r.multi_lleva||null
+    };
+  }
+  cart[id]={id:id,nombre:p.nombre,qty:st.qty,seg:seg,precio:price,
+            pData:{pm:r.pm,pe:r.pe,pi:r.pi},
+            oferta:ofertaSnapshot,
+            isDecan:false};
+  updateCartCount();
+  showToast(ofertaSnapshot?"🔥 Oferta aplicada: "+fmt(price)+" x "+st.qty:"Agregado: "+fmt(price)+" x "+st.qty);
+  applyFilters();
 }
 
 function updateCartCount(){
@@ -2006,10 +2285,22 @@ function renderDrawer(){
     } else {
       var p=allProds.find(function(x){return x.id===item.id;});
       var r=p?calcP(p):{pm:item.pData.pm,pe:item.pData.pe,pi:item.pData.pi};
-      var seg=getBestSeg(totalUnits,r);var price=r[seg]||item.precio;
-      sub=price*item.qty;total+=sub;
-      var segLabels={pm:"precio x10",pe:"precio x3",pi:"precio unitario"};segLabel=segLabels[seg];
-      if(seg!==item.seg){upgrades.push(item.nombre);if(cart[item.id]){cart[item.id].seg=seg;cart[item.id].precio=price;}}
+      var seg, price;
+      // ── Snapshot de oferta ──
+      // Si al agregar al carrito el cliente tenía una oferta vigente, respetamos
+      // ese precio aunque la oferta haya vencido (decisión de Ger).
+      if(item.oferta && item.oferta.precio_aplicado){
+        price = item.oferta.precio_aplicado;
+        seg   = item.seg || 'pi';
+        segLabel = '🔥 ' + (item.oferta.etiqueta || 'oferta');
+        sub = price * item.qty;
+        total += sub;
+      } else {
+        seg=getBestSeg(totalUnits,r);price=r[seg]||item.precio;
+        sub=price*item.qty;total+=sub;
+        var segLabels={pm:"precio x10",pe:"precio x3",pi:"precio unitario"};segLabel=segLabels[seg];
+        if(seg!==item.seg){upgrades.push(item.nombre);if(cart[item.id]){cart[item.id].seg=seg;cart[item.id].precio=price;}}
+      }
     }
     return"<div class='ci' style='display:flex;align-items:flex-start;gap:.55rem'>"+
       imgHtml+
@@ -4182,10 +4473,14 @@ function _renderUnPanel(containerEl, panelKey, dests, bgImg, _ca, _cn, _cp, _cf,
   var isMobile=window.innerWidth<=680;
   if(isMobile){
     var bgStyle=bgImg?'background-color:'+_cf+';':'background:'+_cf+';';
-    var imgMedidor=bgImg?'<img src="'+bgImg+'" id="dest-medidor-'+panelKey+'" style="position:absolute;height:100%;width:auto;opacity:0;pointer-events:none;top:0;left:0" draggable="false">':'';
-    wrapper.innerHTML='<div class="dest-wrap" style="position:relative;'+altoStyle+'">'
+    // Si no hay productos, NO incluir el medidor (evita el spacer que fuerza scroll)
+    var imgMedidor=(bgImg&&cards)?'<img src="'+bgImg+'" id="dest-medidor-'+panelKey+'" style="position:absolute;height:100%;width:auto;opacity:0;pointer-events:none;top:0;left:0" draggable="false">':'';
+    // Si es solo banner (sin productos), forzar aspect-ratio rectangular tipo publicidad
+    var modoBanner=(!cards&&bgImg);
+    var altoBannerStyle=modoBanner?'aspect-ratio:16/9;height:auto;':altoStyle;
+    wrapper.innerHTML='<div class="dest-wrap" style="position:relative;'+altoBannerStyle+'">'
       +textoOverlay
-      +'<div class="dest-mobile-scroll" id="dest-mscroll-'+panelKey+'" style="'+bgStyle+'">'
+      +'<div class="dest-mobile-scroll'+(modoBanner?' dest-banner-only':'')+'" id="dest-mscroll-'+panelKey+'" style="'+bgStyle+(modoBanner?'overflow:hidden;':'')+'">'
       +imgMedidor
       +(cards?'<div class="dest-mobile-cards">'+cards+'</div>':'')
       +'</div></div>';
@@ -4202,12 +4497,15 @@ function _renderUnPanel(containerEl, panelKey, dests, bgImg, _ca, _cn, _cp, _cf,
           scroller.style.backgroundSize='cover';
           scroller.style.backgroundRepeat='no-repeat';
           scroller.style.backgroundPosition='center center';
+          scroller.style.overflow='hidden'; // sin scroll cuando es solo banner
         } else {
           scroller.style.backgroundSize='auto 100%';
           scroller.style.backgroundRepeat='no-repeat';
           scroller.style.backgroundPosition='left center';
         }
       }
+      // Si no hay productos, NO calcular medidor ni spacer ni scroll
+      if(!cards) return;
       var medidor=document.getElementById('dest-medidor-'+panelKey);
       function ajustarAncho(){
         if(!medidor||!medidor.naturalWidth)return;

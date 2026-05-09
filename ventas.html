@@ -826,10 +826,26 @@ function loadConfig(){
 
 function loadProds(){
   document.getElementById("pg-catalogo").innerHTML="<div class='loading'><div class='spin'></div>Cargando...</div>";
-  apiGet("productos","select=*&activo=is.true&order=empresa,nombre&limit=2000").then(function(data){
+  // Cargar productos y ofertas en paralelo
+  Promise.all([
+    apiGet("productos","select=*&activo=is.true&order=empresa,nombre&limit=2000"),
+    apiGet('ofertas','select=*&activa=is.true').catch(function(){return [];}),
+    apiGet('ofertas_campania_productos','select=*').catch(function(){return [];})
+  ]).then(function(r){
+    var data=r[0];
     if(!Array.isArray(data)){toast("Error cargando productos","terr");return;}
-    prods=data;buildCatalogo();fillEmps();renderCat();loadCombosVendedor();
-  });
+    prods=data;
+    // Indexar ofertas
+    window._ofertas=Array.isArray(r[1])?r[1]:[];
+    window._ofertaCampaniaProductos={};
+    if(Array.isArray(r[2])){
+      r[2].forEach(function(rel){
+        if(!window._ofertaCampaniaProductos[rel.campania_id])window._ofertaCampaniaProductos[rel.campania_id]=[];
+        window._ofertaCampaniaProductos[rel.campania_id].push(rel.producto_id);
+      });
+    }
+    buildCatalogo();fillEmps();renderCat();loadCombosVendedor();
+  }).catch(function(){toast("Error cargando productos","terr");});
 }
 
 function checkDots(){
@@ -842,6 +858,62 @@ function checkDots(){
 }
 
 function fmt(n){return n?("$"+Math.round(n).toLocaleString("es-AR",{timeZone:"America/Argentina/Buenos_Aires"})):"-";}
+
+// ════════════════════════════════════════════════════════════════════
+// SISTEMA DE OFERTAS — helpers en ventas.html
+// (los datos se cargan al boot junto con productos — ver loadProds())
+// ════════════════════════════════════════════════════════════════════
+function ofertaParaProducto(prodId){
+  if(!window._ofertas||!window._ofertas.length)return null;
+  var ahora=Date.now();
+  function vigente(o){
+    if(!o.activa)return false;
+    if(o.fecha_desde&&new Date(o.fecha_desde).getTime()>ahora)return false;
+    if(o.fecha_hasta&&new Date(o.fecha_hasta).getTime()<=ahora)return false;
+    return true;
+  }
+  var ind=window._ofertas.find(function(o){return o.producto_id===prodId&&vigente(o);});
+  if(ind)return ind;
+  var camps=window._ofertaCampaniaProductos||{};
+  var campOferta=window._ofertas.find(function(o){
+    if(!o.campania_id||!vigente(o))return false;
+    return (camps[o.campania_id]||[]).indexOf(prodId)>=0;
+  });
+  return campOferta||null;
+}
+
+function aplicarOferta(r,oferta,esCC){
+  if(!oferta||!r)return r;
+  var out={pm:r.pm,pe:r.pe,pi:r.pi,decan:r.decan,
+           pm_orig:r.pm,pe_orig:r.pe,pi_orig:r.pi,
+           ct:r.ct,rM:r.rM,rE:r.rE,
+           oferta:oferta,oferta_tipo:oferta.tipo,
+           oferta_etiqueta:oferta.etiqueta||''};
+  switch(oferta.tipo){
+    case 'precio_unico':
+      out.precio_unico=parseFloat(oferta.precio_unico)||0;
+      out.pm=out.precio_unico;out.pe=out.precio_unico;out.pi=out.precio_unico;
+      break;
+    case 'descuento_pct':
+      var f=1-(parseFloat(oferta.descuento_pct)||0)/100;
+      out.pm=Math.round(r.pm*f);out.pe=Math.round(r.pe*f);out.pi=Math.round(r.pi*f);
+      out.descuento_pct=parseFloat(oferta.descuento_pct)||0;
+      break;
+    case 'x10_sin_minimo': out.precio_efectivo='pm';break;
+    case 'x3_sin_minimo':  out.precio_efectivo='pe';break;
+    case 'multixmenos':
+      out.multi_paga=parseInt(oferta.multi_paga)||1;
+      out.multi_lleva=parseInt(oferta.multi_lleva)||2;
+      break;
+  }
+  if(esCC&&r.pm){
+    var precioConOferta=(out.precio_unico||out.pm);
+    if(r.pm<precioConOferta){
+      out.pm=r.pm;out.pe=r.pe;out.pi=r.pi;out.oferta_descartada_por_cc=true;
+    }
+  }
+  return out;
+}
 
 function calcP(p){
   var ci=p.costo_ind||0, cl=p.costo_log||0;
@@ -859,7 +931,16 @@ function calcP(p){
   var rM=pm>0&&ct>0?((pm-ct*cotiz)/pm*100):0;
   var rE=pe>0&&ct>0?((pe-ct*cotiz)/pe*100):0;
   var decan=p.precio_decan>0?p.precio_decan:(pi>0?(Math.ceil(pi*0.1/1000)*1000+3000):0);
-  return{ct:ct,pm:pm,pe:pe,pi:pi,rM:rM,rE:rE,decan:decan};
+  var r={ct:ct,pm:pm,pe:pe,pi:pi,rM:rM,rE:rE,decan:decan};
+  // ── INTEGRACIÓN CON OFERTAS ──
+  if(typeof ofertaParaProducto==='function'){
+    var oferta=ofertaParaProducto(p.id);
+    if(oferta){
+      var esCC=!!(typeof _carritoCliente!=='undefined' && _carritoCliente && _carritoCliente.cuenta_corriente_habilitada);
+      r=aplicarOferta(r,oferta,esCC);
+    }
+  }
+  return r;
 }
 
 function calcAlertaPrecio(items){
