@@ -605,15 +605,50 @@ td{padding:.35rem .5rem;font-size:.78rem;color:var(--tx2);vertical-align:middle;
     <div class="page" id="page-fichas" style="display:none">
       <div class="page-header">
         <div class="page-title">📋 Fichas Técnicas</div>
-        <button class="btn btn-g" onclick="fichaImportarTodas()" style="font-size:.72rem">⬇️ Importar fichas</button>
+        <button class="btn btn-g" onclick="fichaImportarTodas()" style="font-size:.72rem" id="fichaBtnImportar">⬇️ Importar fichas</button>
       </div>
-      <div style="display:flex;gap:.5rem;margin-bottom:.8rem;flex-wrap:wrap">
-        <input class="fi" id="fichaSearch" placeholder="Buscar producto..." style="flex:1;min-width:200px" oninput="fichaSearchProd(this.value)">
-        <select class="fi" id="fichaMarcaFil" style="max-width:200px" onchange="fichaSearchProd(document.getElementById('fichaSearch').value)">
-          <option value="">Todas las marcas</option>
-        </select>
+      <!-- Sub-pestañas -->
+      <div style="display:flex;gap:.3rem;margin-bottom:.8rem;border-bottom:1px solid var(--bd)">
+        <div class="fichas-subtab act" data-stab="fichas" onclick="fichasSwitchSubtab('fichas',this)"
+             style="padding:.55rem 1rem;cursor:pointer;font-size:.78rem;font-weight:600;border-bottom:2px solid var(--acc);color:var(--acc)">
+          📋 Productos
+        </div>
+        <div class="fichas-subtab" data-stab="notas" onclick="fichasSwitchSubtab('notas',this)"
+             style="padding:.55rem 1rem;cursor:pointer;font-size:.78rem;color:var(--tx3);font-weight:500">
+          🌸 Notas
+        </div>
       </div>
-      <div id="fichaListaProds" style="display:flex;flex-direction:column;gap:.4rem"></div>
+
+      <!-- Sub-pestaña: Productos (la original) -->
+      <div id="fichas-tab-fichas" style="display:block">
+        <div style="display:flex;gap:.5rem;margin-bottom:.8rem;flex-wrap:wrap">
+          <input class="fi" id="fichaSearch" placeholder="Buscar producto..." style="flex:1;min-width:200px" oninput="fichaSearchProd(this.value)">
+          <select class="fi" id="fichaMarcaFil" style="max-width:200px" onchange="fichaSearchProd(document.getElementById('fichaSearch').value)">
+            <option value="">Todas las marcas</option>
+          </select>
+        </div>
+        <div id="fichaListaProds" style="display:flex;flex-direction:column;gap:.4rem"></div>
+      </div>
+
+      <!-- Sub-pestaña: Notas (NUEVA) -->
+      <div id="fichas-tab-notas" style="display:none">
+        <div style="display:flex;gap:.5rem;margin-bottom:.5rem;flex-wrap:wrap;align-items:center">
+          <input class="fi" id="notasAdmSearch" placeholder="🔍 Buscar nota..." style="flex:1;min-width:200px" oninput="notasAdmRender()">
+          <select class="fi" id="notasAdmFiltro" onchange="notasAdmRender()" style="max-width:220px;font-size:.72rem">
+            <option value="todas">📋 Todas</option>
+            <option value="con_imagen">🖼 Con imagen</option>
+            <option value="sin_imagen">⚠️ Sin imagen</option>
+            <option value="duplicadas">🔁 Posibles duplicadas</option>
+          </select>
+          <button class="btn btn-g" onclick="notasAdmCargar()" style="font-size:.72rem">🔄 Recargar</button>
+          <span id="notasAdmCount" style="font-size:.7rem;color:var(--tx3)"></span>
+        </div>
+        <div style="font-size:.65rem;color:var(--tx3);margin-bottom:.5rem;line-height:1.45">
+          💡 Acá administrás las notas olfativas centralizadas. Cambiá nombre o foto y se replica a todas las fichas que la usen.
+          La sincronización se hace por el nombre normalizado (sin tildes, mayúsculas o acentos).
+        </div>
+        <div id="notasAdmContainer"><div class="loading"><div class="spin"></div>Cargando notas...</div></div>
+      </div>
     </div>
     <div class="page" id="page-destacados" style="display:none">
       <div class="page-header"><div class="page-title">⭐ Paneles de Destacados</div><button class="btn btn-a" onclick="destAbrirModal(null)" style="font-size:.75rem">+ Nuevo panel</button></div>
@@ -30653,6 +30688,7 @@ function fichaGuardarFotoNota(notaNombre, fotoUrl){
   }).then(function(){
     toast('Foto de nota "'+notaNombre+'" guardada y replicada ✅','tok');
     window._notasFotos=null; // invalidar cache
+    window._notasAdminCache=null; // invalidar admin de notas
   }).catch(function(e){toast('Error: '+e.message,'terr');});
 }
 
@@ -30696,12 +30732,589 @@ function fichaEditarFotoNota(notaNombre){
       delete fotos[keyNorm];
       var json=JSON.stringify(fotos);
       apiPatch('configuracion',{valor:json},'clave=eq.notas_fotos')
-        .then(function(){toast('Foto de nota eliminada','tok');window._notasFotos=null;})
+        .then(function(){toast('Foto de nota eliminada','tok');window._notasFotos=null;window._notasAdminCache=null;})
         .catch(function(e){toast('Error: '+e.message,'terr');});
     });
     return;
   }
   fichaGuardarFotoNota(notaNombre, url.trim());
+}
+
+
+// ════════════════════════════════════════════════════════════════════
+// ADMIN DE NOTAS — sub-pestaña dentro de Fichas
+// ════════════════════════════════════════════════════════════════════
+// Permite ver TODAS las notas usadas en cualquier ficha, editar nombre,
+// editar foto (URL externa o subida), filtrar por estado, detectar
+// duplicadas por similitud (Levenshtein).
+//
+// El "nombre canónico" para sincronización es el nombre normalizado
+// (lowercase, sin tildes, espacios colapsados). Si dos notas distintas
+// se normalizan al mismo string, se consideran la misma.
+// ════════════════════════════════════════════════════════════════════
+
+window._notasAdminCache = null; // {nombre_norm: {nombre_display, foto, count, ejemplos:[fichas]}}
+
+function fichasSwitchSubtab(name, el){
+  // Visualmente actualizar las pestañas
+  var tabs = document.querySelectorAll('.fichas-subtab');
+  tabs.forEach(function(t){
+    t.classList.remove('act');
+    t.style.borderBottom='';
+    t.style.color='var(--tx3)';
+    t.style.fontWeight='500';
+  });
+  if(el){
+    el.classList.add('act');
+    el.style.borderBottom='2px solid var(--acc)';
+    el.style.color='var(--acc)';
+    el.style.fontWeight='600';
+  }
+  // Mostrar el panel correspondiente
+  var elFichas = document.getElementById('fichas-tab-fichas');
+  var elNotas  = document.getElementById('fichas-tab-notas');
+  if(elFichas) elFichas.style.display = (name === 'fichas') ? 'block' : 'none';
+  if(elNotas)  elNotas.style.display  = (name === 'notas')  ? 'block' : 'none';
+  // Mostrar/ocultar botón "Importar fichas" según pestaña
+  var btnImp = document.getElementById('fichaBtnImportar');
+  if(btnImp) btnImp.style.display = (name === 'fichas') ? '' : 'none';
+  // Cargar notas si entramos a esa pestaña por primera vez
+  if(name === 'notas' && !window._notasAdminCache){
+    notasAdmCargar();
+  }
+}
+
+// Normalizar nombre para usar como clave (igual que el catálogo)
+function _notaNormalizar(s){
+  return (s||'').trim().toLowerCase()
+    .normalize('NFD').replace(/[\u0300-\u036f]/g,'')
+    .replace(/[^a-z0-9]/g,' ').replace(/\s+/g,' ').trim();
+}
+
+// Distancia de Levenshtein entre dos strings (edits necesarios para llegar de a a b)
+function _levenshtein(a, b){
+  if(!a) return (b||'').length;
+  if(!b) return a.length;
+  if(a === b) return 0;
+  var m = a.length, n = b.length;
+  var dp = new Array(n+1);
+  for(var j=0; j<=n; j++) dp[j] = j;
+  for(var i=1; i<=m; i++){
+    var prev = dp[0]; dp[0] = i;
+    for(var k=1; k<=n; k++){
+      var tmp = dp[k];
+      dp[k] = Math.min(
+        dp[k]+1,         // borrado
+        dp[k-1]+1,       // inserción
+        prev + (a[i-1]===b[k-1] ? 0 : 1)  // sustitución
+      );
+      prev = tmp;
+    }
+  }
+  return dp[n];
+}
+
+function notasAdmCargar(){
+  var cont = document.getElementById('notasAdmContainer');
+  if(cont) cont.innerHTML = "<div class='loading'><div class='spin'></div>Cargando notas...</div>";
+  Promise.all([
+    apiGet('fichas_perfume','select=id,producto_id,notas_salida,notas_corazon,notas_fondo&limit=2000'),
+    apiGet('configuracion','select=valor&clave=eq.notas_fotos&limit=1')
+  ]).then(function(r){
+    var fichas = Array.isArray(r[0]) ? r[0] : [];
+    var fotos = {};
+    try { fotos = JSON.parse((r[1] && r[1][0]) ? r[1][0].valor : '{}'); } catch(e){}
+    // Indexar todas las notas: {nombreNorm: {display, foto, count, ejemplos}}
+    var mapa = {};
+    fichas.forEach(function(f){
+      ['notas_salida','notas_corazon','notas_fondo'].forEach(function(campo){
+        var val = f[campo] || '';
+        val.split(',').forEach(function(notaRaw){
+          var notaTrim = (notaRaw||'').trim();
+          if(!notaTrim) return;
+          var key = _notaNormalizar(notaTrim);
+          if(!key) return;
+          if(!mapa[key]){
+            mapa[key] = {
+              clave: key,
+              nombre_display: notaTrim,
+              foto: fotos[key] || '',
+              count: 0,
+              ejemplos: []
+            };
+          }
+          mapa[key].count++;
+          // Mantener el display más "lindo" (con primera letra mayúscula si aparece)
+          if(notaTrim.length > 0 && notaTrim[0] === notaTrim[0].toUpperCase() && mapa[key].nombre_display === mapa[key].nombre_display.toLowerCase()){
+            mapa[key].nombre_display = notaTrim;
+          }
+        });
+      });
+    });
+    window._notasAdminCache = mapa;
+    window._notasAdminFotos = fotos;
+    notasAdmRender();
+  }).catch(function(e){
+    console.error('[notasAdm] cargar:', e);
+    if(cont) cont.innerHTML = "<div class='empty' style='padding:2rem;color:var(--red)'>Error: "+(e.message||'')+
+      ". <button class='btn btn-g' onclick='notasAdmCargar()' style='margin-left:.5rem'>Reintentar</button></div>";
+  });
+}
+
+function _notasAdmDetectarDuplicadas(notas){
+  // Recibe array de objetos {clave, nombre_display, ...}
+  // Detecta pares cuya distancia Levenshtein es ≤ 2 sobre nombres ≥5 chars
+  // Retorna {clave: [otrasClavesSimilares]}
+  var dup = {};
+  for(var i=0; i<notas.length; i++){
+    for(var j=i+1; j<notas.length; j++){
+      var a = notas[i].clave, b = notas[j].clave;
+      if(a.length < 4 || b.length < 4) continue; // muy cortas, falsos positivos
+      var d = _levenshtein(a, b);
+      var maxLen = Math.max(a.length, b.length);
+      // Umbral: ≤2 cambios y al menos 60% de similitud
+      if(d <= 2 && d / maxLen <= 0.4){
+        if(!dup[a]) dup[a] = [];
+        if(!dup[b]) dup[b] = [];
+        dup[a].push(b);
+        dup[b].push(a);
+      }
+    }
+  }
+  return dup;
+}
+
+function notasAdmRender(){
+  var cont = document.getElementById('notasAdmContainer');
+  if(!cont) return;
+  if(!window._notasAdminCache){
+    cont.innerHTML = "<div class='empty'>Cargando...</div>";
+    return;
+  }
+  var srch = (document.getElementById('notasAdmSearch')||{value:''}).value.toLowerCase().trim();
+  var filtro = (document.getElementById('notasAdmFiltro')||{value:'todas'}).value;
+  // Convertir mapa a array
+  var notas = Object.values(window._notasAdminCache);
+  // Detectar duplicadas (siempre, para badges)
+  var duplicadas = _notasAdmDetectarDuplicadas(notas);
+  window._notasDuplicadas = duplicadas;
+  // Aplicar filtros
+  var filtradas = notas.filter(function(n){
+    if(srch && n.nombre_display.toLowerCase().indexOf(srch) < 0 && n.clave.indexOf(srch) < 0) return false;
+    if(filtro === 'con_imagen' && !n.foto) return false;
+    if(filtro === 'sin_imagen' && n.foto) return false;
+    if(filtro === 'duplicadas' && !duplicadas[n.clave]) return false;
+    return true;
+  });
+  // Ordenar: primero las sin imagen, luego por uso descendente, luego alfabético
+  filtradas.sort(function(a, b){
+    if(filtro === 'sin_imagen' || filtro === 'todas'){
+      // Sin imagen primero
+      var aHas = !!a.foto, bHas = !!b.foto;
+      if(aHas !== bHas) return aHas ? 1 : -1;
+    }
+    // Después por count descendente
+    if(a.count !== b.count) return b.count - a.count;
+    return a.nombre_display.localeCompare(b.nombre_display);
+  });
+  // Contador
+  var totalSin = notas.filter(function(n){return !n.foto;}).length;
+  var totalCon = notas.length - totalSin;
+  var totalDup = Object.keys(duplicadas).length;
+  var cnt = document.getElementById('notasAdmCount');
+  if(cnt) cnt.textContent = filtradas.length+' / '+notas.length+' notas · '+totalCon+' con foto · '+totalSin+' sin foto · '+totalDup+' posibles duplicadas';
+  // Render tabla compacta
+  if(!filtradas.length){
+    cont.innerHTML = "<div class='empty' style='padding:2rem;text-align:center;color:var(--tx3)'>Sin resultados con esos filtros</div>";
+    return;
+  }
+  var html = "<div style='overflow-x:auto;border:1px solid var(--bd);border-radius:8px;background:var(--sur)'>"+
+    "<table style='width:100%;border-collapse:collapse;font-size:.78rem'>"+
+    "<thead style='background:var(--sur2);position:sticky;top:0;z-index:1'>"+
+      "<tr>"+
+        "<th style='padding:.55rem .65rem;text-align:left;font-size:.66rem;color:var(--tx3);text-transform:uppercase;letter-spacing:.05em;border-bottom:1px solid var(--bd);width:48px'>Foto</th>"+
+        "<th style='padding:.55rem .65rem;text-align:left;font-size:.66rem;color:var(--tx3);text-transform:uppercase;letter-spacing:.05em;border-bottom:1px solid var(--bd)'>Nombre</th>"+
+        "<th style='padding:.55rem .65rem;text-align:left;font-size:.66rem;color:var(--tx3);text-transform:uppercase;letter-spacing:.05em;border-bottom:1px solid var(--bd);width:80px'>Usos</th>"+
+        "<th style='padding:.55rem .65rem;text-align:left;font-size:.66rem;color:var(--tx3);text-transform:uppercase;letter-spacing:.05em;border-bottom:1px solid var(--bd);width:120px'>Estado</th>"+
+        "<th style='padding:.55rem .65rem;text-align:right;font-size:.66rem;color:var(--tx3);text-transform:uppercase;letter-spacing:.05em;border-bottom:1px solid var(--bd);width:200px'>Acciones</th>"+
+      "</tr>"+
+    "</thead><tbody>";
+  filtradas.forEach(function(n){
+    var dups = duplicadas[n.clave] || [];
+    var fotoHtml = n.foto
+      ? "<img src='"+n.foto+"' style='width:36px;height:36px;border-radius:50%;object-fit:cover;border:1px solid var(--bd);background:var(--sur3)' onerror=\"this.outerHTML='<div style=\\'width:36px;height:36px;border-radius:50%;background:var(--sur3);display:flex;align-items:center;justify-content:center;font-size:.7rem;color:var(--red)\\' title=\\'Imagen rota\\'>!</div>'\">"
+      : "<div style='width:36px;height:36px;border-radius:50%;background:var(--sur3);display:flex;align-items:center;justify-content:center;font-size:.65rem;color:var(--tx3);border:1px dashed var(--bd)'>📷</div>";
+    var estado = '';
+    if(!n.foto){
+      estado += "<span style='display:inline-block;background:rgba(232,160,40,.15);color:#c89c5a;padding:.15rem .4rem;border-radius:8px;font-size:.6rem;font-weight:600;margin-right:.2rem'>⚠ Sin foto</span>";
+    } else {
+      estado += "<span style='display:inline-block;background:rgba(125,211,163,.15);color:#7dd3a3;padding:.15rem .4rem;border-radius:8px;font-size:.6rem;font-weight:600;margin-right:.2rem'>✓ OK</span>";
+    }
+    if(dups.length){
+      estado += "<span style='display:inline-block;background:rgba(91,141,238,.15);color:#5b8dee;padding:.15rem .4rem;border-radius:8px;font-size:.6rem;font-weight:600;cursor:pointer' onclick='notasAdmVerDuplicadas(\""+n.clave.replace(/"/g,'')+"\")' title='Click para ver duplicadas'>🔁 "+dups.length+"</span>";
+    }
+    html += "<tr style='border-bottom:1px solid var(--bd)'>"+
+      "<td style='padding:.45rem .65rem'>"+fotoHtml+"</td>"+
+      "<td style='padding:.45rem .65rem'>"+
+        "<div style='font-weight:600;color:var(--tx)'>"+_ofEsc(n.nombre_display)+"</div>"+
+        "<div style='font-size:.62rem;color:var(--tx3)'>clave: "+_ofEsc(n.clave)+"</div>"+
+      "</td>"+
+      "<td style='padding:.45rem .65rem'>"+
+        "<span style='font-weight:700;color:var(--acc)'>"+n.count+"</span>"+
+        "<span style='font-size:.62rem;color:var(--tx3)'> ficha"+(n.count===1?'':'s')+"</span>"+
+      "</td>"+
+      "<td style='padding:.45rem .65rem'>"+estado+"</td>"+
+      "<td style='padding:.45rem .65rem;text-align:right'>"+
+        "<button class='btn btn-a' onclick=\"notasAdmEditar('"+n.clave.replace(/"/g,'').replace(/'/g,"\\'")+"')\" style='font-size:.65rem;padding:.25rem .55rem'>✏️ Editar</button>"+
+      "</td>"+
+    "</tr>";
+  });
+  html += "</tbody></table></div>";
+  cont.innerHTML = html;
+}
+
+// ─── MODAL DE EDICIÓN DE UNA NOTA ────────────────────────────────────
+function notasAdmEditar(claveNorm){
+  var nota = window._notasAdminCache[claveNorm];
+  if(!nota){toast('Nota no encontrada','terr');return;}
+  var existing = document.getElementById('moNotaEdit');
+  if(existing) existing.remove();
+  var mo = document.createElement('div');
+  mo.id = 'moNotaEdit';
+  mo.className = 'mo';
+  mo.style.display = 'flex';
+  mo.innerHTML =
+    "<div class='md' style='max-width:520px'>"+
+      "<div class='mh'><div class='mtt'>✏️ Editar nota: "+_ofEsc(nota.nombre_display)+"</div>"+
+        "<button class='btn btn-g' onclick='document.getElementById(\"moNotaEdit\").remove()' style='padding:.2rem .5rem'>✕</button>"+
+      "</div>"+
+      "<div class='mb' style='display:flex;flex-direction:column;gap:.7rem'>"+
+        "<div style='font-size:.7rem;color:var(--tx3);background:rgba(196,150,90,.08);border-left:3px solid var(--acc);padding:.5rem .7rem;border-radius:4px;line-height:1.5'>"+
+          "💡 Esta nota se usa en <b>"+nota.count+"</b> ficha"+(nota.count===1?'':'s')+". "+
+          "Si cambiás el nombre, se actualiza en todas las fichas. "+
+          "Si cambiás la foto, se replica automáticamente."+
+        "</div>"+
+        "<div class='fg'>"+
+          "<label>Nombre de la nota</label>"+
+          "<input class='fi' id='_notaEditNombre' value='"+_ofEsc(nota.nombre_display)+"' placeholder='Ej: Bergamota'>"+
+          "<div style='font-size:.6rem;color:var(--tx3);margin-top:.2rem'>Clave normalizada actual: <b style='color:var(--tx2)'>"+_ofEsc(nota.clave)+"</b></div>"+
+        "</div>"+
+        "<div class='fg'>"+
+          "<label>URL de imagen</label>"+
+          "<input class='fi' id='_notaEditFoto' value='"+_ofEsc(nota.foto||'')+"' placeholder='https://...' oninput='_notaEditPrev()'>"+
+        "</div>"+
+        "<div style='display:flex;gap:.5rem;align-items:center'>"+
+          "<label class='btn btn-a' style='cursor:pointer;font-size:.72rem'>"+
+            "📷 Subir imagen<input type='file' accept='image/*' style='display:none' onchange='_notaEditSubirImg(this)'>"+
+          "</label>"+
+          "<button class='btn btn-g' onclick='_notaEditQuitarFoto()' style='font-size:.72rem'>🗑 Quitar foto</button>"+
+          "<span id='_notaEditUploadStatus' style='font-size:.65rem;color:var(--acc)'></span>"+
+        "</div>"+
+        "<div id='_notaEditPrevWrap' style='text-align:center;padding:.5rem;background:var(--sur2);border-radius:8px;border:1px solid var(--bd);min-height:80px;display:flex;align-items:center;justify-content:center'>"+
+          (nota.foto
+            ? "<img id='_notaEditPrev' src='"+_ofEsc(nota.foto)+"' style='max-width:120px;max-height:120px;border-radius:50%;object-fit:cover;border:2px solid var(--bd)'>"
+            : "<div style='color:var(--tx3);font-size:.72rem'>Sin foto</div>"
+          )+
+        "</div>"+
+      "</div>"+
+      "<div class='mf'>"+
+        "<button class='btn btn-g' onclick='document.getElementById(\"moNotaEdit\").remove()'>Cancelar</button>"+
+        "<button class='btn btn-a' onclick='notasAdmGuardar(\""+claveNorm.replace(/"/g,'')+"\")'>💾 Guardar</button>"+
+      "</div>"+
+    "</div>";
+  document.body.appendChild(mo);
+}
+
+function _notaEditPrev(){
+  var url = (document.getElementById('_notaEditFoto')||{value:''}).value.trim();
+  var wrap = document.getElementById('_notaEditPrevWrap');
+  if(!wrap) return;
+  if(url){
+    wrap.innerHTML = "<img id='_notaEditPrev' src='"+_ofEsc(url)+"' style='max-width:120px;max-height:120px;border-radius:50%;object-fit:cover;border:2px solid var(--bd)' onerror=\"this.outerHTML='<div style=\\'color:var(--red);font-size:.72rem\\'>Imagen no carga</div>'\">";
+  } else {
+    wrap.innerHTML = "<div style='color:var(--tx3);font-size:.72rem'>Sin foto</div>";
+  }
+}
+
+function _notaEditQuitarFoto(){
+  var inp = document.getElementById('_notaEditFoto');
+  if(inp){inp.value = ''; _notaEditPrev();}
+}
+
+function _notaEditSubirImg(input){
+  var file = input.files && input.files[0];
+  if(!file) return;
+  var status = document.getElementById('_notaEditUploadStatus');
+  if(status) status.textContent = 'Comprimiendo...';
+  var img = new Image(), reader = new FileReader();
+  reader.onload = function(e){
+    img.onload = function(){
+      // Comprimir a max 800px (las fotos de notas son chicas, no necesitan más)
+      var MAX = 800, w = img.width, h = img.height;
+      if(w > MAX){var s = MAX/w; w = MAX; h = Math.round(h*s);}
+      if(h > MAX){var s2 = MAX/h; h = MAX; w = Math.round(w*s2);}
+      var c = document.createElement('canvas'); c.width = w; c.height = h;
+      c.getContext('2d').drawImage(img, 0, 0, w, h);
+      c.toBlob(function(blob){
+        if(status) status.textContent = 'Subiendo...';
+        if(typeof subirImagenStorage !== 'function'){
+          if(status) status.textContent = 'Error: función subirImagenStorage no disponible';
+          return;
+        }
+        subirImagenStorage(blob, 'notas', function(url){
+          var inp = document.getElementById('_notaEditFoto');
+          if(inp){inp.value = url; _notaEditPrev();}
+          if(status){status.textContent = '✅ Subida'; setTimeout(function(){status.textContent='';}, 2000);}
+        }, function(err){
+          if(status) status.textContent = 'Error: '+err;
+          toast('Error al subir: '+err, 'terr');
+        });
+      }, 'image/jpeg', 0.85);
+    };
+    img.src = e.target.result;
+  };
+  reader.readAsDataURL(file);
+}
+
+function notasAdmGuardar(claveOriginal){
+  var nota = window._notasAdminCache[claveOriginal];
+  if(!nota){toast('Nota no encontrada','terr');return;}
+  var nuevoNombre = (document.getElementById('_notaEditNombre')||{value:''}).value.trim();
+  var nuevaFoto = (document.getElementById('_notaEditFoto')||{value:''}).value.trim();
+  if(!nuevoNombre){toast('El nombre no puede estar vacío','twarn');return;}
+  var claveNueva = _notaNormalizar(nuevoNombre);
+  if(!claveNueva){toast('Nombre inválido','twarn');return;}
+  // Detectar si cambió el nombre (clave normalizada distinta)
+  var cambioNombre = (claveNueva !== claveOriginal);
+  var cambioFoto = ((nota.foto||'') !== nuevaFoto);
+  if(!cambioNombre && !cambioFoto){
+    toast('No hay cambios','twarn');
+    return;
+  }
+  // Si la nueva clave ya existe en el mapa (y es distinta a la original), preguntar si fusionar
+  if(cambioNombre && window._notasAdminCache[claveNueva]){
+    var existing = window._notasAdminCache[claveNueva];
+    if(!confirm('Ya existe una nota con clave "'+claveNueva+'" ('+existing.count+' fichas).\n\n¿Querés FUSIONAR? Las '+nota.count+' fichas que usan "'+nota.nombre_display+'" pasarán a usar "'+nuevoNombre+'".\n\nEsta acción no se puede deshacer.')){
+      return;
+    }
+  }
+  // Si no hay cambio de nombre, solo actualizar foto en `configuracion`
+  if(!cambioNombre){
+    _notasAdmGuardarFotoSolo(claveOriginal, nuevaFoto);
+    return;
+  }
+  // Cambio de nombre: hay que actualizar las fichas. Cargar TODAS las fichas que tienen esa nota.
+  toast('Actualizando '+nota.count+' fichas...', 'twarn');
+  apiGet('fichas_perfume','select=id,notas_salida,notas_corazon,notas_fondo&limit=2000').then(function(rows){
+    if(!Array.isArray(rows)) throw new Error('No se pudieron cargar fichas');
+    var pendientes = [];
+    rows.forEach(function(f){
+      var cambios = {};
+      ['notas_salida','notas_corazon','notas_fondo'].forEach(function(campo){
+        var val = f[campo] || '';
+        if(!val) return;
+        var partes = val.split(',').map(function(s){return s.trim();}).filter(Boolean);
+        var nuevas = partes.map(function(notaItem){
+          var keyItem = _notaNormalizar(notaItem);
+          if(keyItem === claveOriginal) return nuevoNombre;
+          return notaItem;
+        });
+        // Deduplicar manteniendo orden
+        var seen = {};
+        var dedup = [];
+        nuevas.forEach(function(x){
+          var k = _notaNormalizar(x);
+          if(!seen[k]){seen[k] = true; dedup.push(x);}
+        });
+        var nuevoVal = dedup.join(', ');
+        if(nuevoVal !== val) cambios[campo] = nuevoVal;
+      });
+      if(Object.keys(cambios).length){
+        pendientes.push({id: f.id, cambios: cambios});
+      }
+    });
+    if(!pendientes.length && !cambioFoto){
+      toast('Nada para actualizar','twarn');
+      return;
+    }
+    // Aplicar patches en cadena
+    var chain = Promise.resolve();
+    pendientes.forEach(function(p){
+      chain = chain.then(function(){
+        return apiPatch('fichas_perfume', p.cambios, 'id=eq.'+p.id);
+      });
+    });
+    return chain.then(function(){
+      // Actualizar `configuracion.notas_fotos`
+      return _notasAdmActualizarConfigFotos(claveOriginal, claveNueva, nuevaFoto);
+    });
+  }).then(function(){
+    toast('✅ '+nota.count+' fichas actualizadas','tok');
+    var mo = document.getElementById('moNotaEdit');
+    if(mo) mo.remove();
+    // Invalidar cache y recargar
+    window._notasFotos = null;
+    window._notasAdminCache = null;
+    notasAdmCargar();
+  }).catch(function(e){
+    console.error('[notasAdm] guardar:', e);
+    toast('Error: '+(e.message||''), 'terr');
+  });
+}
+
+function _notasAdmGuardarFotoSolo(clave, nuevaFoto){
+  // Solo cambia la foto en `configuracion.notas_fotos` (no toca fichas)
+  apiGet('configuracion','select=valor&clave=eq.notas_fotos&limit=1').then(function(res){
+    var datos = {};
+    try { datos = JSON.parse((res && res[0]) ? res[0].valor : '{}'); } catch(e){}
+    if(nuevaFoto){
+      datos[clave] = nuevaFoto;
+    } else {
+      delete datos[clave];
+    }
+    var json = JSON.stringify(datos);
+    return (res && res[0])
+      ? apiPatch('configuracion', {valor: json}, 'clave=eq.notas_fotos')
+      : apiPost('configuracion', {clave: 'notas_fotos', valor: json});
+  }).then(function(){
+    toast(nuevaFoto ? '✅ Foto actualizada' : '✅ Foto eliminada', 'tok');
+    var mo = document.getElementById('moNotaEdit');
+    if(mo) mo.remove();
+    window._notasFotos = null;
+    window._notasAdminCache = null;
+    notasAdmCargar();
+  }).catch(function(e){
+    console.error('[notasAdm] guardar foto:', e);
+    toast('Error: '+(e.message||''), 'terr');
+  });
+}
+
+function _notasAdmActualizarConfigFotos(claveVieja, claveNueva, nuevaFoto){
+  return apiGet('configuracion','select=valor&clave=eq.notas_fotos&limit=1').then(function(res){
+    var datos = {};
+    try { datos = JSON.parse((res && res[0]) ? res[0].valor : '{}'); } catch(e){}
+    // Si cambió la clave, mover/borrar la vieja
+    if(claveVieja && claveNueva && claveVieja !== claveNueva){
+      delete datos[claveVieja];
+    }
+    if(nuevaFoto){
+      datos[claveNueva] = nuevaFoto;
+    } else {
+      delete datos[claveNueva];
+    }
+    var json = JSON.stringify(datos);
+    return (res && res[0])
+      ? apiPatch('configuracion', {valor: json}, 'clave=eq.notas_fotos')
+      : apiPost('configuracion', {clave: 'notas_fotos', valor: json});
+  });
+}
+
+// ─── VISUALIZAR DUPLICADAS ────────────────────────────────────────────
+function notasAdmVerDuplicadas(claveNorm){
+  var dups = (window._notasDuplicadas||{})[claveNorm] || [];
+  var nota = window._notasAdminCache[claveNorm];
+  if(!nota){toast('Nota no encontrada','terr');return;}
+  var existing = document.getElementById('moNotaDups');
+  if(existing) existing.remove();
+  var mo = document.createElement('div');
+  mo.id = 'moNotaDups';
+  mo.className = 'mo';
+  mo.style.display = 'flex';
+  var listaHtml = dups.map(function(otra){
+    var n2 = window._notasAdminCache[otra];
+    if(!n2) return '';
+    var distancia = _levenshtein(claveNorm, otra);
+    var f1 = nota.foto ? "<img src='"+nota.foto+"' style='width:32px;height:32px;border-radius:50%;object-fit:cover;border:1px solid var(--bd)'>" : "<div style='width:32px;height:32px;border-radius:50%;background:var(--sur3);display:flex;align-items:center;justify-content:center;font-size:.6rem;color:var(--tx3)'>📷</div>";
+    var f2 = n2.foto ? "<img src='"+n2.foto+"' style='width:32px;height:32px;border-radius:50%;object-fit:cover;border:1px solid var(--bd)'>" : "<div style='width:32px;height:32px;border-radius:50%;background:var(--sur3);display:flex;align-items:center;justify-content:center;font-size:.6rem;color:var(--tx3)'>📷</div>";
+    return "<div style='border:1px solid var(--bd);border-radius:8px;padding:.65rem;margin-bottom:.5rem;background:var(--sur)'>"+
+      "<div style='display:flex;align-items:center;gap:.6rem;margin-bottom:.5rem'>"+
+        "<div style='display:flex;align-items:center;gap:.3rem;flex:1'>"+
+          f1+"<div><div style='font-size:.78rem;font-weight:600'>"+_ofEsc(nota.nombre_display)+"</div><div style='font-size:.6rem;color:var(--tx3)'>"+nota.count+" usos</div></div>"+
+        "</div>"+
+        "<div style='font-size:.85rem;color:var(--tx3)'>↔</div>"+
+        "<div style='display:flex;align-items:center;gap:.3rem;flex:1'>"+
+          f2+"<div><div style='font-size:.78rem;font-weight:600'>"+_ofEsc(n2.nombre_display)+"</div><div style='font-size:.6rem;color:var(--tx3)'>"+n2.count+" usos</div></div>"+
+        "</div>"+
+        "<span style='background:rgba(91,141,238,.15);color:#5b8dee;padding:.15rem .4rem;border-radius:8px;font-size:.6rem;font-weight:600'>"+distancia+" letra"+(distancia===1?'':'s')+" diff</span>"+
+      "</div>"+
+      "<div style='display:flex;gap:.4rem;justify-content:flex-end'>"+
+        "<button class='btn btn-g' onclick=\"notasAdmFusionar('"+otra.replace(/"/g,'').replace(/'/g,"\\'")+"','"+claveNorm.replace(/"/g,'').replace(/'/g,"\\'")+"')\" style='font-size:.65rem' title='Fusionar: "+_ofEsc(n2.nombre_display)+" → "+_ofEsc(nota.nombre_display)+"'>← Fusionar a "+_ofEsc(nota.nombre_display)+"</button>"+
+        "<button class='btn btn-g' onclick=\"notasAdmFusionar('"+claveNorm.replace(/"/g,'').replace(/'/g,"\\'")+"','"+otra.replace(/"/g,'').replace(/'/g,"\\'")+"')\" style='font-size:.65rem' title='Fusionar: "+_ofEsc(nota.nombre_display)+" → "+_ofEsc(n2.nombre_display)+"'>Fusionar a "+_ofEsc(n2.nombre_display)+" →</button>"+
+      "</div>"+
+    "</div>";
+  }).join('');
+  mo.innerHTML =
+    "<div class='md' style='max-width:600px;max-height:90vh;display:flex;flex-direction:column'>"+
+      "<div class='mh'><div class='mtt'>🔁 Posibles duplicadas de "+_ofEsc(nota.nombre_display)+"</div>"+
+        "<button class='btn btn-g' onclick='document.getElementById(\"moNotaDups\").remove()' style='padding:.2rem .5rem'>✕</button>"+
+      "</div>"+
+      "<div class='mb' style='overflow-y:auto'>"+
+        "<div style='font-size:.7rem;color:var(--tx3);background:rgba(196,150,90,.08);border-left:3px solid var(--acc);padding:.5rem .7rem;border-radius:4px;line-height:1.5;margin-bottom:.7rem'>"+
+          "💡 Las notas con nombres muy similares pueden ser la misma. Si son la misma, podés <b>fusionar</b>: la nota origen se renombra a la destino en TODAS las fichas, y se elimina del sistema."+
+        "</div>"+
+        listaHtml+
+      "</div>"+
+    "</div>";
+  document.body.appendChild(mo);
+}
+
+function notasAdmFusionar(claveOrigen, claveDestino){
+  var origen = window._notasAdminCache[claveOrigen];
+  var destino = window._notasAdminCache[claveDestino];
+  if(!origen || !destino){toast('Notas no encontradas','terr');return;}
+  if(!confirm('Fusionar "'+origen.nombre_display+'" (origen, '+origen.count+' usos) → "'+destino.nombre_display+'" (destino, '+destino.count+' usos)\n\n• En las '+origen.count+' fichas que usan "'+origen.nombre_display+'", se reemplaza por "'+destino.nombre_display+'"\n• Las fichas que ya tienen "'+destino.nombre_display+'" no se duplican\n• La foto del destino se mantiene\n\n¿Continuar?')){
+    return;
+  }
+  toast('Fusionando '+origen.count+' fichas...', 'twarn');
+  apiGet('fichas_perfume','select=id,notas_salida,notas_corazon,notas_fondo&limit=2000').then(function(rows){
+    if(!Array.isArray(rows)) throw new Error('No se pudieron cargar fichas');
+    var chain = Promise.resolve();
+    rows.forEach(function(f){
+      var cambios = {};
+      ['notas_salida','notas_corazon','notas_fondo'].forEach(function(campo){
+        var val = f[campo] || '';
+        if(!val) return;
+        var partes = val.split(',').map(function(s){return s.trim();}).filter(Boolean);
+        var nuevas = partes.map(function(notaItem){
+          var keyItem = _notaNormalizar(notaItem);
+          if(keyItem === claveOrigen) return destino.nombre_display;
+          return notaItem;
+        });
+        var seen = {};
+        var dedup = [];
+        nuevas.forEach(function(x){
+          var k = _notaNormalizar(x);
+          if(!seen[k]){seen[k] = true; dedup.push(x);}
+        });
+        var nuevoVal = dedup.join(', ');
+        if(nuevoVal !== val) cambios[campo] = nuevoVal;
+      });
+      if(Object.keys(cambios).length){
+        chain = chain.then(function(){return apiPatch('fichas_perfume', cambios, 'id=eq.'+f.id);});
+      }
+    });
+    // Borrar la entrada de la nota origen en `notas_fotos`
+    chain = chain.then(function(){
+      return apiGet('configuracion','select=valor&clave=eq.notas_fotos&limit=1');
+    }).then(function(res){
+      if(!res || !res[0]) return;
+      var datos = {};
+      try { datos = JSON.parse(res[0].valor || '{}'); } catch(e){}
+      if(datos[claveOrigen]) delete datos[claveOrigen];
+      return apiPatch('configuracion', {valor: JSON.stringify(datos)}, 'clave=eq.notas_fotos');
+    });
+    return chain;
+  }).then(function(){
+    toast('✅ Fusión completa','tok');
+    var mo1 = document.getElementById('moNotaDups');if(mo1) mo1.remove();
+    var mo2 = document.getElementById('moNotaEdit');if(mo2) mo2.remove();
+    window._notasFotos = null;
+    window._notasAdminCache = null;
+    notasAdmCargar();
+  }).catch(function(e){
+    console.error('[notasAdm] fusionar:', e);
+    toast('Error: '+(e.message||''), 'terr');
+  });
 }
 
 </script>
