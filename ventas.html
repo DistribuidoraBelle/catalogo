@@ -2421,6 +2421,58 @@ function _vcConfirmarPedido(clienteId,clienteNombre,accion){
   if(stockInsuf){toast("Stock insuficiente: "+stockInsuf,"terr");return;}
   if(!items.length){toast("Sin productos válidos","twarn");return;}
 
+  // ─── Validación de crédito disponible (solo CC) ───
+  // Antes de continuar, si el cliente tiene CC habilitada y un límite de crédito definido,
+  // verificamos que el pedido no exceda su crédito disponible.
+  return apiGet("clientes","select=cuenta_corriente_habilitada,limite_credito&id=eq."+clienteId+"&limit=1").then(function(rowsCli){
+    if(!Array.isArray(rowsCli)||!rowsCli[0]) return _vcContinuarPedido(clienteId,clienteNombre,accion,items,total,segKey);
+    var cli=rowsCli[0];
+    if(!cli.cuenta_corriente_habilitada || !cli.limite_credito) {
+      // No es CC o no tiene límite: continuar normal
+      return _vcContinuarPedido(clienteId,clienteNombre,accion,items,total,segKey);
+    }
+    var limite=parseFloat(cli.limite_credito)||0;
+    if(limite<=0) return _vcContinuarPedido(clienteId,clienteNombre,accion,items,total,segKey);
+    // Calcular crédito ya usado
+    return apiGet("pedidos_catalogo",
+      "select=total,cobrado_total&cliente_id=eq."+clienteId+
+      "&estado=in.(pendiente,reservado,en_preparacion,en_reparto,cobrado_parcial)"
+    ).then(function(activos){
+      var totalAct=0,totalCob=0;
+      if(Array.isArray(activos)){
+        activos.forEach(function(p){
+          totalAct+=parseFloat(p.total)||0;
+          totalCob+=parseFloat(p.cobrado_total)||0;
+        });
+      }
+      var usado=Math.max(0,totalAct-totalCob);
+      var dispon=limite-usado;
+      // Si "cobrar" al toque, no consume crédito (se paga inmediato)
+      if(accion!=="cobrar" && total > dispon+0.01){
+        // Excede crédito
+        var msg="⚠️ Pedido excede el crédito de "+clienteNombre+"\n\n"+
+          "Crédito total: "+fmt(limite)+"\n"+
+          "Ya usado: "+fmt(usado)+"\n"+
+          "Disponible: "+fmt(Math.max(0,dispon))+"\n"+
+          "Este pedido: "+fmt(total)+"\n"+
+          "Excede por: "+fmt(total-dispon)+"\n\n"+
+          "Opciones:\n"+
+          "• Esperar a que el cliente abone parte de la deuda\n"+
+          "• Reducir el monto del pedido\n"+
+          "• Hacer pedido COBRADO AL TOQUE (no usa crédito)\n\n"+
+          "¿Forzar el pedido igual?";
+        if(!confirm(msg)){
+          return; // Cancelado
+        }
+        // Si el admin/vendedor confirma forzar, continúa
+      }
+      return _vcContinuarPedido(clienteId,clienteNombre,accion,items,total,segKey);
+    });
+  });
+}
+
+// _vcContinuarPedido: continúa el flujo después de validación CC
+function _vcContinuarPedido(clienteId,clienteNombre,accion,items,total,segKey){
   var nroOrden="ORD-"+Math.floor(100000+Math.random()*900000);
   var labelAccion=accion==="cobrar"?"Cobrar al toque":"Reservar para entregar";
   if(!confirm(labelAccion+" - "+fmt(total)+" para "+clienteNombre+"?"))return;
@@ -6280,7 +6332,48 @@ function confirmarReservarPed(){
   if(window._reservandoPed){toast("Espera, procesando...","twarn");return;}
   window._reservandoPed=true;
   var cliente=document.getElementById("resClienteNombre").value.trim();
-  if(!cliente){toast("Ingresa el nombre del cliente","twarn");return;}
+  if(!cliente){toast("Ingresa el nombre del cliente","twarn");window._reservandoPed=false;return;}
+
+  // ─── Validación de crédito CC si hay cliente con CC habilitada ───
+  var clienteIdCC = (typeof _carritoCliente!=='undefined' && _carritoCliente && _carritoCliente.id) ? _carritoCliente.id : null;
+  var esCC = !!(typeof _carritoCliente!=='undefined' && _carritoCliente && _carritoCliente.cuenta_corriente_habilitada);
+  if(clienteIdCC && esCC){
+    var totalEstimado = Object.values(cart).reduce(function(s,i){return s+(i.price*i.qty);},0);
+    apiGet("clientes","select=limite_credito&id=eq."+clienteIdCC+"&limit=1").then(function(rowsCli){
+      var lim = (Array.isArray(rowsCli)&&rowsCli[0]) ? (parseFloat(rowsCli[0].limite_credito)||0) : 0;
+      if(lim<=0){
+        // Sin límite definido: continuar sin chequeo
+        _confirmarReservarPedContinuar();
+        return;
+      }
+      apiGet("pedidos_catalogo",
+        "select=total,cobrado_total&cliente_id=eq."+clienteIdCC+
+        "&estado=in.(pendiente,reservado,en_preparacion,en_reparto,cobrado_parcial)"
+      ).then(function(activos){
+        var totalAct=0,totalCob=0;
+        if(Array.isArray(activos)){
+          activos.forEach(function(p){
+            totalAct+=parseFloat(p.total)||0;
+            totalCob+=parseFloat(p.cobrado_total)||0;
+          });
+        }
+        var dispon = lim - Math.max(0,totalAct-totalCob);
+        if(totalEstimado > dispon+0.01){
+          if(!confirm("⚠️ Pedido excede crédito CC.\n\nDisponible: "+fmt(Math.max(0,dispon))+"\nEste pedido: "+fmt(totalEstimado)+"\nExcede por: "+fmt(totalEstimado-dispon)+"\n\n¿Forzar igual?")){
+            window._reservandoPed=false;
+            return;
+          }
+        }
+        _confirmarReservarPedContinuar();
+      }).catch(function(){_confirmarReservarPedContinuar();});
+    }).catch(function(){_confirmarReservarPedContinuar();});
+    return;
+  }
+  _confirmarReservarPedContinuar();
+}
+
+function _confirmarReservarPedContinuar(){
+  var cliente=document.getElementById("resClienteNombre").value.trim();
   var tel=document.getElementById("resClienteTel").value.trim();
   var nota=document.getElementById("resClienteNota").value.trim();
   var entregaFecha=(document.getElementById("resEntregaFecha")||{}).value||"";

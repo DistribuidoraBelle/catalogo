@@ -7610,18 +7610,24 @@ function _adminCancelarPedido(id){
     if(!Array.isArray(data)||!data.length)return;
     var p=data[0];
     var nroOrden=p.nro_orden||('WEB-'+id);
-    var estabaCobrado=(p.estado==='cobrado'||p.confirmado_cobro);
+    // ── Detectar correctamente si tenía cobros (incluso parciales) ──
+    // Si tenía cobros parciales, ya hay ventas creadas y stock descontado a vendido_david.
+    // Si nunca tuvo cobros, el stock está en reserva y no hay ventas.
+    var teniaCobro = (p.estado==='cobrado' || p.estado==='cobrado_parcial' || p.confirmado_cobro || (parseFloat(p.cobrado_total)||0) > 0);
+    var estabaCobrado=teniaCobro; // Mantener nombre legacy pero con lógica corregida
     var items=[];try{items=typeof p.items==='string'?JSON.parse(p.items):p.items||[];}catch(e){items=[];}
     var promesas=[apiPatch('pedidos_catalogo',{estado:'cancelado'},'id=eq.'+id)];
 
-    // Devolver stock: depende si estaba reservado o cobrado
+    // Devolver stock: depende si estaba reservado o cobrado (incluido parcial)
     if(Array.isArray(items)){
       items.forEach(function(it){
         if(!it.producto_id||it.isDecan)return;
         var qty=parseInt(it.qty)||parseInt(it.cantidad)||1;
         if(estabaCobrado){
+          // Stock estaba en vendido_david → devolver a stock_actual
           promesas.push(patchStockFresco(it.producto_id,{stock_actual:+qty,vendido_david:-qty},'Cancelación pedido '+nroOrden));
         } else {
+          // Stock estaba en reserva → devolver a stock_actual
           promesas.push(patchStockFresco(it.producto_id,{stock_actual:+qty,reserva:-qty},'Cancelación pedido '+nroOrden));
         }
         if(it.isCombo&&it.combo_id){
@@ -7640,7 +7646,7 @@ function _adminCancelarPedido(id){
       });
     }
 
-    // Si estaba cobrado: borrar ventas y limpiar cc_pagos
+    // Si tenía cobro (completo o parcial): borrar ventas y limpiar cc_pagos
     if(estabaCobrado){
       promesas.push(apiDelete('ventas','nro_orden=eq.'+encodeURIComponent(nroOrden)).catch(function(e){console.error('borrar ventas:',e);}));
       promesas.push(apiGet('cc_pagos_aplicaciones','select=id,pago_id&pedido_id=eq.'+id).then(function(apps){
@@ -7678,7 +7684,8 @@ function _adminEliminarPedido(id){
     if(!Array.isArray(data)||!data.length)return;
     var p=data[0];
     var nroOrden=p.nro_orden||('WEB-'+id);
-    var estabaCobrado=(p.estado==='cobrado'||p.confirmado_cobro);
+    // Detectar correctamente si tenía cobros (incluso parciales)
+    var estabaCobrado=(p.estado==='cobrado'||p.estado==='cobrado_parcial'||p.confirmado_cobro||(parseFloat(p.cobrado_total)||0) > 0);
     // Si NO estaba cancelado y tenía stock reservado/vendido, devolverlo antes de borrar
     var promesas=[];
     if(p.estado!=='cancelado'){
@@ -12025,10 +12032,17 @@ function _mgConfirmarCobro(){
   var nroOrden=rec.nro_orden||('COB-'+Math.floor(100000+Math.random()*900000));
   var periodo=periodoActual||'general';
 
+  // ── Escribir AMBOS campos cobrado_parcial + cobrado_total ──
+  // El sistema admin usa cobrado_total, Marcela históricamente usaba cobrado_parcial.
+  // Para evitar inconsistencias, escribimos los dos con el mismo valor.
   var proms=[
     apiPatch('pedidos_catalogo',
-      Object.assign({cobrado_parcial:nuevoCobrado,items_cobrados:JSON.stringify(merged)},
-        esSaldado?{estado:'cobrado',confirmado_cobro:true,confirmado_at:new Date().toISOString()}:{}),
+      Object.assign({
+        cobrado_parcial:nuevoCobrado,
+        cobrado_total:nuevoCobrado,
+        items_cobrados:JSON.stringify(merged)
+      },
+        esSaldado?{estado:'cobrado',confirmado_cobro:true,confirmado_at:new Date().toISOString()}:{estado:'cobrado_parcial'}),
       'id=eq.'+id)
   ];
 
@@ -13193,30 +13207,70 @@ function _admBorrarPago(pagoId, clienteId, clienteNombre){
         var totalP = parseFloat(p.total)||0;
         var patch = { cobrado_total: nuevoCobrado };
         // Decidir nuevo estado
-        if(nuevoCobrado <= 0.01){
+        var quedaSinCobrar = (nuevoCobrado <= 0.01);
+        if(quedaSinCobrar){
           patch.estado = "pendiente";
           patch.cobrado_at = null;
+          patch.confirmado_cobro = false;
+          patch.confirmado_at = null;
         } else if(nuevoCobrado < totalP - 0.01){
           patch.estado = "cobrado_parcial";
           patch.cobrado_at = null;
+          patch.confirmado_cobro = false;
+          patch.confirmado_at = null;
         }
-        // Si el pedido estaba "cobrado" y se revierte completamente, hay que revertir el stock también
-        var debeRevertirStock = (p.estado === "cobrado" || p.estado === "entregado") && nuevoCobrado < totalP - 0.01;
+        // ── Revertir stock + borrar ventas ──
+        // Si el pedido vuelve a "pendiente" (cobro 100% revertido), hay que:
+        //   1. Devolver stock vendido a reserva
+        //   2. Borrar las ventas creadas (el vendedor pierde la venta)
+        // Nota: si queda como cobrado_parcial, el stock SE QUEDA descontado (decisión:
+        // las ventas se generan desde el primer cobro parcial; al revertir un pago
+        // que dejaba al pedido completo, queda en parcial pero las ventas y el stock
+        // descontado se mantienen — porque el pedido sigue cobrándose).
+        var revertirTodo = quedaSinCobrar;
         return apiPatch("pedidos_catalogo", patch, "id=eq."+p.id).then(function(){
-          if(debeRevertirStock){
-            // Devolver vendido_david → reserva (el inverso del cobro)
-            return apiGet("pedidos_catalogo_items","select=producto_id,qty&pedido_id=eq."+p.id).then(function(items){
-              if(!Array.isArray(items)||!items.length) return;
-              var c2 = Promise.resolve();
-              items.forEach(function(it){
-                if(!it.producto_id||!it.qty)return;
+          if(!revertirTodo) return;
+          // 1) Revertir stock — leer items del JSON del pedido (más confiable que tabla aparte)
+          var stockProm = apiGet("pedidos_catalogo","select=items&id=eq."+p.id).then(function(rowsP){
+            if(!Array.isArray(rowsP)||!rowsP[0])return;
+            var pFresh = rowsP[0];
+            var items = [];
+            try { items = typeof pFresh.items==='string' ? JSON.parse(pFresh.items) : (pFresh.items||[]); }
+            catch(e) { items = []; }
+            if(!Array.isArray(items) || !items.length) return;
+            var c2 = Promise.resolve();
+            items.forEach(function(it){
+              if(it.isDecan) return; // decans no tocan stock
+              var qty = parseInt(it.qty)||parseInt(it.cantidad)||1;
+              // Producto normal
+              if(it.producto_id && !it.isCombo){
                 c2 = c2.then(function(){
-                  return patchStockFresco(it.producto_id, {reserva:+it.qty, vendido_david:-it.qty}, "Reverso pago borrado pedido "+(p.nro_orden||"#"+p.id));
+                  return patchStockFresco(it.producto_id, {reserva:+qty, vendido_david:-qty}, "Reverso pago borrado pedido "+(p.nro_orden||"#"+p.id));
                 });
-              });
-              return c2;
+              }
+              // Combo: revertir stock de cada producto del combo
+              if(it.isCombo && it.combo_id){
+                c2 = c2.then(function(){
+                  return apiGet('combo_items','select=producto_id,cantidad&combo_id=eq.'+it.combo_id).then(function(ci){
+                    if(!Array.isArray(ci))return;
+                    var c3 = Promise.resolve();
+                    ci.filter(function(x){return x.producto_id;}).forEach(function(cit){
+                      var cTot = (cit.cantidad||1)*qty;
+                      c3 = c3.then(function(){
+                        return patchStockFresco(cit.producto_id, {reserva:+cTot, vendido_david:-cTot}, "Reverso combo pago borrado "+(p.nro_orden||"#"+p.id));
+                      });
+                    });
+                    return c3;
+                  });
+                });
+              }
             });
-          }
+            return c2;
+          });
+          // 2) Borrar ventas asociadas
+          var nroOrden = p.nro_orden || ("#"+p.id);
+          var ventasProm = apiDelete("ventas","nro_orden=eq."+encodeURIComponent(nroOrden)).catch(function(e){console.error("borrar ventas:",e);});
+          return Promise.all([stockProm, ventasProm]);
         });
       });
     });
@@ -14102,21 +14156,84 @@ function _admFIFOConfirmarPago(clienteId){
     });
 
     // Después de procesar TODAS las aplicaciones, ahora sí pedidosCobrados está completo
+    // Para cada pedido completado: descontar stock y crear ventas (solo si NO existen aún).
     chain = chain.then(function(){
       var stockChain = Promise.resolve();
       pedidosCobrados.forEach(function(p){
+        var nroOrden = p.nro_orden || ("WEB-"+p.id);
+        var fecha = (document.getElementById("_admFIFOFecha")||{value:""}).value || new Date().toISOString().slice(0,10);
         stockChain = stockChain.then(function(){
-          return apiGet("pedidos_catalogo_items","select=producto_id,qty&pedido_id=eq."+p.id);
-        }).then(function(items){
-          if(!Array.isArray(items)||!items.length) return;
-          var c2 = Promise.resolve();
-          items.forEach(function(it){
-            if(!it.producto_id || !it.qty) return;
-            c2 = c2.then(function(){
-              return patchStockFresco(it.producto_id, {reserva:-it.qty, vendido_david:+it.qty}, "Cobro CC FIFO admin pedido "+(p.nro_orden||"#"+p.id));
+          // ── PROTECCIÓN CONTRA DOBLE DESCUENTO ──
+          // Si el pedido ya tiene ventas registradas (porque tuvo cobro parcial previo
+          // por el modal directo en _adminGuardarCobro), el stock YA se descontó.
+          return apiGet("ventas","select=id&nro_orden=eq."+encodeURIComponent(nroOrden)+"&limit=1");
+        }).then(function(ventasExistentes){
+          var yaTeniaVentas = Array.isArray(ventasExistentes) && ventasExistentes.length;
+          if(yaTeniaVentas){
+            // Ya hay ventas → stock ya descontado y ventas creadas. No tocar nada.
+            console.log('[cobros FIFO] pedido '+p.id+' ya tenía ventas — sin doble descuento');
+            return;
+          }
+          // No hay ventas: crear ventas + descontar stock (es la primera vez).
+          // Cargar items del pedido (la versión JSON tiene todos: combos, decans, productos).
+          return apiGet("pedidos_catalogo","select=items&id=eq."+p.id).then(function(rowsP){
+            if(!Array.isArray(rowsP)||!rowsP[0])return;
+            var pedidoFresh = rowsP[0];
+            var items = [];
+            try { items = typeof pedidoFresh.items === 'string' ? JSON.parse(pedidoFresh.items) : (pedidoFresh.items||[]); }
+            catch(e) { items = []; }
+            if(!Array.isArray(items)) return;
+            var c2 = Promise.resolve();
+            items.forEach(function(it){
+              c2 = c2.then(function(){
+                // COMBOS
+                if(it.isCombo){
+                  return apiPost('ventas',{
+                    vendedor_id: vendedorAcreditado, producto_id: null, producto_nombre: it.nombre,
+                    cantidad: it.qty||1, precio_unitario: it.precio||0, segmento: 'combo',
+                    total: it.total||0, estado: 'confirmada', origen: 'catalogo',
+                    nro_orden: nroOrden, periodo: periodoActual, forma_cobro: forma
+                  }).then(function(){
+                    if(!it.combo_id) return;
+                    return apiGet('combo_items','select=producto_id,cantidad&combo_id=eq.'+it.combo_id).then(function(ci){
+                      if(!Array.isArray(ci))return;
+                      var c3 = Promise.resolve();
+                      ci.filter(function(x){return x.producto_id;}).forEach(function(cit){
+                        var cantTot = (cit.cantidad||1)*(it.qty||1);
+                        c3 = c3.then(function(){
+                          return patchStockFresco(cit.producto_id,{reserva:-cantTot,vendido_david:+cantTot},'Cobro CC FIFO combo '+nroOrden);
+                        });
+                      });
+                      return c3;
+                    });
+                  });
+                }
+                // DECAN o sin producto_id: solo crear venta sin tocar stock
+                if(it.isDecan || !it.producto_id){
+                  if(it.isDecan){
+                    return apiPost('ventas',{
+                      vendedor_id: vendedorAcreditado, producto_id: it.producto_id||null, producto_nombre: it.nombre,
+                      cantidad: it.qty||1, precio_unitario: it.precio||0, segmento: 'decan',
+                      total: it.total||0, estado: 'confirmada', origen: 'catalogo',
+                      nro_orden: nroOrden, periodo: periodoActual, forma_cobro: forma
+                    });
+                  }
+                  return;
+                }
+                // PRODUCTO NORMAL: descontar stock + crear venta
+                return patchStockFresco(it.producto_id,{reserva:-(it.qty||1),vendido_david:+(it.qty||1)},'Cobro CC FIFO '+nroOrden)
+                  .then(function(){
+                    return apiPost('ventas',{
+                      vendedor_id: vendedorAcreditado, producto_id: it.producto_id, producto_nombre: it.nombre,
+                      cantidad: it.qty||1, precio_unitario: it.precio||0, segmento: it.segmento||'pi',
+                      total: it.total||0, estado: 'confirmada', origen: 'catalogo',
+                      nro_orden: nroOrden, periodo: periodoActual, forma_cobro: forma
+                    });
+                  });
+              });
             });
+            return c2;
           });
-          return c2;
         });
       });
       return stockChain;

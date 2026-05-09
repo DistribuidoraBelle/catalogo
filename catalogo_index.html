@@ -2580,6 +2580,97 @@ function sendWA(){
     }
   }
 
+  // ─── Validación de crédito disponible (solo CC) ───
+  // Si el cliente tiene CC habilitada y un límite de crédito definido,
+  // NO puede hacer pedidos que excedan su crédito disponible.
+  if(_catCliente.cuenta_corriente_habilitada){
+    var limiteCredito = parseFloat(_catCliente.limite_credito) || 0;
+    if(limiteCredito > 0){
+      // Calcular crédito ya usado: total de pedidos activos no completamente cobrados
+      // Hacemos un fetch sincrónico con apiGet — flujo: validar crédito antes de continuar
+      apiGet("pedidos_catalogo",
+        "select=total,cobrado_total,estado&cliente_id=eq."+_catCliente.id+
+        "&estado=in.(pendiente,reservado,en_preparacion,en_reparto,cobrado_parcial)"
+      ).then(function(pedActivos){
+        var totalActivos = 0, totalCobrado = 0;
+        if(Array.isArray(pedActivos)){
+          pedActivos.forEach(function(p){
+            totalActivos += parseFloat(p.total) || 0;
+            totalCobrado += parseFloat(p.cobrado_total) || 0;
+          });
+        }
+        var creditoUsado = Math.max(0, totalActivos - totalCobrado);
+        var creditoDisponible = limiteCredito - creditoUsado;
+        // Total del nuevo pedido
+        var totalNuevoPedido = items.reduce(function(s, it){
+          return s + (parseFloat(it.precio||0) * parseInt(it.qty||0));
+        }, 0);
+        if(totalNuevoPedido > creditoDisponible + 0.01){
+          // Cartel detallado bloqueando el pedido
+          _catModalCreditoExcedido({
+            credito_total: limiteCredito,
+            credito_usado: creditoUsado,
+            credito_disponible: Math.max(0, creditoDisponible),
+            total_pedido: totalNuevoPedido,
+            excede_por: totalNuevoPedido - creditoDisponible
+          });
+          return;
+        }
+        // Pasó la validación: continuar con el flujo normal
+        _sendWAContinuar();
+      }).catch(function(e){
+        console.error("[CC] error validando crédito:", e);
+        // Si falla la consulta, dejar pasar (no bloquear por error técnico)
+        _sendWAContinuar();
+      });
+      return; // detener flujo aquí — _sendWAContinuar() lo retoma
+    }
+  }
+  // No tiene CC habilitada o no tiene límite: flujo normal
+  _sendWAContinuar();
+}
+
+// ════════════════════════════════════════════════════════════════
+// Cartel modal: crédito excedido (CC)
+// Muestra al cliente cuánto crédito tiene disponible y por cuánto se excede
+// ════════════════════════════════════════════════════════════════
+function _catModalCreditoExcedido(info){
+  var existing = document.getElementById('_catMoCredito');
+  if(existing) existing.remove();
+  var mo = document.createElement('div');
+  mo.id = '_catMoCredito';
+  mo.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,0.55);z-index:99999;display:flex;align-items:center;justify-content:center;padding:1rem';
+  mo.innerHTML =
+    '<div style="background:#fff;border-radius:14px;padding:1.5rem;max-width:420px;width:100%;box-shadow:0 20px 60px rgba(0,0,0,0.3)">'+
+      '<div style="text-align:center;margin-bottom:1rem">'+
+        '<div style="font-size:2.5rem;margin-bottom:.4rem">⚠️</div>'+
+        '<div style="font-size:1.05rem;font-weight:700;color:#c5443a;line-height:1.3">Tu pedido excede el crédito disponible</div>'+
+      '</div>'+
+      '<div style="background:#fef9e8;border:1px solid #d4a830;border-radius:10px;padding:.85rem 1rem;margin-bottom:1rem;font-size:.78rem;line-height:1.5">'+
+        '<div style="display:flex;justify-content:space-between;margin-bottom:.3rem"><span style="color:#7a5a1a">👑 Tu crédito total:</span><b style="color:#7a5a1a">'+_catFmtMoney(info.credito_total)+'</b></div>'+
+        '<div style="display:flex;justify-content:space-between;margin-bottom:.3rem"><span style="color:#7a5a1a">💳 Ya usado en pedidos activos:</span><b style="color:#7a5a1a">'+_catFmtMoney(info.credito_usado)+'</b></div>'+
+        '<div style="display:flex;justify-content:space-between;margin-bottom:.3rem;padding-top:.3rem;border-top:1px solid #d4a83055"><span style="color:#5a8a4a;font-weight:700">✅ Crédito disponible ahora:</span><b style="color:#5a8a4a">'+_catFmtMoney(info.credito_disponible)+'</b></div>'+
+        '<div style="display:flex;justify-content:space-between;margin-top:.4rem;padding-top:.3rem;border-top:1px solid #d4a83055"><span style="color:#444">🛒 Este pedido:</span><b style="color:#444">'+_catFmtMoney(info.total_pedido)+'</b></div>'+
+        '<div style="display:flex;justify-content:space-between;margin-top:.3rem"><span style="color:#c5443a;font-weight:700">⚠️ Excede por:</span><b style="color:#c5443a">'+_catFmtMoney(info.excede_por)+'</b></div>'+
+      '</div>'+
+      '<div style="font-size:.78rem;color:#444;line-height:1.5;margin-bottom:1rem">Para hacer este pedido podés:</div>'+
+      '<ul style="font-size:.75rem;color:#555;line-height:1.6;padding-left:1.2rem;margin:0 0 1rem">'+
+        '<li>Pagar parte de tu deuda actual</li>'+
+        '<li>Reducir el monto del pedido</li>'+
+        '<li>Contactar a tu vendedor para revisar el límite</li>'+
+      '</ul>'+
+      '<div style="display:flex;gap:.5rem">'+
+        '<button onclick="document.getElementById(\'_catMoCredito\').remove()" style="flex:1;padding:.7rem;background:#eee;border:none;border-radius:8px;font-weight:600;cursor:pointer;font-size:.85rem">Entendido</button>'+
+      '</div>'+
+    '</div>';
+  document.body.appendChild(mo);
+}
+
+// _sendWAContinuar: flujo después de validaciones (extraído de sendWA)
+function _sendWAContinuar(){
+  var items=Object.values(cart);
+  if(!items.length) return;
+
   // Hay sesión: chequear que tenga al menos una dirección Y un teléfono
   apiGet("clientes_direcciones","select=*&cliente_id=eq."+_catCliente.id+"&order=es_principal.desc,created_at.desc").then(function(rows){
     var dirs = Array.isArray(rows) ? rows : [];
