@@ -30692,12 +30692,23 @@ function fichaGuardarFotoNota(notaNombre, fotoUrl){
   }).catch(function(e){toast('Error: '+e.message,'terr');});
 }
 
-// Cargar el mapa de fotos de notas (cache)
+// Cargar el mapa de fotos de notas (cache) — tolerante a claves viejas con tildes
 function fichaCargarNotasFotos(cb){
   if(window._notasFotos){cb(window._notasFotos);return;}
   apiGet('configuracion','select=valor&clave=eq.notas_fotos&limit=1').then(function(res){
-    try{window._notasFotos=JSON.parse((res&&res[0])?res[0].valor:'{}');}catch(e){window._notasFotos={};}
-    cb(window._notasFotos);
+    var raw = {};
+    try{raw=JSON.parse((res&&res[0])?res[0].valor:'{}');}catch(e){raw={};}
+    // Construir mapa tolerante: cada clave se re-normaliza para que matchee
+    // independientemente de si fue guardada con o sin tildes
+    var fotos = {};
+    Object.keys(raw).forEach(function(k){
+      var nKey = (k||'').trim().toLowerCase()
+        .normalize('NFD').replace(/[\u0300-\u036f]/g,'')
+        .replace(/[^a-z0-9]/g,' ').replace(/\s+/g,' ').trim();
+      if(nKey && !fotos[nKey]) fotos[nKey] = raw[k];
+    });
+    window._notasFotos = fotos;
+    cb(fotos);
   }).catch(function(){window._notasFotos={};cb({});});
 }
 
@@ -30708,7 +30719,11 @@ function fichaRenderNotasChips(containerId, notasStr, tipo){
   fichaCargarNotasFotos(function(fotos){
     var chips=notasStr.split(',').map(function(n){return n.trim();}).filter(Boolean);
     cont.innerHTML=chips.map(function(nota){
-      var key=nota.toLowerCase();
+      // Normalizar IGUAL que se guarda (sin tildes, sin caracteres especiales).
+      // Si solo usamos toLowerCase, "Ámbar" busca por "ámbar" pero está guardado como "ambar".
+      var key=(nota||'').trim().toLowerCase()
+        .normalize('NFD').replace(/[\u0300-\u036f]/g,'')
+        .replace(/[^a-z0-9]/g,' ').replace(/\s+/g,' ').trim();
       var foto=fotos[key];
       var chipStyle='display:inline-flex;align-items:center;gap:.3rem;padding:.2rem .5rem .2rem .2rem;border-radius:20px;font-size:.68rem;cursor:pointer;border:1px solid var(--bd);background:var(--sur2);margin:.15rem;transition:all .15s';
       var fotoHtml=foto
@@ -30822,8 +30837,34 @@ function notasAdmCargar(){
     apiGet('configuracion','select=valor&clave=eq.notas_fotos&limit=1')
   ]).then(function(r){
     var fichas = Array.isArray(r[0]) ? r[0] : [];
+    var fotosRaw = {};
+    try { fotosRaw = JSON.parse((r[1] && r[1][0]) ? r[1][0].valor : '{}'); } catch(e){}
+
+    // ── COMPATIBILIDAD CON CLAVES VIEJAS ──
+    // Versiones antiguas guardaban las claves con tildes (ej: "ámbar").
+    // La versión actual usa sin tildes (ej: "ambar").
+    // Construimos un mapa "clave_normalizada → foto" tolerante a ambos formatos.
     var fotos = {};
-    try { fotos = JSON.parse((r[1] && r[1][0]) ? r[1][0].valor : '{}'); } catch(e){}
+    var clavesViejasDetectadas = {}; // {claveNueva: claveVieja} para migrar después
+    Object.keys(fotosRaw).forEach(function(k){
+      var keyNorm = _notaNormalizar(k);
+      if(!keyNorm) return;
+      if(!fotos[keyNorm]){
+        fotos[keyNorm] = fotosRaw[k];
+        if(k !== keyNorm){
+          // Es una clave vieja con tildes/mayúsculas → marcarla para migración
+          clavesViejasDetectadas[keyNorm] = k;
+        }
+      }
+    });
+
+    // Si detectamos claves viejas, migrar a formato normalizado en background
+    var clavesViejas = Object.keys(clavesViejasDetectadas);
+    if(clavesViejas.length){
+      console.log('[notasAdm] migrando '+clavesViejas.length+' claves viejas a formato normalizado...');
+      _notasAdmMigrarClavesViejas(fotosRaw, clavesViejasDetectadas);
+    }
+
     // Indexar todas las notas: {nombreNorm: {display, foto, count, ejemplos}}
     var mapa = {};
     fichas.forEach(function(f){
@@ -30858,6 +30899,28 @@ function notasAdmCargar(){
     console.error('[notasAdm] cargar:', e);
     if(cont) cont.innerHTML = "<div class='empty' style='padding:2rem;color:var(--red)'>Error: "+(e.message||'')+
       ". <button class='btn btn-g' onclick='notasAdmCargar()' style='margin-left:.5rem'>Reintentar</button></div>";
+  });
+}
+
+// Migrar claves viejas (con tildes/mayúsculas) a formato normalizado
+function _notasAdmMigrarClavesViejas(fotosRaw, clavesViejasDetectadas){
+  var datosNuevos = {};
+  // Recorrer y normalizar TODAS las claves
+  Object.keys(fotosRaw).forEach(function(k){
+    var keyNorm = _notaNormalizar(k);
+    if(!keyNorm) return;
+    // Si ya hay una versión normalizada, mantener esa (es la más "moderna")
+    // Si solo hay versión vieja, migrarla
+    if(!datosNuevos[keyNorm]){
+      datosNuevos[keyNorm] = fotosRaw[k];
+    }
+  });
+  // Guardar
+  apiPatch('configuracion', {valor: JSON.stringify(datosNuevos)}, 'clave=eq.notas_fotos').then(function(){
+    console.log('[notasAdm] ✅ migración de claves viejas completada ('+Object.keys(datosNuevos).length+' claves normalizadas)');
+    window._notasFotos = null; // invalidar cache global
+  }).catch(function(e){
+    console.warn('[notasAdm] error migrando claves viejas:', e);
   });
 }
 
@@ -31103,9 +31166,42 @@ function notasAdmGuardar(claveOriginal){
     _notasAdmGuardarFotoSolo(claveOriginal, nuevaFoto);
     return;
   }
-  // Cambio de nombre: hay que actualizar las fichas. Cargar TODAS las fichas que tienen esa nota.
-  toast('Actualizando '+nota.count+' fichas...', 'twarn');
-  apiGet('fichas_perfume','select=id,notas_salida,notas_corazon,notas_fondo&limit=2000').then(function(rows){
+  // Cambio de nombre: hay que actualizar las fichas.
+  // ── INTENTO 1: usar función SQL `notas_fusionar` (atómica, ~1 segundo) ──
+  toast('Renombrando '+nota.count+' fichas...', 'twarn');
+  apiPost('rpc/notas_fusionar', {
+    p_clave_origen: claveOriginal,
+    p_clave_destino: claveNueva,
+    p_nombre_destino: nuevoNombre
+  }).then(function(res){
+    var info = (Array.isArray(res) && res[0]) ? res[0] : res;
+    var actualizadas = (info && typeof info.fichas_actualizadas !== 'undefined') ? info.fichas_actualizadas : nota.count;
+    // Si además cambió la foto, actualizarla aparte
+    if(cambioFoto){
+      return _notasAdmActualizarConfigFotos(null, claveNueva, nuevaFoto).then(function(){return actualizadas;});
+    }
+    return actualizadas;
+  }).then(function(actualizadas){
+    toast('✅ '+actualizadas+' fichas actualizadas','tok');
+    var mo = document.getElementById('moNotaEdit');
+    if(mo) mo.remove();
+    window._notasFotos = null;
+    window._notasAdminCache = null;
+    notasAdmCargar();
+  }).catch(function(e){
+    console.warn('[notasAdm] RPC notas_fusionar falló, usando fallback:', e);
+    // ── FALLBACK: paralelización en chunks ──
+    _notasAdmGuardarManualFallback(claveOriginal, claveNueva, nuevoNombre, nuevaFoto, cambioFoto, nota);
+  });
+}
+
+// FALLBACK: rename manual con paralelización (sin función SQL)
+function _notasAdmGuardarManualFallback(claveOriginal, claveNueva, nuevoNombre, nuevaFoto, cambioFoto, nota){
+  toast('⚠️ Función SQL no instalada, usando método lento...', 'twarn');
+  var primeraPalabra = (claveOriginal.split(' ')[0] || claveOriginal);
+  var patronBusq = encodeURIComponent('*'+primeraPalabra+'*');
+  var orFilter = "or=(notas_salida.ilike."+patronBusq+",notas_corazon.ilike."+patronBusq+",notas_fondo.ilike."+patronBusq+")";
+  apiGet('fichas_perfume','select=id,notas_salida,notas_corazon,notas_fondo&'+orFilter+'&limit=2000').then(function(rows){
     if(!Array.isArray(rows)) throw new Error('No se pudieron cargar fichas');
     var pendientes = [];
     rows.forEach(function(f){
@@ -31119,7 +31215,6 @@ function notasAdmGuardar(claveOriginal){
           if(keyItem === claveOriginal) return nuevoNombre;
           return notaItem;
         });
-        // Deduplicar manteniendo orden
         var seen = {};
         var dedup = [];
         nuevas.forEach(function(x){
@@ -31137,29 +31232,41 @@ function notasAdmGuardar(claveOriginal){
       toast('Nada para actualizar','twarn');
       return;
     }
-    // Aplicar patches en cadena
-    var chain = Promise.resolve();
-    pendientes.forEach(function(p){
-      chain = chain.then(function(){
-        return apiPatch('fichas_perfume', p.cambios, 'id=eq.'+p.id);
-      });
-    });
-    return chain.then(function(){
-      // Actualizar `configuracion.notas_fotos`
+    if(pendientes.length){
+      toast('Actualizando '+pendientes.length+' fichas en paralelo...', 'twarn');
+    }
+    return _notasAdmPatchesEnChunks(pendientes, 12).then(function(){
       return _notasAdmActualizarConfigFotos(claveOriginal, claveNueva, nuevaFoto);
     });
   }).then(function(){
     toast('✅ '+nota.count+' fichas actualizadas','tok');
     var mo = document.getElementById('moNotaEdit');
     if(mo) mo.remove();
-    // Invalidar cache y recargar
     window._notasFotos = null;
     window._notasAdminCache = null;
     notasAdmCargar();
   }).catch(function(e){
-    console.error('[notasAdm] guardar:', e);
+    console.error('[notasAdm] guardar fallback:', e);
     toast('Error: '+(e.message||''), 'terr');
   });
+}
+
+// Helper: aplicar patches en paralelo en chunks de N
+// Esto evita golpear al servidor con miles de requests simultáneos pero saca
+// muy buen throughput vs hacer uno por uno secuencial.
+function _notasAdmPatchesEnChunks(pendientes, tamañoChunk){
+  var chunkSize = tamañoChunk || 10;
+  var idx = 0;
+  function siguienteChunk(){
+    if(idx >= pendientes.length) return Promise.resolve();
+    var slice = pendientes.slice(idx, idx + chunkSize);
+    idx += chunkSize;
+    var promesas = slice.map(function(p){
+      return apiPatch('fichas_perfume', p.cambios, 'id=eq.'+p.id);
+    });
+    return Promise.all(promesas).then(siguienteChunk);
+  }
+  return siguienteChunk();
 }
 
 function _notasAdmGuardarFotoSolo(clave, nuevaFoto){
@@ -31266,9 +31373,38 @@ function notasAdmFusionar(claveOrigen, claveDestino){
     return;
   }
   toast('Fusionando '+origen.count+' fichas...', 'twarn');
-  apiGet('fichas_perfume','select=id,notas_salida,notas_corazon,notas_fondo&limit=2000').then(function(rows){
+
+  // ── INTENTO 1: usar función SQL `notas_fusionar` (atómica, ~1 segundo) ──
+  apiPost('rpc/notas_fusionar', {
+    p_clave_origen: claveOrigen,
+    p_clave_destino: claveDestino,
+    p_nombre_destino: destino.nombre_display
+  }).then(function(res){
+    var info = (Array.isArray(res) && res[0]) ? res[0] : res;
+    var actualizadas = (info && typeof info.fichas_actualizadas !== 'undefined') ? info.fichas_actualizadas : '?';
+    toast('✅ Fusión completa — '+actualizadas+' fichas actualizadas','tok');
+    var mo1 = document.getElementById('moNotaDups');if(mo1) mo1.remove();
+    var mo2 = document.getElementById('moNotaEdit');if(mo2) mo2.remove();
+    window._notasFotos = null;
+    window._notasAdminCache = null;
+    notasAdmCargar();
+  }).catch(function(e){
+    console.warn('[notasAdm] RPC notas_fusionar falló, usando fallback manual:', e);
+    // ── FALLBACK: si la función SQL no está instalada, usar el método antiguo ──
+    _notasAdmFusionarManualFallback(claveOrigen, claveDestino, origen, destino);
+  });
+}
+
+// FALLBACK: fusión manual con paralelización por chunks
+function _notasAdmFusionarManualFallback(claveOrigen, claveDestino, origen, destino){
+  toast('⚠️ Función SQL no instalada, usando método lento (puede tardar)...', 'twarn');
+  // Filtrar server-side por la primera palabra de la clave origen (case-insensitive)
+  var primeraPalabra = (claveOrigen.split(' ')[0] || claveOrigen);
+  var patronBusq = encodeURIComponent('*'+primeraPalabra+'*');
+  var orFilter = "or=(notas_salida.ilike."+patronBusq+",notas_corazon.ilike."+patronBusq+",notas_fondo.ilike."+patronBusq+")";
+  apiGet('fichas_perfume','select=id,notas_salida,notas_corazon,notas_fondo&'+orFilter+'&limit=2000').then(function(rows){
     if(!Array.isArray(rows)) throw new Error('No se pudieron cargar fichas');
-    var chain = Promise.resolve();
+    var pendientes = [];
     rows.forEach(function(f){
       var cambios = {};
       ['notas_salida','notas_corazon','notas_fondo'].forEach(function(campo){
@@ -31290,11 +31426,20 @@ function notasAdmFusionar(claveOrigen, claveDestino){
         if(nuevoVal !== val) cambios[campo] = nuevoVal;
       });
       if(Object.keys(cambios).length){
-        chain = chain.then(function(){return apiPatch('fichas_perfume', cambios, 'id=eq.'+f.id);});
+        pendientes.push({id: f.id, cambios: cambios});
       }
     });
-    // Borrar la entrada de la nota origen en `notas_fotos`
-    chain = chain.then(function(){
+    if(!pendientes.length){
+      return apiGet('configuracion','select=valor&clave=eq.notas_fotos&limit=1').then(function(res){
+        if(!res || !res[0]) return;
+        var datos = {};
+        try { datos = JSON.parse(res[0].valor || '{}'); } catch(e){}
+        if(datos[claveOrigen]) delete datos[claveOrigen];
+        return apiPatch('configuracion', {valor: JSON.stringify(datos)}, 'clave=eq.notas_fotos');
+      });
+    }
+    toast('Procesando '+pendientes.length+' fichas en paralelo...', 'twarn');
+    return _notasAdmPatchesEnChunks(pendientes, 12).then(function(){
       return apiGet('configuracion','select=valor&clave=eq.notas_fotos&limit=1');
     }).then(function(res){
       if(!res || !res[0]) return;
@@ -31303,7 +31448,6 @@ function notasAdmFusionar(claveOrigen, claveDestino){
       if(datos[claveOrigen]) delete datos[claveOrigen];
       return apiPatch('configuracion', {valor: JSON.stringify(datos)}, 'clave=eq.notas_fotos');
     });
-    return chain;
   }).then(function(){
     toast('✅ Fusión completa','tok');
     var mo1 = document.getElementById('moNotaDups');if(mo1) mo1.remove();
@@ -31312,7 +31456,7 @@ function notasAdmFusionar(claveOrigen, claveDestino){
     window._notasAdminCache = null;
     notasAdmCargar();
   }).catch(function(e){
-    console.error('[notasAdm] fusionar:', e);
+    console.error('[notasAdm] fusionar fallback:', e);
     toast('Error: '+(e.message||''), 'terr');
   });
 }
