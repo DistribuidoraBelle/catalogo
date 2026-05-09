@@ -1011,12 +1011,19 @@ function loadProds(){
       window._catPaneles=Array.isArray(pr[0])?pr[0]:[];
       window._catPanelesLoading=false;
       if(Array.isArray(pr[1])&&pr[1].length){pestanasCatalogo=pr[1];buildTabs();}
-      // Indexar ofertas y campañas
-      window._ofertas=Array.isArray(pr[2])?pr[2]:[];
+      // Indexar ofertas y campañas — solo conservar ofertas cuya campaña esté activa
+      var campAct={};
       window._ofertaCampanias=Array.isArray(pr[3])?pr[3]:[];
+      window._ofertaCampanias.forEach(function(c){campAct[c.id]=true;});
+      var todasOfertas=Array.isArray(pr[2])?pr[2]:[];
+      window._ofertas=todasOfertas.filter(function(o){
+        if(!o.campania_id) return true;       // oferta individual: pasa
+        return !!campAct[o.campania_id];       // oferta de campaña: solo si la campaña está activa
+      });
       window._ofertaCampaniaProductos={};
       if(Array.isArray(pr[4])){
         pr[4].forEach(function(rel){
+          if(!campAct[rel.campania_id]) return;  // ignorar productos de campañas inactivas
           if(!window._ofertaCampaniaProductos[rel.campania_id])
             window._ofertaCampaniaProductos[rel.campania_id]=[];
           window._ofertaCampaniaProductos[rel.campania_id].push(rel.producto_id);
@@ -1103,6 +1110,8 @@ function ofertaParaProducto(prodId){
   var ind=window._ofertas.find(function(o){return o.producto_id===prodId&&vigente(o);});
   if(ind)return ind;
   // 2. Oferta de campaña
+  // NOTA: si dos campañas activas cubren el mismo producto, devuelve la primera encontrada.
+  // Es un edge case raro — en producción evitarlo desde el admin.
   var camps=window._ofertaCampaniaProductos||{};
   var campOferta=window._ofertas.find(function(o){
     if(!o.campania_id||!vigente(o))return false;
@@ -2010,9 +2019,10 @@ if(!nostock&&r.decan>0&&p.precio_decan!==-1){
   var _etBadge=_etiq?"<div style='position:absolute;top:-1px;left:10px;z-index:5;background:"+_etBg+";color:#fff;font-size:.5rem;font-weight:700;letter-spacing:.1em;padding:.14rem .42rem;border-radius:0 0 5px 5px;text-transform:uppercase;white-space:nowrap;box-shadow:0 2px 5px rgba(0,0,0,.3)'>"+_etiq+"</div>":"";
 
   // Badge de oferta (arriba a la derecha) — más prominente que la etiqueta normal
+  // Si no hay stock, NO mostrar oferta (sería confuso ofrecer algo que no se puede vender).
   var _ofertaBadge="";
   var _cardOfertaStyle="";
-  if(_hasOferta){
+  if(_hasOferta && !nostock){
     var lblOferta=_oferta.etiqueta||"";
     if(!lblOferta){
       // Generar etiqueta automática según tipo
@@ -2130,8 +2140,33 @@ function addCart(id){
   var r=calcP(p);
   var totalUnits=getCartTotalUnits()+st.qty-(cart[id]&&!cart[id].isDecan?cart[id].qty:0);
   var _puA=p.precio_pestana||0;
-  var seg=_puA>0?'pi':getBestSeg(totalUnits,r);
-  var price=_puA>0?_puA:(r[seg]||r.pi);
+  // ── Prioridad: oferta > precio_pestana > precios normales ──
+  // Si hay oferta vigente, IGNORAR precio_pestana (la oferta es más específica/temporal).
+  // Sin oferta, si el producto tiene precio único (precio_pestana), usar ese.
+  // Si no, usar el precio según tramo (x10/x3/x1).
+  var hayOferta = !!r.oferta;
+  var seg, price;
+  if(hayOferta){
+    seg=getBestSeg(totalUnits,r);
+    price=r[seg]||r.pi;
+    // ── Multi x menos (ej: 2x1, 3x2) ──
+    // El precio unitario "efectivo" se ajusta en función de cuántas unidades lleva el cliente.
+    // Ejemplo 2x1: por cada 2 unidades, paga 1 → precio unitario efectivo = price * (paga/lleva).
+    // Pero solo si lleva al menos `multi_lleva` unidades.
+    if(r.oferta_tipo==='multixmenos' && r.multi_lleva && r.multi_paga && st.qty >= r.multi_lleva){
+      // Calcular cuánto paga realmente
+      var grupos = Math.floor(st.qty / r.multi_lleva);     // grupos completos (ej: 4 unidades en 2x1 = 2 grupos)
+      var resto  = st.qty - (grupos * r.multi_lleva);      // unidades sueltas que pagan precio normal
+      var totalPagar = (grupos * r.multi_paga * price) + (resto * price);
+      // Promedio para guardar como precio unitario en el carrito
+      price = Math.round(totalPagar / st.qty);
+    }
+  } else if(_puA>0){
+    seg='pi';price=_puA;
+  } else {
+    seg=getBestSeg(totalUnits,r);
+    price=r[seg]||r.pi;
+  }
   // Snapshot del precio: si la oferta venciera mientras el cliente tiene el producto en
   // el carrito, queremos respetar el precio que vio al agregarlo (decisión de Ger).
   var ofertaSnapshot=null;
@@ -4432,8 +4467,46 @@ function _renderUnPanel(containerEl, panelKey, dests, bgImg, _ca, _cn, _cp, _cf,
     var pm=r.pm||0,pe=r.pe||0,pi=r.pi||0;
     // Si el cliente tiene CC habilitada, mostrar el panel con estilo VIP
     var _isCC = !!(typeof _catCliente!=="undefined" && _catCliente && _catCliente.cuenta_corriente_habilitada && pm);
+    // ── Oferta vigente ──
+    var _hasOf = !!(r.oferta && !r.oferta_descartada_por_cc);
+    var _ofLabel = '';
+    if(_hasOf){
+      _ofLabel = r.oferta.etiqueta || '';
+      if(!_ofLabel){
+        if(r.oferta_tipo==='descuento_pct' && r.descuento_pct) _ofLabel = Math.round(r.descuento_pct)+'% OFF';
+        else if(r.oferta_tipo==='precio_unico') _ofLabel = 'OFERTA';
+        else if(r.oferta_tipo==='x10_sin_minimo') _ofLabel = 'PRECIO MAYOR';
+        else if(r.oferta_tipo==='x3_sin_minimo') _ofLabel = 'PRECIO X3';
+        else if(r.oferta_tipo==='multixmenos' && r.multi_lleva && r.multi_paga) _ofLabel = r.multi_lleva+'x'+r.multi_paga;
+        else _ofLabel = 'OFERTA';
+      }
+    }
     var ph='<div class="dest-chip-prices">';
-    if(_isCC){
+    if(_hasOf && r.oferta_tipo==='precio_unico'){
+      // Precio único en oferta — un solo recuadro destacado
+      var orig = r.pi_orig || r.pe_orig || r.pm_orig || 0;
+      ph+='<div class="dest-chip-price" style="border:2px solid #c45a3a;background:rgba(196,90,58,.14);grid-column:1/-1"><span class="dest-chip-price-lbl" style="color:#c45a3a;font-weight:700;letter-spacing:.04em">🔥 '+_ofLabel+'</span><span class="dest-chip-price-val" style="color:#c45a3a;font-weight:700">$'+Math.round(r.precio_unico||pi).toLocaleString('es-AR')+(orig>r.precio_unico?' <small style="color:#999;text-decoration:line-through;font-weight:400">$'+Math.round(orig).toLocaleString('es-AR')+'</small>':'')+'</span></div>';
+    } else if(_hasOf && (r.oferta_tipo==='x10_sin_minimo' || r.oferta_tipo==='x3_sin_minimo')){
+      // x10/x3 sin mín: destaca el efectivo y tacha los demás
+      var efPx = r.precio_efectivo || 'pm';
+      ['pm','pe','pi'].forEach(function(s){
+        var v = r[s]; if(!v) return;
+        var lbl = s==='pm'?'x10':(s==='pe'?'x3':'x1');
+        if(s===efPx){
+          ph+='<div class="dest-chip-price" style="border:2px solid #c45a3a;background:rgba(196,90,58,.14)"><span class="dest-chip-price-lbl" style="color:#c45a3a;font-weight:700">🔥 '+_ofLabel+'</span><span class="dest-chip-price-val" style="color:#c45a3a;font-weight:700">$'+Math.round(v).toLocaleString('es-AR')+'</span></div>';
+        } else {
+          ph+='<div class="dest-chip-price" style="border-color:'+_ca+'44;background:'+_ca+'08;opacity:.6"><span class="dest-chip-price-lbl" style="color:'+_ca+'">'+lbl+'</span><span class="dest-chip-price-val" style="color:#c97a82;text-decoration:line-through">$'+Math.round(v).toLocaleString('es-AR')+'</span></div>';
+        }
+      });
+    } else if(_hasOf && r.oferta_tipo==='descuento_pct'){
+      // Descuento %: cada precio con tachado del original
+      ['pm','pe','pi'].forEach(function(s){
+        var v = r[s]; if(!v) return;
+        var orig = r[s+'_orig']||v;
+        var lbl = s==='pm'?'x10':(s==='pe'?'x3':'x1');
+        ph+='<div class="dest-chip-price" style="border:1px solid #c45a3a44;background:rgba(196,90,58,.07)"><span class="dest-chip-price-lbl" style="color:#c45a3a">'+lbl+'</span><span class="dest-chip-price-val" style="color:#c45a3a;font-weight:700">$'+Math.round(v).toLocaleString('es-AR')+(orig>v?' <small style="color:#999;text-decoration:line-through;font-weight:400">$'+Math.round(orig).toLocaleString('es-AR')+'</small>':'')+'</span></div>';
+      });
+    } else if(_isCC){
       // Modo CC: x10 destacado como "PRECIO VIP" + x3/x1 tachados rojo delicado
       if(pm)ph+='<div class="dest-chip-price" style="border:2px solid '+_ca+';background:'+_ca+'2a"><span class="dest-chip-price-lbl" style="color:'+_ca+';font-weight:700;letter-spacing:.04em">PRECIO VIP</span><span class="dest-chip-price-val" style="color:'+_cp+';font-weight:700">$'+Math.round(pm).toLocaleString('es-AR')+'</span></div>';
       if(pe)ph+='<div class="dest-chip-price" style="border-color:'+_ca+'44;background:'+_ca+'08;opacity:.75"><span class="dest-chip-price-lbl" style="color:'+_ca+'">x3</span><span class="dest-chip-price-val" style="color:#c97a82;text-decoration:line-through;text-decoration-color:#c97a82;text-decoration-thickness:1px">$'+Math.round(pe).toLocaleString('es-AR')+'</span></div>';

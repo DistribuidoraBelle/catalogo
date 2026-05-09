@@ -154,6 +154,54 @@ function getProdId(){
 }
 
 // ════════════════════════════════════════════════════════════════════
+// SISTEMA DE OFERTAS — helpers en card.html
+// ════════════════════════════════════════════════════════════════════
+function ofertaParaProducto(prodId){
+  if(!window._ofertas||!window._ofertas.length)return null;
+  var ahora=Date.now();
+  function vigente(o){
+    if(!o.activa)return false;
+    if(o.fecha_desde&&new Date(o.fecha_desde).getTime()>ahora)return false;
+    if(o.fecha_hasta&&new Date(o.fecha_hasta).getTime()<=ahora)return false;
+    return true;
+  }
+  var ind=window._ofertas.find(function(o){return o.producto_id===prodId&&vigente(o);});
+  if(ind)return ind;
+  var camps=window._ofertaCampaniaProductos||{};
+  var campOferta=window._ofertas.find(function(o){
+    if(!o.campania_id||!vigente(o))return false;
+    return (camps[o.campania_id]||[]).indexOf(prodId)>=0;
+  });
+  return campOferta||null;
+}
+
+function aplicarOferta(r,oferta){
+  if(!oferta||!r)return r;
+  var out={pm:r.pm,pe:r.pe,pi:r.pi,decan:r.decan,
+           pm_orig:r.pm,pe_orig:r.pe,pi_orig:r.pi,
+           ct:r.ct,oferta:oferta,oferta_tipo:oferta.tipo,
+           oferta_etiqueta:oferta.etiqueta||''};
+  switch(oferta.tipo){
+    case 'precio_unico':
+      out.precio_unico=parseFloat(oferta.precio_unico)||0;
+      out.pm=out.precio_unico;out.pe=out.precio_unico;out.pi=out.precio_unico;
+      break;
+    case 'descuento_pct':
+      var f=1-(parseFloat(oferta.descuento_pct)||0)/100;
+      out.pm=Math.round(r.pm*f);out.pe=Math.round(r.pe*f);out.pi=Math.round(r.pi*f);
+      out.descuento_pct=parseFloat(oferta.descuento_pct)||0;
+      break;
+    case 'x10_sin_minimo': out.precio_efectivo='pm';break;
+    case 'x3_sin_minimo':  out.precio_efectivo='pe';break;
+    case 'multixmenos':
+      out.multi_paga=parseInt(oferta.multi_paga)||1;
+      out.multi_lleva=parseInt(oferta.multi_lleva)||2;
+      break;
+  }
+  return out;
+}
+
+// ════════════════════════════════════════════════════════════════════
 // calcP — IDÉNTICA a la del catálogo (catalogo_index.html)
 // Calcula precios al vuelo: costo + ganancia + cotización
 // Si no hay costo, usa los precios precalculados en BD como fallback.
@@ -172,7 +220,13 @@ function calcP(p){
   var ml=p.precio_ml||0;
   var pi=ml>0?Math.ceil((ml+pe)/2/100)*100:(p.precio_min_ars||pe);
   var decan=p.precio_decan>0?p.precio_decan:(pi>0?(Math.ceil(pi*0.1/1000)*1000+3000):0);
-  return{ct:ct,pm:pm,pe:pe,pi:pi,decan:decan};
+  var r={ct:ct,pm:pm,pe:pe,pi:pi,decan:decan};
+  // Integrar oferta vigente
+  if(typeof ofertaParaProducto==='function'){
+    var of=ofertaParaProducto(p.id);
+    if(of)r=aplicarOferta(r,of);
+  }
+  return r;
 }
 
 function renderCard(p,r){
@@ -210,6 +264,20 @@ function renderCard(p,r){
 
   // ── SIN STOCK: ocultar precios y decan, mostrar CTA WhatsApp ──
   var pricesBlock;
+  // Detectar oferta vigente (ya aplicada en r vía calcP)
+  var hasOf = !!r.oferta;
+  var ofLabel = '';
+  if(hasOf){
+    ofLabel = r.oferta.etiqueta || '';
+    if(!ofLabel){
+      if(r.oferta_tipo==='descuento_pct' && r.descuento_pct) ofLabel = Math.round(r.descuento_pct)+'% OFF';
+      else if(r.oferta_tipo==='precio_unico') ofLabel = 'OFERTA';
+      else if(r.oferta_tipo==='x10_sin_minimo') ofLabel = 'PRECIO MAYOR';
+      else if(r.oferta_tipo==='x3_sin_minimo') ofLabel = 'PRECIO X3';
+      else if(r.oferta_tipo==='multixmenos' && r.multi_lleva && r.multi_paga) ofLabel = r.multi_lleva+'x'+r.multi_paga;
+      else ofLabel = 'OFERTA';
+    }
+  }
   if(nostock){
     var waMsg=encodeURIComponent("Hola! Quiero consultar disponibilidad de: "+p.nombre);
     pricesBlock=
@@ -218,7 +286,52 @@ function renderCard(p,r){
         '<div class="nostock-cta-text">Consultanos por WhatsApp para conocer próximos ingresos o productos similares.</div>'+
         '<a href="https://wa.me/'+WHATSAPP_NUMERO+'?text='+waMsg+'" target="_blank" class="nostock-cta-btn">📱 Consultar disponibilidad</a>'+
       '</div>';
+  } else if(hasOf && r.oferta_tipo==='precio_unico'){
+    // Precio único
+    var origPU = r.pi_orig || r.pe_orig || r.pm_orig || 0;
+    pricesBlock =
+      '<div style="background:linear-gradient(135deg,#fff5f0,#ffe4d4);border:2px solid #c45a3a;border-radius:10px;padding:.85rem;text-align:center;margin-bottom:.75rem">'+
+        '<div style="font-size:.66rem;color:#c45a3a;font-weight:700;letter-spacing:.06em;margin-bottom:.25rem">🔥 '+ofLabel+'</div>'+
+        '<div style="font-size:1.5rem;font-weight:800;color:#c45a3a">'+fmt(r.precio_unico)+'</div>'+
+        (origPU>r.precio_unico?'<div style="font-size:.7rem;color:#999;text-decoration:line-through;margin-top:.2rem">'+fmt(origPU)+'</div>':'')+
+      '</div>';
+  } else if(hasOf && (r.oferta_tipo==='x10_sin_minimo' || r.oferta_tipo==='x3_sin_minimo')){
+    // x10/x3 sin mínimo: destaca el efectivo, tacha los demás
+    var efPx = r.precio_efectivo || 'pm';
+    var box = function(s, lbl, esEfectivo){
+      var v = r[s]; if(!v) return '<div class="pbox"><div class="plabel">'+lbl+'</div><div class="pval">—</div></div>';
+      if(esEfectivo){
+        return '<div class="pbox" style="border:2px solid #c45a3a;background:rgba(196,90,58,.10)"><div class="plabel" style="color:#c45a3a;font-weight:700">🔥 '+ofLabel+'</div><div class="pval" style="color:#c45a3a">'+fmt(v)+'</div></div>';
+      }
+      return '<div class="pbox" style="opacity:.55"><div class="plabel">'+lbl+'</div><div class="pval" style="text-decoration:line-through;color:#aaa">'+fmt(v)+'</div></div>';
+    };
+    pricesBlock =
+      '<div class="prices">'+
+        box('pm','10 o más',efPx==='pm')+
+        box('pe','3 o más',efPx==='pe')+
+        box('pi','1 unidad',efPx==='pi')+
+      '</div>';
+  } else if(hasOf && r.oferta_tipo==='descuento_pct'){
+    // Descuento %
+    var boxD = function(s, lbl, hi){
+      var v = r[s]; var orig = r[s+'_orig'] || v;
+      if(!v) return '<div class="pbox"><div class="plabel">'+lbl+'</div><div class="pval">—</div></div>';
+      var hiStyle = hi ? 'background:linear-gradient(135deg,#fff5f0,#ffe4d4);border-color:#c45a3a;' : '';
+      return '<div class="pbox" style="border:1px solid #e8a888;'+hiStyle+'"><div class="plabel" style="color:#c45a3a">'+lbl+'</div><div class="pval" style="color:#c45a3a">'+fmt(v)+'</div>'+
+        (orig>v?'<div style="font-size:.55rem;color:#999;text-decoration:line-through">'+fmt(orig)+'</div>':'')+
+      '</div>';
+    };
+    var decanHtmlD=r.decan>0?
+      '<div class="decan-row">'+
+        '<div class="decan-label">🧪 Decan 5ml disponible</div>'+
+        '<div class="decan-price">'+fmt(r.decan)+'</div>'+
+      '</div>':'';
+    pricesBlock =
+      '<div style="text-align:center;font-size:.7rem;color:#c45a3a;font-weight:700;letter-spacing:.05em;margin-bottom:.4rem">🔥 '+ofLabel+'</div>'+
+      '<div class="prices">'+boxD('pm','10 o más',false)+boxD('pe','3 o más',false)+boxD('pi','1 unidad',true)+'</div>'+
+      decanHtmlD;
   } else {
+    // Caso normal — sin oferta
     var decanHtml=r.decan>0?
       '<div class="decan-row">'+
         '<div class="decan-label">🧪 Decan 5ml disponible</div>'+
@@ -343,7 +456,13 @@ window.addEventListener('DOMContentLoaded',function(){
   }
   Promise.all([
     fetch(SB_URL+'/rest/v1/productos?id=eq.'+id+'&select=*',{headers:{'apikey':SB_KEY,'Authorization':'Bearer '+SB_KEY}}).then(function(r){return r.json();}),
-    fetch(SB_URL+'/rest/v1/configuracion?select=clave,valor',{headers:{'apikey':SB_KEY,'Authorization':'Bearer '+SB_KEY}}).then(function(r){return r.json();}).catch(function(){return[];})
+    fetch(SB_URL+'/rest/v1/configuracion?select=clave,valor',{headers:{'apikey':SB_KEY,'Authorization':'Bearer '+SB_KEY}}).then(function(r){return r.json();}).catch(function(){return[];}),
+    // Cargar ofertas vigentes que aplican al producto (individual o por campaña)
+    fetch(SB_URL+'/rest/v1/ofertas?select=*&activa=is.true&or=(producto_id.eq.'+id+',campania_id.not.is.null)',{headers:{'apikey':SB_KEY,'Authorization':'Bearer '+SB_KEY}}).then(function(r){return r.json();}).catch(function(){return[];}),
+    // Cargar asignaciones de campaña para ese producto
+    fetch(SB_URL+'/rest/v1/ofertas_campania_productos?select=*&producto_id=eq.'+id,{headers:{'apikey':SB_KEY,'Authorization':'Bearer '+SB_KEY}}).then(function(r){return r.json();}).catch(function(){return[];}),
+    // Cargar campañas activas para filtrar las inactivas
+    fetch(SB_URL+'/rest/v1/ofertas_campanias?select=id&activa=is.true',{headers:{'apikey':SB_KEY,'Authorization':'Bearer '+SB_KEY}}).then(function(r){return r.json();}).catch(function(){return[];})
   ]).then(function(res){
     var prods=res[0];var config=Array.isArray(res[1])?res[1]:[];
     if(!Array.isArray(prods)||!prods.length){
@@ -355,6 +474,22 @@ window.addEventListener('DOMContentLoaded',function(){
     config.forEach(function(c){
       if(c.clave==='cotizacion_usd') cotizActual=parseFloat(c.valor)||1520;
     });
+    // Indexar ofertas — filtrar las de campañas inactivas
+    var campAct={};
+    if(Array.isArray(res[4])) res[4].forEach(function(c){campAct[c.id]=true;});
+    var todasOfs=Array.isArray(res[2])?res[2]:[];
+    window._ofertas=todasOfs.filter(function(o){
+      if(!o.campania_id) return true;
+      return !!campAct[o.campania_id];
+    });
+    window._ofertaCampaniaProductos={};
+    if(Array.isArray(res[3])){
+      res[3].forEach(function(rel){
+        if(!campAct[rel.campania_id]) return;
+        if(!window._ofertaCampaniaProductos[rel.campania_id])window._ofertaCampaniaProductos[rel.campania_id]=[];
+        window._ofertaCampaniaProductos[rel.campania_id].push(rel.producto_id);
+      });
+    }
     renderCard(p,calcP(p));
   }).catch(function(e){
     document.getElementById('root').innerHTML='<div class="err"><div class="err-brand">Distribuidora Belle</div>Error al cargar: '+e.message+'</div>';
