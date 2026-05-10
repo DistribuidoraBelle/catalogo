@@ -11540,12 +11540,17 @@ function guardarCampania(id){
 
   // Construir campData (función para reutilizar)
   function campData_construir(pestanaIdForzada){
+    // [BUG #1 fix] Al editar una campaña existente, preservar su valor `activa` actual.
+    // Antes, este campo se forzaba a `true` siempre — eso reactivaba campañas pausadas
+    // si el admin sólo quería editar fechas/colores/etc.
+    var campOrig = id ? (window._campaniasData||[]).find(function(c){return c.id === id;}) : null;
+    var activaActual = campOrig ? (campOrig.activa !== false) : true;
     return {
       nombre: nombre,
       descripcion: desc || null,
       pestana_id: pestanaIdForzada !== undefined ? pestanaIdForzada : (pestId ? parseInt(pestId) : null),
       abrir_pestana_al_entrar: !!abrir,
-      activa: true,
+      activa: activaActual,
       // Campos visuales
       tab_logo_url: (document.getElementById('campTabLogoUrl').value||'').trim() || null,
       tab_color_fondo: (document.getElementById('campTabColorFondo').value||'').trim() || null,
@@ -11580,7 +11585,11 @@ function _campGuardarConData(id, campData, ofData){
     if(!newId){toast('No se pudo obtener ID de campaña','terr');return;}
     // 2) Crear o actualizar oferta de la campaña
     var ofExistente = (window._ofertasDeCampanias||[]).find(function(o){return o.campania_id === newId;});
-    var ofPayload = Object.assign({campania_id: newId, producto_id: null, activa: true}, ofData);
+    // [BUG #1 fix] Al editar una oferta existente, preservar su `activa` actual.
+    // Si es nueva, default a `true`. Antes se forzaba `true` siempre, lo que
+    // reactivaba ofertas que el admin había pausado manualmente.
+    var activaPreservada = ofExistente ? (ofExistente.activa !== false) : true;
+    var ofPayload = Object.assign({campania_id: newId, producto_id: null, activa: activaPreservada}, ofData);
     var ofProm = ofExistente
       ? apiPatch('ofertas', ofPayload, 'id=eq.'+ofExistente.id)
       : apiPost('ofertas', ofPayload);
@@ -11997,7 +12006,14 @@ function _campOnChangePestana(){
 }
 
 function toggleCampaniaActiva(id, activar){
-  apiPatch('ofertas_campanias', {activa: activar}, 'id=eq.'+id).then(function(){
+  // [BUG #3 fix] Antes solo cambiaba ofertas_campanias.activa, dejando ofertas.activa
+  // desincronizada. Ahora sincronizamos ambas tablas en paralelo.
+  var ofExistente = (window._ofertasDeCampanias||[]).find(function(o){return o.campania_id === id;});
+  var promesas = [apiPatch('ofertas_campanias', {activa: activar}, 'id=eq.'+id)];
+  if(ofExistente){
+    promesas.push(apiPatch('ofertas', {activa: activar}, 'id=eq.'+ofExistente.id));
+  }
+  Promise.all(promesas).then(function(){
     toast(activar ? 'Campaña activada' : 'Campaña pausada','tok');
     loadOfertasAdmin();
   }).catch(function(e){ toast('Error: '+e.message,'terr'); });

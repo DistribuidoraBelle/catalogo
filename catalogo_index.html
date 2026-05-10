@@ -175,7 +175,14 @@ header{background:var(--bg-header);border-bottom:1px solid var(--border-color);p
 #filtrosColapsables.expandido .pills{flex-wrap:wrap;justify-content:center}
 #filtrosColapsables.expandido .fsel{width:100%}
 }
-@media(max-width:480px){.card{flex-direction:column}.cimg{width:100%;height:160px;min-width:unset;background:#fff}.cimg img{object-fit:contain;padding:8px;mix-blend-mode:multiply}.fav-heart{top:6px!important;right:6px!important;bottom:auto!important;left:auto!important}.share-btn{top:42px!important;right:6px!important;bottom:auto!important;left:auto!important}.cright{width:100%;min-width:unset;border-left:none;border-top:1px solid var(--border)}.prices-row{flex-wrap:wrap}.tabs{overflow-x:auto;-webkit-overflow-scrolling:touch;scrollbar-width:none;padding:0 1rem;flex-shrink:0}.tabs::-webkit-scrollbar{display:none}.tab{white-space:nowrap;padding:.9rem 1rem;font-size:.82rem;flex-shrink:0}header{position:sticky;top:0;z-index:1000;-webkit-position:sticky}
+@media(max-width:480px){.card{flex-direction:column}.cimg{width:100%;height:160px;min-width:unset;background:#fff}.cimg img{object-fit:contain;padding:8px;mix-blend-mode:multiply}.fav-heart{top:6px!important;right:6px!important;bottom:auto!important;left:auto!important}.share-btn{top:42px!important;right:6px!important;bottom:auto!important;left:auto!important}
+/* ── Mobile: card stacked vertical — cinfo y cright con padding idéntico para alineación prolija ── */
+/* Fix del desfase visible donde nombre AFNAN y precios no quedaban alineados verticalmente.   */
+/* Forzamos mismo padding lateral y damos fondo/estructura coherente a los dos bloques.        */
+.cinfo{padding:.85rem 1rem .65rem !important;gap:.3rem !important}
+.cinfo .cname{white-space:normal !important;line-height:1.2;font-size:1rem}
+.cright{width:100%;min-width:unset;border-left:none;border-top:1px solid var(--border);padding:.85rem 1rem !important;gap:.55rem !important}
+.prices-row{flex-wrap:wrap}.tabs{overflow-x:auto;-webkit-overflow-scrolling:touch;scrollbar-width:none;padding:0 1rem;flex-shrink:0}.tabs::-webkit-scrollbar{display:none}.tab{white-space:nowrap;padding:.9rem 1rem;font-size:.82rem;flex-shrink:0}header{position:sticky;top:0;z-index:1000;-webkit-position:sticky}
 .fb-nota-img{width:72px;height:72px;border-radius:8px;}.fb-nota-nombre{font-size:.5rem;max-width:72px;}.fb-notas-fotos{gap:2px;}
 footer>div{flex-direction:column;text-align:center;}footer>div>div{text-align:center !important;}
 }
@@ -984,6 +991,44 @@ function abrirPestanaCampaniaSiCorresponde(){
   }
 }
 
+// ── Recargar ofertas y campañas desde Supabase y re-renderizar el catálogo ──
+// [BUG #4 fix] Llamado desde realtime cuando admin cambia algo en ofertas/campañas.
+// Mantiene la lógica de filtrado de campañas pausadas y refresca las pestañas.
+function recargarOfertasYCampanias(){
+  Promise.all([
+    apiGet('ofertas','select=*&activa=is.true').catch(function(){return [];}),
+    apiGet('ofertas_campanias','select=*').catch(function(){return [];}),
+    apiGet('ofertas_campania_productos','select=*').catch(function(){return [];})
+  ]).then(function(pr){
+    var todasCamps = Array.isArray(pr[1])?pr[1]:[];
+    window._ofertaCampaniasTodas = todasCamps;
+    window._ofertaCampanias = todasCamps.filter(function(c){return c.activa !== false;});
+    var campAct = {};
+    window._ofertaCampanias.forEach(function(c){campAct[c.id]=true;});
+    var todasOfertas = Array.isArray(pr[0])?pr[0]:[];
+    window._ofertas = todasOfertas.filter(function(o){
+      if(!o.campania_id) return true;
+      return !!campAct[o.campania_id];
+    });
+    window._ofertaCampaniaProductos = {};
+    if(Array.isArray(pr[2])){
+      pr[2].forEach(function(rel){
+        if(!campAct[rel.campania_id]) return;
+        if(!window._ofertaCampaniaProductos[rel.campania_id])
+          window._ofertaCampaniaProductos[rel.campania_id] = [];
+        window._ofertaCampaniaProductos[rel.campania_id].push(rel.producto_id);
+      });
+    }
+    // Re-renderizar todo lo afectado
+    if(typeof buildTabs === 'function') buildTabs();
+    if(typeof applyFilters === 'function') applyFilters();
+    if(typeof renderDestacados === 'function') renderDestacados(curTab);
+    if(typeof _ofertasWatchdogInit === 'function') _ofertasWatchdogInit();
+  }).catch(function(e){
+    console.error('[ofertas] recarga realtime:', e);
+  });
+}
+
 function iniciarWatchdogOfertas(){
   // ── Watchdog de ofertas ──
   // Cada 60 segundos evalúa si alguna oferta cambió de estado de vigencia.
@@ -1184,12 +1229,28 @@ function buildTabs(){
   // Una pestaña asociada a una campaña debe ocultarse si:
   //   - La campaña está pausada (activa === false)
   //   - O tiene mostrar_pestana === false
+  //   - O la oferta está PROGRAMADA (fecha_desde futura) o VENCIDA (fecha_hasta pasada)
+  //     [BUG #5 fix: antes la pestaña aparecía en el catálogo aunque la oferta no
+  //      estuviera vigente todavía, dando la sensación de "se activó de una"]
   // Las pestañas SIN campaña asociada se muestran siempre (no son pestañas de campaña)
   function pestanaDebeOcultarse(t){
     var c = campañaPorPestIdTodas[t.id];
     if(!c) return false;  // sin campaña asociada → mostrar normal
     if(c.activa === false) return true;
     if(c.mostrar_pestana === false) return true;
+    // Chequear vigencia de la oferta vinculada (programada o vencida → ocultar pestaña)
+    var ofs = (window._ofertasTodas||window._ofertas||[]).filter(function(o){return o.campania_id === c.id;});
+    if(ofs.length){
+      // Hay oferta vinculada → debe estar vigente para mostrar la pestaña
+      var ahora = Date.now();
+      var algunaVigente = ofs.some(function(o){
+        if(!o.activa) return false;
+        if(o.fecha_desde && new Date(o.fecha_desde).getTime() > ahora) return false;
+        if(o.fecha_hasta && new Date(o.fecha_hasta).getTime() <= ahora) return false;
+        return true;
+      });
+      if(!algunaVigente) return true;
+    }
     return false;
   }
 
@@ -1267,6 +1328,22 @@ function _catAplicarTemaCampania(){
   var campActiva = null;
   if(pestActual){
     campActiva = camps.find(function(c){return c.pestana_id === pestActual.id;});
+  }
+  // [BUG #5 fix] Solo aplicar el tema si la oferta de la campaña está VIGENTE.
+  // Si está programada o vencida, no aplicar colores/fondos (la pestaña ni siquiera
+  // debería estar visible — esto es defensa adicional).
+  if(campActiva){
+    var ofs = (window._ofertas||[]).filter(function(o){return o.campania_id === campActiva.id;});
+    if(ofs.length){
+      var ahora = Date.now();
+      var algunaVigente = ofs.some(function(o){
+        if(!o.activa) return false;
+        if(o.fecha_desde && new Date(o.fecha_desde).getTime() > ahora) return false;
+        if(o.fecha_hasta && new Date(o.fecha_hasta).getTime() <= ahora) return false;
+        return true;
+      });
+      if(!algunaVigente) campActiva = null; // no aplicar tema
+    }
   }
   // Encontrar/crear el style override
   var styleEl = document.getElementById('_catCampTema');
@@ -3572,6 +3649,21 @@ function _catEvaluarRestricciones(){
   var st = window._catCobState || {};
   var formaPago = st.forma_pago;
 
+  // [BUG #6 fix] Helper: verificar si una campaña tiene oferta vigente AHORA.
+  // Si la oferta está programada (no empezó) o vencida, las restricciones
+  // de la campaña (como solo_efectivo_local) NO deben aplicar.
+  function _campTieneOfertaVigente(campId){
+    var ofs = (window._ofertas||[]).filter(function(o){return o.campania_id === campId;});
+    if(!ofs.length) return false; // sin oferta vinculada → la "campaña" no está activa
+    var ahora = Date.now();
+    return ofs.some(function(o){
+      if(!o.activa) return false;
+      if(o.fecha_desde && new Date(o.fecha_desde).getTime() > ahora) return false;
+      if(o.fecha_hasta && new Date(o.fecha_hasta).getTime() <= ahora) return false;
+      return true;
+    });
+  }
+
   // 1) Detectar campañas restrictivas en el carrito (solo_efectivo_local=true)
   var campañasSoloLocal = [];
   var campañasIds = {};
@@ -3580,6 +3672,8 @@ function _catEvaluarRestricciones(){
     camps.forEach(function(c){
       if(!c.solo_efectivo_local) return; // solo restrictivas
       if(campañasIds[c.id]) return;
+      // [BUG #6 fix] No aplicar restricción si la oferta no está vigente todavía
+      if(!_campTieneOfertaVigente(c.id)) return;
       var prodEnCamp = false;
       if(c.pestana_id){
         var p = (allProds||[]).find(function(pp){return pp.id === it.id;});
@@ -4362,7 +4456,7 @@ function _sendWAOriginal(){
     } else {
       // Perfume normal o precio único — mapear segmento correctamente
       var seg=item.seg==="pm"?"x10":item.seg==="pe"?"x3":item.seg==="pi"?"Precio unico":"x1";
-      fullPedidoItems.push({
+      var itemPedido = {
         producto_id:item.id,
         nombre:item.nombre,
         qty:item.qty,
@@ -4371,7 +4465,15 @@ function _sendWAOriginal(){
         total:item.precio*item.qty,
         isDecan:false,
         isCombo:false
-      });
+      };
+      // [OBSERVACIÓN fix] Si el item tenía una oferta aplicada, guardar trazabilidad
+      // (id de oferta, tipo, etiqueta) para auditoría/reportes futuros.
+      if(item.oferta && item.oferta.id){
+        itemPedido.oferta_id = item.oferta.id;
+        itemPedido.oferta_tipo = item.oferta.tipo;
+        itemPedido.oferta_etiqueta = item.oferta.etiqueta || null;
+      }
+      fullPedidoItems.push(itemPedido);
     }
   });
 
@@ -7008,6 +7110,36 @@ function initRealtime() {
         function(payload) {
           _rtDebounce('pestanas', function() {
             if (typeof loadProds === 'function') loadProds();
+          }, 800);
+        })
+      .subscribe();
+
+    // ── ofertas (cambios de admin: pausar, editar fecha, crear, etc.) [BUG #4 fix] ──
+    _sbClient.channel('rt-ofertas')
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'ofertas' },
+        function(payload) {
+          _rtDebounce('ofertas', function() {
+            if (typeof recargarOfertasYCampanias === 'function') recargarOfertasYCampanias();
+          }, 800);
+        })
+      .subscribe();
+
+    // ── ofertas_campanias (pausar/reanudar/visibilidad de pestaña) [BUG #4 fix] ──
+    _sbClient.channel('rt-ofertas-camp')
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'ofertas_campanias' },
+        function(payload) {
+          _rtDebounce('ofertasCamp', function() {
+            if (typeof recargarOfertasYCampanias === 'function') recargarOfertasYCampanias();
+          }, 800);
+        })
+      .subscribe();
+
+    // ── ofertas_campania_productos (asignación/desasignación de productos a campañas) [BUG #4 fix] ──
+    _sbClient.channel('rt-ofertas-camp-prods')
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'ofertas_campania_productos' },
+        function(payload) {
+          _rtDebounce('ofertasCampProds', function() {
+            if (typeof recargarOfertasYCampanias === 'function') recargarOfertasYCampanias();
           }, 800);
         })
       .subscribe();
