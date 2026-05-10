@@ -1022,17 +1022,21 @@ function loadProds(){
     Promise.all([
       apiGet('paneles_destacados','select=*&order=orden'),
       apiGet('pestanas_catalogo','select=*&activa=is.true&order=orden'),
-      // ── Cargar ofertas activas + campañas + asignaciones campania→productos ──
+      // ── Cargar ofertas activas + TODAS las campañas (activas+inactivas) + asignaciones ──
+      // Cargamos TODAS las campañas porque necesitamos saber cuáles están pausadas
+      // para ocultar sus pestañas. Después filtramos las activas para uso normal.
       apiGet('ofertas','select=*&activa=is.true').catch(function(){return [];}),
-      apiGet('ofertas_campanias','select=*&activa=is.true').catch(function(){return [];}),
+      apiGet('ofertas_campanias','select=*').catch(function(){return [];}),
       apiGet('ofertas_campania_productos','select=*').catch(function(){return [];})
     ]).then(function(pr){
       window._catPaneles=Array.isArray(pr[0])?pr[0]:[];
       window._catPanelesLoading=false;
       if(Array.isArray(pr[1])&&pr[1].length){pestanasCatalogo=pr[1];}
-      // Indexar ofertas y campañas — solo conservar ofertas cuya campaña esté activa
+      // Indexar ofertas y campañas — TODAS y ACTIVAS por separado
+      var todasCamps = Array.isArray(pr[3])?pr[3]:[];
+      window._ofertaCampaniasTodas = todasCamps;  // ← INCLUYE pausadas (para detectar y ocultar pestañas)
+      window._ofertaCampanias = todasCamps.filter(function(c){return c.activa !== false;});  // solo activas para lógica normal
       var campAct={};
-      window._ofertaCampanias=Array.isArray(pr[3])?pr[3]:[];
       window._ofertaCampanias.forEach(function(c){campAct[c.id]=true;});
       var todasOfertas=Array.isArray(pr[2])?pr[2]:[];
       window._ofertas=todasOfertas.filter(function(o){
@@ -1148,8 +1152,41 @@ function buildTabs(){
 
   var html = '';
 
+  // ── Indexar TODAS las campañas (activas e inactivas) por pestana_id ──
+  // para saber si una pestaña debe ocultarse porque su campaña está pausada
+  // u oculta. Esto requiere que carguemos TODAS las campañas, no solo activas.
+  // Si no tenemos esa info, usamos solo las activas.
+  var todasCamps = window._ofertaCampaniasTodas || window._ofertaCampanias || [];
+  var campañaPorPestIdTodas = {};
+  todasCamps.forEach(function(c){
+    if(c.pestana_id) campañaPorPestIdTodas[c.pestana_id] = c;
+  });
+
+  // ── Helper: determinar si una pestaña debe ocultarse ──
+  // Una pestaña asociada a una campaña debe ocultarse si:
+  //   - La campaña está pausada (activa === false)
+  //   - O tiene mostrar_pestana === false
+  // Las pestañas SIN campaña asociada se muestran siempre (no son pestañas de campaña)
+  function pestanaDebeOcultarse(t){
+    var c = campañaPorPestIdTodas[t.id];
+    if(!c) return false;  // sin campaña asociada → mostrar normal
+    if(c.activa === false) return true;
+    if(c.mostrar_pestana === false) return true;
+    return false;
+  }
+
+  // ── Si el usuario está parado en una pestaña que ahora debe ocultarse,
+  //    redirigir automáticamente a Inicio para no dejarlo en una vista vacía.
+  var pestActual = pestanasCatalogo.find(function(t){return t.slug === act;});
+  if(pestActual && pestanaDebeOcultarse(pestActual)){
+    curTab = 'inicio';
+    act = 'inicio';
+    // Limpiar el tema de campaña que quedó aplicado (no, se hace en _catAplicarTemaCampania al final)
+  }
+
   // Pestañas DESTACADAS (campañas con tab_destacada=true) — a la izquierda de todo
   pestanasCatalogo.forEach(function(t){
+    if(pestanaDebeOcultarse(t)) return; // ocultar si la campaña está pausada
     var camp = campPorPestId[t.id];
     if(!camp || !camp.tab_destacada) return; // solo destacadas en este pase
     var isAct = (act === t.slug);
@@ -1174,6 +1211,7 @@ function buildTabs(){
   // Pestañas custom NO destacadas (que no son base)
   pestanasCatalogo.forEach(function(t){
     if(base.indexOf(t.slug) >= 0) return;
+    if(pestanaDebeOcultarse(t)) return; // ocultar si la campaña está pausada
     var camp = campPorPestId[t.id];
     if(camp && camp.tab_destacada) return; // ya renderizadas arriba
     var isAct = (act === t.slug);
