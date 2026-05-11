@@ -3486,6 +3486,31 @@ function _checkReingreso(prodId, stockAntes, stockDespues){
   }
 }
 
+// ─── Helper unificado de logging de movimientos de stock (2026-05-11) ───
+// Best-effort: si falla, solo deja warn en consola, NO bloquea el flujo principal.
+function _logMovStock(opts){
+  try{
+    if(!opts||!opts.pid)return;
+    var payload={
+      producto_id:opts.pid,
+      producto_nombre:opts.nombre||('Prod #'+opts.pid),
+      tipo:opts.tipo||'ajuste',
+      cantidad:opts.cantidad!=null?opts.cantidad:0,
+      motivo:opts.motivo||'(sin motivo)',
+      usuario:opts.usuario||(typeof curUser!=='undefined'&&curUser?curUser:'admin'),
+      created_at:new Date().toISOString()
+    };
+    if(opts.stockAntes!=null)payload.stock_antes=opts.stockAntes;
+    if(opts.stockDespues!=null)payload.stock_despues=opts.stockDespues;
+    if(typeof periodoActual!=='undefined'&&periodoActual)payload.periodo=periodoActual;
+    return apiPost('movimientos_stock',payload).catch(function(e){
+      console.warn('[_logMovStock] error silencioso:',e,opts);
+    });
+  }catch(eLog){
+    console.warn('[_logMovStock] excepción:',eLog);
+  }
+}
+
 
 function apiDelete(t,f){return api("DELETE",t,null,f);}
 function apiUpsert(t,d){
@@ -10191,22 +10216,36 @@ function incConfirmarMatch(itemId){
     // Si había un producto distinto asignado antes Y tenía en_viaje por este match → restar
     if(oldFueAutoMatch){
       proms.push(
-        apiGet("productos","select=id,en_viaje&id=eq."+oldProdId).then(function(rows){
+        apiGet("productos","select=id,nombre,en_viaje&id=eq."+oldProdId).then(function(rows){
           var oldP=rows&&rows[0];
           if(!oldP)return;
-          var nv=Math.max(0,(oldP.en_viaje||0)-qty);
-          return apiPatch("productos",{en_viaje:nv},"id=eq."+oldProdId);
+          var enViajeAntes=oldP.en_viaje||0;
+          var nv=Math.max(0,enViajeAntes-qty);
+          return apiPatch("productos",{en_viaje:nv},"id=eq."+oldProdId).then(function(){
+            // FIX 3 (2026-05-11): loguear cambio en_viaje por rematch
+            _logMovStock({pid:oldProdId,nombre:oldP.nombre||('Prod #'+oldProdId),
+              tipo:'ajuste',cantidad:qty,
+              stockAntes:enViajeAntes,stockDespues:nv,
+              motivo:'En_viaje -'+qty+' por rematch (item id '+itemId+' reasignado)'});
+          });
         })
       );
     }
 
     // Sumar en_viaje al nuevo producto — siempre desde BD fresca
     proms.push(
-      apiGet("productos","select=id,en_viaje&id=eq."+newProdId).then(function(rows){
+      apiGet("productos","select=id,nombre,en_viaje&id=eq."+newProdId).then(function(rows){
         var newP=rows&&rows[0];
         if(!newP)return;
-        var nv2=(newP.en_viaje||0)+qty;
-        return apiPatch("productos",{en_viaje:nv2},"id=eq."+newProdId);
+        var enViajeAntes2=newP.en_viaje||0;
+        var nv2=enViajeAntes2+qty;
+        return apiPatch("productos",{en_viaje:nv2},"id=eq."+newProdId).then(function(){
+          // FIX 3 (2026-05-11): loguear suma de en_viaje por rematch
+          _logMovStock({pid:newProdId,nombre:newP.nombre||('Prod #'+newProdId),
+            tipo:'ajuste',cantidad:qty,
+            stockAntes:enViajeAntes2,stockDespues:nv2,
+            motivo:'En_viaje +'+qty+' por rematch (item id '+itemId+' asignado)'});
+        });
       })
     );
 
@@ -10922,7 +10961,13 @@ function guardarNuevoProdFromModal(){
         var newProd=prods.find(function(p){return p.id===newId;});
         if(!newProd){prods.push({id:newId,nombre:nombre,empresa:empresa,stock_actual:qty,en_viaje:0});}
         else{newProd.stock_actual=qty;newProd.en_viaje=0;}
-        apiPatch("productos",{stock_actual:qty,en_viaje:0},"id=eq."+newId);
+        apiPatch("productos",{stock_actual:qty,en_viaje:0},"id=eq."+newId).then(function(){
+          // FIX 3 (2026-05-11): loguear alta de nuevo producto con stock inicial
+          _logMovStock({pid:newId,nombre:nombre,
+            tipo:'entrada',cantidad:qty,
+            stockAntes:0,stockDespues:qty,
+            motivo:'Alta de producto nuevo desde recepción pedido proveedor (item '+itemId+')'});
+        });
       });
     }
     toast("Producto agregado al catalogo","tok");
@@ -16887,10 +16932,18 @@ function guardarNuevoProd(){
         // Also add to stock immediately
         var newProd=prods.find(function(p){return p.id===newId;});
         if(newProd){
-          var ns=(newProd.stock_actual||0)+itemQty;
-          var nv=Math.max(0,(newProd.en_viaje||0)-itemQty);
+          var stockAntes=newProd.stock_actual||0;
+          var enViajeAntes=newProd.en_viaje||0;
+          var ns=stockAntes+itemQty;
+          var nv=Math.max(0,enViajeAntes-itemQty);
           newProd.stock_actual=ns;newProd.en_viaje=nv;
-          apiPatch("productos",{stock_actual:ns,en_viaje:nv},"id=eq."+newId);
+          apiPatch("productos",{stock_actual:ns,en_viaje:nv},"id=eq."+newId).then(function(){
+            // FIX 3 (2026-05-11): loguear ingreso de producto nuevo al stock
+            _logMovStock({pid:newId,nombre:newProd.nombre||('Prod #'+newId),
+              tipo:'entrada',cantidad:itemQty,
+              stockAntes:stockAntes,stockDespues:ns,
+              motivo:'Ingreso producto nuevo desde recepción pedido proveedor (item '+itemId+')'});
+          });
         }
       });
     }
@@ -17061,12 +17114,18 @@ function cpGuardarMatchesExistente(){
 
 // Helper: ajusta en_viaje de forma segura (lee fresco, evita negativos)
 function _pvAjustarEnViaje(prodId,delta,motivo){
-  return apiGet('productos','select=id,en_viaje&id=eq.'+prodId).then(function(rows){
+  return apiGet('productos','select=id,nombre,en_viaje&id=eq.'+prodId).then(function(rows){
     var p=rows&&rows[0];
     if(!p)return;
     var actual=parseInt(p.en_viaje)||0;
     var nuevo=Math.max(0,actual+delta);
-    return apiPatch('productos',{en_viaje:nuevo},'id=eq.'+prodId);
+    return apiPatch('productos',{en_viaje:nuevo},'id=eq.'+prodId).then(function(){
+      // FIX 3 (2026-05-11): loguear ajuste de en_viaje
+      _logMovStock({pid:prodId,nombre:p.nombre||('Prod #'+prodId),
+        tipo:'ajuste',cantidad:Math.abs(delta),
+        stockAntes:actual,stockDespues:nuevo,
+        motivo:'En_viaje '+(delta>0?'+':'')+delta+' — '+(motivo||'sin motivo')});
+    });
   }).catch(function(e){console.error('[pvEnViaje] err motivo='+motivo,e);});
 }
 
@@ -27835,6 +27894,9 @@ async function adminEjecutarCierrePeriodo() {
   })
 
   // PASO 6: Actualizar periodo actual en config + resetear vendido_david
+  // NOTA (2026-05-11): el reset masivo de vendido_david NO se loguea en movimientos_stock
+  // porque (a) no afecta stock_actual/reserva/en_viaje, (b) genera ruido innecesario.
+  // El cierre de periodo queda registrado en la tabla `periodos_cerrados`.
   .then(function() {
     return Promise.all([
       apiPatch('configuracion', {valor: nuevoPer}, 'clave=eq.periodo_actual'),
@@ -31608,7 +31670,18 @@ function ppConfirmarMatch(btn){
   var proms=g.items.map(function(it){return apiPatch('pedidos_proveedor_items',{producto_id:prodId,estado_item:'macheado'},'id=eq.'+it.id);});
   var allProds=(typeof prods!=='undefined'&&prods)?prods:[];
   var p=allProds.find(function(x){return x.id===prodId;});
-  if(p&&g.qtot>0){var nv=(p.en_viaje||0)+g.qtot;p.en_viaje=nv;proms.push(apiPatch('productos',{en_viaje:nv},'id=eq.'+prodId));}
+  if(p&&g.qtot>0){
+    var enViajeAntes=p.en_viaje||0;
+    var nv=enViajeAntes+g.qtot;
+    p.en_viaje=nv;
+    proms.push(apiPatch('productos',{en_viaje:nv},'id=eq.'+prodId).then(function(){
+      // FIX 3 (2026-05-11): loguear match de pedidos pendientes a producto
+      _logMovStock({pid:prodId,nombre:prodNom||p.nombre||('Prod #'+prodId),
+        tipo:'ajuste',cantidad:g.qtot,
+        stockAntes:enViajeAntes,stockDespues:nv,
+        motivo:'En_viaje +'+g.qtot+' por match panel productos (key '+key+')'});
+    }));
+  }
   Promise.all(proms).then(function(){
     toast('Macheado: '+prodNom,'tok');
     cerrarModal('ppMoMatch');
@@ -31625,9 +31698,16 @@ function ppAgregarStock(btn){
   if(!p){toast('Producto no encontrado en catálogo. Cargá stock primero.','twarn');return;}
   var qty=parseInt(prompt('Unidades a agregar al stock (en pedidos: '+g.qtot+', en viaje cat.: '+(p.en_viaje||0)+'):',g.qtot)||0);
   if(!qty||qty<=0)return;
+  // FIX 3 (2026-05-11): leer stock fresco para tener antes/después correctos en el log.
+  // Antes el código usaba 'nS' que no estaba definido → bug que generaba mov stock corrupto.
+  var stockAntes=p.stock_actual||0;
   Promise.all([
-    patchStockFresco(g.pid,{stock_actual:+qty,en_viaje:-qty},'Agregar stock pedido viaje'),
-    apiPost('movimientos_stock',{producto_id:g.pid,producto_nombre:p.nombre,tipo:'ingreso_pedido',cantidad:qty,stock_antes:nS-qty,stock_despues:nS,motivo:'Ingreso panel productos en viaje',usuario:'admin',periodo:periodoActual})
+    patchStockFresco(g.pid,{stock_actual:+qty,en_viaje:-qty},'Agregar stock pedido viaje')
+      .then(function(){
+        _logMovStock({pid:g.pid,nombre:p.nombre,tipo:'ingreso_pedido',
+          cantidad:qty,stockAntes:stockAntes,stockDespues:stockAntes+qty,
+          motivo:'Ingreso panel productos en viaje'});
+      })
   ]).then(function(){toast(qty+'u agregadas al stock ✅','tok');ppLoad();if(typeof _reloadStock==='function')_reloadStock();})
   .catch(function(e){toast('Error: '+e.message,'terr');});
 }
