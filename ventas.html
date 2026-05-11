@@ -739,6 +739,35 @@ function patchStockFresco(prodId, delta, motivo){
   });
 }
 
+// ─── Helper unificado de logging de movimientos de stock (2026-05-11) ───
+// Uso: _logMovStock({pid, nombre, tipo, cantidad, stockAntes, stockDespues, motivo})
+// Best-effort: si falla, solo deja warn en consola, NO bloquea el flujo principal.
+// Tipos válidos: 'entrada','salida','venta','reserva','devolucion','ajuste',
+//                'baja_fallado','ingreso_faltante','ingreso_pedido','devolucion_cliente',
+//                'reserva_cancelada','ajuste_manual','deposito_ajuste'
+function _logMovStock(opts){
+  try{
+    if(!opts||!opts.pid)return;
+    var payload={
+      producto_id:opts.pid,
+      producto_nombre:opts.nombre||('Prod #'+opts.pid),
+      tipo:opts.tipo||'ajuste',
+      cantidad:opts.cantidad!=null?opts.cantidad:0,
+      motivo:opts.motivo||'(sin motivo)',
+      usuario:opts.usuario||(typeof VENDEDOR_NOMBRE!=='undefined'?VENDEDOR_NOMBRE:'sistema'),
+      created_at:new Date().toISOString()
+    };
+    if(opts.stockAntes!=null)payload.stock_antes=opts.stockAntes;
+    if(opts.stockDespues!=null)payload.stock_despues=opts.stockDespues;
+    if(typeof periodoActual!=='undefined'&&periodoActual)payload.periodo=periodoActual;
+    return apiPost('movimientos_stock',payload).catch(function(e){
+      console.warn('[_logMovStock] error silencioso:',e,opts);
+    });
+  }catch(eLog){
+    console.warn('[_logMovStock] excepción:',eLog);
+  }
+}
+
 
 function apiDelete(t,f){return api("DELETE",t,null,f);}
 
@@ -1033,6 +1062,10 @@ function adjDepo(pid,delta){
     var p=prods.find(function(x){return x.id===pid;});
     if(p)p.deposito_m=nuevo;
     toast("Deposito: "+nuevo+"u","tok");
+    // FIX 3 (2026-05-11): loguear cambio de depósito Marcela
+    _logMovStock({pid:pid,nombre:(p&&p.nombre)||('Prod #'+pid),tipo:'deposito_ajuste',
+      cantidad:Math.abs(delta),stockAntes:cur,stockDespues:nuevo,
+      motivo:'Ajuste depósito Marcela ('+(delta>0?'+':'')+delta+')'});
   });
 }
 
@@ -1047,10 +1080,19 @@ function setDepositoDirecto(prodId, valor){
   var nuevo=Math.max(0,parseInt(valor)||0);
   var inp=document.getElementById("qd-"+prodId);
   if(inp)inp.value=nuevo;
+  // FIX 3 (2026-05-11): leer valor antes para tener stock_antes en el log
+  var pPrev=prods.find(function(x){return x.id===prodId;});
+  var stockAntes=pPrev?(pPrev.stock_actual||0):0;
   apiPatch("productos",{stock_actual:nuevo},"id=eq."+prodId).then(function(){
     var p=prods.find(function(x){return x.id===prodId;});
     if(p)p.stock_actual=nuevo;
     toast("Deposito actualizado: "+nuevo+"u","tok");
+    // FIX 3 (2026-05-11): loguear cambio manual de stock
+    var delta=nuevo-stockAntes;
+    _logMovStock({pid:prodId,nombre:(p&&p.nombre)||('Prod #'+prodId),
+      tipo:delta>=0?'entrada':'salida',cantidad:Math.abs(delta),
+      stockAntes:stockAntes,stockDespues:nuevo,
+      motivo:'Ajuste manual stock (panel rápido)'});
     if(nuevo===0)setTimeout(loadQuickPanels,500);
   });
 }
@@ -1142,6 +1184,11 @@ function renderCat(){
           var p=prods.find(function(x){return x.id===pid;});
           if(p)p.reserva=nuevo;
           toast("Reserva: "+nuevo+"u","tok");
+          // FIX 3 (2026-05-11): loguear ajuste manual de reserva
+          _logMovStock({pid:pid,nombre:(p&&p.nombre)||('Prod #'+pid),
+            tipo:delta>0?'reserva':'reserva_cancelada',
+            cantidad:Math.abs(delta),stockAntes:cur,stockDespues:nuevo,
+            motivo:'Ajuste manual reserva ('+(delta>0?'+':'')+delta+') desde panel vendedor'});
         });
         return;
       }
@@ -1157,6 +1204,11 @@ function renderCat(){
           var p=prods.find(function(x){return x.id===dp;});
           if(p)p.deposito_m=nuevo;
           toast("Deposito: "+nuevo+"u","tok");
+          // FIX 3 (2026-05-11): loguear ajuste manual de depósito Marcela
+          _logMovStock({pid:dp,nombre:(p&&p.nombre)||('Prod #'+dp),
+            tipo:'deposito_ajuste',
+            cantidad:Math.abs(delta),stockAntes:cur,stockDespues:nuevo,
+            motivo:'Ajuste depósito Marcela ('+(delta>0?'+':'')+delta+') desde panel vendedor'});
         });
       }
     });
@@ -5010,7 +5062,26 @@ function cancelarPedidoWeb(pedId,btn){
             if(!Array.isArray(ci))return;
             return Promise.all(ci.filter(function(cit){return cit.producto_id;}).map(function(cit){
               var cantTotal=(cit.cantidad||1)*(it.qty||1);
-              return patchStockFresco(cit.producto_id,{stock_actual:+cantTotal,reserva:-cantTotal},'Cancelación combo web');
+              // FIX 1 (2026-05-11): loguear cancelación de combo. Leer producto para stock_antes.
+              return apiGet("productos","select=id,nombre,stock_actual&id=eq."+cit.producto_id).then(function(rows2){
+                var fp2=rows2&&rows2[0];
+                var stockAntes2=fp2?(fp2.stock_actual||0):0;
+                var nombreProd2=fp2?fp2.nombre:("Prod #"+cit.producto_id);
+                return patchStockFresco(cit.producto_id,{stock_actual:+cantTotal,reserva:-cantTotal},'Cancelación combo web')
+                  .then(function(){
+                    return apiPost("movimientos_stock",{
+                      producto_id:cit.producto_id,
+                      producto_nombre:nombreProd2,
+                      tipo:"devolucion",
+                      cantidad:cantTotal,
+                      stock_antes:stockAntes2,
+                      stock_despues:stockAntes2+cantTotal,
+                      motivo:"Cancelación combo web "+(ped.nro_orden||"#"+pedId)+" — "+(it.nombre||("Combo #"+it.combo_id)),
+                      usuario:VENDEDOR_NOMBRE,
+                      created_at:new Date().toISOString()
+                    }).catch(function(e){console.error("[belle] mov no registrado:",e);});
+                  });
+              });
             }));
           })
         );
@@ -5021,24 +5092,37 @@ function cancelarPedidoWeb(pedId,btn){
       var qty=it.qty||1;
       // Devolver si estaba reservado O pendiente (pendiente también reserva stock desde el fix de combos)
       if(estadoPed!=="reservado"&&estadoPed!=="pendiente")return;
-      // Verificar que el producto realmente tiene reserva antes de devolver
+      // FIX 1 (2026-05-11): devolver exactamente qty (Opción A — siempre lo que reservó el pedido).
+      // patchStockFresco usa Math.max(0,...) en reserva, así que si reserva está corrupta queda en 0.
+      // El movimiento_stock se crea SOLO si patchStockFresco corre exitosamente.
       promises.push(
-        apiGet("productos","select=id,stock_actual,reserva&id=eq."+pid).then(function(rows){
+        apiGet("productos","select=id,nombre,stock_actual,reserva&id=eq."+pid).then(function(rows){
           var fp=rows&&rows[0];
-          if(!fp)return;
-          var reservaReal=fp.reserva||0;
-          if(reservaReal<=0)return; // No tiene reserva — no devolver stock
-          var devQty=Math.min(qty,reservaReal); // Devolver solo lo que tiene reservado
-          return patchStockFresco(pid,{stock_actual:+devQty,reserva:-devQty},'Cancelación pedido web');
+          if(!fp){console.warn('[cancelar] producto no encontrado pid='+pid);return;}
+          var stockAntes=fp.stock_actual||0;
+          var reservaAntes=fp.reserva||0;
+          // Detectar inconsistencias y dejar log
+          if(reservaAntes < qty){
+            console.warn('[cancelar] desync reserva='+reservaAntes+' < qty='+qty+' pid='+pid+' — devolviendo qty completo igual');
+          }
+          // Opción A: devolver siempre qty. patchStockFresco protege con Math.max(0,...).
+          return patchStockFresco(pid,{stock_actual:+qty,reserva:-qty},'Cancelación pedido web')
+            .then(function(){
+              // Solo loggear si el patch corrió exitosamente
+              return apiPost("movimientos_stock",{
+                producto_id:pid,
+                producto_nombre:it.nombre||fp.nombre||("Prod #"+pid),
+                tipo:"devolucion",
+                cantidad:qty,
+                stock_antes:stockAntes,
+                stock_despues:stockAntes+qty,
+                motivo:"Cancelación pedido web "+(ped.nro_orden||"#"+pedId),
+                usuario:VENDEDOR_NOMBRE,
+                created_at:new Date().toISOString()
+              }).catch(function(e){console.error("[belle] mov no registrado:",e);});
+            });
         })
-        .then(function(){ apiPost("movimientos_stock",{
-          producto_id:pid,producto_nombre:it.nombre||("Prod #"+pid),
-          tipo:"devolucion",cantidad:qty,
-          motivo:"Cancelación pedido web #"+pedId,
-          usuario:VENDEDOR_NOMBRE,
-          created_at:new Date().toISOString()
-        }).catch(function(e){console.error("[belle] error silencioso:",e);});}
-      ));
+      );
 
     });
     Promise.all(promises).then(function(){
@@ -5920,7 +6004,15 @@ function chgDeposito(id,delta){
   var p=prods.find(function(x){return x.id===id;});
   if(p&&nv>(p.stock_actual||0)){toast("No puede superar el stock total","twarn");return;}
   el.textContent=nv;
-  apiPatch("productos",{deposito_m:nv},"id=eq."+id).then(function(){if(p)p.deposito_m=nv;toast("Deposito Marcela actualizado","tok");});
+  apiPatch("productos",{deposito_m:nv},"id=eq."+id).then(function(){
+    if(p)p.deposito_m=nv;
+    toast("Deposito Marcela actualizado","tok");
+    // FIX 3 (2026-05-11): loguear cambio de depósito Marcela
+    _logMovStock({pid:id,nombre:(p&&p.nombre)||('Prod #'+id),
+      tipo:'deposito_ajuste',cantidad:Math.abs(delta),
+      stockAntes:cur,stockDespues:nv,
+      motivo:'Cambio depósito Marcela ('+(delta>0?'+':'')+delta+') desde panel vendedor'});
+  });
 }
 
 // GASTOS
