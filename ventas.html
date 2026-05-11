@@ -851,6 +851,54 @@ function loadConfig(){
       _setPeriodoDesde(hist[0].created_at);
     }
   });
+  // FEAT (2026-05-11): cargar configuración de decans
+  _loadConfigDecans();
+}
+
+// === CONFIGURACIÓN DECANS (cargada de la tabla configuracion_decans) ===
+window._configDecans = {
+  min_unidades_sin_perfume: 5,
+  min_monto_sin_perfume: 0,
+  modo: 'unidades',
+  mensaje_warning: 'Si lleva únicamente Decans, el mínimo de compra es de 5 unidades. En caso de comprar un perfume, los decans no tienen mínimo.',
+  precio_decan_pct: 0.10,
+  precio_decan_fijo: 3000,
+  activo: true
+};
+function _loadConfigDecans(){
+  apiGet('configuracion_decans','select=*&id=eq.1&limit=1').then(function(rows){
+    if(Array.isArray(rows) && rows[0]){
+      var c = rows[0];
+      window._configDecans = {
+        min_unidades_sin_perfume: parseInt(c.min_unidades_sin_perfume)||5,
+        min_monto_sin_perfume: parseInt(c.min_monto_sin_perfume)||0,
+        modo: c.modo || 'unidades',
+        mensaje_warning: c.mensaje_warning || window._configDecans.mensaje_warning,
+        precio_decan_pct: parseFloat(c.precio_decan_pct)||0.10,
+        precio_decan_fijo: parseInt(c.precio_decan_fijo)||3000,
+        activo: c.activo !== false
+      };
+    }
+  }).catch(function(e){
+    console.warn('[decans] config no cargada, usando defaults:',e);
+  });
+}
+
+// Evalúa si el carrito de SOLO decans cumple el mínimo configurado.
+function _decansCumpleMinimo(totalDecans, montoDecans){
+  var c = window._configDecans || {};
+  if(!c.activo) return {cumple:true, motivo:''};
+  var u = parseInt(c.min_unidades_sin_perfume)||0;
+  var m = parseInt(c.min_monto_sin_perfume)||0;
+  var modo = c.modo || 'unidades';
+  var cumpleU = (u<=0) || (totalDecans >= u);
+  var cumpleM = (m<=0) || (montoDecans >= m);
+  var cumple = true;
+  if(modo === 'unidades') cumple = cumpleU;
+  else if(modo === 'monto') cumple = cumpleM;
+  else if(modo === 'ambos') cumple = cumpleU && cumpleM;
+  else if(modo === 'cualquiera') cumple = cumpleU || cumpleM;
+  return {cumple:cumple, modo:modo, min_u:u, min_m:m};
 }
 
 function loadProds(){
@@ -967,7 +1015,11 @@ function calcP(p){
   var pi=ml>0?Math.ceil((ml+pe)/2/100)*100:(p.precio_min_ars||pe);
   var rM=pm>0&&ct>0?((pm-ct*cotiz)/pm*100):0;
   var rE=pe>0&&ct>0?((pe-ct*cotiz)/pe*100):0;
-  var decan=p.precio_decan>0?p.precio_decan:(pi>0?(Math.ceil(pi*0.1/1000)*1000+3000):0);
+  // FEAT (2026-05-11): precio_decan auto usa config dinámica
+  var _cdcV = window._configDecans || {precio_decan_pct:0.10, precio_decan_fijo:3000};
+  var _pctV = parseFloat(_cdcV.precio_decan_pct)||0.10;
+  var _fijV = parseInt(_cdcV.precio_decan_fijo)||3000;
+  var decan=p.precio_decan>0?p.precio_decan:(pi>0?(Math.ceil(pi*_pctV/1000)*1000+_fijV):0);
   var r={ct:ct,pm:pm,pe:pe,pi:pi,rM:rM,rE:rE,decan:decan};
   // ── INTEGRACIÓN CON OFERTAS ──
   if(typeof ofertaParaProducto==='function'){
@@ -3878,8 +3930,13 @@ function confirmarVenta(){
   var perfsEnCarrito=allCartItems.filter(function(i){return !i.isDecan;});
   var totalDecans=decansEnCarrito.reduce(function(s,i){return s+i.qty;},0);
   var totalPerfs=perfsEnCarrito.reduce(function(s,i){return s+i.qty;},0);
-  if(totalDecans>0&&totalPerfs===0&&totalDecans<5){
-    toast("Si lleva unicamente Decans, el minimo es 5. Con un perfume no hay minimo.","twarn");return;
+  var montoDecansV=decansEnCarrito.reduce(function(s,i){return s+(i.precio||i.price||0)*i.qty;},0);
+  // FEAT (2026-05-11): valida con config dinámica
+  var _chkDecV = _decansCumpleMinimo(totalDecans, montoDecansV);
+  if(totalDecans>0 && totalPerfs===0 && !_chkDecV.cumple){
+    var _msgV = (window._configDecans && window._configDecans.mensaje_warning) ||
+      'Si lleva únicamente Decans, no cumple el mínimo configurado.';
+    toast(_msgV,"twarn");return;
   }
   // Respetar precios del carrito — si el precio difiere del calculado, es especial
   var totalUnidadesFinales=items.filter(function(i){return !i.isDecan&&!i.isCombo;}).reduce(function(s,i){return s+i.qty;},0);

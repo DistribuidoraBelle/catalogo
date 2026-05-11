@@ -961,6 +961,56 @@ function loadConfig(){
       if(r.clave==="callmebot_apikey_facu")cmApiKeyFacu=r.valor||"";
     });
   });
+  // FEAT (2026-05-11): cargar configuración de decans
+  _loadConfigDecans();
+}
+
+// === CONFIGURACIÓN DECANS (cargada de la tabla configuracion_decans) ===
+// Defaults seguros que replican el comportamiento hardcoded actual.
+window._configDecans = {
+  min_unidades_sin_perfume: 5,
+  min_monto_sin_perfume: 0,
+  modo: 'unidades',
+  mensaje_warning: 'Si lleva únicamente Decans, el mínimo de compra es de 5 unidades. En caso de comprar un perfume, los decans no tienen mínimo.',
+  precio_decan_pct: 0.10,
+  precio_decan_fijo: 3000,
+  activo: true
+};
+function _loadConfigDecans(){
+  apiGet('configuracion_decans','select=*&id=eq.1&limit=1').then(function(rows){
+    if(Array.isArray(rows) && rows[0]){
+      var c = rows[0];
+      window._configDecans = {
+        min_unidades_sin_perfume: parseInt(c.min_unidades_sin_perfume)||5,
+        min_monto_sin_perfume: parseInt(c.min_monto_sin_perfume)||0,
+        modo: c.modo || 'unidades',
+        mensaje_warning: c.mensaje_warning || window._configDecans.mensaje_warning,
+        precio_decan_pct: parseFloat(c.precio_decan_pct)||0.10,
+        precio_decan_fijo: parseInt(c.precio_decan_fijo)||3000,
+        activo: c.activo !== false
+      };
+    }
+  }).catch(function(e){
+    console.warn('[decans] config no cargada, usando defaults:',e);
+  });
+}
+
+// Evalúa si el carrito de SOLO decans cumple el mínimo configurado.
+// Devuelve {cumple:bool, motivo:string}
+function _decansCumpleMinimo(totalDecans, montoDecans){
+  var c = window._configDecans || {};
+  if(!c.activo) return {cumple:true, motivo:''};
+  var u = parseInt(c.min_unidades_sin_perfume)||0;
+  var m = parseInt(c.min_monto_sin_perfume)||0;
+  var modo = c.modo || 'unidades';
+  var cumpleU = (u<=0) || (totalDecans >= u);
+  var cumpleM = (m<=0) || (montoDecans >= m);
+  var cumple = true;
+  if(modo === 'unidades') cumple = cumpleU;
+  else if(modo === 'monto') cumple = cumpleM;
+  else if(modo === 'ambos') cumple = cumpleU && cumpleM;
+  else if(modo === 'cualquiera') cumple = cumpleU || cumpleM;
+  return {cumple:cumple, modo:modo, min_u:u, min_m:m};
 }
 
 function loadSlides(){
@@ -1666,7 +1716,12 @@ function calcP(p){
   var pi=ml>0?Math.ceil((ml+pe)/2/100)*100:(p.precio_min_ars||pe);
   var rM=pm>0&&ct>0?((pm-ct*cotiz)/pm*100):0;
   var rE=pe>0&&ct>0?((pe-ct*cotiz)/pe*100):0;
-  var decan=p.precio_decan>0?p.precio_decan:(pi>0?(Math.ceil(pi*0.1/1000)*1000+3000):0);
+  // FEAT (2026-05-11): precio_decan auto usa config dinámica si precio_decan<=0
+  // Fórmula: ceil(pi * pct / 1000) * 1000 + fijo (configurable desde admin)
+  var _cdc = window._configDecans || {precio_decan_pct:0.10, precio_decan_fijo:3000};
+  var _pct = parseFloat(_cdc.precio_decan_pct)||0.10;
+  var _fij = parseInt(_cdc.precio_decan_fijo)||3000;
+  var decan=p.precio_decan>0?p.precio_decan:(pi>0?(Math.ceil(pi*_pct/1000)*1000+_fij):0);
   var r={ct:ct,pm:pm,pe:pe,pi:pi,rM:rM,rE:rE,decan:decan};
   // ── INTEGRACIÓN CON OFERTAS ──
   // Si el producto tiene una oferta vigente, aplicarla.
@@ -2885,10 +2940,14 @@ function renderDrawer(){
   }).join("");
   db.innerHTML=html;
   document.getElementById("ctotal").textContent=fmt(total);
-  // Decan warning
+  // Decan warning (FEAT 2026-05-11: usa config dinámica)
   var dw=document.getElementById("decanWarn");
-  if(totalDecans>0&&totalUnits===0&&totalDecans<5){
-    dw.innerHTML="<div class='warn-decan'>Si lleva unicamente Decans, el minimo de compra es de 5. En caso de comprar un perfume, los decans no tienen minimo.</div>";
+  var montoDecans = decans.reduce(function(s,i){return s+(i.precio||0)*i.qty;},0);
+  var _chkDec = _decansCumpleMinimo(totalDecans, montoDecans);
+  if(totalDecans>0 && totalUnits===0 && !_chkDec.cumple){
+    var _msg = (window._configDecans && window._configDecans.mensaje_warning) ||
+      'Si lleva únicamente Decans, el mínimo de compra es de 5 unidades.';
+    dw.innerHTML="<div class='warn-decan'>"+_msg+"</div>";
     document.getElementById("waBtn").disabled=true;document.getElementById("waBtn").style.background="#bbb";
   } else {dw.innerHTML="";resetWA();}
   document.getElementById("upgBanner").innerHTML=upgrades.length?"<div class='upg-banner'>Precios actualizados segun cantidad del pedido</div>":"";
@@ -3040,19 +3099,22 @@ function loadAnnBar(){
 
 loadAnnBar();
 
-function _reservarProducto(pid, qty, intentos){
+function _reservarProducto(pid, qty, intentos, nombreProd, nroOrden){
   intentos=intentos||0;
   // Devuelve una promesa que resuelve con {ok:true} o {ok:false, error:...}
   // para poder agregar manejo de errores en el flujo principal.
-  return apiGet("productos","select=id,stock_actual,reserva&id=eq."+pid)
+  // FIX 2 (2026-05-11): aceptar nombreProd y nroOrden para registrar movimiento_stock
+  return apiGet("productos","select=id,nombre,stock_actual,reserva&id=eq."+pid)
     .then(function(rows){
       var fp=rows&&rows[0];
       if(!fp){
         console.error('reserva: producto no encontrado id='+pid);
         return {ok:false, error:'producto no encontrado'};
       }
-      var ns=Math.max(0,(fp.stock_actual||0)-qty);
+      var stockAntes=fp.stock_actual||0;
+      var ns=Math.max(0,stockAntes-qty);
       var nr=(fp.reserva||0)+qty;
+      var nombre=nombreProd||fp.nombre||('Prod #'+pid);
       return fetch(SB_URL+"/rest/v1/productos?id=eq."+pid,{
         method:"PATCH",
         headers:{"Content-Type":"application/json","apikey":SB_KEY,"Authorization":"Bearer "+SB_KEY,"Prefer":"return=minimal"},
@@ -3061,6 +3123,25 @@ function _reservarProducto(pid, qty, intentos){
         if(!r.ok){
           throw new Error('HTTP '+r.status);
         }
+        // FIX 2 (2026-05-11): registrar movimiento de reserva (best-effort).
+        // No bloquea el flujo si falla — solo se pierde el log de auditoría.
+        try{
+          fetch(SB_URL+"/rest/v1/movimientos_stock",{
+            method:"POST",
+            headers:{"Content-Type":"application/json","apikey":SB_KEY,"Authorization":"Bearer "+SB_KEY,"Prefer":"return=minimal"},
+            body:JSON.stringify({
+              producto_id:pid,
+              producto_nombre:nombre,
+              tipo:'reserva',
+              cantidad:qty,
+              stock_antes:stockAntes,
+              stock_despues:ns,
+              motivo:'Reserva pedido web '+(nroOrden||'(sin orden)'),
+              usuario:'cliente_web',
+              created_at:new Date().toISOString()
+            })
+          }).catch(function(e){console.warn('mov reserva no registrado:',e);});
+        }catch(eLog){console.warn('mov reserva error:',eLog);}
         return {ok:true};
       });
     }).catch(function(e){
@@ -3069,7 +3150,7 @@ function _reservarProducto(pid, qty, intentos){
         // Reintentar con backoff
         return new Promise(function(resolve){
           setTimeout(function(){
-            _reservarProducto(pid,qty,intentos+1).then(resolve);
+            _reservarProducto(pid,qty,intentos+1,nombreProd,nroOrden).then(resolve);
           }, 1500);
         });
       }
@@ -4498,11 +4579,16 @@ function _sendWAOriginal(){
   var decans=items.filter(function(i){return i.isDecan;});
   var totalUnits=perfs.reduce(function(s,i){return s+i.qty;},0);
   var totalDecans=decans.reduce(function(s,i){return s+i.qty;},0);
-  if(totalDecans>0&&totalUnits===0&&totalDecans<5){
-    showToast("Si lleva unicamente Decans el minimo es 5. Con un perfume no hay minimo.");
+  var montoDecans=decans.reduce(function(s,i){return s+(i.precio||0)*i.qty;},0);
+  // FEAT (2026-05-11): validar con config dinámica
+  var _chkD2 = _decansCumpleMinimo(totalDecans, montoDecans);
+  if(totalDecans>0 && totalUnits===0 && !_chkD2.cumple){
+    var _msgErr = (window._configDecans && window._configDecans.mensaje_warning) ||
+      'Si lleva únicamente Decans, no cumple el mínimo configurado.';
+    showToast(_msgErr);
     window._sendingOrder=false;
     if(waBtn){waBtn.disabled=false;waBtn.style.opacity='';}
-    try{window.dispatchEvent(new CustomEvent('belle:pedido-enviado',{detail:{exito:false, error:'Mínimo 5 decants si no hay perfume'}}));}catch(e){}
+    try{window.dispatchEvent(new CustomEvent('belle:pedido-enviado',{detail:{exito:false, error:'Mínimo decans no cumplido'}}));}catch(e){}
     return;
   }
   // Validar stock disponible para cada producto individual
@@ -4698,21 +4784,31 @@ function _sendWAOriginal(){
         if(comboRef&&comboRef.combo_items){
           comboRef.combo_items.forEach(function(ci){
             if(ci.producto_id&&!ci.es_decan){
-              todosIds.push({id:ci.producto_id,qty:(ci.cantidad||1)*(item.qty||1)});
+              // FIX 2 (2026-05-11): pasar nombre para logging del movimiento
+              var prodRef2=allProds.find(function(p){return p.id===ci.producto_id;});
+              todosIds.push({id:ci.producto_id,qty:(ci.cantidad||1)*(item.qty||1),nombre:(prodRef2&&prodRef2.nombre)||('Prod #'+ci.producto_id)+' (combo)'});
             }
           });
         }
       } else {
         var pid=parseInt(item.id);
-        if(pid){todosIds.push({id:pid,qty:item.qty||1});}
+        if(pid){
+          var prodRef=allProds.find(function(p){return p.id===pid;});
+          todosIds.push({id:pid,qty:item.qty||1,nombre:(prodRef&&prodRef.nombre)||item.nombre||('Prod #'+pid)});
+        }
       }
     });
     var qtxProd={};
-    todosIds.forEach(function(x){qtxProd[x.id]=(qtxProd[x.id]||0)+x.qty;});
+    var qtxNombre={};
+    todosIds.forEach(function(x){
+      qtxProd[x.id]=(qtxProd[x.id]||0)+x.qty;
+      if(x.nombre)qtxNombre[x.id]=x.nombre;
+    });
     // Recolectar promesas para detectar fallas y loggear (importante para no quedar con
     // pedidos sin stock reservado).
+    // FIX 2 (2026-05-11): pasar nombre y nro_orden a _reservarProducto para registro en movimientos_stock
     var reservasPromesas = Object.keys(qtxProd).map(function(pid){
-      return _reservarProducto(parseInt(pid), qtxProd[pid], 0).then(function(res){
+      return _reservarProducto(parseInt(pid), qtxProd[pid], 0, qtxNombre[pid], nroOrden).then(function(res){
         return Object.assign({pid:pid, qty:qtxProd[pid]}, res || {});
       });
     });
