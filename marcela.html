@@ -623,6 +623,31 @@ function patchStockFresco(prodId, delta, motivo){
   });
 }
 
+// ─── Helper unificado de logging de movimientos de stock (2026-05-11) ───
+// Best-effort: si falla, solo deja warn en consola, NO bloquea el flujo principal.
+function _logMovStock(opts){
+  try{
+    if(!opts||!opts.pid)return;
+    var payload={
+      producto_id:opts.pid,
+      producto_nombre:opts.nombre||('Prod #'+opts.pid),
+      tipo:opts.tipo||'ajuste',
+      cantidad:opts.cantidad!=null?opts.cantidad:0,
+      motivo:opts.motivo||'(sin motivo)',
+      usuario:opts.usuario||(typeof VENDEDOR_NOMBRE!=='undefined'?VENDEDOR_NOMBRE:'sistema'),
+      created_at:new Date().toISOString()
+    };
+    if(opts.stockAntes!=null)payload.stock_antes=opts.stockAntes;
+    if(opts.stockDespues!=null)payload.stock_despues=opts.stockDespues;
+    if(typeof periodoActual!=='undefined'&&periodoActual)payload.periodo=periodoActual;
+    return apiPost('movimientos_stock',payload).catch(function(e){
+      console.warn('[_logMovStock] error silencioso:',e,opts);
+    });
+  }catch(eLog){
+    console.warn('[_logMovStock] excepción:',eLog);
+  }
+}
+
 
 function apiDelete(t,f){return api("DELETE",t,null,f);}
 
@@ -924,6 +949,11 @@ function loadQuickPanels(){
             var p=prods.find(function(x){return x.id===parseInt(pid);});
             if(p)p.deposito_m=nuevo;
             toast("Deposito: "+nuevo+"u","tok");
+            // FIX 3 (2026-05-11): loguear ajuste depósito
+            _logMovStock({pid:parseInt(pid),nombre:(p&&p.nombre)||('Prod #'+pid),
+              tipo:'deposito_ajuste',cantidad:Math.abs(delta),
+              stockAntes:cur,stockDespues:nuevo,
+              motivo:'Ajuste depósito ('+(delta>0?'+':'')+delta+') desde panel Marcela'});
             if(nuevo===0)setTimeout(loadQuickPanels,600);
           });
           return;
@@ -952,10 +982,19 @@ function setDepositoDirecto(prodId, valor){
   var nuevo=Math.max(0,parseInt(valor)||0);
   var inp=document.getElementById("qd-"+prodId);
   if(inp)inp.value=nuevo;
+  // FIX 3 (2026-05-11): leer valor antes para tener stock_antes en el log
+  var pPrev=prods.find(function(x){return x.id===prodId;});
+  var stockAntes=pPrev?(pPrev.deposito_m||0):0;
   apiPatch("productos",{deposito_m:nuevo},"id=eq."+prodId).then(function(){
     var p=prods.find(function(x){return x.id===prodId;});
     if(p)p.deposito_m=nuevo;
     toast("Deposito actualizado: "+nuevo+"u","tok");
+    // FIX 3 (2026-05-11): loguear ajuste directo de depósito
+    var delta=nuevo-stockAntes;
+    _logMovStock({pid:prodId,nombre:(p&&p.nombre)||('Prod #'+prodId),
+      tipo:'deposito_ajuste',cantidad:Math.abs(delta),
+      stockAntes:stockAntes,stockDespues:nuevo,
+      motivo:'Ajuste directo depósito Marcela'});
     if(nuevo===0)setTimeout(loadQuickPanels,500);
   });
 }
@@ -1046,6 +1085,11 @@ function renderCat(){
           var p=prods.find(function(x){return x.id===pid;});
           if(p)p.reserva=nuevo;
           toast("Reserva: "+nuevo+"u","tok");
+          // FIX 3 (2026-05-11): loguear ajuste manual de reserva
+          _logMovStock({pid:pid,nombre:(p&&p.nombre)||('Prod #'+pid),
+            tipo:delta>0?'reserva':'reserva_cancelada',
+            cantidad:Math.abs(delta),stockAntes:cur,stockDespues:nuevo,
+            motivo:'Ajuste manual reserva ('+(delta>0?'+':'')+delta+') desde panel Marcela'});
         });
         return;
       }
@@ -1061,6 +1105,11 @@ function renderCat(){
           var p=prods.find(function(x){return x.id===dp;});
           if(p)p.deposito_m=nuevo;
           toast("Deposito: "+nuevo+"u","tok");
+          // FIX 3 (2026-05-11): loguear ajuste depo
+          _logMovStock({pid:dp,nombre:(p&&p.nombre)||('Prod #'+dp),
+            tipo:'deposito_ajuste',cantidad:Math.abs(delta),
+            stockAntes:cur,stockDespues:nuevo,
+            motivo:'Ajuste depósito ('+(delta>0?'+':'')+delta+') desde panel Marcela'});
         });
       }
     });
@@ -2207,7 +2256,15 @@ function chgDeposito(id,delta){
   var p=prods.find(function(x){return x.id===id;});
   if(p&&nv>(p.stock_actual||0)){toast("No puede superar el stock total","twarn");return;}
   el.textContent=nv;
-  apiPatch("productos",{deposito_m:nv},"id=eq."+id).then(function(){if(p)p.deposito_m=nv;toast("Deposito Marcela actualizado","tok");});
+  apiPatch("productos",{deposito_m:nv},"id=eq."+id).then(function(){
+    if(p)p.deposito_m=nv;
+    toast("Deposito Marcela actualizado","tok");
+    // FIX 3 (2026-05-11): loguear cambio depo
+    _logMovStock({pid:id,nombre:(p&&p.nombre)||('Prod #'+id),
+      tipo:'deposito_ajuste',cantidad:Math.abs(delta),
+      stockAntes:cur,stockDespues:nv,
+      motivo:'Cambio depósito Marcela ('+(delta>0?'+':'')+delta+') desde gestión depósito'});
+  });
 }
 
 // GASTOS
