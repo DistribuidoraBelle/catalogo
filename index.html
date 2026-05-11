@@ -3040,19 +3040,22 @@ function loadAnnBar(){
 
 loadAnnBar();
 
-function _reservarProducto(pid, qty, intentos){
+function _reservarProducto(pid, qty, intentos, nombreProd, nroOrden){
   intentos=intentos||0;
   // Devuelve una promesa que resuelve con {ok:true} o {ok:false, error:...}
   // para poder agregar manejo de errores en el flujo principal.
-  return apiGet("productos","select=id,stock_actual,reserva&id=eq."+pid)
+  // FIX 2 (2026-05-11): aceptar nombreProd y nroOrden para registrar movimiento_stock
+  return apiGet("productos","select=id,nombre,stock_actual,reserva&id=eq."+pid)
     .then(function(rows){
       var fp=rows&&rows[0];
       if(!fp){
         console.error('reserva: producto no encontrado id='+pid);
         return {ok:false, error:'producto no encontrado'};
       }
-      var ns=Math.max(0,(fp.stock_actual||0)-qty);
+      var stockAntes=fp.stock_actual||0;
+      var ns=Math.max(0,stockAntes-qty);
       var nr=(fp.reserva||0)+qty;
+      var nombre=nombreProd||fp.nombre||('Prod #'+pid);
       return fetch(SB_URL+"/rest/v1/productos?id=eq."+pid,{
         method:"PATCH",
         headers:{"Content-Type":"application/json","apikey":SB_KEY,"Authorization":"Bearer "+SB_KEY,"Prefer":"return=minimal"},
@@ -3061,6 +3064,25 @@ function _reservarProducto(pid, qty, intentos){
         if(!r.ok){
           throw new Error('HTTP '+r.status);
         }
+        // FIX 2 (2026-05-11): registrar movimiento de reserva (best-effort).
+        // No bloquea el flujo si falla — solo se pierde el log de auditoría.
+        try{
+          fetch(SB_URL+"/rest/v1/movimientos_stock",{
+            method:"POST",
+            headers:{"Content-Type":"application/json","apikey":SB_KEY,"Authorization":"Bearer "+SB_KEY,"Prefer":"return=minimal"},
+            body:JSON.stringify({
+              producto_id:pid,
+              producto_nombre:nombre,
+              tipo:'reserva',
+              cantidad:qty,
+              stock_antes:stockAntes,
+              stock_despues:ns,
+              motivo:'Reserva pedido web '+(nroOrden||'(sin orden)'),
+              usuario:'cliente_web',
+              created_at:new Date().toISOString()
+            })
+          }).catch(function(e){console.warn('mov reserva no registrado:',e);});
+        }catch(eLog){console.warn('mov reserva error:',eLog);}
         return {ok:true};
       });
     }).catch(function(e){
@@ -3069,7 +3091,7 @@ function _reservarProducto(pid, qty, intentos){
         // Reintentar con backoff
         return new Promise(function(resolve){
           setTimeout(function(){
-            _reservarProducto(pid,qty,intentos+1).then(resolve);
+            _reservarProducto(pid,qty,intentos+1,nombreProd,nroOrden).then(resolve);
           }, 1500);
         });
       }
@@ -4698,21 +4720,31 @@ function _sendWAOriginal(){
         if(comboRef&&comboRef.combo_items){
           comboRef.combo_items.forEach(function(ci){
             if(ci.producto_id&&!ci.es_decan){
-              todosIds.push({id:ci.producto_id,qty:(ci.cantidad||1)*(item.qty||1)});
+              // FIX 2 (2026-05-11): pasar nombre para logging del movimiento
+              var prodRef2=allProds.find(function(p){return p.id===ci.producto_id;});
+              todosIds.push({id:ci.producto_id,qty:(ci.cantidad||1)*(item.qty||1),nombre:(prodRef2&&prodRef2.nombre)||('Prod #'+ci.producto_id)+' (combo)'});
             }
           });
         }
       } else {
         var pid=parseInt(item.id);
-        if(pid){todosIds.push({id:pid,qty:item.qty||1});}
+        if(pid){
+          var prodRef=allProds.find(function(p){return p.id===pid;});
+          todosIds.push({id:pid,qty:item.qty||1,nombre:(prodRef&&prodRef.nombre)||item.nombre||('Prod #'+pid)});
+        }
       }
     });
     var qtxProd={};
-    todosIds.forEach(function(x){qtxProd[x.id]=(qtxProd[x.id]||0)+x.qty;});
+    var qtxNombre={};
+    todosIds.forEach(function(x){
+      qtxProd[x.id]=(qtxProd[x.id]||0)+x.qty;
+      if(x.nombre)qtxNombre[x.id]=x.nombre;
+    });
     // Recolectar promesas para detectar fallas y loggear (importante para no quedar con
     // pedidos sin stock reservado).
+    // FIX 2 (2026-05-11): pasar nombre y nro_orden a _reservarProducto para registro en movimientos_stock
     var reservasPromesas = Object.keys(qtxProd).map(function(pid){
-      return _reservarProducto(parseInt(pid), qtxProd[pid], 0).then(function(res){
+      return _reservarProducto(parseInt(pid), qtxProd[pid], 0, qtxNombre[pid], nroOrden).then(function(res){
         return Object.assign({pid:pid, qty:qtxProd[pid]}, res || {});
       });
     });
