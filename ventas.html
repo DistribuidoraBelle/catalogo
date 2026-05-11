@@ -12026,6 +12026,17 @@ function _rbAbrirModalDir(pedido, cliente){
     cliente: cliente,
     pos: null,
     completa: "",
+    // FIX (2026-05-11): partes de la dirección (Google address_components) — necesarias porque
+    // clientes_direcciones tiene calle/numero/localidad como NOT NULL.
+    componentes: {
+      calle: "",
+      numero: "",
+      barrio: "",
+      localidad: "",
+      provincia: "Córdoba",
+      codigo_postal: "",
+      pais: "Argentina"
+    },
     map: null,
     marker: null
   };
@@ -12164,6 +12175,28 @@ function _rbAbrirModalDir(pedido, cliente){
 }
 
 // Búsqueda manual con geocoder (igual al de mis direcciones, adaptado)
+// FIX (2026-05-11): parsea address_components de Google y guarda en _rbAsigDir.componentes
+// Devuelve también el barrio si vino, para registro adicional.
+function _rbParsearComponentes(addrComponents){
+  if(!Array.isArray(addrComponents)) return;
+  var c = {calle:"", numero:"", barrio:"", localidad:"", provincia:"Córdoba", codigo_postal:"", pais:"Argentina"};
+  addrComponents.forEach(function(comp){
+    var types = comp.types || [];
+    if(types.indexOf("route") >= 0) c.calle = comp.long_name || "";
+    else if(types.indexOf("street_number") >= 0) c.numero = comp.long_name || "";
+    else if(types.indexOf("sublocality") >= 0 || types.indexOf("sublocality_level_1") >= 0 || types.indexOf("neighborhood") >= 0){
+      if(!c.barrio) c.barrio = comp.long_name || "";
+    }
+    else if(types.indexOf("locality") >= 0) c.localidad = comp.long_name || "";
+    else if(!c.localidad && types.indexOf("administrative_area_level_2") >= 0) c.localidad = comp.long_name || "";
+    else if(types.indexOf("administrative_area_level_1") >= 0) c.provincia = comp.long_name || c.provincia;
+    else if(types.indexOf("postal_code") >= 0) c.codigo_postal = comp.long_name || "";
+    else if(types.indexOf("country") >= 0) c.pais = comp.long_name || c.pais;
+  });
+  if(_rbAsigDir) _rbAsigDir.componentes = c;
+  return c;
+}
+
 function _rbDirBuscar(){
   var inp = document.getElementById("_rbDirSearch");
   var q = (inp && inp.value || "").trim();
@@ -12177,6 +12210,8 @@ function _rbDirBuscar(){
       var r = res[0];
       _rbAsigDir.pos = {lat: r.geometry.location.lat(), lng: r.geometry.location.lng()};
       _rbAsigDir.completa = r.formatted_address || q;
+      // FIX (2026-05-11): extraer partes de la dirección (calle, número, ciudad, etc.)
+      _rbParsearComponentes(r.address_components);
       _rbAsigDir.map.setCenter(_rbAsigDir.pos);
       _rbAsigDir.map.setZoom(17);
       _rbAsigDir.marker.setPosition(_rbAsigDir.pos);
@@ -12195,6 +12230,8 @@ function _rbDirReverse(pos){
   _rt.geocoder.geocode({location: pos}, function(res, status){
     if(status === "OK" && res && res[0]){
       _rbAsigDir.completa = res[0].formatted_address || "";
+      // FIX (2026-05-11): extraer partes de la dirección
+      _rbParsearComponentes(res[0].address_components);
       var inpC = document.getElementById("_rbDirCompleta");
       if(inpC) inpC.value = _rbAsigDir.completa;
     }
@@ -12219,14 +12256,37 @@ function _rbConfirmarDir(){
 
   if(cliente){
     // CASO 1: cliente asignado → guardar en clientes_direcciones (queda asociada al cliente)
+    // FIX (2026-05-11): incluir calle/numero/localidad (NOT NULL) y resto de componentes parseados.
+    // Si Google no devolvió calle/numero/localidad (caso raro: el usuario clickeó en medio del mapa
+    // sin reverse geocode válido), fallback al texto completo en cada campo crítico.
+    var comp = _rbAsigDir.componentes || {};
+    var calleFinal = (comp.calle || "").trim();
+    var numeroFinal = (comp.numero || "").trim();
+    var localidadFinal = (comp.localidad || "").trim();
+    // Si faltan campos críticos, intentar derivar del texto formateado
+    if(!calleFinal || !numeroFinal || !localidadFinal){
+      // Fallback razonable: usar 'direccion_completa' o partes truncadas
+      // Si solo falta numero, usar "s/n" (sin número) que es válido en Argentina
+      if(!numeroFinal) numeroFinal = "s/n";
+      if(!calleFinal) calleFinal = (completa.split(",")[0] || completa).trim();
+      if(!localidadFinal) localidadFinal = "Córdoba"; // fallback razonable para Belle
+    }
     var dirData = {
       cliente_id: cliente.id,
       etiqueta: etiqueta || null,
+      calle: calleFinal,                             // NOT NULL
+      numero: numeroFinal,                           // NOT NULL
+      localidad: localidadFinal,                     // NOT NULL
+      barrio: comp.barrio || null,
+      provincia: comp.provincia || "Córdoba",
+      codigo_postal: comp.codigo_postal || null,
+      pais: comp.pais || "Argentina",
       direccion_completa: completa,
       lat: pos.lat,
       lng: pos.lng,
       referencias: referencias || null,
-      es_principal: false
+      es_principal: false,
+      modo_entrega: "domicilio"
     };
     apiPost("clientes_direcciones", dirData).then(function(rows){
       var nuevaDir = Array.isArray(rows) && rows[0];
