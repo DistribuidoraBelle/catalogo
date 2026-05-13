@@ -19523,16 +19523,27 @@ function bcNormalizarNombre(raw){
 
 // ── SIMILITUD ───────────────────────────────────────────────────
 // MEJORA (2026-05-12): stopwords ampliadas, fuzzy matching, bonus de marca
+// FIX (2026-05-12): cache de normalización para no recalcular en cada comparación
+window._bcNormCache = {};
+window._bcWordsCache = {};
 function bcNorm(s){
-  return (s||'').toLowerCase()
+  if(!s) return '';
+  if(window._bcNormCache.hasOwnProperty(s)) return window._bcNormCache[s];
+  var r = s.toLowerCase()
     .normalize('NFD').replace(/[\u0300-\u036f]/g,'')
-    // Stopwords ampliadas: artículos, preposiciones, palabras genéricas
     .replace(/\b(eau|de|pour|for|her|him|spray|set|kit|body|deo|by|the|le|la|el|al|du|y|and|with|con|perfume|fragrance|fragancia|edp|edt|edc|parfum|extrait|elixir|ml|cl|oz)\b/g,' ')
-    // Quitar números sueltos de hasta 3 dígitos (volúmenes residuales)
     .replace(/\b\d{1,3}\b/g,' ')
     .replace(/[^a-z0-9\s]/g,' ').replace(/\s+/g,' ').trim();
+  window._bcNormCache[s] = r;
+  return r;
 }
-function bcWords(s){ return bcNorm(s).split(' ').filter(function(w){return w.length>2;}); }
+function bcWords(s){
+  if(!s) return [];
+  if(window._bcWordsCache.hasOwnProperty(s)) return window._bcWordsCache[s];
+  var r = bcNorm(s).split(' ').filter(function(w){return w.length>2;});
+  window._bcWordsCache[s] = r;
+  return r;
+}
 
 // Distancia Levenshtein: cuenta operaciones necesarias para transformar a en b.
 // Tolerante a tipeos: "khamra" vs "khamrah" = 1 operación.
@@ -19567,52 +19578,86 @@ function _bcWordsCercanas(a, b){
 }
 
 function bcSim(a, b){
+  // FIX (2026-05-12): optimizar para no hacer trabajo innecesario
+  // 1. Igualdad rápida
+  if(a===b) return 1.0;
   var wa=bcWords(a), wb=bcWords(b);
   if(!wa.length||!wb.length) return 0;
-  // MEJORA (2026-05-12): contar matches exactos + matches fuzzy (con menos peso)
-  var matchExact=0, matchFuzzy=0;
-  var usadosB={};
-  wa.forEach(function(w){
-    // 1. exacto primero
+
+  // 2. Fast path: solo contar matches exactos (cubre 95% de los casos)
+  var matchExact=0;
+  var usadosB=new Array(wb.length); // false por default
+  for(var i=0;i<wa.length;i++){
+    var w=wa[i];
     var idx = wb.indexOf(w);
     if(idx>=0 && !usadosB[idx]){
       matchExact++;
       usadosB[idx]=true;
-      return;
     }
-    // 2. fuzzy contra los no usados
-    for(var j=0;j<wb.length;j++){
-      if(usadosB[j]) continue;
-      if(_bcWordsCercanas(w, wb[j])){
-        matchFuzzy++;
-        usadosB[j]=true;
-        return;
+  }
+
+  // 3. F1 con matches exactos solamente
+  var p1=matchExact/wa.length, r1=matchExact/wb.length;
+  var f1 = p1+r1>0 ? 2*p1*r1/(p1+r1) : 0;
+
+  // 4. Si ya pasamos 85%, no vale la pena hacer fuzzy (es el match)
+  // 5. Si estamos por debajo de 40%, tampoco — son productos muy distintos
+  // SOLO hacer fuzzy en la zona dudosa (40-85%) donde puede ayudar
+  if(f1 < 0.85 && f1 >= 0.40){
+    var matchFuzzy=0;
+    for(var ii=0;ii<wa.length;ii++){
+      var wi=wa[ii];
+      // skip si ya matcheó exacto
+      var idxE=wb.indexOf(wi);
+      if(idxE>=0 && usadosB[idxE]) continue;
+      // fuzzy contra los no usados — solo palabras de tamaño similar
+      for(var j=0;j<wb.length;j++){
+        if(usadosB[j]) continue;
+        var wj=wb[j];
+        // Pre-filtro rápido: longitudes deben ser similares
+        if(Math.abs(wi.length-wj.length)>2) continue;
+        // Solo palabras largas (>=5) son candidatas a fuzzy
+        if(wi.length<5 || wj.length<5) continue;
+        if(_bcWordsCercanas(wi, wj)){
+          matchFuzzy++;
+          usadosB[j]=true;
+          break;
+        }
       }
     }
-  });
-  // Fuzzy cuenta como 0.7 vs match exacto
-  var m = matchExact + matchFuzzy*0.7;
-  var p=m/wa.length, r=m/wb.length;
-  var f1 = p+r>0 ? 2*p*r/(p+r) : 0;
+    if(matchFuzzy>0){
+      var m2 = matchExact + matchFuzzy*0.7;
+      var p2=m2/wa.length, r2=m2/wb.length;
+      f1 = p2+r2>0 ? 2*p2*r2/(p2+r2) : f1;
+    }
+  }
 
-  // MEJORA (2026-05-12): bonus si la marca extraída coincide
-  var ma = _bcExtraerMarca(a);
-  var mb = _bcExtraerMarca(b);
-  if(ma.marca && mb.marca){
-    var marcaA = ma.marca.toLowerCase();
-    var marcaB = mb.marca.toLowerCase();
-    if(marcaA===marcaB){
-      // Bonus +15% si la marca es idéntica
-      f1 = Math.min(1, f1 + 0.15);
-    } else if(_bcWordsCercanas(marcaA, marcaB)){
-      // Bonus +5% si la marca es similar (tipeo)
-      f1 = Math.min(1, f1 + 0.05);
-    } else {
-      // Penalty si las marcas son distintas: -10%
-      f1 = Math.max(0, f1 - 0.10);
+  // 6. Bonus marca: SOLO si está cerca del threshold (donde puede importar)
+  // y usando cache de marca por string (window._bcMarcaCache)
+  if(f1 >= 0.30 && f1 <= 0.95){
+    var marcaA = _bcGetMarcaCached(a);
+    var marcaB = _bcGetMarcaCached(b);
+    if(marcaA && marcaB){
+      if(marcaA===marcaB){
+        f1 = Math.min(1, f1 + 0.15);
+      } else if(marcaA.length>4 && marcaB.length>4 && _bcWordsCercanas(marcaA, marcaB)){
+        f1 = Math.min(1, f1 + 0.05);
+      } else {
+        f1 = Math.max(0, f1 - 0.10);
+      }
     }
   }
   return f1;
+}
+
+// FIX (2026-05-12): cache de marcas por string para no recalcular en cada bcSim
+window._bcMarcaCache = {};
+function _bcGetMarcaCached(s){
+  if(!s) return '';
+  if(window._bcMarcaCache.hasOwnProperty(s)) return window._bcMarcaCache[s];
+  var m = _bcExtraerMarca(s).marca.toLowerCase();
+  window._bcMarcaCache[s] = m;
+  return m;
 }
 
 
@@ -20064,22 +20109,24 @@ function bcSetTab(tab, el){
     t.style.borderBottomColor='transparent';t.style.color='var(--tx3)';
   });
   if(el){el.style.borderBottomColor='var(--acc)';el.style.color='var(--acc)';}
-  document.getElementById('bcViewComparar').style.display=tab==='comparar'?'block':'none';
-  document.getElementById('bcViewLista').style.display=tab==='lista'?'block':'none';
+  // FIX (2026-05-12): ocultar TODAS las views primero, luego mostrar la correcta
+  document.getElementById('bcViewComparar').style.display='none';
+  document.getElementById('bcViewLista').style.display='none';
   var _rv=document.getElementById('bcViewRecomendaciones');
-  if(_rv) _rv.style.display=tab==='recomendaciones'?'block':'none';
-  if(tab==='recomendaciones') bcRenderRecomendaciones();
-  var recView=document.getElementById('bcViewRecomendaciones');
-  if(recView) recView.style.display=tab==='recomendaciones'?'block':'none';
+  if(_rv) _rv.style.display='none';
   var _cv=document.getElementById('bcViewCruzados');
-  if(_cv) _cv.style.display=tab==='cruzados'?'block':'none';
-  if(tab==='comparar') bcRenderComparativa();
-  if(tab==='recomendaciones') bcRenderRecomendaciones();
-  if(tab==='cruzados') bcRenderCruzados();
+  if(_cv) _cv.style.display='none';
 
-  var _cv=document.getElementById('bcViewCruzados');
-  if(_cv) _cv.style.display=tab==='cruzados'?'block':'none';
-  if(tab==='cruzados') bcRenderCruzados();
+  if(tab==='comparar'){
+    document.getElementById('bcViewComparar').style.display='block';
+    bcRenderComparativa();
+  } else if(tab==='recomendaciones'){
+    if(_rv) _rv.style.display='block';
+    bcRenderRecomendaciones();
+  } else if(tab==='cruzados'){
+    if(_cv) _cv.style.display='block';
+    bcRenderCruzados();
+  }
 }
 
 function bcSetTabLista(nombre, el){
@@ -20089,7 +20136,12 @@ function bcSetTabLista(nombre, el){
     t.style.borderBottomColor='transparent';t.style.color='var(--tx3)';
   });
   if(el){el.style.borderBottomColor='var(--acc)';el.style.color='var(--acc)';}
+  // FIX (2026-05-12): ocultar TODAS las otras views, no solo comparar
   document.getElementById('bcViewComparar').style.display='none';
+  var _rv2=document.getElementById('bcViewRecomendaciones');
+  if(_rv2) _rv2.style.display='none';
+  var _cv2=document.getElementById('bcViewCruzados');
+  if(_cv2) _cv2.style.display='none';
   document.getElementById('bcViewLista').style.display='block';
   try{
     bcRenderListaCompleta(nombre);
@@ -20824,8 +20876,31 @@ function bcRenderComparativa(){
   var brandList=Object.keys(allBrands).sort();
   var catalogBrands=bcGetCatalogBrands()||[];
 
+  // FIX (2026-05-12): pre-calcular match con catálogo UNA VEZ por row
+  // (antes se llamaba bcFindInProds 3+ veces por row → muy lento)
+  var rowMatchData = rows.map(function(r){
+    var mk = bcNorm(r.nombre);
+    var manualPid = bcManualMatches[mk] || null;
+    var matchCat = manualPid 
+      ? (prods||[]).find(function(p){return p.id===manualPid;}) 
+      : bcFindInProds({nombre_norm:r.nombre, nombre_proveedor:r.nombre});
+    var matchScore = 0;
+    if(matchCat){
+      matchScore = bcSim(bcNorm(r.nombre), bcNorm(matchCat.nombre||''));
+    }
+    return {
+      key: mk,
+      manualPid: manualPid,
+      matchCat: matchCat,
+      matchCatId: matchCat ? matchCat.id : null,
+      matchScore: matchScore,
+      // estado: 'manual' | 'auto' | 'parcial' | 'sin'
+      estado: manualPid ? 'manual' : (matchCat ? (matchScore>=0.85?'auto':'parcial') : 'sin')
+    };
+  });
+
   // Apply filters
-  var filteredRows=rows.filter(function(r){
+  var filteredRows=rows.filter(function(r, ri){
     if(bcSearchComp){
       var q=bcSearchComp.toLowerCase();
       if(norm(r.nombre||"").indexOf(norm(q))<0) return false;
@@ -20834,18 +20909,11 @@ function bcRenderComparativa(){
       var hasB=keys.some(function(k){ return r[k]&&bcGetBrand(r[k]).toUpperCase()===bcBrandComp; });
       if(!hasB) return false;
     }
-    // MEJORA (2026-05-12): filtro por estado de match con catálogo
+    // FIX (2026-05-12): filtro por estado usando datos pre-calculados
     if(window._bcFiltroEstadoMatch){
-      var mk = bcNorm(r.nombre);
-      var matchCat = bcFindInProds({nombre_norm:r.nombre, nombre_proveedor:r.nombre});
-      if(window._bcFiltroEstadoMatch==='sin'){
-        if(matchCat) return false;
-      } else if(window._bcFiltroEstadoMatch==='parcial'){
-        if(!matchCat) return false;
-        if(bcManualMatches[mk]) return false;
-        var sc = bcSim(bcNorm(r.nombre), bcNorm(matchCat.nombre||''));
-        if(sc >= 0.85) return false;
-      }
+      var rd = rowMatchData[ri];
+      if(window._bcFiltroEstadoMatch==='sin' && rd.estado!=='sin') return false;
+      if(window._bcFiltroEstadoMatch==='parcial' && rd.estado!=='parcial') return false;
     }
     return true;
   });
@@ -20871,6 +20939,7 @@ function bcRenderComparativa(){
 
   var tbody=filteredRows.map(function(r,ri){
     var realRi=rows.indexOf(r);
+    var rmd = rowMatchData[realRi]; // FIX: usar datos pre-calculados
     var prices=keys.map(function(k){return r[k]?r[k].precio:null;}).filter(Boolean);
     var minP=prices.length?Math.min.apply(null,prices):null;
     var maxP=prices.length?Math.max.apply(null,prices):null;
@@ -20878,8 +20947,8 @@ function bcRenderComparativa(){
     var pct=minP&&maxP&&maxP!==minP?((maxP-minP)/maxP*100).toFixed(1):null;
 
     // MEJORA (2026-05-12): mostrar siempre nombre original + estado del match + lupita
-    var matchKey = bcNorm(r.nombre);
-    var hasManual = !!bcManualMatches[matchKey];
+    var matchKey = rmd.key;
+    var hasManual = !!rmd.manualPid;
     var hasPartial = keys.some(function(k){return r[k] && r[k].partial;});
     var hasFull = keys.some(function(k){return r[k] && !r[k].partial && r[k].score!==1.0;});
 
@@ -20893,9 +20962,8 @@ function bcRenderComparativa(){
       statusBadge = '<span title="Match automático" style="font-size:.55rem;color:#22c55e;background:rgba(34,197,94,.15);padding:.1rem .25rem;border-radius:3px">✅ AUTO</span>';
     }
 
-    // Buscar match con catálogo Belle
-    var matchCat = bcFindInProds({nombre_norm:r.nombre,nombre_proveedor:r.nombre});
-    var matchCatId = matchCat ? matchCat.id : null;
+    // FIX: usar match pre-calculado, no recalcular
+    var matchCatId = rmd.matchCatId;
 
     var cells='<td style="min-width:200px">'+
       '<div style="display:flex;align-items:center;gap:.3rem;flex-wrap:wrap">'+
@@ -20946,21 +21014,13 @@ function bcRenderComparativa(){
     return '<tr>'+cells+'</tr>';
   }).join('');
 
-  // MEJORA (2026-05-12): contar matches por tipo (auto/manual/parcial/sin-match con catálogo)
+  // FIX (2026-05-12): contar estados usando rowMatchData pre-calculado
   var statsMatch = {auto:0, manual:0, parcial:0, sinMatch:0};
-  rows.forEach(function(r){
-    var mk = bcNorm(r.nombre);
-    if(bcManualMatches[mk]){ statsMatch.manual++; return; }
-    // Buscar match con catálogo
-    var matchCat = bcFindInProds({nombre_norm:r.nombre, nombre_proveedor:r.nombre});
-    if(matchCat){
-      // Cuán bueno es el match con el catálogo?
-      var sc = bcSim(bcNorm(r.nombre), bcNorm(matchCat.nombre||''));
-      if(sc >= 0.85) statsMatch.auto++;
-      else statsMatch.parcial++;
-    } else {
-      statsMatch.sinMatch++;
-    }
+  rowMatchData.forEach(function(rd){
+    if(rd.estado==='manual') statsMatch.manual++;
+    else if(rd.estado==='auto') statsMatch.auto++;
+    else if(rd.estado==='parcial') statsMatch.parcial++;
+    else statsMatch.sinMatch++;
   });
 
   wrap.innerHTML=
@@ -22033,233 +22093,209 @@ function bcRenderRecomendaciones(){
   var wrap=document.getElementById('bcRecomContent');
   if(!wrap) return;
   var keys=Object.keys(bcProveedores);
-  if(!keys.length){wrap.innerHTML="<div class='empty'>Carga al menos un proveedor para ver recomendaciones.</div>";return;}
+  if(!keys.length){wrap.innerHTML="<div class='empty' style='padding:1.5rem'>Cargá al menos un proveedor para ver recomendaciones.</div>";return;}
   wrap.innerHTML="<div class='loading'><div class='spin'></div>Calculando recomendaciones...</div>";
 
-  setTimeout(function(){
-    wrap.innerHTML="";
-    keys.forEach(function(provKey){
-      var provItems=bcProveedores[provKey]||[];
-      if(!provItems.length) return;
+  // Filtro activo (default: urgentes)
+  window._bcRecomFiltro = window._bcRecomFiltro || 'urgentes';
 
-      var sinStock=[], stockBajo=[], masVendidos=[], nuevos=[], mejorPrecio=[], nuncaRepuesto=[];
-      provItems.forEach(function(item,idx){
-        var match=bcFindInProds(item);
-        item._idx=idx;
-        if(!match){nuevos.push({item:item,prod:null});return;}
-        var stock=match.stock_actual||0;
-        var cat=String(match.cat||'3').replace('.0','');
-        if(stock===0)        sinStock.push({item:item,prod:match});
-        else if(stock<=3)    stockBajo.push({item:item,prod:match});
-        if((cat==='S'||cat==='1')&&stock<=5) masVendidos.push({item:item,prod:match});
-        // MEJORA (2026-05-12): mejor precio = costo del proveedor < costo_ind histórico
-        if(match.costo_ind && item.precio_usd && item.precio_usd < (match.costo_ind*0.95)){
-          mejorPrecio.push({item:item,prod:match, ahorro: match.costo_ind-item.precio_usd});
+  setTimeout(function(){
+    // ============ PASO 1: análisis de TODOS los proveedores ============
+    var allRecoms = []; // {provKey, item, prod, tipo, urgencia, info}
+    var statsTotal = {sin:0, bajo:0, top:0, precio:0, nuevo:0, nunca:0};
+
+    keys.forEach(function(provKey){
+      var provItems = bcProveedores[provKey]||[];
+      provItems.forEach(function(item, idx){
+        item._idx = idx;
+        var match = bcFindInProds(item);
+        if(!match){
+          allRecoms.push({provKey:provKey, item:item, prod:null, tipo:'nuevo', urgencia:0, info:''});
+          statsTotal.nuevo++;
+          return;
         }
-        // MEJORA: nunca repuesto = stock 0 + sin pedido en viaje
-        if(stock===0 && (match.en_viaje||0)===0){
-          nuncaRepuesto.push({item:item,prod:match});
+        var stock = match.stock_actual||0;
+        var enViaje = match.en_viaje||0;
+        var cat = String(match.cat||'3').replace('.0','');
+        var costo = match.costo_ind||0;
+        var vendido = match.vendido_david||0;
+
+        // Sin stock + sin en viaje = MUY URGENTE
+        if(stock===0 && enViaje===0){
+          allRecoms.push({provKey:provKey, item:item, prod:match, tipo:'nunca', urgencia:5, info:'agotado, sin pedido en viaje'});
+          statsTotal.nunca++;
+        }
+        // Sin stock (pero hay en viaje)
+        else if(stock===0){
+          allRecoms.push({provKey:provKey, item:item, prod:match, tipo:'sin', urgencia:4, info:enViaje+' u en viaje'});
+          statsTotal.sin++;
+        }
+        // Stock bajo
+        else if(stock<=3){
+          allRecoms.push({provKey:provKey, item:item, prod:match, tipo:'bajo', urgencia:3, info:stock+' u en stock'});
+          statsTotal.bajo++;
+        }
+        // Top vendedor (cat S o 1) con stock bajo (≤5)
+        if((cat==='S'||cat==='1') && stock<=5){
+          allRecoms.push({provKey:provKey, item:item, prod:match, tipo:'top', urgencia:cat==='S'?4:3, info:'★ cat '+cat+' • '+vendido+' u vendidas'});
+          statsTotal.top++;
+        }
+        // Mejor precio (≥5% descuento)
+        if(costo>0 && item.precio_usd < costo*0.95){
+          var ahorroPct = ((costo-item.precio_usd)/costo*100).toFixed(0);
+          allRecoms.push({provKey:provKey, item:item, prod:match, tipo:'precio', urgencia:2, info:'-'+ahorroPct+'% vs costo actual'});
+          statsTotal.precio++;
         }
       });
-
-      if(!sinStock.length&&!stockBajo.length&&!masVendidos.length&&!nuevos.length&&!mejorPrecio.length&&!nuncaRepuesto.length) return;
-
-      var section=document.createElement('div');
-      section.style.cssText='background:var(--sur2);border:1px solid var(--bd);border-radius:var(--r);padding:.9rem;margin-bottom:.9rem';
-
-      var hdr=document.createElement('div');
-      var urgentes=sinStock.length+stockBajo.length;
-      hdr.style.cssText='font-size:.85rem;font-weight:700;color:var(--acc);margin-bottom:.7rem;display:flex;align-items:center;gap:.5rem';
-      hdr.innerHTML=provKey+(urgentes?'<span style="font-size:.7rem;background:var(--red);color:#fff;border-radius:10px;padding:.1rem .4rem">'+urgentes+' urgentes</span>':'');
-      section.appendChild(hdr);
-
-      // Renderiza cada categoría con toda la info
-      function renderSection(title, color, items){
-        if(!items.length) return;
-        var d=document.createElement('div');
-        d.style.marginBottom='.7rem';
-        d.innerHTML='<div style="font-size:.68rem;font-weight:700;color:'+color+';text-transform:uppercase;letter-spacing:.04em;margin-bottom:.4rem">'+title+' ('+items.length+')</div>';
-
-        // Mini tabla con header
-        var mini=document.createElement('table');
-        mini.style.cssText='width:100%;border-collapse:collapse;font-size:.7rem';
-        var mhead=document.createElement('thead');
-        mhead.innerHTML='<tr style="border-bottom:1px solid var(--bd);color:var(--tx3);font-size:.62rem">'+
-          '<th style="padding:.25rem .4rem;text-align:left;font-weight:400">Producto proveedor</th>'+
-          '<th style="padding:.25rem .4rem;text-align:right;font-weight:400;white-space:nowrap">Precio prov.</th>'+
-          '<th style="padding:.25rem .4rem;text-align:right;font-weight:400;white-space:nowrap">Costo nuestro</th>'+
-          '<th style="padding:.25rem .4rem;text-align:center;font-weight:400;white-space:nowrap">Stock nuestro</th>'+
-          '<th style="padding:.25rem .4rem;text-align:center;font-weight:400;white-space:nowrap">Stock prov.</th>'+
-          '<th style="padding:.25rem .4rem;text-align:center;font-weight:400;white-space:nowrap">Pedir</th>'+
-          '</tr>';
-        mini.appendChild(mhead);
-        var mtbody=document.createElement('tbody');
-
-        items.slice(0,25).forEach(function(r,ri){
-          var it=r.item;
-          var prod=r.prod;
-          var idx=it._idx;
-
-          var tr=document.createElement('tr');
-          tr.style.cssText='border-bottom:1px solid var(--bd);'+(ri%2===1?'background:var(--sur3)':'');
-
-          // Nombre proveedor
-          var tdN=document.createElement('td');
-          tdN.style.cssText='padding:.28rem .4rem;max-width:200px';
-          var cat=prod?String(prod.cat||'').replace('.0',''):'';
-          tdN.innerHTML=
-            (prod?'<div style="font-size:.58rem;color:var(--tx3)">'+( prod.empresa||'')+(cat?' · cat:'+cat:'')+'</div>':'')+
-            '<div style="color:var(--tx);white-space:nowrap;overflow:hidden;text-overflow:ellipsis" title="'+it.nombre_proveedor+'">'+bcTitleCase(it.nombre_proveedor)+'</div>';
-          tr.appendChild(tdN);
-
-          // Precio proveedor
-          var tdPP=document.createElement('td');
-          tdPP.style.cssText='padding:.28rem .4rem;text-align:right;white-space:nowrap';
-          tdPP.innerHTML='<span style="font-weight:700;color:var(--acc)">u$d '+it.precio_usd.toFixed(2)+'</span>'+
-            (it.estoque!=null?'':'');
-          tr.appendChild(tdPP);
-
-          // Costo nuestro
-          var tdCN=document.createElement('td');
-          tdCN.style.cssText='padding:.28rem .4rem;text-align:right;white-space:nowrap';
-          if(prod){
-            var costoInd=prod.costo_ind||0;
-            var diff=costoInd>0?(it.precio_usd-costoInd):null;
-            var diffCol=diff===null?'var(--tx3)':diff<-1?'var(--green)':diff<=0?'var(--yel)':'#f88';
-            tdCN.innerHTML=(costoInd>0?
-              '<div style="color:var(--tx3)">u$d '+costoInd.toFixed(2)+'</div>'+
-              (diff!==null?'<div style="font-size:.6rem;color:'+diffCol+'">'+(diff>0?'+':'')+diff.toFixed(2)+' dif</div>':'')
-              :'<span style="color:var(--bd)">-</span>');
-          } else {
-            tdCN.innerHTML='<span style="color:var(--bd);font-size:.65rem">no en cat.</span>';
-          }
-          tr.appendChild(tdCN);
-
-          // Stock nuestro
-          var tdSN=document.createElement('td');
-          tdSN.style.cssText='padding:.28rem .4rem;text-align:center;white-space:nowrap';
-          if(prod){
-            var stockN=prod.stock_actual||0;
-            var vendN=prod.vendido_david||0;
-            var viajeN=prod.en_viaje||0;
-            tdSN.innerHTML=
-              '<span style="font-weight:700;color:'+(stockN===0?'#f88':stockN<=3?'var(--yel)':'var(--green)')+'">'+stockN+'</span>'+
-              (viajeN>0?'<div style="font-size:.62rem;color:var(--acc);font-weight:700">&#9992; '+viajeN+' en viaje</div>':'')+
-              (vendN>0?'<div style="font-size:.58rem;color:var(--tx3)">vend: '+vendN+'</div>':'');
-          } else {
-            tdSN.innerHTML='<span style="color:var(--bd)">-</span>';
-          }
-          tr.appendChild(tdSN);
-
-          // Stock proveedor
-          var tdSP=document.createElement('td');
-          tdSP.style.cssText='padding:.28rem .4rem;text-align:center;white-space:nowrap';
-          if(it.estoque!=null){
-            var sp=it.estoque;
-            tdSP.innerHTML='<span style="font-weight:700;color:'+(sp===0?'#f88':sp<=5?'var(--yel)':'var(--cyan)')+'">'+sp+'</span>';
-          } else {
-            tdSP.innerHTML='<span style="font-size:.6rem;color:var(--tx3)">s/d</span>';
-          }
-          tr.appendChild(tdSP);
-
-          // Input pedir
-          var tdI=document.createElement('td');
-          tdI.style.cssText='padding:.28rem .4rem;text-align:center';
-          var ped=bcPedidos[provKey]&&bcPedidos[provKey].items&&bcPedidos[provKey].items['l'+idx];
-          var currentQty=ped?ped.qty:0;
-          var input=document.createElement('input');
-          input.type='number';input.min=0;input.max=99;input.value=currentQty;
-          input.style.cssText='width:44px;text-align:center;padding:.2rem;border-radius:4px;'+
-            'border:1px solid '+(currentQty>0?'var(--green)':'var(--bd)')+';'+
-            'background:'+(currentQty>0?'var(--gdim)':'var(--sur)')+';'+
-            'color:'+(currentQty>0?'var(--green)':'var(--tx)')+';'+
-            'font-size:.72rem;font-weight:'+(currentQty>0?'700':'400');
-          (function(provK,itemIdx,nombre,precio,inputEl){
-            inputEl.addEventListener('change',function(){
-              var qty=Math.max(0,parseInt(this.value)||0);
-              bcToggleLista(provK,itemIdx,qty,bcTitleCase(nombre),precio);
-              this.style.borderColor=qty>0?'var(--green)':'var(--bd)';
-              this.style.background=qty>0?'var(--gdim)':'var(--sur)';
-              this.style.color=qty>0?'var(--green)':'var(--tx)';
-              this.style.fontWeight=qty>0?'700':'400';
-            });
-          })(provKey,idx,it.nombre_proveedor,it.precio_usd,input);
-          tdI.appendChild(input);
-          tr.appendChild(tdI);
-
-          mtbody.appendChild(tr);
-        });
-
-        // Always render all items but hide those beyond 25
-        // (already rendered above via slice) - add expandable row
-        if(items.length>25){
-          var more=document.createElement('tr');
-          more.innerHTML='<td colspan="6" style="padding:.4rem;text-align:center">'+
-            '<button style="font-size:.65rem;background:transparent;border:1px solid var(--bd2);color:var(--acc);border-radius:6px;padding:.25rem .7rem;cursor:pointer">'+
-            '&#9660; Ver '+(items.length-25)+' más</button></td>';
-          more.querySelector('button').onclick=function(){
-            // Render all remaining items
-            more.remove();
-            items.slice(25).forEach(function(r,ri){
-              var it=r.item; var prod=r.prod; var idx=it._idx;
-              var tr=document.createElement('tr');
-              tr.style.cssText='border-bottom:1px solid var(--bd);'+((ri+25)%2===1?'background:var(--sur3)':'');
-              // Nombre
-              var tdN=document.createElement('td'); tdN.style.cssText='padding:.28rem .4rem;max-width:200px';
-              tdN.innerHTML='<div style="font-size:.7rem;font-weight:500">'+bcTitleCase(it.nombre_proveedor)+'</div>'+(it.codigo?'<div style="font-size:.58rem;color:var(--tx3)">'+it.codigo+'</div>':'');
-              // Precio proveedor
-              var tdP=document.createElement('td'); tdP.style.cssText='padding:.28rem .4rem;text-align:right;font-weight:700;color:var(--acc);white-space:nowrap';
-              tdP.textContent='u$d '+it.precio_usd.toFixed(2);
-              // Match
-              var tdM=document.createElement('td'); tdM.style.cssText='padding:.28rem .4rem';
-              if(prod){tdM.innerHTML='<div style="font-size:.65rem;color:var(--tx)">'+prod.empresa+' '+prod.nombre+'</div>';}
-              else{tdM.innerHTML='<span style="font-size:.62rem;color:var(--tx3)">— sin match</span>';}
-              // Stock
-              var tdS=document.createElement('td'); tdS.style.cssText='padding:.28rem .4rem;text-align:center';
-              if(prod){var st=prod.stock_actual||0;tdS.innerHTML='<span style="font-weight:700;color:'+(st===0?'#f88':st<=3?'var(--yel)':'var(--green)')+'">'+st+'</span>';}
-              else tdS.innerHTML='-';
-              // Costo diff
-              var tdD=document.createElement('td'); tdD.style.cssText='padding:.28rem .4rem;text-align:right';
-              var costoN=prod?(prod.costo_ind||0):0;
-              var diff=costoN>0?(it.precio_usd-costoN):null;
-              var diffCol=diff===null?'var(--tx3)':diff<-1?'var(--green)':diff<=0?'var(--yel)':'#f88';
-              tdD.innerHTML=costoN>0?('<div style="font-size:.7rem;color:var(--tx3)">u$d '+costoN.toFixed(2)+'</div>'+(diff!==null?'<div style="font-size:.6rem;color:'+diffCol+'">'+(diff>0?'+':'')+diff.toFixed(2)+'</div>':'')):'<span style="color:var(--bd)">-</span>';
-              // Qty input
-              var tdI=document.createElement('td'); tdI.style.cssText='padding:.28rem .4rem;text-align:center';
-              var inOrd2=ped.items&&ped.items['l'+idx]; var qty2=inOrd2?inOrd2.qty:0;
-              var input2=document.createElement('input');
-              input2.type='number'; input2.value=qty2; input2.min=0; input2.max=99;
-              input2.style.cssText='width:40px;text-align:center;background:var(--sur3);border:1px solid var(--bd);border-radius:4px;color:var(--tx);font-size:.7rem;padding:.1rem';
-              (function(capturedIdx,capturedIt,capturedNombre){
-                input2.onchange=function(){bcToggleLista(capturedNombre,capturedIdx,this.value,bcTitleCase(capturedIt.nombre_proveedor),capturedIt.precio_usd);};
-              })(idx,it,provKey);
-              tdI.appendChild(input2);
-              tr.appendChild(tdN); tr.appendChild(tdP); tr.appendChild(tdM);
-              tr.appendChild(tdS); tr.appendChild(tdD); tr.appendChild(tdI);
-              mtbody.appendChild(tr);
-            });
-          };
-          mtbody.appendChild(more);
-        }
-        mini.appendChild(mtbody);
-        d.appendChild(mini);
-        section.appendChild(d);
-      }
-
-      renderSection('&#9888; Sin stock', 'var(--red)',   sinStock);
-      renderSection('&#10060; Nunca repuesto (sin pedido en viaje)', '#f97316',   nuncaRepuesto);
-      renderSection('&#9660; Stock bajo','var(--yel)',   stockBajo);
-      renderSection('&#11088; M&aacute;s vendidos','var(--green)', masVendidos);
-      renderSection('&#128184; Mejor precio (descuento &ge; 5%)','#22d3ee', mejorPrecio);
-      renderSection('&#127381; No en cat&aacute;logo','var(--cyan)', nuevos);
-
-      wrap.appendChild(section);
     });
 
-    if(!wrap.children.length)
-      wrap.innerHTML="<div class='empty'>Sin recomendaciones con los proveedores actuales.</div>";
-  },100);
+    if(!allRecoms.length){
+      wrap.innerHTML="<div class='empty' style='padding:1.5rem'>Sin recomendaciones con los proveedores cargados.</div>";
+      return;
+    }
+
+    // ============ PASO 2: filtrar según selector ============
+    var filtroActivo = window._bcRecomFiltro;
+    var visibles = allRecoms.filter(function(r){
+      if(filtroActivo==='todas') return true;
+      if(filtroActivo==='urgentes') return r.urgencia >= 3;
+      if(filtroActivo==='sin') return r.tipo==='sin' || r.tipo==='nunca';
+      if(filtroActivo==='top') return r.tipo==='top';
+      if(filtroActivo==='precio') return r.tipo==='precio';
+      if(filtroActivo==='nuevo') return r.tipo==='nuevo';
+      if(filtroActivo==='bajo') return r.tipo==='bajo';
+      return true;
+    });
+
+    // Ordenar por urgencia desc
+    visibles.sort(function(a,b){return b.urgencia - a.urgencia;});
+
+    // ============ PASO 3: render ============
+    var tipoColors = {
+      nunca: {bg:'rgba(239,68,68,.12)', border:'#ef4444', icon:'🚨', label:'NUNCA REPUESTO'},
+      sin:   {bg:'rgba(249,115,22,.12)', border:'#f97316', icon:'⚠️', label:'SIN STOCK'},
+      bajo:  {bg:'rgba(251,191,36,.12)', border:'#fbbf24', icon:'🔻', label:'STOCK BAJO'},
+      top:   {bg:'rgba(34,197,94,.12)', border:'#22c55e', icon:'⭐', label:'MÁS VENDIDO'},
+      precio:{bg:'rgba(34,211,238,.12)', border:'#22d3ee', icon:'💰', label:'BUEN PRECIO'},
+      nuevo: {bg:'rgba(168,85,247,.12)', border:'#a855f7', icon:'🆕', label:'NO EN CATÁLOGO'}
+    };
+
+    var htmlOut = '';
+
+    // ── BARRA DE FILTROS ──
+    htmlOut += '<div style="display:flex;gap:.4rem;flex-wrap:wrap;align-items:center;margin-bottom:.9rem;padding:.6rem;background:var(--sur2);border-radius:8px;border:1px solid var(--bd)">';
+    htmlOut += '<div style="font-size:.7rem;color:var(--tx3);font-weight:600;text-transform:uppercase;letter-spacing:.04em">Filtrar:</div>';
+    var filtros = [
+      {k:'urgentes', lbl:'🚨 Urgentes', count:statsTotal.nunca+statsTotal.sin+statsTotal.bajo+statsTotal.top},
+      {k:'todas', lbl:'📋 Todas', count:allRecoms.length},
+      {k:'sin', lbl:'⚠️ Sin stock', count:statsTotal.nunca+statsTotal.sin},
+      {k:'bajo', lbl:'🔻 Stock bajo', count:statsTotal.bajo},
+      {k:'top', lbl:'⭐ Top vendidos', count:statsTotal.top},
+      {k:'precio', lbl:'💰 Buen precio', count:statsTotal.precio},
+      {k:'nuevo', lbl:'🆕 Nuevos', count:statsTotal.nuevo}
+    ];
+    filtros.forEach(function(f){
+      if(f.count===0 && f.k!=='todas') return;
+      var act = filtroActivo===f.k;
+      htmlOut += '<button onclick="window._bcRecomFiltro=\''+f.k+'\';bcRenderRecomendaciones()" '+
+        'style="background:'+(act?'var(--acc)':'transparent')+';color:'+(act?'#000':'var(--tx)')+';'+
+        'border:1px solid '+(act?'var(--acc)':'var(--bd)')+';border-radius:6px;padding:.25rem .55rem;cursor:pointer;'+
+        'font-size:.7rem;font-weight:'+(act?'700':'500')+'">'+f.lbl+' ('+f.count+')</button>';
+    });
+    htmlOut += '</div>';
+
+    if(!visibles.length){
+      htmlOut += '<div class="empty" style="padding:1.5rem">No hay items en esta categoría.</div>';
+      wrap.innerHTML = htmlOut;
+      return;
+    }
+
+    htmlOut += '<div style="font-size:.7rem;color:var(--tx3);margin-bottom:.5rem">Mostrando <b style="color:var(--tx)">'+visibles.length+'</b> recomendaciones</div>';
+
+    // ── GRID DE TARJETAS ──
+    htmlOut += '<div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(280px,1fr));gap:.6rem">';
+
+    visibles.slice(0, 100).forEach(function(r, idx){
+      var color = tipoColors[r.tipo];
+      var it = r.item;
+      var prod = r.prod;
+      var ped = bcPedidos[r.provKey] && bcPedidos[r.provKey].items && bcPedidos[r.provKey].items['l'+it._idx];
+      var qty = ped ? ped.qty : 0;
+      var costoStr = prod && prod.costo_ind ? 'u$d '+prod.costo_ind.toFixed(2) : 's/d';
+      var stockStr = prod ? ((prod.stock_actual||0)+' u') : '-';
+      var viajeStr = prod && prod.en_viaje>0 ? ' ✈️'+prod.en_viaje : '';
+
+      htmlOut += '<div style="background:'+color.bg+';border:1px solid '+color.border+';border-radius:8px;padding:.7rem;display:flex;flex-direction:column;gap:.4rem">';
+
+      // Header: badge tipo + proveedor
+      htmlOut += '<div style="display:flex;justify-content:space-between;align-items:flex-start;gap:.4rem">';
+      htmlOut += '<span style="font-size:.6rem;color:'+color.border+';font-weight:700;letter-spacing:.04em">'+color.icon+' '+color.label+'</span>';
+      htmlOut += '<span style="font-size:.6rem;color:var(--tx3);font-weight:600">'+r.provKey+'</span>';
+      htmlOut += '</div>';
+
+      // Nombre del producto
+      htmlOut += '<div style="font-size:.78rem;font-weight:600;color:var(--tx);line-height:1.3" title="'+(it.nombre_proveedor||'').replace(/"/g,'&quot;')+'">'+bcTitleCase(it.nombre_proveedor||'')+'</div>';
+
+      // Match con catálogo (si existe)
+      if(prod){
+        htmlOut += '<div style="font-size:.62rem;color:var(--tx3);background:rgba(0,0,0,.15);padding:.2rem .4rem;border-radius:3px">↔ '+prod.empresa+' - '+prod.nombre+'</div>';
+      }
+
+      // Info adicional
+      htmlOut += '<div style="font-size:.66rem;color:var(--tx2);font-style:italic">'+r.info+'</div>';
+
+      // Stats row: precio proveedor vs costo nuestro, stock
+      htmlOut += '<div style="display:flex;gap:.5rem;flex-wrap:wrap;font-size:.65rem;padding:.3rem 0;border-top:1px dashed var(--bd)">';
+      htmlOut += '<div><span style="color:var(--tx3)">Prov:</span> <b style="color:var(--acc)">u$d '+it.precio_usd.toFixed(2)+'</b></div>';
+      if(prod){
+        htmlOut += '<div><span style="color:var(--tx3)">Costo:</span> <b>'+costoStr+'</b></div>';
+        htmlOut += '<div><span style="color:var(--tx3)">Stock:</span> <b style="color:'+((prod.stock_actual||0)===0?'#ef4444':(prod.stock_actual||0)<=3?'#fbbf24':'#22c55e')+'">'+stockStr+viajeStr+'</b></div>';
+      }
+      htmlOut += '</div>';
+
+      // Input pedir
+      htmlOut += '<div style="display:flex;align-items:center;justify-content:space-between;gap:.4rem;padding-top:.3rem;border-top:1px dashed var(--bd)">';
+      htmlOut += '<span style="font-size:.65rem;color:var(--tx3);font-weight:600">PEDIR:</span>';
+      htmlOut += '<input type="number" min="0" max="99" value="'+qty+'" '+
+        'data-rec-prov="'+r.provKey.replace(/"/g,'&quot;')+'" data-rec-idx="'+it._idx+'" '+
+        'data-rec-nombre="'+(it.nombre_proveedor||'').replace(/"/g,'&quot;')+'" '+
+        'data-rec-precio="'+it.precio_usd+'" '+
+        'class="bc-rec-qty" '+
+        'style="width:60px;text-align:center;background:'+(qty>0?'rgba(34,197,94,.15)':'var(--sur)')+';'+
+        'border:1px solid '+(qty>0?'#22c55e':'var(--bd)')+';border-radius:6px;'+
+        'color:'+(qty>0?'#22c55e':'var(--tx)')+';font-size:.85rem;padding:.3rem;font-weight:700">';
+      htmlOut += '</div>';
+
+      htmlOut += '</div>';
+    });
+
+    htmlOut += '</div>';
+
+    if(visibles.length > 100){
+      htmlOut += '<div style="text-align:center;margin-top:.8rem;font-size:.7rem;color:var(--tx3)">Mostrando primeras 100 de '+visibles.length+'. Filtrá para reducir.</div>';
+    }
+
+    wrap.innerHTML = htmlOut;
+
+    // Bind input change
+    wrap.querySelectorAll('.bc-rec-qty').forEach(function(inp){
+      inp.addEventListener('change', function(){
+        var qty = Math.max(0, parseInt(this.value)||0);
+        var provK = this.dataset.recProv;
+        var idx = parseInt(this.dataset.recIdx);
+        var nombre = this.dataset.recNombre;
+        var precio = parseFloat(this.dataset.recPrecio);
+        bcToggleLista(provK, idx, qty, bcTitleCase(nombre), precio);
+        // Actualizar visual
+        this.style.background = qty>0 ? 'rgba(34,197,94,.15)' : 'var(--sur)';
+        this.style.borderColor = qty>0 ? '#22c55e' : 'var(--bd)';
+        this.style.color = qty>0 ? '#22c55e' : 'var(--tx)';
+      });
+    });
+
+  }, 50);
 }
+
 
 // MEJORA (2026-05-12): cache para evitar recalcular match con catálogo en cada render.
 // Se invalida al recargar prods o al cambiar matches manuales.
@@ -22268,6 +22304,10 @@ window._bcFindCacheReady = false;
 function _bcResetFindCache(){
   window._bcFindCache = {};
   window._bcFindCacheReady = false;
+  // FIX (2026-05-12): invalidar también caches de normalización
+  window._bcNormCache = {};
+  window._bcWordsCache = {};
+  window._bcMarcaCache = {};
 }
 
 function bcFindInProds(item){
