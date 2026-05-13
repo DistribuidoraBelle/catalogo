@@ -948,7 +948,12 @@ var _catSession = null;    // sesión activa de Supabase Auth
 var _catFavs = [];         // array de IDs de productos favoritos del cliente
 var _catAuthReady = false; // flag de inicialización del módulo
 
-window.addEventListener("DOMContentLoaded",function(){initTheme();loadConfig();loadSlides();loadProds();});
+window.addEventListener("DOMContentLoaded",function(){
+  // FIX (2026-05-11): leer si este navegador es admin/vendedor (seteado por belle.html/ventas.html).
+  // Si lo es, habilita features privilegiadas como editor de fotos de notas olfativas.
+  try{ window._catAdminMode = localStorage.getItem('belle_admin_mode')==='1'; }catch(e){ window._catAdminMode=false; }
+  initTheme();loadConfig();loadSlides();loadProds();
+});
 
 function loadConfig(){
   apiGet("configuracion","select=clave,valor").then(function(rows){
@@ -961,6 +966,56 @@ function loadConfig(){
       if(r.clave==="callmebot_apikey_facu")cmApiKeyFacu=r.valor||"";
     });
   });
+  // FEAT (2026-05-11): cargar configuración de decans
+  _loadConfigDecans();
+}
+
+// === CONFIGURACIÓN DECANS (cargada de la tabla configuracion_decans) ===
+// Defaults seguros que replican el comportamiento hardcoded actual.
+window._configDecans = {
+  min_unidades_sin_perfume: 5,
+  min_monto_sin_perfume: 0,
+  modo: 'unidades',
+  mensaje_warning: 'Si lleva únicamente Decans, el mínimo de compra es de 5 unidades. En caso de comprar un perfume, los decans no tienen mínimo.',
+  precio_decan_pct: 0.10,
+  precio_decan_fijo: 3000,
+  activo: true
+};
+function _loadConfigDecans(){
+  apiGet('configuracion_decans','select=*&id=eq.1&limit=1').then(function(rows){
+    if(Array.isArray(rows) && rows[0]){
+      var c = rows[0];
+      window._configDecans = {
+        min_unidades_sin_perfume: parseInt(c.min_unidades_sin_perfume)||5,
+        min_monto_sin_perfume: parseInt(c.min_monto_sin_perfume)||0,
+        modo: c.modo || 'unidades',
+        mensaje_warning: c.mensaje_warning || window._configDecans.mensaje_warning,
+        precio_decan_pct: parseFloat(c.precio_decan_pct)||0.10,
+        precio_decan_fijo: parseInt(c.precio_decan_fijo)||3000,
+        activo: c.activo !== false
+      };
+    }
+  }).catch(function(e){
+    console.warn('[decans] config no cargada, usando defaults:',e);
+  });
+}
+
+// Evalúa si el carrito de SOLO decans cumple el mínimo configurado.
+// Devuelve {cumple:bool, motivo:string}
+function _decansCumpleMinimo(totalDecans, montoDecans){
+  var c = window._configDecans || {};
+  if(!c.activo) return {cumple:true, motivo:''};
+  var u = parseInt(c.min_unidades_sin_perfume)||0;
+  var m = parseInt(c.min_monto_sin_perfume)||0;
+  var modo = c.modo || 'unidades';
+  var cumpleU = (u<=0) || (totalDecans >= u);
+  var cumpleM = (m<=0) || (montoDecans >= m);
+  var cumple = true;
+  if(modo === 'unidades') cumple = cumpleU;
+  else if(modo === 'monto') cumple = cumpleM;
+  else if(modo === 'ambos') cumple = cumpleU && cumpleM;
+  else if(modo === 'cualquiera') cumple = cumpleU || cumpleM;
+  return {cumple:cumple, modo:modo, min_u:u, min_m:m};
 }
 
 function loadSlides(){
@@ -1666,7 +1721,12 @@ function calcP(p){
   var pi=ml>0?Math.ceil((ml+pe)/2/100)*100:(p.precio_min_ars||pe);
   var rM=pm>0&&ct>0?((pm-ct*cotiz)/pm*100):0;
   var rE=pe>0&&ct>0?((pe-ct*cotiz)/pe*100):0;
-  var decan=p.precio_decan>0?p.precio_decan:(pi>0?(Math.ceil(pi*0.1/1000)*1000+3000):0);
+  // FEAT (2026-05-11): precio_decan auto usa config dinámica si precio_decan<=0
+  // Fórmula: ceil(pi * pct / 1000) * 1000 + fijo (configurable desde admin)
+  var _cdc = window._configDecans || {precio_decan_pct:0.10, precio_decan_fijo:3000};
+  var _pct = parseFloat(_cdc.precio_decan_pct)||0.10;
+  var _fij = parseInt(_cdc.precio_decan_fijo)||3000;
+  var decan=p.precio_decan>0?p.precio_decan:(pi>0?(Math.ceil(pi*_pct/1000)*1000+_fij):0);
   var r={ct:ct,pm:pm,pe:pe,pi:pi,rM:rM,rE:rE,decan:decan};
   // ── INTEGRACIÓN CON OFERTAS ──
   // Si el producto tiene una oferta vigente, aplicarla.
@@ -2885,10 +2945,14 @@ function renderDrawer(){
   }).join("");
   db.innerHTML=html;
   document.getElementById("ctotal").textContent=fmt(total);
-  // Decan warning
+  // Decan warning (FEAT 2026-05-11: usa config dinámica)
   var dw=document.getElementById("decanWarn");
-  if(totalDecans>0&&totalUnits===0&&totalDecans<5){
-    dw.innerHTML="<div class='warn-decan'>Si lleva unicamente Decans, el minimo de compra es de 5. En caso de comprar un perfume, los decans no tienen minimo.</div>";
+  var montoDecans = decans.reduce(function(s,i){return s+(i.precio||0)*i.qty;},0);
+  var _chkDec = _decansCumpleMinimo(totalDecans, montoDecans);
+  if(totalDecans>0 && totalUnits===0 && !_chkDec.cumple){
+    var _msg = (window._configDecans && window._configDecans.mensaje_warning) ||
+      'Si lleva únicamente Decans, el mínimo de compra es de 5 unidades.';
+    dw.innerHTML="<div class='warn-decan'>"+_msg+"</div>";
     document.getElementById("waBtn").disabled=true;document.getElementById("waBtn").style.background="#bbb";
   } else {dw.innerHTML="";resetWA();}
   document.getElementById("upgBanner").innerHTML=upgrades.length?"<div class='upg-banner'>Precios actualizados segun cantidad del pedido</div>":"";
@@ -4520,11 +4584,16 @@ function _sendWAOriginal(){
   var decans=items.filter(function(i){return i.isDecan;});
   var totalUnits=perfs.reduce(function(s,i){return s+i.qty;},0);
   var totalDecans=decans.reduce(function(s,i){return s+i.qty;},0);
-  if(totalDecans>0&&totalUnits===0&&totalDecans<5){
-    showToast("Si lleva unicamente Decans el minimo es 5. Con un perfume no hay minimo.");
+  var montoDecans=decans.reduce(function(s,i){return s+(i.precio||0)*i.qty;},0);
+  // FEAT (2026-05-11): validar con config dinámica
+  var _chkD2 = _decansCumpleMinimo(totalDecans, montoDecans);
+  if(totalDecans>0 && totalUnits===0 && !_chkD2.cumple){
+    var _msgErr = (window._configDecans && window._configDecans.mensaje_warning) ||
+      'Si lleva únicamente Decans, no cumple el mínimo configurado.';
+    showToast(_msgErr);
     window._sendingOrder=false;
     if(waBtn){waBtn.disabled=false;waBtn.style.opacity='';}
-    try{window.dispatchEvent(new CustomEvent('belle:pedido-enviado',{detail:{exito:false, error:'Mínimo 5 decants si no hay perfume'}}));}catch(e){}
+    try{window.dispatchEvent(new CustomEvent('belle:pedido-enviado',{detail:{exito:false, error:'Mínimo decans no cumplido'}}));}catch(e){}
     return;
   }
   // Validar stock disponible para cada producto individual
@@ -6239,11 +6308,18 @@ function renderFichaModal(prod, f){
       html+='<div class="fb-nota-tipo">'+tier.label+'</div>';
       html+='</div>';
       html+='<div class="fb-notas-fotos">';
+      // FIX (2026-05-11): solo admin/vendedor ven el cursor pointer y pueden clickear notas.
+      // Para el público, las notas son solo visuales.
+      var _esAdmCat = !!window._catAdminMode;
       notas.forEach(function(nota){
         var foto=getNotaFoto(nota);
         var notaKey2=(nota||'').toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g,'').replace(/[^a-z0-9]/g,' ').trim();
         var fotoFinal=NOTAS_FOTOS_USER[notaKey2]||foto;
-        html+='<div class="fb-nota-foto-item" data-nota="'+nota+'" data-key="'+notaKey2+'" onclick="abrirEditorNota(this.dataset.nota,this.dataset.key)" title="Clic para cambiar foto">';
+        if(_esAdmCat){
+          html+='<div class="fb-nota-foto-item" data-nota="'+nota+'" data-key="'+notaKey2+'" onclick="abrirEditorNota(this.dataset.nota,this.dataset.key)" title="Clic para cambiar foto" style="cursor:pointer">';
+        } else {
+          html+='<div class="fb-nota-foto-item" style="cursor:default">';
+        }
         html+='<img src="'+fotoFinal+'" alt="'+nota+'" class="fb-nota-img" loading="lazy" onerror="this.src=NOTAS_FOTOS[\'_default\']">';
         html+='<div class="fb-nota-nombre">'+nota+'</div>';
         html+='</div>';
@@ -7165,6 +7241,9 @@ function compExportar(tipo){
 <!-- modal inline nota -->
 <script>
 function abrirEditorNota(nombre,key){
+  // FIX (2026-05-11): solo admin/vendedor pueden abrir el editor de fotos de notas.
+  // El público general no debe ver este modal (es confuso y no aporta valor).
+  if(!window._catAdminMode){ return; }
   window._notaKey=key;window._notaNombre=nombre;window._notaFotoSel='';
   var fotoActual=NOTAS_FOTOS_USER[key]||NOTAS_FOTOS[key]||NOTAS_FOTOS['_default'];
   var mo=document.getElementById('moNotaFoto');
