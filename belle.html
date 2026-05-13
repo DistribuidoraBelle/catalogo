@@ -2665,6 +2665,15 @@ function comprasParseAnyText(text, provNombre){
   var rStar=/^(.+?)\s*-\s*\$?([\d]+\.[\d]{2})\s*(?:-\s*\(([\d]+)pcs\))?\s*$/i;
   // Generic slash: "NAME / 22.50"
   var rSlash=/^(.+?)\s*\/\s*([\d]+[,\.][0-9]{2})\s*$/;
+  // MEJORA (2026-05-12): nuevos patterns más flexibles
+  // Dollar prefix: "$22.50 NOMBRE" o "USD 22.50 NOMBRE"
+  var rDollarPrefix=/^(?:USD\s*|U\$D\s*|\$\s*)([\d]+[,\.][\d]{1,2})\s+(.+)$/i;
+  // Tabular (con tab o múltiples espacios entre nombre y precio): "NOMBRE     22.50"
+  var rTab=/^(.+?)[\s\t]{2,}(?:USD\s*|U\$D\s*|\$\s*)?([\d]+[,\.][\d]{2})\s*$/i;
+  // Lista con dos puntos: "NOMBRE: 22.50" o "NOMBRE : USD 22.50"
+  var rColon=/^(.+?)\s*:\s*(?:USD\s*|U\$D\s*|\$\s*)?([\d]+[,\.][\d]{2})\s*$/i;
+  // WhatsApp: "1) NOMBRE - precio" o "• NOMBRE - precio" (con o sin bullet)
+  var rWhatsApp=/^(?:\d+[\)\.\-]\s+|[•\-▪►]\s+)?(.+?)\s+(?:USD\s*|U\$D\s*|\$\s*)?([\d]+[,\.][\d]{2})\s*$/i;
   // Brand header: *🧴💨BRAND🧴💨* or *BRAND* on its own line
   var rBrand=/^[🧴💨✨🕌🌙⭐🇵🇾\s]*([A-Z][A-Z\s&'\.0-9]{2,})[🧴💨✨🕌🌙⭐🇵🇾\s]*$/;
 
@@ -2672,7 +2681,7 @@ function comprasParseAnyText(text, provNombre){
     line=line.trim();
     if(!line||line.length<5) return;
     if(/^[|*=\-]{3,}/.test(line)) return;
-    if(/lista de pre|emiss|grupo:|loja:|pag:|hora:|stock en|cod\.\s+desc/i.test(line)) return;
+    if(/lista de pre|emiss|grupo:|loja:|pag:|hora:|stock en|cod\.\s+desc|whatsapp|telegram|^total[\s:]|^subtotal/i.test(line)) return;
 
     // Detect brand header lines
     var cleanForBrand=line.replace(/[*▪►•]/g,'').replace(/[^\x00-\x7F]/g,'').trim();
@@ -2686,34 +2695,77 @@ function comprasParseAnyText(text, provNombre){
     // Remove trailing * that weren't caught
     clean=clean.replace(/\*+/g,'').trim();
 
+    function _addItem(nom, pr, opts){
+      opts = opts || {};
+      if(!nom||nom.length<3) return false;
+      if(pr<=0 || pr>1000) return false;
+      // Filtros anti-falsos positivos
+      if(/^(precio|valor|total|subtotal|envio|envío|descuento)/i.test(nom)) return false;
+      if(seen[nom]) return false;
+      seen[nom]=1;
+      var fullNom = (currentBrand && !nom.toLowerCase().includes(currentBrand.toLowerCase()))
+        ? currentBrand+' '+nom : nom;
+      var obj = {
+        nombre_proveedor: nom,
+        nombre_norm: bcNormalizarNombre(fullNom),
+        precio_usd: pr,
+        proveedor: provNombre,
+        marca: currentBrand
+      };
+      if(opts.codigo) obj.codigo = opts.codigo;
+      if(opts.stock!=null) obj.stock_prov = opts.stock;
+      items.push(obj);
+      return true;
+    }
+
     var m=rAtacado.exec(clean);
     if(m){
       var codAt=m[1].trim();
       var nom=m[2].trim().replace(/^PERFUME\s+/i,'').trim();
       var pr=parseFloat(m[3]);
-      if(nom.length>3&&pr>0&&pr<600&&!seen[nom]){seen[nom]=1;items.push({nombre_proveedor:nom,nombre_norm:bcNormalizarNombre(nom),precio_usd:pr,codigo:codAt,proveedor:provNombre,marca:currentBrand});}
+      _addItem(nom, pr, {codigo:codAt});
       return;
     }
     m=rStar.exec(clean);
     if(m){
       var nom2=m[1].trim();
       var pr2=parseFloat(m[2]);
-      if(nom2.length>3&&pr2>0&&pr2<600&&!seen[nom2]){
-        seen[nom2]=1;
-        var fullNom2=currentBrand?currentBrand+' '+nom2:nom2;
-        var stk2=m[3]?parseInt(m[3]):null;
-        items.push({nombre_proveedor:nom2,nombre_norm:bcNormalizarNombre(fullNom2),precio_usd:pr2,proveedor:provNombre,marca:currentBrand,stock_prov:stk2});
-      }
-      return;
+      var stk2=m[3]?parseInt(m[3]):null;
+      if(_addItem(nom2, pr2, {stock:stk2})) return;
     }
     m=rSlash.exec(clean);
     if(m){
       var nom3=m[1].trim().replace(/^PERFUME\s+/i,'').trim();
       var pr3=parseFloat(m[2].replace(',','.'));
-      if(nom3.length>3&&pr3>0&&pr3<600&&!seen[nom3]){
-        seen[nom3]=1;
-        var fullNom3=currentBrand?currentBrand+' '+nom3:nom3;
-        items.push({nombre_proveedor:nom3,nombre_norm:bcNormalizarNombre(fullNom3),precio_usd:pr3,proveedor:provNombre,marca:currentBrand});
+      if(_addItem(nom3, pr3)) return;
+    }
+    // MEJORA (2026-05-12): probar los nuevos patterns
+    m=rDollarPrefix.exec(clean);
+    if(m){
+      var prDP=parseFloat(m[1].replace(',','.'));
+      var nomDP=m[2].trim();
+      if(_addItem(nomDP, prDP)) return;
+    }
+    m=rTab.exec(clean);
+    if(m){
+      var nomT=m[1].trim();
+      var prT=parseFloat(m[2].replace(',','.'));
+      if(_addItem(nomT, prT)) return;
+    }
+    m=rColon.exec(clean);
+    if(m){
+      var nomC=m[1].trim();
+      var prC=parseFloat(m[2].replace(',','.'));
+      if(_addItem(nomC, prC)) return;
+    }
+    // WhatsApp es el más permisivo, va al final
+    m=rWhatsApp.exec(clean);
+    if(m){
+      var nomW=m[1].trim();
+      var prW=parseFloat(m[2].replace(',','.'));
+      // Sanity check: nombre tiene al menos una letra
+      if(/[a-zA-Z]/.test(nomW)){
+        if(_addItem(nomW, prW)) return;
       }
     }
   });
@@ -16569,6 +16621,8 @@ function draftSave(){
 function draftInit(){
   var container=document.getElementById('draftTabsContainer');
   if(container) container.innerHTML='<span style="font-size:.68rem;color:var(--tx3)">Cargando...</span>';
+  // MEJORA (2026-05-12): cargar marcas del catálogo para reconocer marcas multipalabra
+  try{ if(typeof _bcCargarMarcasCatalogo==='function') _bcCargarMarcasCatalogo(); }catch(e){}
   apiGet('bellcito_drafts','select=*&order=updated_at.asc').then(function(rows){
     if(Array.isArray(rows)&&rows.length){
       var activeRow=rows.find(function(r){return r.draft_id==='__active__';});
@@ -19364,6 +19418,76 @@ var bcMatchCache=null;
 // ═══════════════════════════════════════════════════════════════
 
 // ── NORMALIZACIÓN DE NOMBRES ────────────────────────────────────
+// ─────────────────────────────────────────────────────────────────────
+// MEJORA AYUDANTE COMPRAS (2026-05-12)
+// Marcas multipalabra reconocidas. Se autocompleta con las marcas únicas
+// del catálogo (ver _bcCargarMarcasCatalogo).
+// ─────────────────────────────────────────────────────────────────────
+window._BC_MARCAS_CONOCIDAS = [
+  // Multipalabra (orden importa: más larga primero al matchear)
+  'maison alhambra', 'maison francis kurkdjian', 'al haramain', 'al wataniah',
+  'parfums de marly', 'tom ford', 'jean paul gaultier', 'paco rabanne',
+  'calvin klein', 'hugo boss', 'dolce gabbana', 'dolce & gabbana',
+  'giorgio armani', 'emporio armani', 'carolina herrera', 'elizabeth arden',
+  'victoria secret', "victoria's secret", 'britney spears', 'guy laroche',
+  'jacques bogart', 'gabriela sabatini', 'marina de bourbon',
+  'scuderia ferrari', 'swiss arabian', 'fragrance world', 'french avenue',
+  'al rehab', 'cacharel', 'bharara beauty', 'al rasasi',
+  // Monopalabra
+  'afnan', 'lattafa', 'armaf', 'rasasi', 'rayhaan', 'asdaaf', 'emper',
+  'zimaya', 'azzaro', 'burberry', 'cacharel', 'versace', 'bharara',
+  'attracione', 'asad', 'tubbees', 'gres', 'montblanc', 'lancome',
+  'lancôme', 'issey', 'miyake'
+];
+
+// Carga marcas únicas del catálogo (productos.empresa) y las agrega a las conocidas.
+// Llamada al cargar el módulo de compras-ia.
+function _bcCargarMarcasCatalogo(){
+  try{
+    if(!Array.isArray(prods))return;
+    var set={};
+    window._BC_MARCAS_CONOCIDAS.forEach(function(m){set[m.toLowerCase()]=true;});
+    prods.forEach(function(p){
+      if(p.empresa){
+        // Primera parte antes de "—" o "-" si la hay (ej: "Afnan Perfumes — Dubai" → "Afnan Perfumes")
+        var m = String(p.empresa).split(/[—\-]/)[0].trim().toLowerCase();
+        if(m && m.length>=2 && !set[m]){
+          set[m]=true;
+          window._BC_MARCAS_CONOCIDAS.push(m);
+        }
+      }
+    });
+    // Ordenar por longitud descendente para matchear primero las más largas
+    window._BC_MARCAS_CONOCIDAS.sort(function(a,b){return b.length-a.length;});
+  }catch(e){console.warn('[bc] marcas catalogo:',e);}
+}
+
+// Extrae la marca al principio del string, devolviendo {marca, resto}
+// Reconoce marcas multipalabra (ej: "Maison Alhambra ..." → marca='Maison Alhambra')
+function _bcExtraerMarca(s){
+  if(!s) return {marca:'', resto:''};
+  var low = s.toLowerCase().trim();
+  for(var i=0;i<window._BC_MARCAS_CONOCIDAS.length;i++){
+    var m = window._BC_MARCAS_CONOCIDAS[i];
+    if(low.indexOf(m)===0){
+      // matchó al principio; verificar que la marca termine en límite de palabra
+      var siguiente = low.charAt(m.length);
+      if(siguiente==='' || siguiente===' ' || /[^a-z]/.test(siguiente)){
+        // Reconstruir con Title Case de la marca original
+        var marcaTC = m.replace(/\w+/g, function(w){
+          var low2=['de','la','el','al','du','le','les','van','von','di','da','&'];
+          return low2.indexOf(w.toLowerCase())>=0 ? w.toLowerCase() :
+            w.charAt(0).toUpperCase()+w.slice(1).toLowerCase();
+        });
+        return {marca: marcaTC, resto: s.substring(m.length).trim().replace(/^[\-–—]\s*/,'')};
+      }
+    }
+  }
+  // Fallback: primera palabra como marca
+  var partes = s.trim().split(/\s+/);
+  return {marca: partes[0]||'', resto: partes.slice(1).join(' ')};
+}
+
 function bcNormalizarNombre(raw){
   // Input:  "AFNAN 9AM POUR FEMME EDP 100ML"
   // Output: "Afnan - 9AM Pour Femme | EDP | 100ml"
@@ -19378,7 +19502,7 @@ function bcNormalizarNombre(raw){
   var vol    = volM  ? volM[1].toLowerCase().replace(/\s+/,'') : null;
   // Remove type and vol from name
   var nombre = s.replace(typeRe,'').replace(volRe,'').replace(/\s+/g,' ').trim();
-  // Title case
+  // Title case (preservando palabras minúsculas como "de", "la", etc.)
   nombre = nombre.replace(/\w+/g, function(w){
     var low = ['de','la','el','al','du','le','les','van','von','di','da'];
     return low.indexOf(w.toLowerCase())>=0 ? w.toLowerCase() :
@@ -19386,10 +19510,10 @@ function bcNormalizarNombre(raw){
   });
   // Remove leading PERFUME
   nombre = nombre.replace(/^Perfume\s+/i,'').trim();
-  // Try to extract brand (first word or up to dash/known brand)
-  var parts = nombre.split(/\s+/);
-  var brand = parts[0];
-  var rest  = parts.slice(1).join(' ');
+  // MEJORA (2026-05-12): extraer marca multipalabra
+  var extr = _bcExtraerMarca(nombre);
+  var brand = extr.marca;
+  var rest  = extr.resto;
   var result = brand + (rest?' - '+rest:'');
   if(tipo && vol) result += ' | '+tipo+' | '+vol;
   else if(tipo)   result += ' | '+tipo;
@@ -19398,25 +19522,99 @@ function bcNormalizarNombre(raw){
 }
 
 // ── SIMILITUD ───────────────────────────────────────────────────
+// MEJORA (2026-05-12): stopwords ampliadas, fuzzy matching, bonus de marca
 function bcNorm(s){
   return (s||'').toLowerCase()
     .normalize('NFD').replace(/[\u0300-\u036f]/g,'')
-    // Solo eliminar stopwords NO discriminantes para perfumes
-    .replace(/\b(eau|de|pour|for|her|him|spray|set|kit|body|deo|by)\b/g,' ')
+    // Stopwords ampliadas: artículos, preposiciones, palabras genéricas
+    .replace(/\b(eau|de|pour|for|her|him|spray|set|kit|body|deo|by|the|le|la|el|al|du|y|and|with|con|perfume|fragrance|fragancia|edp|edt|edc|parfum|extrait|elixir|ml|cl|oz)\b/g,' ')
+    // Quitar números sueltos de hasta 3 dígitos (volúmenes residuales)
+    .replace(/\b\d{1,3}\b/g,' ')
     .replace(/[^a-z0-9\s]/g,' ').replace(/\s+/g,' ').trim();
 }
 function bcWords(s){ return bcNorm(s).split(' ').filter(function(w){return w.length>2;}); }
-function bcSim(a,b){
+
+// Distancia Levenshtein: cuenta operaciones necesarias para transformar a en b.
+// Tolerante a tipeos: "khamra" vs "khamrah" = 1 operación.
+function _bcLevenshtein(a, b){
+  if(a===b) return 0;
+  if(!a.length) return b.length;
+  if(!b.length) return a.length;
+  var v0 = new Array(b.length+1);
+  var v1 = new Array(b.length+1);
+  for(var i=0;i<=b.length;i++) v0[i]=i;
+  for(var i=0;i<a.length;i++){
+    v1[0] = i+1;
+    for(var j=0;j<b.length;j++){
+      var cost = a.charCodeAt(i)===b.charCodeAt(j) ? 0 : 1;
+      v1[j+1] = Math.min(v1[j]+1, v0[j+1]+1, v0[j]+cost);
+    }
+    for(var k=0;k<=b.length;k++) v0[k]=v1[k];
+  }
+  return v1[b.length];
+}
+
+// ¿Las palabras son lo suficientemente parecidas? (tolera 1 typo cada 5 chars)
+function _bcWordsCercanas(a, b){
+  if(a===b) return true;
+  if(Math.abs(a.length-b.length)>3) return false;
+  var maxLen = Math.max(a.length, b.length);
+  if(maxLen<=3) return false; // muy cortas, no fuzzy
+  var dist = _bcLevenshtein(a, b);
+  // Tolerar 1 char typo si <=5, 2 chars si >=6
+  var tol = maxLen<=5 ? 1 : Math.floor(maxLen/4);
+  return dist <= tol;
+}
+
+function bcSim(a, b){
   var wa=bcWords(a), wb=bcWords(b);
   if(!wa.length||!wb.length) return 0;
-  var m=0;
+  // MEJORA (2026-05-12): contar matches exactos + matches fuzzy (con menos peso)
+  var matchExact=0, matchFuzzy=0;
+  var usadosB={};
   wa.forEach(function(w){
-    // Solo match exacto de palabra — sin substring para evitar falsos positivos
-    if(wb.indexOf(w)>=0) m++;
+    // 1. exacto primero
+    var idx = wb.indexOf(w);
+    if(idx>=0 && !usadosB[idx]){
+      matchExact++;
+      usadosB[idx]=true;
+      return;
+    }
+    // 2. fuzzy contra los no usados
+    for(var j=0;j<wb.length;j++){
+      if(usadosB[j]) continue;
+      if(_bcWordsCercanas(w, wb[j])){
+        matchFuzzy++;
+        usadosB[j]=true;
+        return;
+      }
+    }
   });
+  // Fuzzy cuenta como 0.7 vs match exacto
+  var m = matchExact + matchFuzzy*0.7;
   var p=m/wa.length, r=m/wb.length;
-  return p+r>0?2*p*r/(p+r):0;
+  var f1 = p+r>0 ? 2*p*r/(p+r) : 0;
+
+  // MEJORA (2026-05-12): bonus si la marca extraída coincide
+  var ma = _bcExtraerMarca(a);
+  var mb = _bcExtraerMarca(b);
+  if(ma.marca && mb.marca){
+    var marcaA = ma.marca.toLowerCase();
+    var marcaB = mb.marca.toLowerCase();
+    if(marcaA===marcaB){
+      // Bonus +15% si la marca es idéntica
+      f1 = Math.min(1, f1 + 0.15);
+    } else if(_bcWordsCercanas(marcaA, marcaB)){
+      // Bonus +5% si la marca es similar (tipeo)
+      f1 = Math.min(1, f1 + 0.05);
+    } else {
+      // Penalty si las marcas son distintas: -10%
+      f1 = Math.max(0, f1 - 0.10);
+    }
+  }
+  return f1;
 }
+
 
 // ── CARGA DE PROVEEDORES ────────────────────────────────────────
 function bcToggleTexto(){
@@ -19631,21 +19829,41 @@ function bcCargarArchivo(input){
               var ws2=wb2.Sheets[sn];
               var rows=XLSX.utils.sheet_to_json(ws2,{header:1,defval:'',raw:rawMode});
               if(!rows||rows.length<4) return;
-              var hrow=-1,ncol=-1,pcol=-1;
-              for(var r=0;r<Math.min(rows.length,6);r++){
+              // MEJORA (2026-05-12): detección flexible de columnas
+              // Busca en las primeras 15 filas (no solo 6) y detecta múltiples sinónimos
+              var hrow=-1, ncol=-1, pcol=-1, codcol=-1, marcacol=-1, stockcol=-1;
+              for(var r=0;r<Math.min(rows.length,15);r++){
                 var row=rows[r];
                 for(var c=0;c<row.length;c++){
-                  var v=String(row[c]||'').toLowerCase();
-                  if(/descrip|nombre|nome|produto|product/.test(v)) ncol=c;
-                  if(/precio|preco|price|mayor/.test(v)) pcol=c;
+                  var v=String(row[c]||'').toLowerCase().trim();
+                  // Nombre del producto: más sinónimos
+                  if(ncol<0 && /^(descrip|descripci|nombre|nome|produto|product|articulo|art[ií]culo|detalle|item|fragancia|perfume)/.test(v)) ncol=c;
+                  // Precio: incluyendo "u\$d", "usd", "$", "valor", "monto"
+                  if(pcol<0 && /^(precio|preco|price|mayor|usd|u\$d|\$|valor|monto|cost|costo)/.test(v)) pcol=c;
+                  // Código (opcional)
+                  if(codcol<0 && /^(c[oó]digo|codigo|cod|ref|sku|barras|ean)/.test(v)) codcol=c;
+                  // Marca (opcional)
+                  if(marcacol<0 && /^(marca|brand|empresa|fabricante|laboratorio)/.test(v)) marcacol=c;
+                  // Stock (opcional, varios nombres)
+                  if(stockcol<0 && /^(stock|estoque|inventario|disponibl|existenc|cantidad|qty)/.test(v)) stockcol=c;
                 }
-                if(ncol>=0&&pcol>=0){hrow=r;break;}
+                if(ncol>=0 && pcol>=0){hrow=r;break;}
               }
-              if(ncol<0){
-                var r3=rows[3]||[];
-                if(r3.length>=3&&r3[1]&&String(r3[1]).trim().length>3){
-                  var prTest=parseFloat(String(r3[2]||'').replace(',','.'));
-                  if(!isNaN(prTest)&&prTest>0){ncol=1;pcol=2;hrow=2;}
+              // Fallback heurístico: si NO encontró headers, buscar fila con texto largo + número
+              if(ncol<0 || pcol<0){
+                for(var r=0; r<Math.min(rows.length,30); r++){
+                  var row=rows[r];
+                  var nIdx=-1, pIdx=-1;
+                  for(var c=0;c<row.length;c++){
+                    var v=String(row[c]||'').trim();
+                    var prTest=parseFloat(v.replace(/[^0-9.,]/g,'').replace(',','.'));
+                    if(nIdx<0 && v.length>=5 && !/^\d+([.,]\d+)?$/.test(v)) nIdx=c;
+                    else if(pIdx<0 && !isNaN(prTest) && prTest>0 && prTest<1000 && /\d/.test(v)) pIdx=c;
+                  }
+                  if(nIdx>=0 && pIdx>=0){
+                    ncol = nIdx; pcol = pIdx; hrow = r - 1; // -1 porque esta es ya la primera fila de datos
+                    break;
+                  }
                 }
               }
               if(ncol<0||pcol<0) return;
@@ -19655,9 +19873,20 @@ function bcCargarArchivo(input){
                 var prStr=String(row[pcol]||'').trim().replace(/[^0-9.,]/g,'').replace(',','.');
                 var pr=parseFloat(prStr);
                 if(!nom||nom.length<3) return;
-                if(/^(DESCRIPCION|CODIGO|PRODUTO|NOMBRE|NOME|PRECO|PRECIO)/i.test(nom)) return;
-                if(isNaN(pr)||pr<=0||pr>600) return;
-                items.push({nombre_proveedor:nom,nombre_norm:bcNormalizarNombre(nom),precio_usd:pr,proveedor:nombre});
+                if(/^(DESCRIPCION|CODIGO|PRODUTO|NOMBRE|NOME|PRECO|PRECIO|TOTAL|SUBTOTAL)/i.test(nom)) return;
+                if(isNaN(pr)||pr<=0||pr>1000) return; // ampliado de 600 a 1000
+                var itm={nombre_proveedor:nom,nombre_norm:bcNormalizarNombre(nom),precio_usd:pr,proveedor:nombre};
+                if(codcol>=0 && row[codcol]){
+                  itm.codigo = String(row[codcol]).trim();
+                }
+                if(marcacol>=0 && row[marcacol]){
+                  itm.marca = String(row[marcacol]).trim();
+                }
+                if(stockcol>=0 && row[stockcol]!=null){
+                  var stk=parseInt(String(row[stockcol]).replace(/[^0-9-]/g,''));
+                  if(!isNaN(stk)) itm.estoque=stk;
+                }
+                items.push(itm);
               });
             });
             return items;
@@ -19719,6 +19948,8 @@ function bcGuardarProveedor(nombre, items){
   bcProveedores[nombre]=items;
   if(!bcPedidos[nombre]) bcPedidos[nombre]={items:{}};
   bcMatchCache=null;
+  // MEJORA (2026-05-12): invalidar cache de búsqueda
+  _bcResetFindCache();
   toast(nombre+': '+items.length+' productos cargados','tok');
   draftSave();
   bcRenderProvsList();
@@ -19870,51 +20101,188 @@ function bcSetTabLista(nombre, el){
 }
 
 // ── COMPARATIVA ─────────────────────────────────────────────────
+// MEJORA (2026-05-12): comparar todos contra todos (no solo el más grande
+// como base), soporte de matches manuales, threshold parcial visible.
 function bcGetMatches(){
   if(bcMatchCache) return bcMatchCache;
   var keys=Object.keys(bcProveedores||{});
-  // Fix #2: protección contra ningún proveedor cargado
   if(!keys.length) return [];
-  // Fix #3: usar el proveedor con MÁS items como base (no el primero alfabético)
-  // Así no se pierden items por usar de base un proveedor pequeño
+
+  // Ordenar proveedores por cantidad de items (más grande primero)
   keys.sort(function(a,b){
     return (bcProveedores[b]||[]).length-(bcProveedores[a]||[]).length;
   });
+
   var simMin=(parseFloat((document.getElementById('comprasSimilitud')||{value:90}).value)||90)/100;
-  var baseKey=keys[0];
-  var baseList=bcProveedores[baseKey]||[];
-  if(!baseList.length) return [];
-  var rows=[];
-  baseList.forEach(function(base,bi){
-    var row={nombre:base.nombre_norm||base.nombre_proveedor, baseIdx:bi, baseKey:baseKey};
-    row[baseKey]={precio:base.precio_usd,nombre:base.nombre_proveedor,norm:base.nombre_norm,idx:bi};
-    var hasMatch=false;
+  // Threshold parcial para "review manual" — ítems con 50-89% se muestran como "revisar"
+  var simParcial = Math.min(simMin, 0.50);
+
+  // Matches manuales del usuario (si existen): key=normalizado, val=prodId/itemKey
+  var manualMatches = window._bcManualMatches || {};
+
+  var rows = [];
+  var usados = {}; // {provKey: {itemIdx: true}} para evitar matchear dos veces el mismo item
+
+  // PASO 1: arrancar con cada item del proveedor base
+  var baseKey = keys[0];
+  var baseList = bcProveedores[baseKey] || [];
+  usados[baseKey] = {};
+  keys.slice(1).forEach(function(k){usados[k]={};});
+
+  baseList.forEach(function(base, bi){
+    var row = {nombre: base.nombre_norm||base.nombre_proveedor, baseIdx: bi, baseKey: baseKey};
+    row[baseKey] = {
+      precio: base.precio_usd,
+      nombre: base.nombre_proveedor,
+      norm: base.nombre_norm,
+      idx: bi,
+      score: 1.0 // base = 100% (es él mismo)
+    };
+    usados[baseKey][bi] = true;
+    var hasFullMatch = false, hasPartialMatch = false;
+
     keys.slice(1).forEach(function(ok){
-      var best=null,bestScore=0;
-      (bcProveedores[ok]||[]).forEach(function(other,oi){
-        var s=bcSim(base.nombre_norm||base.nombre_proveedor, other.nombre_norm||other.nombre_proveedor);
-        if(s>bestScore){bestScore=s;best={...other,idx:oi};}
+      // ¿Hay match manual para este item base?
+      var baseNorm = bcNorm(base.nombre_norm || base.nombre_proveedor);
+      var manualKey = manualMatches[baseNorm + '@@' + ok];
+
+      if(manualKey !== undefined){
+        // El usuario forzó qué item del otro proveedor matcheaba
+        var otherItem = (bcProveedores[ok]||[])[manualKey];
+        if(otherItem){
+          row[ok] = {
+            precio: otherItem.precio_usd,
+            nombre: otherItem.nombre_proveedor,
+            norm: otherItem.nombre_norm,
+            idx: manualKey,
+            score: 1.0,
+            manual: true
+          };
+          usados[ok][manualKey] = true;
+          hasFullMatch = true;
+          return;
+        }
+      }
+
+      // Sin manual: buscar el mejor match automático entre los no usados
+      var best = null, bestScore = 0;
+      (bcProveedores[ok]||[]).forEach(function(other, oi){
+        if(usados[ok][oi]) return;
+        var s = bcSim(
+          base.nombre_norm||base.nombre_proveedor,
+          other.nombre_norm||other.nombre_proveedor
+        );
+        if(s > bestScore){
+          bestScore = s;
+          best = Object.assign({}, other, {idx: oi});
+        }
       });
-      if(bestScore>=simMin){
-        row[ok]={precio:best.precio_usd,nombre:best.nombre_proveedor,norm:best.nombre_norm,idx:best.idx,score:bestScore};
-        hasMatch=true;
+
+      if(best && bestScore >= simMin){
+        row[ok] = {
+          precio: best.precio_usd,
+          nombre: best.nombre_proveedor,
+          norm: best.nombre_norm,
+          idx: best.idx,
+          score: bestScore
+        };
+        usados[ok][best.idx] = true;
+        hasFullMatch = true;
+      } else if(best && bestScore >= simParcial){
+        // Match parcial: lo guardamos pero marcado para revisar
+        row[ok] = {
+          precio: best.precio_usd,
+          nombre: best.nombre_proveedor,
+          norm: best.nombre_norm,
+          idx: best.idx,
+          score: bestScore,
+          partial: true
+        };
+        usados[ok][best.idx] = true;
+        hasPartialMatch = true;
       } else {
-        row[ok]=null;
+        row[ok] = null;
       }
     });
-    // Si solo hay 1 proveedor, hasMatch=false pero igual queremos mostrar la fila
-    if(hasMatch||keys.length===1) rows.push(row);
+
+    // Incluir la fila si tiene matches o si es proveedor único
+    if(hasFullMatch || hasPartialMatch || keys.length === 1) rows.push(row);
   });
+
+  // PASO 2: items en otros proveedores que NO matchearon con el base
+  // —> intentar matchearlos entre sí (todos vs todos restantes)
+  keys.slice(1).forEach(function(k, ki){
+    (bcProveedores[k]||[]).forEach(function(item, idx){
+      if(usados[k][idx]) return; // ya está en alguna fila
+      // Crear fila nueva con este item como pivot
+      var row = {nombre: item.nombre_norm||item.nombre_proveedor, baseIdx: idx, baseKey: k};
+      row[k] = {
+        precio: item.precio_usd,
+        nombre: item.nombre_proveedor,
+        norm: item.nombre_norm,
+        idx: idx,
+        score: 1.0
+      };
+      usados[k][idx] = true;
+      // Llenar baseKey con null y los otros proveedores
+      row[baseKey] = null;
+      keys.slice(1).forEach(function(ok){
+        if(ok === k){return;}
+        if(!row[ok]){
+          // Buscar match en el otro proveedor
+          var best = null, bestScore = 0;
+          (bcProveedores[ok]||[]).forEach(function(other, oi){
+            if(usados[ok][oi]) return;
+            var s = bcSim(
+              item.nombre_norm||item.nombre_proveedor,
+              other.nombre_norm||other.nombre_proveedor
+            );
+            if(s > bestScore){
+              bestScore = s;
+              best = Object.assign({}, other, {idx: oi});
+            }
+          });
+          if(best && bestScore >= simMin){
+            row[ok] = {
+              precio: best.precio_usd,
+              nombre: best.nombre_proveedor,
+              norm: best.nombre_norm,
+              idx: best.idx,
+              score: bestScore
+            };
+            usados[ok][best.idx] = true;
+          } else if(best && bestScore >= simParcial){
+            row[ok] = {
+              precio: best.precio_usd,
+              nombre: best.nombre_proveedor,
+              norm: best.nombre_norm,
+              idx: best.idx,
+              score: bestScore,
+              partial: true
+            };
+            usados[ok][best.idx] = true;
+          } else {
+            row[ok] = null;
+          }
+        }
+      });
+      rows.push(row);
+    });
+  });
+
+  // Ordenar: mayor diferencia de precio entre proveedores primero
   rows.sort(function(a,b){
-    var pa=keys.map(function(k){return a[k]?a[k].precio:null;}).filter(Boolean);
-    var pb=keys.map(function(k){return b[k]?b[k].precio:null;}).filter(Boolean);
-    var da=pa.length>1?Math.max.apply(null,pa)-Math.min.apply(null,pa):0;
-    var db=pb.length>1?Math.max.apply(null,pb)-Math.min.apply(null,pb):0;
+    var pa = keys.map(function(k){return a[k]?a[k].precio:null;}).filter(Boolean);
+    var pb = keys.map(function(k){return b[k]?b[k].precio:null;}).filter(Boolean);
+    var da = pa.length>1 ? Math.max.apply(null,pa)-Math.min.apply(null,pa) : 0;
+    var db = pb.length>1 ? Math.max.apply(null,pb)-Math.min.apply(null,pb) : 0;
     return db-da;
   });
-  bcMatchCache=rows;
+
+  bcMatchCache = rows;
   return rows;
 }
+
 
 
 
@@ -20466,6 +20834,19 @@ function bcRenderComparativa(){
       var hasB=keys.some(function(k){ return r[k]&&bcGetBrand(r[k]).toUpperCase()===bcBrandComp; });
       if(!hasB) return false;
     }
+    // MEJORA (2026-05-12): filtro por estado de match con catálogo
+    if(window._bcFiltroEstadoMatch){
+      var mk = bcNorm(r.nombre);
+      var matchCat = bcFindInProds({nombre_norm:r.nombre, nombre_proveedor:r.nombre});
+      if(window._bcFiltroEstadoMatch==='sin'){
+        if(matchCat) return false;
+      } else if(window._bcFiltroEstadoMatch==='parcial'){
+        if(!matchCat) return false;
+        if(bcManualMatches[mk]) return false;
+        var sc = bcSim(bcNorm(r.nombre), bcNorm(matchCat.nombre||''));
+        if(sc >= 0.85) return false;
+      }
+    }
     return true;
   });
 
@@ -20496,18 +20877,44 @@ function bcRenderComparativa(){
     var cheapKey=minP!==null?keys.find(function(k){return r[k]&&r[k].precio===minP;}):null;
     var pct=minP&&maxP&&maxP!==minP?((maxP-minP)/maxP*100).toFixed(1):null;
 
+    // MEJORA (2026-05-12): mostrar siempre nombre original + estado del match + lupita
+    var matchKey = bcNorm(r.nombre);
+    var hasManual = !!bcManualMatches[matchKey];
+    var hasPartial = keys.some(function(k){return r[k] && r[k].partial;});
+    var hasFull = keys.some(function(k){return r[k] && !r[k].partial && r[k].score!==1.0;});
+
+    // Badge de estado: ✅ exacto / ⚠️ parcial / ✏️ manual / ❓ sin match
+    var statusBadge = '';
+    if(hasManual){
+      statusBadge = '<span title="Match manual" style="font-size:.55rem;color:#fbbf24;background:rgba(251,191,36,.15);padding:.1rem .25rem;border-radius:3px;font-weight:600">✏️ MANUAL</span>';
+    } else if(hasPartial && !hasFull){
+      statusBadge = '<span title="Match parcial — revisar manualmente" style="font-size:.55rem;color:#f97316;background:rgba(249,115,22,.15);padding:.1rem .25rem;border-radius:3px;font-weight:600">⚠️ REVISAR</span>';
+    } else if(hasFull){
+      statusBadge = '<span title="Match automático" style="font-size:.55rem;color:#22c55e;background:rgba(34,197,94,.15);padding:.1rem .25rem;border-radius:3px">✅ AUTO</span>';
+    }
+
+    // Buscar match con catálogo Belle
+    var matchCat = bcFindInProds({nombre_norm:r.nombre,nombre_proveedor:r.nombre});
+    var matchCatId = matchCat ? matchCat.id : null;
+
     var cells='<td style="min-width:200px">'+
-      '<div style="display:flex;align-items:center;gap:.3rem">'+
+      '<div style="display:flex;align-items:center;gap:.3rem;flex-wrap:wrap">'+
         '<div style="font-size:.73rem;font-weight:500;color:var(--tx)">'+bcTitleCase(r.nombre)+bcStockBadge({nombre_norm:r.nombre,nombre_proveedor:r.nombre})+'</div>'+
-        (bcManualMatches[bcNorm(r.nombre)]?'<span style="font-size:.58rem;color:var(--acc)">&#9998;</span>':'')+
-        '<button onclick="bcAbrirMatchModal(\''+bcNorm(r.nombre)+'\','+(function(){var m=bcFindInProds({nombre_norm:r.nombre,nombre_proveedor:r.nombre});return m?m.id:'null';})()+'\',\''+r.nombre.replace(/\'/g,'')+'\'  )" '+
-        'style="background:none;border:1px solid var(--bd);border-radius:4px;cursor:pointer;color:var(--tx3);font-size:.55rem;padding:.08rem .25rem">&#128279;</button>'+
+        statusBadge+
+        // Lupita siempre visible para reasignar match
+        '<button onclick="bcAbrirMatchModal(\''+matchKey.replace(/\'/g,"\\'")+'\','+(matchCatId||'null')+',\''+r.nombre.replace(/\'/g,"\\'")+'\')" '+
+          'title="Reasignar match manualmente" '+
+          'style="background:none;border:1px solid var(--bd);border-radius:4px;cursor:pointer;color:var(--tx3);font-size:.6rem;padding:.1rem .3rem">🔍</button>'+
       '</div>'+
-      // Show original names per provider below
-      '<div style="display:flex;gap:.4rem;flex-wrap:wrap;margin-top:.15rem">'+
+      // Mostrar nombre ORIGINAL completo por cada proveedor (ÚTIL para verificar matches)
+      '<div style="display:flex;gap:.3rem;flex-wrap:wrap;margin-top:.2rem">'+
       keys.filter(function(k){return r[k];}).map(function(k){
-        return '<span style="font-size:.58rem;color:var(--tx3);background:var(--sur3);padding:.05rem .3rem;border-radius:3px">'+
-          k+': '+bcTitleCase(r[k].nombre)+'</span>';
+        var partialMark = r[k].partial ? ' style="background:rgba(249,115,22,.10);border:1px dashed rgba(249,115,22,.3)"' : '';
+        var bgStyle = r[k].partial 
+          ? 'font-size:.6rem;color:var(--tx2);background:rgba(249,115,22,.10);border:1px dashed rgba(249,115,22,.3);padding:.1rem .3rem;border-radius:3px'
+          : 'font-size:.6rem;color:var(--tx3);background:var(--sur3);padding:.1rem .3rem;border-radius:3px';
+        return '<span style="'+bgStyle+'" title="'+(r[k].partial?'Match parcial ('+Math.round(r[k].score*100)+'%) — revisar':'Match automático ('+Math.round((r[k].score||1)*100)+'%)')+'">'+
+          '<b>'+k+':</b> '+bcTitleCase(r[k].nombre)+'</span>';
       }).join('')+
       '</div>'+
     '</td>';
@@ -20539,7 +20946,33 @@ function bcRenderComparativa(){
     return '<tr>'+cells+'</tr>';
   }).join('');
 
+  // MEJORA (2026-05-12): contar matches por tipo (auto/manual/parcial/sin-match con catálogo)
+  var statsMatch = {auto:0, manual:0, parcial:0, sinMatch:0};
+  rows.forEach(function(r){
+    var mk = bcNorm(r.nombre);
+    if(bcManualMatches[mk]){ statsMatch.manual++; return; }
+    // Buscar match con catálogo
+    var matchCat = bcFindInProds({nombre_norm:r.nombre, nombre_proveedor:r.nombre});
+    if(matchCat){
+      // Cuán bueno es el match con el catálogo?
+      var sc = bcSim(bcNorm(r.nombre), bcNorm(matchCat.nombre||''));
+      if(sc >= 0.85) statsMatch.auto++;
+      else statsMatch.parcial++;
+    } else {
+      statsMatch.sinMatch++;
+    }
+  });
+
   wrap.innerHTML=
+    // Panel calidad matching (FEAT 2026-05-12)
+    '<div style="display:flex;gap:.4rem;flex-wrap:wrap;align-items:center;margin-bottom:.5rem;padding:.5rem;background:var(--sur2);border-radius:6px">'+
+      '<div style="font-size:.65rem;color:var(--tx3);font-weight:600;text-transform:uppercase;letter-spacing:.04em">📋 Calidad de matcheo con catálogo:</div>'+
+      (statsMatch.auto?'<span style="font-size:.7rem;color:#22c55e;background:rgba(34,197,94,.12);padding:.15rem .4rem;border-radius:4px">✅ '+statsMatch.auto+' automáticos</span>':'')+
+      (statsMatch.manual?'<span style="font-size:.7rem;color:#fbbf24;background:rgba(251,191,36,.12);padding:.15rem .4rem;border-radius:4px">✏️ '+statsMatch.manual+' manuales</span>':'')+
+      (statsMatch.parcial?'<span style="font-size:.7rem;color:#f97316;background:rgba(249,115,22,.12);padding:.15rem .4rem;border-radius:4px;cursor:pointer" onclick="bcFiltrarPorEstadoMatch(\'parcial\')" title="Click para filtrar">⚠️ '+statsMatch.parcial+' a revisar</span>':'')+
+      (statsMatch.sinMatch?'<span style="font-size:.7rem;color:#ef4444;background:rgba(239,68,68,.12);padding:.15rem .4rem;border-radius:4px;cursor:pointer" onclick="bcFiltrarPorEstadoMatch(\'sin\')" title="Click para filtrar">❌ '+statsMatch.sinMatch+' sin match</span>':'')+
+      (window._bcFiltroEstadoMatch?'<button onclick="bcFiltrarPorEstadoMatch(null)" style="margin-left:auto;background:none;border:1px solid var(--bd);color:var(--tx3);border-radius:4px;cursor:pointer;font-size:.65rem;padding:.15rem .4rem">Quitar filtro</button>':'')+
+    '</div>'+
     // Stats
     '<div style="display:flex;gap:.5rem;flex-wrap:wrap;align-items:center;margin-bottom:.6rem">'+
       '<div class="scard" style="flex:1;min-width:80px"><div class="scard-lbl">En comun</div><div class="scard-val">'+filteredRows.length+'</div></div>'+
@@ -20553,7 +20986,7 @@ function bcRenderComparativa(){
     '<div style="display:flex;gap:.4rem;flex-wrap:wrap;align-items:center;margin-bottom:.5rem">'+
       '<div class="sbox" style="flex:1;min-width:160px"><span class="sbi">&#128269;</span>'+
         '<input type="text" placeholder="Buscar producto..." value="'+bcSearchComp+'" '+
-        'oninput="bcSearchComp=this.value;bcUpdateCompTable()" style="width:100%">'+
+        'oninput="bcSearchComp=this.value;clearTimeout(window._bcSearchCompDebounce);window._bcSearchCompDebounce=setTimeout(bcUpdateCompTable,220)" style="width:100%">'+
       '</div>'+
       '<select onchange="bcBrandComp=this.value;bcRenderComparativa()" class="sel" style="min-width:160px">'+
         brandOpts+
@@ -20638,9 +21071,14 @@ function bcRenderListaCompleta(nombre){
       '<td style="padding:.3rem .4rem;text-align:right;font-weight:700;color:var(--acc);white-space:nowrap">u$d '+it.precio_usd.toFixed(2)+'</td>'+
       '<td style="padding:.3rem .4rem;min-width:160px">'+
         (match?
-          '<div style="font-size:.65rem;color:var(--tx)">'+match.empresa+' '+match.nombre+'</div>'+
-          '<div style="font-size:.6rem;color:var(--tx3)">match: '+matchScore+'%</div>'
-          :'<span style="font-size:.62rem;color:var(--tx3)">— sin match</span>')+
+          (function(){
+            // MEJORA (2026-05-12): mostrar score con color visual
+            var scoreCol = matchScore>=85?'#22c55e':matchScore>=65?'#f97316':'#94a3b8';
+            var scoreLbl = matchScore>=85?'✅':matchScore>=65?'⚠️':'❓';
+            return '<div style="font-size:.65rem;color:var(--tx);font-weight:500">'+match.empresa+' '+match.nombre+'</div>'+
+              '<div style="font-size:.55rem;color:'+scoreCol+';font-weight:600;margin-top:.1rem">'+scoreLbl+' '+matchScore+'% match</div>';
+          })()
+          :'<span style="font-size:.62rem;color:#f97316;background:rgba(249,115,22,.1);padding:.1rem .3rem;border-radius:3px;font-weight:600">❌ SIN MATCH — usar 🔍</span>')+
       '</td>'+
       '<td style="padding:.3rem .4rem;text-align:right;white-space:nowrap">'+
         (costoN>0?
@@ -20708,6 +21146,9 @@ function bcRenderListaCompleta(nombre){
       '<button id="bcFiltroNuestrasBtn" class="btn" style="font-size:.7rem;border:1px solid var(--acc);'+
         (soloNuestras?'background:var(--acc);color:#000;':'background:transparent;color:var(--acc);')+
         '" title="Solo marcas que trabajamos">★ Nuestras</button>'+
+      '<button onclick="bcSugerirCantidades(\''+nombre.replace(/\'/g,"\\'")+'\')" class="btn" '+
+        'style="font-size:.7rem;border:1px solid #fbbf24;background:transparent;color:#fbbf24" '+
+        'title="Sugerir cantidades basado en stock y ventas">💡 Sugerir</button>'+
       '<button id="bcListaClear" class="btn btn-g" style="font-size:.7rem;display:'+((search||brandF||soloNuestras)?'':'none')+'">&#10006; Limpiar</button>'+
       '<span id="bcListaCounter" style="font-size:.7rem;color:var(--tx3)">'+filtered.length+'/'+items.length+'</span>'+
     '</div>'+
@@ -20725,8 +21166,15 @@ function bcRenderListaCompleta(nombre){
     '</table></div></div>';
 
   // Bind events via addEventListener — no inline onclick with variable names
+  // MEJORA (2026-05-12): debounce de búsqueda para no re-renderizar en cada tecla
   var srchInp=document.getElementById('bcListaSearchInp');
-  if(srchInp) srchInp.oninput=function(){ bcSearchLista[nombre]=this.value; bcRenderListaCompleta(nombre); };
+  if(srchInp){
+    srchInp.oninput=function(){
+      bcSearchLista[nombre]=this.value;
+      clearTimeout(window._bcSearchDebounce);
+      window._bcSearchDebounce = setTimeout(function(){bcRenderListaCompleta(nombre);}, 220);
+    };
+  }
   // Delegation para lupita de match
   var tbody=document.getElementById('bcListaTbody');
   if(tbody) tbody.onclick=function(e){
@@ -21594,7 +22042,7 @@ function bcRenderRecomendaciones(){
       var provItems=bcProveedores[provKey]||[];
       if(!provItems.length) return;
 
-      var sinStock=[], stockBajo=[], masVendidos=[], nuevos=[];
+      var sinStock=[], stockBajo=[], masVendidos=[], nuevos=[], mejorPrecio=[], nuncaRepuesto=[];
       provItems.forEach(function(item,idx){
         var match=bcFindInProds(item);
         item._idx=idx;
@@ -21604,9 +22052,17 @@ function bcRenderRecomendaciones(){
         if(stock===0)        sinStock.push({item:item,prod:match});
         else if(stock<=3)    stockBajo.push({item:item,prod:match});
         if((cat==='S'||cat==='1')&&stock<=5) masVendidos.push({item:item,prod:match});
+        // MEJORA (2026-05-12): mejor precio = costo del proveedor < costo_ind histórico
+        if(match.costo_ind && item.precio_usd && item.precio_usd < (match.costo_ind*0.95)){
+          mejorPrecio.push({item:item,prod:match, ahorro: match.costo_ind-item.precio_usd});
+        }
+        // MEJORA: nunca repuesto = stock 0 + sin pedido en viaje
+        if(stock===0 && (match.en_viaje||0)===0){
+          nuncaRepuesto.push({item:item,prod:match});
+        }
       });
 
-      if(!sinStock.length&&!stockBajo.length&&!masVendidos.length&&!nuevos.length) return;
+      if(!sinStock.length&&!stockBajo.length&&!masVendidos.length&&!nuevos.length&&!mejorPrecio.length&&!nuncaRepuesto.length) return;
 
       var section=document.createElement('div');
       section.style.cssText='background:var(--sur2);border:1px solid var(--bd);border-radius:var(--r);padding:.9rem;margin-bottom:.9rem';
@@ -21791,9 +22247,11 @@ function bcRenderRecomendaciones(){
       }
 
       renderSection('&#9888; Sin stock', 'var(--red)',   sinStock);
+      renderSection('&#10060; Nunca repuesto (sin pedido en viaje)', '#f97316',   nuncaRepuesto);
       renderSection('&#9660; Stock bajo','var(--yel)',   stockBajo);
-      renderSection('&#11088; Más vendidos','var(--green)', masVendidos);
-      renderSection('&#127381; No en catálogo','var(--cyan)', nuevos);
+      renderSection('&#11088; M&aacute;s vendidos','var(--green)', masVendidos);
+      renderSection('&#128184; Mejor precio (descuento &ge; 5%)','#22d3ee', mejorPrecio);
+      renderSection('&#127381; No en cat&aacute;logo','var(--cyan)', nuevos);
 
       wrap.appendChild(section);
     });
@@ -21803,15 +22261,32 @@ function bcRenderRecomendaciones(){
   },100);
 }
 
+// MEJORA (2026-05-12): cache para evitar recalcular match con catálogo en cada render.
+// Se invalida al recargar prods o al cambiar matches manuales.
+window._bcFindCache = {};
+window._bcFindCacheReady = false;
+function _bcResetFindCache(){
+  window._bcFindCache = {};
+  window._bcFindCacheReady = false;
+}
+
 function bcFindInProds(item){
   // Try to match provider item against our catalog
   if(!prods||!prods.length) return null;
   var nombre=bcNorm(item.nombre_norm||item.nombre_proveedor||'');
   if(!nombre) return null;
+  // 1. Match manual tiene prioridad absoluta
   if(typeof bcManualMatches!=="undefined"&&bcManualMatches[nombre]){
     var mp=(prods||[]).find(function(p){return p.id===bcManualMatches[nombre];});
     if(mp) return mp;
   }
+  // 2. Cache: si ya calculamos para este nombre normalizado, devolver
+  if(window._bcFindCache.hasOwnProperty(nombre)){
+    var cachedId = window._bcFindCache[nombre];
+    if(cachedId === null) return null;
+    return (prods||[]).find(function(p){return p.id===cachedId;}) || null;
+  }
+  // 3. Calcular y guardar en cache
   var best=null; var bestScore=0;
   prods.forEach(function(p){
     var pn=bcNorm(p.nombre||'');
@@ -21819,7 +22294,9 @@ function bcFindInProds(item){
     var score=bcSim(nombre,pn);
     if(score>bestScore){bestScore=score;best=p;}
   });
-  return bestScore>=0.7?best:null;
+  var result = bestScore>=0.7?best:null;
+  window._bcFindCache[nombre] = result ? result.id : null;
+  return result;
 }
 
 
@@ -26651,6 +27128,9 @@ function bcGetMatchKey(item){return bcNorm(item.nombre_norm||item.nombre_proveed
 function bcSetManualMatch(k,pid){
   if(pid===null||pid===undefined){delete bcManualMatches[k];}
   else{bcManualMatches[k]=parseInt(pid);}
+  // MEJORA (2026-05-12): invalidar caches al cambiar matches
+  _bcResetFindCache();
+  bcMatchCache=null;
   // Cache local inmediato
   try{localStorage.setItem('bcMatches_'+(activeDraftId||'default'),JSON.stringify(bcManualMatches));}catch(e){}
   // Persistir a Supabase (debounce de 800ms para no saturar)
@@ -26691,26 +27171,73 @@ function bcLoadManualMatches(){
     }
   }).catch(function(){/* offline ok, cache local sirve */});
 }
+// MEJORA (2026-05-12): modal match con top-3 sugerencias automáticas + buscador
 function bcAbrirMatchModal(itemKey,currentMatchId,provNombre){
   var mo=document.getElementById('moMatchProd');
   if(!mo){
     mo=document.createElement('div');mo.id='moMatchProd';mo.className='mo';
-    var h="<div class='md' style='max-width:520px;width:96%;max-height:90vh;overflow-y:auto'>";
-    h+="<div class='md-h'><span>Equiparar con catálogo</span><button onclick='cerrarMoMatch()' class='xb'>&#10005;</button></div>";
+    var h="<div class='md' style='max-width:580px;width:96%;max-height:90vh;overflow-y:auto'>";
+    h+="<div class='md-h'><span>🔗 Equiparar con catálogo</span><button onclick='cerrarMoMatch()' class='xb'>&#10005;</button></div>";
     h+="<div class='md-b'>";
-    h+="<div id='moMatchSubtitle' style='font-size:.72rem;color:var(--tx3);margin-bottom:.5rem'></div>";
+    h+="<div id='moMatchSubtitle' style='font-size:.78rem;color:var(--tx2);margin-bottom:.4rem;background:var(--sur2);padding:.5rem;border-radius:5px;border-left:3px solid var(--acc)'></div>";
+    h+="<div id='moMatchSugerencias' style='margin-bottom:.7rem'></div>";
+    h+="<div style='font-size:.7rem;color:var(--tx3);margin-bottom:.3rem;font-weight:600;text-transform:uppercase;letter-spacing:.04em'>🔍 Buscar manualmente</div>";
     h+="<div class='sbox' style='margin-bottom:.5rem'><span class='sbi'>&#128269;</span>";
-    h+="<input id='moMatchSearch' type='text' placeholder='Buscar en catálogo...' oninput='bcMatchSearchResults()' style='width:100%'></div>";
-    h+="<div id='moMatchResults' style='max-height:300px;overflow-y:auto'></div>";
-    h+="<div style='margin-top:.6rem;display:flex;gap:.4rem'>";
-    h+="<button class='btn btn-red' onclick='bcClearMatch()' style='flex:1;font-size:.72rem'>&#10006; Quitar equiparacion</button>";
+    h+="<input id='moMatchSearch' type='text' placeholder='Nombre o marca del producto...' oninput='bcMatchSearchResults()' style='width:100%'></div>";
+    h+="<div id='moMatchResults' style='max-height:280px;overflow-y:auto;border:1px solid var(--bd);border-radius:6px'></div>";
+    h+="<div style='margin-top:.7rem;display:flex;gap:.4rem'>";
+    h+="<button class='btn btn-red' onclick='bcClearMatch()' style='flex:1;font-size:.72rem'>&#10006; Quitar equiparación</button>";
     h+="<button class='btn btn-g' onclick='cerrarMoMatch()' style='font-size:.72rem'>Cancelar</button>";
     h+="</div></div></div>";
     mo.innerHTML=h;document.body.appendChild(mo);
   }
   mo._itemKey=itemKey;
+  mo._provNombre=provNombre;
   var sub=document.getElementById('moMatchSubtitle');
-  if(sub)sub.textContent='Producto proveedor: '+provNombre;
+  if(sub){
+    sub.innerHTML='<div style="font-size:.65rem;color:var(--tx3);text-transform:uppercase;letter-spacing:.04em;font-weight:600">Nombre original del proveedor:</div>'+
+      '<div style="font-size:.85rem;color:var(--tx);font-weight:600;margin-top:.2rem">'+(provNombre||'').replace(/</g,'&lt;')+'</div>';
+  }
+
+  // Calcular top-3 sugerencias automáticas usando bcSim contra el catálogo
+  var sugDiv = document.getElementById('moMatchSugerencias');
+  if(sugDiv && Array.isArray(prods)){
+    var nombrePr = provNombre || '';
+    var sugerencias = prods.map(function(p){
+      var nombreCat = (p.empresa||'') + ' ' + (p.nombre||'');
+      var s = bcSim(nombrePr, nombreCat);
+      return {prod: p, score: s};
+    }).filter(function(x){return x.score >= 0.30;})
+      .sort(function(a,b){return b.score - a.score;})
+      .slice(0,3);
+
+    if(sugerencias.length){
+      var htmlS = '<div style="font-size:.7rem;color:var(--tx3);margin-bottom:.3rem;font-weight:600;text-transform:uppercase;letter-spacing:.04em">💡 Mejores sugerencias automáticas</div>';
+      htmlS += '<div style="display:flex;flex-direction:column;gap:.3rem">';
+      sugerencias.forEach(function(s){
+        var p = s.prod;
+        var pct = Math.round(s.score*100);
+        var scoreCol = pct>=85?'#22c55e':pct>=65?'#f97316':'#94a3b8';
+        var st = p.stock_actual||0; var vj = p.en_viaje||0;
+        var stockCol = st===0?'#f88':st<=3?'var(--yel)':'var(--green)';
+        htmlS += "<div onclick='bcConfirmarMatch("+p.id+")' style='cursor:pointer;padding:.5rem .6rem;background:var(--sur2);border:1px solid var(--bd);border-radius:6px;display:flex;justify-content:space-between;align-items:center;gap:.4rem' "+
+          "onmouseover='this.style.background=\"var(--sur3)\"' onmouseout='this.style.background=\"var(--sur2)\"'>"+
+          "<div style='flex:1;min-width:0'>"+
+            "<div style='font-size:.75rem;font-weight:600;color:var(--tx)'>"+(p.empresa||'')+" - "+(p.nombre||'')+"</div>"+
+            "<div style='font-size:.62rem;color:var(--tx3);margin-top:.15rem'>u$d "+((p.costo_ind||0).toFixed(2))+" • Stock <span style='color:"+stockCol+";font-weight:600'>"+st+"u</span>"+(vj>0?" • <span style='color:var(--acc)'>✈️"+vj+"</span>":"")+"</div>"+
+          "</div>"+
+          "<div style='flex-shrink:0;text-align:right'>"+
+            "<div style='background:"+scoreCol+"22;color:"+scoreCol+";padding:.15rem .4rem;border-radius:4px;font-size:.65rem;font-weight:700'>"+pct+"%</div>"+
+          "</div>"+
+        "</div>";
+      });
+      htmlS += '</div>';
+      sugDiv.innerHTML = htmlS;
+    } else {
+      sugDiv.innerHTML = '<div style="font-size:.7rem;color:var(--tx3);font-style:italic;padding:.4rem;background:var(--sur2);border-radius:5px">⚠️ No hay sugerencias automáticas con score ≥ 30%. Usá el buscador.</div>';
+    }
+  }
+
   var inp=document.getElementById('moMatchSearch');
   if(inp){inp.value=provNombre||'';bcMatchSearchResults();}
   mo.classList.add('open');
@@ -26724,13 +27251,14 @@ function bcMatchSearchResults(){
     if(!q)return true;
     return norm(p.nombre||'').indexOf(norm(q))>=0||norm(p.empresa||'').indexOf(norm(q))>=0;
   }).slice(0,40);
-  if(!filtered.length){el.innerHTML="<div style='font-size:.72rem;color:var(--tx3);padding:.5rem'>Sin resultados</div>";return;}
+  if(!filtered.length){el.innerHTML="<div style='font-size:.72rem;color:var(--tx3);padding:.6rem;text-align:center'>Sin resultados</div>";return;}
   el.innerHTML=filtered.map(function(p){
     var st=p.stock_actual||0;var vj=p.en_viaje||0;
     var col=st===0?'#f88':st<=3?'var(--yel)':'var(--green)';
-    return "<div onclick='bcConfirmarMatch("+p.id+")' style='cursor:pointer;padding:.4rem .5rem;border-bottom:1px solid var(--bd);display:flex;justify-content:space-between;align-items:center'>"+
-      "<div><div style='font-size:.73rem;font-weight:500;color:var(--tx)'>"+p.empresa+" - "+p.nombre+"</div>"+
-      "<div style='font-size:.6rem;color:var(--tx3)'>u$d "+(p.costo_ind||0).toFixed(2)+"</div></div>"+
+    return "<div onclick='bcConfirmarMatch("+p.id+")' style='cursor:pointer;padding:.45rem .55rem;border-bottom:1px solid var(--bd);display:flex;justify-content:space-between;align-items:center' "+
+      "onmouseover='this.style.background=\"var(--sur3)\"' onmouseout='this.style.background=\"transparent\"'>"+
+      "<div><div style='font-size:.73rem;font-weight:500;color:var(--tx)'>"+(p.empresa||'')+" - "+(p.nombre||'')+"</div>"+
+      "<div style='font-size:.6rem;color:var(--tx3)'>u$d "+((p.costo_ind||0).toFixed(2))+"</div></div>"+
       "<div style='text-align:right;flex-shrink:0;padding-left:.5rem'>"+
         "<span style='font-weight:700;font-size:.72rem;color:"+col+"'>"+st+"u</span>"+
         (vj>0?" <span style='font-size:.6rem;color:var(--acc)'>&#9992;"+vj+"</span>":"")+
@@ -26741,13 +27269,13 @@ function bcConfirmarMatch(prodId){
   var mo=document.getElementById('moMatchProd');if(!mo)return;
   bcSetManualMatch(mo._itemKey,prodId);
   cerrarMoMatch();bcRenderAllViews();
-  toast('Equiparacion guardada','tok');
+  toast('Equiparación guardada ✓','tok');
 }
 function bcClearMatch(){
   var mo=document.getElementById('moMatchProd');if(!mo)return;
   bcSetManualMatch(mo._itemKey,null);
   cerrarMoMatch();bcRenderAllViews();
-  toast('Equiparacion eliminada','twarn');
+  toast('Equiparación eliminada','twarn');
 }
 function bcRenderAllViews(){
   var active=document.querySelector('.bc-tab.act');
@@ -26757,6 +27285,109 @@ function bcRenderAllViews(){
   else if(tabId==='bctab-comparar')bcRenderComparativa();
   else if(tabId==='bctab-cruzados')bcRenderCruzadosTable();
   bcRenderPedidos();
+}
+
+// MEJORA (2026-05-12): filtro por estado de match en pestaña comparativa
+function bcFiltrarPorEstadoMatch(estado){
+  window._bcFiltroEstadoMatch = estado; // 'parcial' | 'sin' | null
+  bcRenderComparativa();
+}
+
+// MEJORA (2026-05-12): sugerir cantidades a comprar basado en stock + criterios
+function bcSugerirCantidades(provNombre){
+  var items = bcProveedores[provNombre]||[];
+  if(!items.length){toast('Cargá primero la lista del proveedor','twarn');return;}
+
+  // Abrir modal de configuración
+  var mo=document.getElementById('moSugerir');
+  if(!mo){
+    mo=document.createElement('div');mo.id='moSugerir';mo.className='mo';
+    mo.innerHTML="<div class='md' style='max-width:520px;width:96%'>"+
+      "<div class='md-h'><span>💡 Sugerir cantidades automáticamente</span><button onclick=\"document.getElementById('moSugerir').classList.remove('open')\" class='xb'>×</button></div>"+
+      "<div class='md-b'>"+
+        "<div style='font-size:.72rem;color:var(--tx3);margin-bottom:.7rem'>Se asignará una cantidad sugerida solo a productos matcheados con tu catálogo, según los criterios elegidos. Podés ajustarla después.</div>"+
+        "<div style='display:flex;flex-direction:column;gap:.5rem;margin-bottom:.8rem'>"+
+          "<label style='display:flex;align-items:center;gap:.4rem;cursor:pointer;font-size:.78rem'>"+
+            "<input type='checkbox' id='sgCritStock0' checked> Stock = 0 (sugerir <input type='number' id='sgQ0' value='6' min='1' max='99' style='width:42px;padding:.15rem;background:var(--sur);border:1px solid var(--bd);border-radius:4px;color:var(--tx)'> u)"+
+          "</label>"+
+          "<label style='display:flex;align-items:center;gap:.4rem;cursor:pointer;font-size:.78rem'>"+
+            "<input type='checkbox' id='sgCritStockBajo' checked> Stock bajo (≤3) (sugerir <input type='number' id='sgQB' value='4' min='1' max='99' style='width:42px;padding:.15rem;background:var(--sur);border:1px solid var(--bd);border-radius:4px;color:var(--tx)'> u)"+
+          "</label>"+
+          "<label style='display:flex;align-items:center;gap:.4rem;cursor:pointer;font-size:.78rem'>"+
+            "<input type='checkbox' id='sgCritMasVendido'> Más vendidos (cat S/1, stock ≤ 5) (sugerir <input type='number' id='sgQM' value='4' min='1' max='99' style='width:42px;padding:.15rem;background:var(--sur);border:1px solid var(--bd);border-radius:4px;color:var(--tx)'> u)"+
+          "</label>"+
+          "<label style='display:flex;align-items:center;gap:.4rem;cursor:pointer;font-size:.78rem'>"+
+            "<input type='checkbox' id='sgCritBuenPrecio'> Buen precio (-5% vs costo) (sugerir <input type='number' id='sgQP' value='3' min='1' max='99' style='width:42px;padding:.15rem;background:var(--sur);border:1px solid var(--bd);border-radius:4px;color:var(--tx)'> u)"+
+          "</label>"+
+        "</div>"+
+        "<div style='font-size:.7rem;color:var(--tx3);margin-bottom:.5rem'>⚠️ Esto sobrescribirá cantidades existentes de items matcheados con los criterios elegidos. Los demás se mantienen.</div>"+
+        "<div style='display:flex;gap:.4rem;justify-content:flex-end'>"+
+          "<button onclick=\"document.getElementById('moSugerir').classList.remove('open')\" class='btn btn-g' style='font-size:.72rem'>Cancelar</button>"+
+          "<button onclick='_bcAplicarSugerencias()' class='btn' style='font-size:.72rem;background:#fbbf24;color:#000;font-weight:600'>💡 Aplicar sugerencias</button>"+
+        "</div>"+
+      "</div></div>";
+    document.body.appendChild(mo);
+  }
+  mo._provNombre = provNombre;
+  mo.classList.add('open');
+}
+
+function _bcAplicarSugerencias(){
+  var mo = document.getElementById('moSugerir');
+  if(!mo) return;
+  var provNombre = mo._provNombre;
+  var items = bcProveedores[provNombre]||[];
+  if(!items.length){toast('Sin items','twarn');return;}
+
+  var critStock0 = document.getElementById('sgCritStock0').checked;
+  var critStockBajo = document.getElementById('sgCritStockBajo').checked;
+  var critMasVendido = document.getElementById('sgCritMasVendido').checked;
+  var critBuenPrecio = document.getElementById('sgCritBuenPrecio').checked;
+  var q0 = parseInt(document.getElementById('sgQ0').value)||0;
+  var qB = parseInt(document.getElementById('sgQB').value)||0;
+  var qM = parseInt(document.getElementById('sgQM').value)||0;
+  var qP = parseInt(document.getElementById('sgQP').value)||0;
+
+  if(!critStock0 && !critStockBajo && !critMasVendido && !critBuenPrecio){
+    toast('Activá al menos un criterio','twarn');return;
+  }
+
+  if(!bcPedidos[provNombre]) bcPedidos[provNombre] = {items:{}};
+
+  var aplicados = 0;
+  items.forEach(function(it, idx){
+    var match = bcFindInProds(it);
+    if(!match) return; // sin match: no se sugiere
+
+    var stock = match.stock_actual||0;
+    var cat = String(match.cat||'3').replace('.0','');
+    var qty = 0;
+
+    if(critStock0 && stock === 0) qty = Math.max(qty, q0);
+    if(critStockBajo && stock > 0 && stock <= 3) qty = Math.max(qty, qB);
+    if(critMasVendido && (cat==='S'||cat==='1') && stock <= 5) qty = Math.max(qty, qM);
+    if(critBuenPrecio && match.costo_ind && it.precio_usd && it.precio_usd < match.costo_ind*0.95){
+      qty = Math.max(qty, qP);
+    }
+
+    if(qty > 0){
+      bcPedidos[provNombre].items['l'+idx] = {
+        nombre: it.nombre_proveedor,
+        precio: it.precio_usd,
+        qty: qty,
+        key: 'l'+idx,
+        codigo: it.codigo||''
+      };
+      aplicados++;
+    }
+  });
+
+  mo.classList.remove('open');
+  draftSave();
+  bcRenderListaCompleta(provNombre);
+  bcRenderPedidos();
+  bcRenderFloating();
+  toast('Aplicadas '+aplicados+' sugerencias','tok');
 }
 
 function guardarBorradorControl(){
