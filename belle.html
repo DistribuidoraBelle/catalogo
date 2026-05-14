@@ -22681,11 +22681,13 @@ function bcRenderRecomendaciones(){
 
     // Acciones rápidas
     html += '<span style="margin-left:auto;display:flex;gap:.3rem;flex-wrap:wrap">';
-    html += '<button onclick="bcAccionRapida(\'sin\')" title="Pedir 6 u de cada producto sin stock matcheado al 100%" '+
+    html += '<button onclick="bcRecargarCatalogo()" title="Recargar productos desde la BD por si el stock cambió" '+
+      'style="background:rgba(100,116,139,.15);border:1px solid var(--bd);color:var(--tx2);border-radius:5px;padding:.25rem .55rem;cursor:pointer;font-size:.7rem;font-weight:600">🔄 Recargar catálogo</button>';
+    html += '<button onclick="bcAccionRapida(\'sin\')" title="Elegir cantidad y aplicar a productos sin stock matcheados al 100%" '+
       'style="background:rgba(239,68,68,.15);border:1px solid #ef4444;color:#ef4444;border-radius:5px;padding:.25rem .55rem;cursor:pointer;font-size:.7rem;font-weight:600">⚡ Reponer agotados</button>';
-    html += '<button onclick="bcAccionRapida(\'top\')" title="Pedir 4 u de cada top con stock bajo" '+
+    html += '<button onclick="bcAccionRapida(\'top\')" title="Elegir cantidad y aplicar a top vendidos con stock bajo" '+
       'style="background:rgba(34,197,94,.15);border:1px solid #22c55e;color:#22c55e;border-radius:5px;padding:.25rem .55rem;cursor:pointer;font-size:.7rem;font-weight:600">⚡ Pedir todos los top</button>';
-    html += '<button onclick="bcAccionRapida(\'precio\')" title="Aprovechar todos los buenos precios" '+
+    html += '<button onclick="bcAccionRapida(\'precio\')" title="Elegir cantidad y aplicar a productos con buen precio" '+
       'style="background:rgba(34,211,238,.15);border:1px solid #22d3ee;color:#22d3ee;border-radius:5px;padding:.25rem .55rem;cursor:pointer;font-size:.7rem;font-weight:600">⚡ Tomar ofertas</button>';
     html += '</span>';
 
@@ -22881,36 +22883,32 @@ function bcRenderRecomendaciones(){
 // ════════════════════════════════════════════════════════════════
 // ACCIONES RÁPIDAS — agregan cantidades sugeridas a items matcheados al 100%
 // ════════════════════════════════════════════════════════════════
+// FEAT (2026-05-14): acción rápida con modal para elegir cantidad
 function bcAccionRapida(tipo){
   var keys = Object.keys(bcProveedores);
   if(!keys.length){ toast('Sin proveedores cargados','twarn'); return; }
 
   // Configuración por tipo
   var cfg = {
-    sin:    {label:'agotados',           qty:6, condicion:function(e){ return e.tipos.indexOf('sin')>=0 || e.tipos.indexOf('nunca')>=0; }},
-    top:    {label:'top vendidos',       qty:4, condicion:function(e){ return e.tipos.indexOf('top')>=0; }},
-    precio: {label:'con buen precio',    qty:3, condicion:function(e){ return e.tipos.indexOf('precio')>=0; }}
+    sin:    {label:'agotados',          ic:'🚨', col:'#ef4444', defaultQty:6, descripcion:'Productos sin stock (incluye los que no tienen pedido en viaje)', condicion:function(e){ return e.tipos.indexOf('sin')>=0 || e.tipos.indexOf('nunca')>=0; }},
+    top:    {label:'top vendidos',      ic:'⭐', col:'#22c55e', defaultQty:4, descripcion:'Productos categoría S o 1 con stock bajo (≤5)', condicion:function(e){ return e.tipos.indexOf('top')>=0; }},
+    precio: {label:'con buen precio',   ic:'💰', col:'#22d3ee', defaultQty:3, descripcion:'Productos con descuento ≥5% vs tu costo histórico', condicion:function(e){ return e.tipos.indexOf('precio')>=0; }}
   };
   var c = cfg[tipo];
   if(!c) return;
 
-  // Confirmación
-  if(!confirm('Aplicar acción "'+c.label+'": agregar '+c.qty+' u a CADA item matcheado al 100% que cumpla la condición. ¿Continuar?')) return;
-
-  var aplicados = 0;
+  // PASO 1: contar cuántos items cumplen la condición
+  var matched = [];
   keys.forEach(function(provKey){
     var items = bcProveedores[provKey]||[];
-    if(!bcPedidos[provKey]) bcPedidos[provKey] = {items:{}};
     items.forEach(function(item, idx){
       item._idx = idx;
       var match = bcFindInProds(item);
       if(!match) return;
-      // Score must be 100%
       var pFull = (match.empresa||'') + ' ' + (match.nombre||'');
       var score = bcSim(bcNorm(pFull), bcNorm(item.nombre_norm||item.nombre_proveedor||''));
-      if(score < 0.999) return; // 100%
+      if(score < 0.999) return;
 
-      // Construir entry para evaluar condición
       var stock = match.stock_actual||0, enViaje = match.en_viaje||0;
       var cat = String(match.cat||'3').replace('.0',''), costo = match.costo_ind||0;
       var tipos = [];
@@ -22920,29 +22918,180 @@ function bcAccionRapida(tipo){
       if((cat==='S'||cat==='1') && stock<=5) tipos.push('top');
       if(costo>0 && item.precio_usd < costo*0.95) tipos.push('precio');
 
-      if(!c.condicion({tipos:tipos})) return;
-
-      bcPedidos[provKey].items['l'+idx] = {
-        nombre: item.nombre_proveedor,
-        precio: item.precio_usd,
-        qty: c.qty,
-        key: 'l'+idx,
-        codigo: item.codigo||''
-      };
-      aplicados++;
+      if(c.condicion({tipos:tipos})){
+        matched.push({provKey:provKey, idx:idx, item:item, match:match});
+      }
     });
   });
 
-  if(aplicados === 0){
+  if(matched.length === 0){
     toast('No se encontraron items que cumplan la condición con match 100%','twarn');
     return;
   }
 
+  // PASO 2: agrupar por proveedor para preview
+  var porProv = {};
+  matched.forEach(function(m){
+    if(!porProv[m.provKey]) porProv[m.provKey] = [];
+    porProv[m.provKey].push(m);
+  });
+
+  // PASO 3: abrir modal de configuración
+  var mo = document.getElementById('moAccionRapida');
+  if(!mo){
+    mo = document.createElement('div');
+    mo.id = 'moAccionRapida';
+    mo.className = 'mo';
+    document.body.appendChild(mo);
+  }
+
+  var totalProv = Object.keys(porProv).length;
+  var totalItems = matched.length;
+
+  // Preview de items que se afectarán (primeros 15)
+  var preview = '';
+  Object.keys(porProv).slice(0, 5).forEach(function(provKey){
+    var pItems = porProv[provKey];
+    preview += '<div style="margin-bottom:.4rem">';
+    preview += '<div style="font-size:.7rem;font-weight:700;color:var(--acc);margin-bottom:.2rem">📦 '+_esc(provKey)+' ('+pItems.length+')</div>';
+    preview += '<ul style="margin:0;padding-left:1.2rem;font-size:.68rem;color:var(--tx2)">';
+    pItems.slice(0, 4).forEach(function(m){
+      var stock = m.match.stock_actual||0;
+      var viaje = m.match.en_viaje||0;
+      var stockTxt = '<span style="color:'+(stock===0?'#ef4444':'#22c55e')+'">'+stock+'u</span>'+(viaje>0?' ✈️'+viaje:'');
+      preview += '<li style="margin:.1rem 0">'+_esc(m.item.nombre_proveedor||'')+' <span style="color:var(--tx3)">('+stockTxt+'<span style="color:var(--tx3)">)</span></span></li>';
+    });
+    if(pItems.length > 4) preview += '<li style="color:var(--tx3);font-style:italic">... y '+(pItems.length-4)+' más</li>';
+    preview += '</ul></div>';
+  });
+  if(Object.keys(porProv).length > 5){
+    preview += '<div style="font-size:.65rem;color:var(--tx3);font-style:italic;text-align:center">+ '+(Object.keys(porProv).length-5)+' proveedores más</div>';
+  }
+
+  var html = "<div class='md' style='max-width:540px;width:96%;max-height:90vh;overflow-y:auto'>";
+  html += "<div class='md-h' style='background:"+c.col+"22;border-bottom:2px solid "+c.col+"'><span style='color:"+c.col+";font-weight:700'>"+c.ic+" Acción rápida: "+c.label+"</span><button onclick=\"document.getElementById('moAccionRapida').classList.remove('open')\" class='xb'>×</button></div>";
+  html += "<div class='md-b'>";
+
+  // Descripción
+  html += "<div style='background:var(--sur2);border-radius:6px;padding:.5rem;margin-bottom:.7rem;font-size:.72rem;color:var(--tx2)'>"+_esc(c.descripcion)+"</div>";
+
+  // Stats
+  html += "<div style='display:grid;grid-template-columns:1fr 1fr;gap:.5rem;margin-bottom:.8rem'>";
+  html += "<div style='background:var(--sur2);border-radius:6px;padding:.6rem;text-align:center'>";
+  html += "<div style='font-size:.6rem;color:var(--tx3);text-transform:uppercase;letter-spacing:.04em'>Items que cumplen</div>";
+  html += "<div style='font-size:1.4rem;font-weight:700;color:"+c.col+"'>"+totalItems+"</div>";
+  html += "</div>";
+  html += "<div style='background:var(--sur2);border-radius:6px;padding:.6rem;text-align:center'>";
+  html += "<div style='font-size:.6rem;color:var(--tx3);text-transform:uppercase;letter-spacing:.04em'>Proveedores afectados</div>";
+  html += "<div style='font-size:1.4rem;font-weight:700;color:var(--tx)'>"+totalProv+"</div>";
+  html += "</div>";
+  html += "</div>";
+
+  // Input de cantidad
+  html += "<div style='background:var(--sur);border:2px solid "+c.col+";border-radius:8px;padding:.8rem;margin-bottom:.8rem'>";
+  html += "<label style='display:block;font-size:.72rem;color:var(--tx3);font-weight:600;text-transform:uppercase;letter-spacing:.04em;margin-bottom:.4rem'>¿Cuántas unidades de CADA producto?</label>";
+  html += "<div style='display:flex;align-items:center;gap:.6rem'>";
+  html += "<button onclick='var i=document.getElementById(\"bcAccionQty\");i.value=Math.max(1,(parseInt(i.value)||0)-1);_bcAccionPreviewTotal()' style='background:var(--sur2);border:1px solid var(--bd);color:var(--tx);border-radius:6px;width:32px;height:32px;cursor:pointer;font-size:1.1rem;font-weight:700'>−</button>";
+  html += "<input id='bcAccionQty' type='number' min='1' max='99' value='"+c.defaultQty+"' oninput='_bcAccionPreviewTotal()' style='flex:1;text-align:center;background:var(--sur2);border:1px solid "+c.col+";color:"+c.col+";font-size:1.6rem;font-weight:700;padding:.4rem;border-radius:6px'>";
+  html += "<button onclick='var i=document.getElementById(\"bcAccionQty\");i.value=Math.min(99,(parseInt(i.value)||0)+1);_bcAccionPreviewTotal()' style='background:var(--sur2);border:1px solid var(--bd);color:var(--tx);border-radius:6px;width:32px;height:32px;cursor:pointer;font-size:1.1rem;font-weight:700'>+</button>";
+  html += "</div>";
+  // Total estimado
+  html += "<div id='bcAccionTotalPreview' style='margin-top:.5rem;text-align:center;font-size:.75rem;color:var(--tx2)'></div>";
+  html += "</div>";
+
+  // Preview
+  html += "<div style='font-size:.65rem;color:var(--tx3);font-weight:700;text-transform:uppercase;letter-spacing:.04em;margin-bottom:.3rem'>Vista previa</div>";
+  html += "<div style='background:var(--sur2);border-radius:6px;padding:.5rem;max-height:200px;overflow-y:auto;margin-bottom:.7rem'>"+preview+"</div>";
+
+  // Footer warning
+  html += "<div style='background:rgba(251,191,36,.1);border:1px solid #fbbf24;border-radius:6px;padding:.5rem;margin-bottom:.7rem;font-size:.65rem;color:var(--tx2)'>⚠️ Esto <b>sobrescribirá</b> las cantidades existentes de estos items en el pedido. Los items que no cumplen la condición no se tocan.</div>";
+
+  // Botones
+  html += "<div style='display:flex;gap:.4rem;justify-content:flex-end'>";
+  html += "<button onclick=\"document.getElementById('moAccionRapida').classList.remove('open')\" class='btn btn-g' style='font-size:.78rem'>Cancelar</button>";
+  html += "<button onclick=\"_bcAplicarAccionRapida('"+tipo+"')\" class='btn' style='font-size:.8rem;background:"+c.col+";color:#000;font-weight:700'>"+c.ic+" Aplicar a "+totalItems+" items</button>";
+  html += "</div>";
+
+  html += "</div></div>";
+  mo.innerHTML = html;
+
+  // Guardar el set de matched en el modal para usar después
+  mo._matched = matched;
+  mo._tipo = tipo;
+  mo._cfg = c;
+
+  mo.classList.add('open');
+
+  // Calcular total inicial
+  setTimeout(_bcAccionPreviewTotal, 50);
+}
+
+// Calcula el costo total estimado con la cantidad actual
+function _bcAccionPreviewTotal(){
+  var mo = document.getElementById('moAccionRapida');
+  if(!mo || !mo._matched) return;
+  var qty = parseInt((document.getElementById('bcAccionQty')||{}).value) || 0;
+  var totalUSD = 0;
+  var totalU = 0;
+  mo._matched.forEach(function(m){
+    totalU += qty;
+    totalUSD += qty * (m.item.precio_usd||0);
+  });
+  var el = document.getElementById('bcAccionTotalPreview');
+  if(el){
+    el.innerHTML = 'Total: <b style="color:var(--tx)">'+totalU+' unidades</b> · <b style="color:'+mo._cfg.col+'">u$d '+totalUSD.toFixed(2)+'</b>';
+  }
+}
+
+// Aplica la acción rápida con la cantidad elegida
+function _bcAplicarAccionRapida(tipo){
+  var mo = document.getElementById('moAccionRapida');
+  if(!mo || !mo._matched) return;
+  var qty = parseInt((document.getElementById('bcAccionQty')||{}).value) || 0;
+  if(qty < 1){ toast('Cantidad inválida','twarn'); return; }
+
+  var aplicados = 0;
+  mo._matched.forEach(function(m){
+    if(!bcPedidos[m.provKey]) bcPedidos[m.provKey] = {items:{}};
+    bcPedidos[m.provKey].items['l'+m.idx] = {
+      nombre: m.item.nombre_proveedor,
+      precio: m.item.precio_usd,
+      qty: qty,
+      key: 'l'+m.idx,
+      codigo: m.item.codigo||''
+    };
+    aplicados++;
+  });
+
+  mo.classList.remove('open');
   draftSave();
   bcRenderRecomendaciones();
   bcRenderPedidos();
   bcRenderFloating();
-  toast('Agregadas cantidades sugeridas a '+aplicados+' items','tok');
+  toast('✅ Aplicadas '+qty+' u a '+aplicados+' items','tok');
+}
+
+// FEAT (2026-05-14): forzar recarga del catálogo desde Supabase
+function bcRecargarCatalogo(){
+  toast('Recargando catálogo...','tinfo');
+  // Invalidar caches del ayudante
+  _bcResetFindCache();
+  bcMatchCache = null;
+  // Recargar prods
+  if(typeof loadProds === 'function'){
+    apiGet('productos','select=*&activo=is.true&order=empresa,nombre&limit=2000').then(function(data){
+      if(!Array.isArray(data)){
+        toast('Error recargando','terr');
+        return;
+      }
+      prods = data;
+      toast('✅ Catálogo actualizado ('+prods.length+' productos)','tok');
+      // Re-renderizar vista actual
+      if(typeof bcRenderAllViews === 'function') bcRenderAllViews();
+    }).catch(function(e){
+      toast('Error: '+e.message,'terr');
+    });
+  }
 }
 
 // ════════════════════════════════════════════════════════════════
@@ -23184,18 +23333,84 @@ function bcFindInProds(item){
     if(cachedId === null) return null;
     return (prods||[]).find(function(p){return p.id===cachedId;}) || null;
   }
-  // 3. Calcular y guardar en cache. Comparar contra empresa+nombre del producto.
-  var best=null; var bestScore=0;
+  // 3. Calcular: encontrar TODOS los que matchean fuerte, no solo el primero
+  // FIX (2026-05-14): si hay varios productos con score similar, preferir:
+  //   1) el que tiene stock > 0
+  //   2) el que más se vendió (vendido_david)
+  //   3) el que tiene precio más cercano al del proveedor
+  // Esto resuelve el caso de productos con varias versiones (50ml/100ml) donde
+  // el catálogo tenía datos viejos y matcheaba uno con stock 0.
+  var candidatos = [];
+  var bestScore = 0;
+  // Volumen del item del proveedor (para preferir match con mismo ml si está en catálogo)
+  var volProv = _bcExtraerVolumen(item.nombre_norm||item.nombre_proveedor||'');
+
   prods.forEach(function(p){
     var pFull = (p.empresa||'') + ' ' + (p.nombre||'');
-    var pn=bcNorm(pFull);
+    var pn = bcNorm(pFull);
     if(!pn) return;
-    var score=bcSim(nombre,pn);
-    if(score>bestScore){bestScore=score;best=p;}
+    var score = bcSim(nombre, pn);
+    if(score >= 0.90){
+      candidatos.push({prod:p, score:score, pn:pn});
+      if(score > bestScore) bestScore = score;
+    }
   });
-  var result = bestScore>=0.90?best:null;
-  window._bcFindCache[nombre] = result ? result.id : null;
-  return result;
+
+  // Sin candidatos, no match
+  if(!candidatos.length){
+    window._bcFindCache[nombre] = null;
+    return null;
+  }
+
+  // Filtrar a los que están cerca del mejor score (dentro de 0.05)
+  var topCandidatos = candidatos.filter(function(c){ return c.score >= bestScore - 0.05; });
+
+  // Si hay UNO solo, devolver ese
+  if(topCandidatos.length === 1){
+    var only = topCandidatos[0].prod;
+    window._bcFindCache[nombre] = only.id;
+    return only;
+  }
+
+  // Múltiples candidatos cerca: aplicar criterios de desempate
+  // 1) Si conocemos volumen del proveedor, preferir el que tenga el mismo ml en el nombre
+  if(volProv != null){
+    var conMismoVol = topCandidatos.filter(function(c){
+      var v = _bcExtraerVolumen(c.prod.nombre||'');
+      return v === volProv;
+    });
+    if(conMismoVol.length){
+      topCandidatos = conMismoVol;
+    }
+  }
+
+  // 2) Preferir productos con stock > 0
+  var conStock = topCandidatos.filter(function(c){
+    return (c.prod.stock_actual||0) > 0;
+  });
+  if(conStock.length){
+    topCandidatos = conStock;
+  }
+
+  // 3) Entre los restantes, ordenar por: más vendido > más score > precio cercano
+  topCandidatos.sort(function(a,b){
+    // Más score primero
+    if(b.score !== a.score) return b.score - a.score;
+    // Más vendido segundo
+    var vA = a.prod.vendido_david||0, vB = b.prod.vendido_david||0;
+    if(vA !== vB) return vB - vA;
+    // Precio similar (si tiene precio del proveedor)
+    if(item.precio_usd && a.prod.costo_ind && b.prod.costo_ind){
+      var dA = Math.abs(a.prod.costo_ind - item.precio_usd);
+      var dB = Math.abs(b.prod.costo_ind - item.precio_usd);
+      return dA - dB;
+    }
+    return 0;
+  });
+
+  var winner = topCandidatos[0].prod;
+  window._bcFindCache[nombre] = winner.id;
+  return winner;
 }
 
 
