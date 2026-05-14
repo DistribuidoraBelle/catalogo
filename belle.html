@@ -1386,9 +1386,13 @@ td{padding:.35rem .5rem;font-size:.78rem;color:var(--tx2);vertical-align:middle;
       <span style="font-size:.7rem;color:var(--tx3);white-space:nowrap">Similitud</span>
       <input type="number" id="comprasSimilitud" value="90" min="30" max="99"
         style="width:46px;background:transparent;border:none;color:var(--acc);font-weight:700;font-size:.82rem;text-align:center;outline:none"
-        oninput="this.value=Math.max(30,Math.min(99,parseInt(this.value)||90))">
+        oninput="this.value=Math.max(30,Math.min(99,parseInt(this.value)||90));bcMatchCache=null;_bcResetFindCache();if(typeof bcRenderAllViews==='function')bcRenderAllViews()">
       <span style="font-size:.7rem;color:var(--tx3)">%</span>
     </div>
+    <label title="Si lo activás, también se muestran matches con score &gt;= 75% como 'a revisar'. Si lo desactivás, solo se matchea por encima del umbral exacto." style="display:flex;align-items:center;gap:.3rem;background:var(--sur3);border:1px solid var(--bd);border-radius:var(--rs);padding:.25rem .6rem;cursor:pointer">
+      <input type="checkbox" id="bcAllowParcial" onchange="bcMatchCache=null;if(typeof bcRenderAllViews==='function')bcRenderAllViews()" style="cursor:pointer">
+      <span style="font-size:.7rem;color:var(--tx3);white-space:nowrap">Parciales</span>
+    </label>
   </div>
 
   <!-- Borradores -->
@@ -19522,31 +19526,83 @@ function bcNormalizarNombre(raw){
 }
 
 // ── SIMILITUD ───────────────────────────────────────────────────
-// MEJORA (2026-05-12): stopwords ampliadas, fuzzy matching, bonus de marca
-// FIX (2026-05-12): cache de normalización para no recalcular en cada comparación
+// FIX (2026-05-13): REESCRITO TOTALMENTE.
+// El usuario reportó que los proveedores escriben bien los nombres.
+// Lógica nueva, simple y confiable:
+//   1. Normalizar quitando tildes, símbolos, mayúsculas, espacios extra
+//   2. Extraer volumen (ml/oz) - si difiere, NO match
+//   3. Match exacto de palabras del nombre (sin orden)
+//   4. Si todas las palabras del más corto están en el más largo → match
 window._bcNormCache = {};
 window._bcWordsCache = {};
+window._bcVolumenCache = {};
+
+// Normaliza string: minúsculas, sin tildes, sin símbolos.
+// NO elimina ml/edp/etc — eso lo manejamos aparte.
 function bcNorm(s){
   if(!s) return '';
   if(window._bcNormCache.hasOwnProperty(s)) return window._bcNormCache[s];
   var r = s.toLowerCase()
-    .normalize('NFD').replace(/[\u0300-\u036f]/g,'')
-    .replace(/\b(eau|de|pour|for|her|him|spray|set|kit|body|deo|by|the|le|la|el|al|du|y|and|with|con|perfume|fragrance|fragancia|edp|edt|edc|parfum|extrait|elixir|ml|cl|oz)\b/g,' ')
-    .replace(/\b\d{1,3}\b/g,' ')
-    .replace(/[^a-z0-9\s]/g,' ').replace(/\s+/g,' ').trim();
+    .normalize('NFD').replace(/[\u0300-\u036f]/g,'')  // quitar tildes
+    .replace(/[^a-z0-9\s]/g,' ')                       // quitar símbolos
+    .replace(/\s+/g,' ').trim();
   window._bcNormCache[s] = r;
   return r;
 }
+
+// Extrae volumen del string (en ml). "100ml", "100 ml", "3.4 oz" → 100
+function _bcExtraerVolumen(s){
+  if(!s) return null;
+  if(window._bcVolumenCache.hasOwnProperty(s)) return window._bcVolumenCache[s];
+  var low = s.toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g,'');
+  // ml: 100ml, 100 ml, 100Ml
+  var mMl = low.match(/(\d{2,4})\s*ml\b/);
+  if(mMl){
+    var v = parseInt(mMl[1]);
+    window._bcVolumenCache[s] = v;
+    return v;
+  }
+  // oz: 3.4oz, 1.7 oz → convertir a ml (1oz ≈ 29.57ml, redondeado al estándar)
+  var mOz = low.match(/(\d+(?:[.,]\d+)?)\s*(?:oz|fl\s*oz)\b/);
+  if(mOz){
+    var oz = parseFloat(mOz[1].replace(',','.'));
+    var ml;
+    // Mapeos comunes a tamaños estándar
+    if(oz >= 3.0 && oz <= 3.6) ml = 100;
+    else if(oz >= 1.5 && oz <= 1.8) ml = 50;
+    else if(oz >= 0.9 && oz <= 1.1) ml = 30;
+    else ml = Math.round(oz * 29.57);
+    window._bcVolumenCache[s] = ml;
+    return ml;
+  }
+  window._bcVolumenCache[s] = null;
+  return null;
+}
+
+// Devuelve las palabras "significativas" del nombre — sin volumen, sin tipo (EDP/EDT),
+// sin stopwords mínimas. Hace match EXACTO así que no se filtran muchas cosas.
 function bcWords(s){
   if(!s) return [];
   if(window._bcWordsCache.hasOwnProperty(s)) return window._bcWordsCache[s];
-  var r = bcNorm(s).split(' ').filter(function(w){return w.length>2;});
-  window._bcWordsCache[s] = r;
-  return r;
+  var r = bcNorm(s)
+    // Quitar tipo de perfume (no aporta al matching)
+    .replace(/\b(edp|edt|edc|eau de parfum|eau de toilette|parfum|extrait|elixir|cologne|colonia)\b/g,' ')
+    // Quitar volumen completo (números + ml/oz)
+    .replace(/\d+\s*(?:ml|oz)\b/g,' ')
+    // Quitar "for her/him/men/women/unisex" (no aporta + a veces los proveedores cambian)
+    .replace(/\b(for\s+(?:her|him|men|women|man|woman)|para\s+(?:el|ella|hombre|mujer)|unisex|hombre|mujer|men|women)\b/g,' ')
+    // Quitar palabras muy genéricas
+    .replace(/\b(perfume|fragancia|fragrance|spray|set|kit|body|deo|deodorant)\b/g,' ')
+    // Normalizar espacios
+    .replace(/\s+/g,' ').trim();
+  // Splittear y quedarnos con palabras de >=2 chars
+  var arr = r.split(' ').filter(function(w){return w.length>=2;});
+  window._bcWordsCache[s] = arr;
+  return arr;
 }
 
-// Distancia Levenshtein: cuenta operaciones necesarias para transformar a en b.
-// Tolerante a tipeos: "khamra" vs "khamrah" = 1 operación.
+// _bcLevenshtein y _bcWordsCercanas: se mantienen por si las usa otra función,
+// pero bcSim ya NO las usa.
 function _bcLevenshtein(a, b){
   if(a===b) return 0;
   if(!a.length) return b.length;
@@ -19565,30 +19621,40 @@ function _bcLevenshtein(a, b){
   return v1[b.length];
 }
 
-// ¿Las palabras son lo suficientemente parecidas? (tolera 1 typo cada 5 chars)
+// ¿Las palabras son lo suficientemente parecidas? (helper, no usado por bcSim ya)
 function _bcWordsCercanas(a, b){
   if(a===b) return true;
   if(Math.abs(a.length-b.length)>3) return false;
   var maxLen = Math.max(a.length, b.length);
-  if(maxLen<=3) return false; // muy cortas, no fuzzy
+  if(maxLen<=3) return false;
   var dist = _bcLevenshtein(a, b);
-  // Tolerar 1 char typo si <=5, 2 chars si >=6
   var tol = maxLen<=5 ? 1 : Math.floor(maxLen/4);
   return dist <= tol;
 }
 
+// ════════════════════════════════════════════════════════════════
+// bcSim — REESCRITO 2026-05-13
+// Lógica simple y confiable: match exacto sobre nombre (sin tildes ni símbolos)
+// y obligatorio mismo volumen (ml). Sin fuzzy ni bonus de marca.
+// ════════════════════════════════════════════════════════════════
 function bcSim(a, b){
-  // FIX (2026-05-12): optimizar para no hacer trabajo innecesario
-  // 1. Igualdad rápida
   if(a===b) return 1.0;
-  var wa=bcWords(a), wb=bcWords(b);
-  if(!wa.length||!wb.length) return 0;
 
-  // 2. Fast path: solo contar matches exactos (cubre 95% de los casos)
-  var matchExact=0;
-  var usadosB=new Array(wb.length); // false por default
+  // 1. VOLUMEN: si ambos tienen volumen y son diferentes → NO MATCH (0)
+  var volA = _bcExtraerVolumen(a);
+  var volB = _bcExtraerVolumen(b);
+  if(volA != null && volB != null && volA !== volB){
+    return 0;  // 100ml vs 50ml = productos distintos aunque mismo perfume
+  }
+
+  // 2. PALABRAS DEL NOMBRE: match exacto, sin orden
+  var wa = bcWords(a), wb = bcWords(b);
+  if(!wa.length || !wb.length) return 0;
+
+  var matchExact = 0;
+  var usadosB = new Array(wb.length);
   for(var i=0;i<wa.length;i++){
-    var w=wa[i];
+    var w = wa[i];
     var idx = wb.indexOf(w);
     if(idx>=0 && !usadosB[idx]){
       matchExact++;
@@ -19596,61 +19662,29 @@ function bcSim(a, b){
     }
   }
 
-  // 3. F1 con matches exactos solamente
-  var p1=matchExact/wa.length, r1=matchExact/wb.length;
-  var f1 = p1+r1>0 ? 2*p1*r1/(p1+r1) : 0;
+  // 3. F1 score (Dice): cuán parecidos son los conjuntos de palabras
+  var p = matchExact/wa.length, r = matchExact/wb.length;
+  var f1 = p+r>0 ? 2*p*r/(p+r) : 0;
 
-  // 4. Si ya pasamos 85%, no vale la pena hacer fuzzy (es el match)
-  // 5. Si estamos por debajo de 40%, tampoco — son productos muy distintos
-  // SOLO hacer fuzzy en la zona dudosa (40-85%) donde puede ayudar
-  if(f1 < 0.85 && f1 >= 0.40){
-    var matchFuzzy=0;
-    for(var ii=0;ii<wa.length;ii++){
-      var wi=wa[ii];
-      // skip si ya matcheó exacto
-      var idxE=wb.indexOf(wi);
-      if(idxE>=0 && usadosB[idxE]) continue;
-      // fuzzy contra los no usados — solo palabras de tamaño similar
-      for(var j=0;j<wb.length;j++){
-        if(usadosB[j]) continue;
-        var wj=wb[j];
-        // Pre-filtro rápido: longitudes deben ser similares
-        if(Math.abs(wi.length-wj.length)>2) continue;
-        // Solo palabras largas (>=5) son candidatas a fuzzy
-        if(wi.length<5 || wj.length<5) continue;
-        if(_bcWordsCercanas(wi, wj)){
-          matchFuzzy++;
-          usadosB[j]=true;
-          break;
-        }
-      }
-    }
-    if(matchFuzzy>0){
-      var m2 = matchExact + matchFuzzy*0.7;
-      var p2=m2/wa.length, r2=m2/wb.length;
-      f1 = p2+r2>0 ? 2*p2*r2/(p2+r2) : f1;
+  // 4. Si TODAS las palabras de uno están en el otro → boost a match casi total.
+  // Esto cubre el caso "Maison Alhambra Salvo EDP 100ml" vs "Maison Alhambra Salvo"
+  // (mismo producto, uno tiene info extra de tipo/vol que ya filtramos)
+  if(matchExact === wa.length || matchExact === wb.length){
+    if(matchExact >= 2){
+      f1 = Math.max(f1, 0.95);
     }
   }
 
-  // 6. Bonus marca: SOLO si está cerca del threshold (donde puede importar)
-  // y usando cache de marca por string (window._bcMarcaCache)
-  if(f1 >= 0.30 && f1 <= 0.95){
-    var marcaA = _bcGetMarcaCached(a);
-    var marcaB = _bcGetMarcaCached(b);
-    if(marcaA && marcaB){
-      if(marcaA===marcaB){
-        f1 = Math.min(1, f1 + 0.15);
-      } else if(marcaA.length>4 && marcaB.length>4 && _bcWordsCercanas(marcaA, marcaB)){
-        f1 = Math.min(1, f1 + 0.05);
-      } else {
-        f1 = Math.max(0, f1 - 0.10);
-      }
-    }
+  // 5. Bonus pequeño si volúmenes coinciden (ambos explícitos y iguales)
+  if(volA != null && volB != null && volA === volB && f1 >= 0.60){
+    f1 = Math.min(1, f1 + 0.05);
   }
+
   return f1;
 }
 
-// FIX (2026-05-12): cache de marcas por string para no recalcular en cada bcSim
+// FIX (2026-05-12): cache de marcas por string (mantenido para compatibilidad).
+// Ya no lo usa bcSim, pero puede usarlo otra función externa.
 window._bcMarcaCache = {};
 function _bcGetMarcaCached(s){
   if(!s) return '';
@@ -20166,8 +20200,10 @@ function bcGetMatches(){
   });
 
   var simMin=(parseFloat((document.getElementById('comprasSimilitud')||{value:90}).value)||90)/100;
-  // Threshold parcial para "review manual" — ítems con 50-89% se muestran como "revisar"
-  var simParcial = Math.min(simMin, 0.50);
+  // FIX (2026-05-13): threshold parcial subido a 0.75 (antes 0.50) — más estricto.
+  // Y solo se usa si el usuario lo habilita (checkbox "Parciales")
+  var allowParcial = !!(document.getElementById('bcAllowParcial')||{}).checked;
+  var simParcial = allowParcial ? Math.min(simMin, 0.75) : simMin; // si no allow, threshold parcial = mismo que exacto (nada parcial)
 
   // Matches manuales del usuario (si existen): key=normalizado, val=prodId/itemKey
   var manualMatches = window._bcManualMatches || {};
@@ -22308,11 +22344,15 @@ function _bcResetFindCache(){
   window._bcNormCache = {};
   window._bcWordsCache = {};
   window._bcMarcaCache = {};
+  // FIX (2026-05-13): cache de volumen
+  window._bcVolumenCache = {};
 }
 
 function bcFindInProds(item){
   // Try to match provider item against our catalog
   if(!prods||!prods.length) return null;
+  // FIX (2026-05-13): threshold subido de 0.70 a 0.85 — antes machaba cualquier cosa.
+  // Comparar con .nombre + .empresa, no solo nombre, para mejorar match con marcas.
   var nombre=bcNorm(item.nombre_norm||item.nombre_proveedor||'');
   if(!nombre) return null;
   // 1. Match manual tiene prioridad absoluta
@@ -22326,15 +22366,16 @@ function bcFindInProds(item){
     if(cachedId === null) return null;
     return (prods||[]).find(function(p){return p.id===cachedId;}) || null;
   }
-  // 3. Calcular y guardar en cache
+  // 3. Calcular y guardar en cache. Comparar contra empresa+nombre del producto.
   var best=null; var bestScore=0;
   prods.forEach(function(p){
-    var pn=bcNorm(p.nombre||'');
+    var pFull = (p.empresa||'') + ' ' + (p.nombre||'');
+    var pn=bcNorm(pFull);
     if(!pn) return;
     var score=bcSim(nombre,pn);
     if(score>bestScore){bestScore=score;best=p;}
   });
-  var result = bestScore>=0.7?best:null;
+  var result = bestScore>=0.90?best:null;
   window._bcFindCache[nombre] = result ? result.id : null;
   return result;
 }
@@ -22401,10 +22442,12 @@ function bcRenderCruzadosTable(){
     keys.forEach(function(k){
       var best=null; var bestScore=0;
       (bcProveedores[k]||[]).forEach(function(it){
-        var s=bcSim(bcNorm(p.nombre||''),bcNorm(it.nombre_proveedor||''));
+        // FIX (2026-05-13): comparar contra nombre+empresa, threshold 0.85
+        var pFull = (p.empresa||'') + ' ' + (p.nombre||'');
+        var s=bcSim(bcNorm(pFull),bcNorm(it.nombre_proveedor||''));
         if(s>bestScore){bestScore=s;best=it;}
       });
-      if(bestScore>=0.7) provMatches[k]={item:best,score:bestScore};
+      if(bestScore>=0.90) provMatches[k]={item:best,score:bestScore};
     });
 
     var hasProv=Object.keys(provMatches).length>0;
@@ -27247,7 +27290,7 @@ function bcAbrirMatchModal(itemKey,currentMatchId,provNombre){
       var nombreCat = (p.empresa||'') + ' ' + (p.nombre||'');
       var s = bcSim(nombrePr, nombreCat);
       return {prod: p, score: s};
-    }).filter(function(x){return x.score >= 0.30;})
+    }).filter(function(x){return x.score >= 0.40;})
       .sort(function(a,b){return b.score - a.score;})
       .slice(0,3);
 
