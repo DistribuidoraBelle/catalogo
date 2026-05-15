@@ -7697,11 +7697,14 @@ function _adminGuardarCobro(id){
       }).then(function(rows){
         var pago=Array.isArray(rows)&&rows.length?rows[0]:null;
         if(pago&&pago.id){
-          return apiPost('cc_pagos_aplicaciones',{
-            pago_id:pago.id,
-            pedido_id:id,
-            monto_aplicado:monto,
-            cubrio_pedido_completo:esCobroCompleto
+          // FEAT CC v2 (2026-05-14): aplicar pago a cuotas del pedido + registrar aplicación
+          return _ccAplicarPagoACuotasPedido(id, monto).then(function(){
+            return apiPost('cc_pagos_aplicaciones',{
+              pago_id:pago.id,
+              pedido_id:id,
+              monto_aplicado:monto,
+              cubrio_pedido_completo:esCobroCompleto
+            });
           });
         }
       }).catch(function(e){console.error('cc_pagos error',e);}));
@@ -15065,9 +15068,22 @@ window.ccBackfillVencimientos = function(){
 
 // ── Modal: Configurar CC del cliente (modalidad, plazos, tasas) ─────────
 window.admAbrirCCConfig = function(clienteId, clienteNombre){
-  apiGet('clientes','select=*&id=eq.'+clienteId+'&limit=1').then(function(rows){
-    var c = (rows && rows[0]) || null;
+  // FEAT 2026-05-14: cargar cliente + planes + verificar si tiene cuotas pendientes (afecta UI)
+  Promise.all([
+    apiGet('clientes','select=*&id=eq.'+clienteId+'&limit=1'),
+    apiGet('cc_planes_cliente','select=*&cliente_id=eq.'+clienteId+'&activo=eq.true&order=orden.asc').catch(function(){return [];}),
+    apiGet('cc_cuotas','select=id,pedido_id,estado,monto,monto_pagado&estado=in.(pendiente,parcial,vencida)&limit=1').catch(function(){return [];})
+  ]).then(function(res){
+    var c = (res[0] && res[0][0]) || null;
+    var planes = Array.isArray(res[1]) ? res[1] : [];
     if(!c){ toast('Cliente no encontrado','terr'); return; }
+    // Setear estado global para que _ccRenderConfigModal use estos planes
+    window._ccCfgPlanesActual = planes.map(function(p){
+      return {id:p.id, nro_cuotas:p.nro_cuotas, recargo_pct:p.recargo_pct||0, orden:p.orden||0};
+    });
+    // Guardar día semana/mes para cuando se cambie frecuencia
+    window._ccCfgClienteDiaSemana = c.cc_dia_semana;
+    window._ccCfgClienteDiaMes = c.cc_dia_mes;
     _ccRenderConfigModal(c, clienteNombre);
   });
 };
@@ -15120,10 +15136,17 @@ function _ccRenderConfigModal(c, clienteNombre){
   h += "</div></label>";
   h += "</div></div>";
 
-  // Bloque modalidad CUOTAS
+  // Bloque modalidad CUOTAS (FEAT 2026-05-14: frecuencia + planes + modo)
   h += "<div id='_ccBlqCuotas' style='display:"+(modalidad==='cuotas'?'block':'none')+";background:var(--sur);border:1px solid var(--bd);border-radius:8px;padding:.8rem'>";
   h += "<div style='font-size:.7rem;color:var(--tx3);text-transform:uppercase;font-weight:700;margin-bottom:.5rem'>🟢 Config Crédito + cuotas</div>";
-  h += "<div style='display:grid;grid-template-columns:1fr 1fr;gap:.5rem'>";
+
+  // Aviso si tiene saldo > 0 (no puede cambiar frecuencia)
+  h += "<div id='_ccCfgAvisoBloqueo' style='display:none;background:rgba(251,191,36,.1);border:1px solid #fbbf24;border-radius:6px;padding:.45rem .6rem;margin-bottom:.6rem;font-size:.7rem;color:#fbbf24'>";
+  h += "🔒 Cliente tiene cuotas pendientes — la frecuencia y modo NO se pueden cambiar hasta saldo en 0";
+  h += "</div>";
+
+  // Plazo + límite
+  h += "<div style='display:grid;grid-template-columns:1fr 1fr;gap:.5rem;margin-bottom:.6rem'>";
   h += "<div><label style='"+lbl+"'>Plazo default (días)</label>";
   h += "<select id='_ccCfgPlazo' style='"+ip+"'>";
   [15,30,45,60,90].forEach(function(p){
@@ -15132,7 +15155,99 @@ function _ccRenderConfigModal(c, clienteNombre){
   h += "</select></div>";
   h += "<div><label style='"+lbl+"'>Límite de crédito ($)</label>";
   h += "<input type='number' id='_ccCfgLim' value='"+(c.limite_credito||0)+"' min='0' style='"+ip+"'></div>";
+  h += "</div>";
+
+  // ─── FRECUENCIA FIJA ───
+  h += "<div style='background:var(--sur2);border:1px solid var(--bd);border-radius:7px;padding:.65rem;margin-bottom:.6rem'>";
+  h += "<div style='font-size:.65rem;color:var(--acc);text-transform:uppercase;font-weight:700;margin-bottom:.4rem'>📅 Frecuencia de pago</div>";
+  h += "<div style='font-size:.62rem;color:var(--tx3);margin-bottom:.4rem;font-style:italic'>Día en que el cliente paga sus cuotas. Las cuotas se alinean a esta frecuencia.</div>";
+  h += "<div style='display:grid;grid-template-columns:1fr 1fr;gap:.5rem'>";
+  h += "<div><label style='"+lbl+"'>Frecuencia</label>";
+  h += "<select id='_ccCfgFrec' onchange='_ccCfgUpdateDia(this.value)' style='"+ip+"'>";
+  var frec = c.cc_frecuencia || '';
+  var frecs = [
+    {v:'',          lbl:'Sin frecuencia (1 pago)'},
+    {v:'semanal',   lbl:'Semanal'},
+    {v:'quincenal', lbl:'Quincenal'},
+    {v:'mensual',   lbl:'Mensual'},
+    {v:'cada_10',   lbl:'Cada 10 días'},
+    {v:'cada_15',   lbl:'Cada 15 días'},
+    {v:'cada_30',   lbl:'Cada 30 días'}
+  ];
+  frecs.forEach(function(f){
+    h += "<option value='"+f.v+"'"+(frec===f.v?' selected':'')+">"+f.lbl+"</option>";
+  });
+  h += "</select></div>";
+  h += "<div id='_ccCfgDiaWrap'><label style='"+lbl+"'>Día</label>";
+  h += "<div id='_ccCfgDiaInner'></div>";
+  h += "</div>";
   h += "</div></div>";
+
+  // ─── MODO DE CUOTAS ───
+  h += "<div style='background:var(--sur2);border:1px solid var(--bd);border-radius:7px;padding:.65rem;margin-bottom:.6rem'>";
+  h += "<div style='font-size:.65rem;color:var(--acc);text-transform:uppercase;font-weight:700;margin-bottom:.4rem'>📊 Modo de cálculo de cuotas</div>";
+  var modoC = c.cc_modo_cuotas || 'iguales';
+  h += "<div style='display:flex;flex-direction:column;gap:.3rem'>";
+  [
+    {v:'iguales',         lbl:'Iguales (proporcionales)',                       desc:'Ej: $100 en 4 = $25 c/u'},
+    {v:'entrega_inicial', lbl:'Entrega inicial + resto en cuotas',              desc:'Primera cuota mayor, resto iguales'},
+    {v:'manual',          lbl:'Manual (edita montos al confirmar)',             desc:'Vos definís cada cuota'}
+  ].forEach(function(m){
+    h += "<label style='display:flex;gap:.5rem;cursor:pointer;padding:.4rem .55rem;border:1px solid "+(modoC===m.v?'var(--acc)':'var(--bd)')+";border-radius:6px;background:"+(modoC===m.v?'rgba(196,150,90,.08)':'var(--sur)')+"'>";
+    h += "<input type='radio' name='_ccModoCuotas' value='"+m.v+"' "+(modoC===m.v?'checked':'')+" onchange='_ccCfgSwitchModoCuotas(\""+m.v+"\")' style='flex-shrink:0;margin-top:.15rem'>";
+    h += "<div><div style='font-size:.78rem;font-weight:600;color:var(--tx)'>"+m.lbl+"</div>";
+    h += "<div style='font-size:.62rem;color:var(--tx3);margin-top:.05rem'>"+m.desc+"</div></div>";
+    h += "</label>";
+  });
+  h += "</div>";
+
+  // Bloque "entrega inicial %" (solo si modo es entrega_inicial)
+  h += "<div id='_ccCfgEntregaWrap' style='display:"+(modoC==='entrega_inicial'?'block':'none')+";margin-top:.5rem'>";
+  h += "<label style='"+lbl+"'>% de entrega inicial</label>";
+  h += "<input type='number' id='_ccCfgEntregaPct' value='"+(c.cc_entrega_inicial_pct||30)+"' min='5' max='90' step='5' style='"+ip+"' placeholder='30'>";
+  h += "<div style='font-size:.6rem;color:var(--tx3);margin-top:.2rem;font-style:italic'>Ej: 30% al confirmar + 70% repartido en cuotas siguientes</div>";
+  h += "</div>";
+  h += "</div>";
+
+  // ─── PLANES DE CUOTAS HABILITADOS (LIBRE) ───
+  h += "<div style='background:var(--sur2);border:1px solid var(--bd);border-radius:7px;padding:.65rem;margin-bottom:.6rem'>";
+  h += "<div style='display:flex;justify-content:space-between;align-items:center;margin-bottom:.4rem'>";
+  h += "<div><div style='font-size:.65rem;color:var(--acc);text-transform:uppercase;font-weight:700'>🎫 Planes de cuotas habilitados</div>";
+  h += "<div style='font-size:.62rem;color:var(--tx3);margin-top:.1rem;font-style:italic'>Opciones que admin/ventas tienen al confirmar pedido CC. Cantidad libre (1, 2, 3, 4, 6, 8, 12...)</div></div>";
+  h += "<button type='button' onclick='_ccCfgAgregarPlan()' class='btn btn-g' style='font-size:.7rem;padding:.3rem .55rem;color:var(--green);border-color:var(--green);white-space:nowrap'>+ Plan</button>";
+  h += "</div>";
+  h += "<div id='_ccCfgPlanesLista' style='display:flex;flex-direction:column;gap:.3rem'></div>";
+  h += "</div>";
+
+  // ─── MORA ───
+  h += "<div style='background:var(--sur2);border:1px solid var(--bd);border-radius:7px;padding:.65rem;margin-bottom:.6rem'>";
+  h += "<div style='font-size:.65rem;color:var(--acc);text-transform:uppercase;font-weight:700;margin-bottom:.4rem'>⚠️ Aplicación de mora</div>";
+  var moraModo = c.cc_mora_modo || 'cuota';
+  h += "<div style='display:grid;grid-template-columns:1fr 1fr 1fr;gap:.4rem'>";
+  [
+    {v:'cuota',  lbl:'Por cuota',    desc:'Sobre cuota individual vencida'},
+    {v:'pedido', lbl:'Por pedido',   desc:'Cuando el pedido entero vence'},
+    {v:'ambas',  lbl:'Ambas',        desc:'Lo que más alto resulte'}
+  ].forEach(function(m){
+    h += "<label style='cursor:pointer;padding:.45rem;border:1px solid "+(moraModo===m.v?'var(--acc)':'var(--bd)')+";border-radius:6px;background:"+(moraModo===m.v?'rgba(196,150,90,.08)':'var(--sur)')+";text-align:center'>";
+    h += "<input type='radio' name='_ccMoraModo' value='"+m.v+"' "+(moraModo===m.v?'checked':'')+" style='display:none'>";
+    h += "<div style='font-size:.72rem;font-weight:600;color:"+(moraModo===m.v?'var(--acc)':'var(--tx)')+"'>"+m.lbl+"</div>";
+    h += "<div style='font-size:.58rem;color:var(--tx3);margin-top:.15rem'>"+m.desc+"</div>";
+    h += "</label>";
+  });
+  h += "</div>";
+  h += "</div>";
+
+  // ─── DESCUENTO POR PRONTO PAGO DE CUOTA ───
+  h += "<div style='background:var(--sur2);border:1px solid var(--bd);border-radius:7px;padding:.65rem;margin-bottom:.4rem'>";
+  h += "<div style='font-size:.65rem;color:var(--acc);text-transform:uppercase;font-weight:700;margin-bottom:.3rem'>💚 Descuento por pago anticipado de cuota</div>";
+  h += "<div style='display:grid;grid-template-columns:1fr 2fr;gap:.5rem;align-items:end'>";
+  h += "<div><label style='"+lbl+"'>% Descuento</label>";
+  h += "<input type='number' id='_ccCfgDescCuota' value='"+(c.cc_descuento_cuota_pct||0)+"' min='0' max='30' step='0.5' style='"+ip+"' placeholder='0'></div>";
+  h += "<div style='font-size:.62rem;color:var(--tx3);font-style:italic'>Si paga la cuota antes del vencimiento, recibe este descuento sobre el monto de esa cuota</div>";
+  h += "</div></div>";
+
+  h += "</div>"; // fin _ccBlqCuotas
 
   // Bloque modalidad RESUMEN
   h += "<div id='_ccBlqResumen' style='display:"+(modalidad==='resumen'?'block':'none')+";background:var(--sur);border:1px solid var(--bd);border-radius:8px;padding:.8rem'>";
@@ -15204,6 +15319,35 @@ function _ccRenderConfigModal(c, clienteNombre){
   h += "</div>";
   mo.innerHTML = h;
   document.body.appendChild(mo);
+
+  // FEAT 2026-05-14: post-render — planes, día según frecuencia, aviso bloqueo
+  setTimeout(function(){
+    if(typeof _ccCfgRenderPlanes === 'function') _ccCfgRenderPlanes();
+    if(typeof _ccCfgUpdateDia === 'function') _ccCfgUpdateDia(c.cc_frecuencia || '');
+    // Check si tiene cuotas pendientes — mostrar aviso de bloqueo de frecuencia
+    // Hacer en 2 queries simples (más confiable que joins en PostgREST)
+    apiGet('pedidos_catalogo','select=id&cliente_id=eq.'+c.id+'&estado=not.in.(cancelado,cobrado)&limit=200').then(function(peds){
+      if(!Array.isArray(peds) || !peds.length) return null;
+      var ids = peds.map(function(p){return p.id;}).join(',');
+      return apiGet('cc_cuotas','select=id&pedido_id=in.('+ids+')&estado=in.(pendiente,parcial,vencida)&limit=1');
+    }).then(function(cuotas){
+      if(cuotas && Array.isArray(cuotas) && cuotas.length){
+        var aviso = document.getElementById('_ccCfgAvisoBloqueo');
+        if(aviso) aviso.style.display = 'block';
+        // Bloquear inputs de frecuencia y modo (no se pueden cambiar)
+        var inputs = ['_ccCfgFrec', '_ccCfgDiaSem', '_ccCfgDiaMes'];
+        inputs.forEach(function(idEl){
+          var el = document.getElementById(idEl);
+          if(el){ el.disabled = true; el.style.opacity = '0.6'; el.style.cursor = 'not-allowed'; }
+        });
+        document.querySelectorAll('input[name="_ccModoCuotas"]').forEach(function(r){
+          r.disabled = true;
+          var lbl = r.closest('label');
+          if(lbl){ lbl.style.opacity = '0.6'; lbl.style.cursor = 'not-allowed'; }
+        });
+      }
+    }).catch(function(){});
+  }, 50);
 }
 
 window._ccCfgToggleHab = function(checked){
@@ -15229,6 +15373,98 @@ window._ccCfgSwitchModalidad = function(mod){
   }
 };
 
+// FEAT 2026-05-14: switch modo de cuotas
+window._ccCfgSwitchModoCuotas = function(modo){
+  var wrap = document.getElementById('_ccCfgEntregaWrap');
+  if(wrap) wrap.style.display = modo === 'entrega_inicial' ? 'block' : 'none';
+  // Refrescar bordes de las opciones de modo
+  document.querySelectorAll('input[name="_ccModoCuotas"]').forEach(function(r){
+    var lbl = r.closest('label');
+    if(!lbl) return;
+    var isChecked = r.value === modo;
+    lbl.style.borderColor = isChecked ? 'var(--acc)' : 'var(--bd)';
+    lbl.style.background = isChecked ? 'rgba(196,150,90,.08)' : 'var(--sur)';
+  });
+};
+
+// FEAT 2026-05-14: actualizar input día según frecuencia
+window._ccCfgUpdateDia = function(frec){
+  var wrap = document.getElementById('_ccCfgDiaWrap');
+  var inner = document.getElementById('_ccCfgDiaInner');
+  if(!wrap || !inner) return;
+  var ip = "padding:.45rem .6rem;border:1px solid var(--bd);border-radius:6px;background:var(--sur);color:var(--tx);font-size:.85rem;width:100%";
+  if(!frec){
+    wrap.style.display = 'none';
+    inner.innerHTML = '';
+    return;
+  }
+  wrap.style.display = 'block';
+  if(frec === 'semanal' || frec === 'quincenal'){
+    var saved = parseInt(window._ccCfgClienteDiaSemana);
+    if(isNaN(saved)) saved = 5; // viernes default
+    inner.innerHTML = "<select id='_ccCfgDiaSem' style='"+ip+"'>"+
+      [0,1,2,3,4,5,6].map(function(d){
+        var dn = ['Domingo','Lunes','Martes','Miércoles','Jueves','Viernes','Sábado'][d];
+        return "<option value='"+d+"'"+(saved===d?' selected':'')+">"+dn+"</option>";
+      }).join('')+"</select>";
+  } else if(frec === 'mensual'){
+    var savedDM = parseInt(window._ccCfgClienteDiaMes);
+    if(isNaN(savedDM)) savedDM = 10;
+    inner.innerHTML = "<input type='number' id='_ccCfgDiaMes' value='"+savedDM+"' min='1' max='28' style='"+ip+"'>";
+  } else {
+    inner.innerHTML = "<div style='font-size:.7rem;color:var(--tx3);font-style:italic;padding:.45rem'>(se calcula desde la fecha del pedido)</div>";
+  }
+};
+
+// FEAT 2026-05-14: render lista de planes de cuotas habilitados
+window._ccCfgRenderPlanes = function(){
+  var lista = document.getElementById('_ccCfgPlanesLista');
+  if(!lista) return;
+  var planes = window._ccCfgPlanesActual || [];
+  if(!planes.length){
+    lista.innerHTML = "<div style='font-size:.72rem;color:var(--tx3);font-style:italic;text-align:center;padding:.5rem'>Sin planes configurados. Tocá <b>+ Plan</b> para agregar opciones.</div>";
+    return;
+  }
+  var h = "";
+  planes.forEach(function(p, idx){
+    h += "<div style='display:grid;grid-template-columns:auto 1fr 1fr auto;gap:.4rem;align-items:center;padding:.4rem .55rem;background:var(--sur);border:1px solid var(--bd);border-radius:6px'>";
+    h += "<div style='font-size:.7rem;color:var(--tx3);min-width:55px'>Plan "+(idx+1)+"</div>";
+    h += "<div><label style='font-size:.58rem;color:var(--tx3);text-transform:uppercase;font-weight:600'>Cuotas</label>";
+    h += "<input type='number' value='"+p.nro_cuotas+"' min='1' max='99' onchange='_ccCfgEditarPlan("+idx+",\"nro_cuotas\",this.value)' style='width:100%;padding:.25rem .4rem;border:1px solid var(--bd);border-radius:4px;background:var(--sur2);color:var(--tx);font-size:.8rem;font-weight:600;text-align:center'></div>";
+    h += "<div><label style='font-size:.58rem;color:var(--tx3);text-transform:uppercase;font-weight:600'>Recargo %</label>";
+    h += "<input type='number' value='"+(p.recargo_pct||0)+"' min='0' max='100' step='0.5' onchange='_ccCfgEditarPlan("+idx+",\"recargo_pct\",this.value)' style='width:100%;padding:.25rem .4rem;border:1px solid var(--bd);border-radius:4px;background:var(--sur2);color:var(--tx);font-size:.8rem;text-align:center'></div>";
+    h += "<button type='button' onclick='_ccCfgBorrarPlan("+idx+")' style='background:transparent;border:1px solid var(--red);color:var(--red);border-radius:4px;padding:.2rem .45rem;cursor:pointer;font-size:.7rem;align-self:end'>🗑</button>";
+    h += "</div>";
+  });
+  lista.innerHTML = h;
+};
+
+window._ccCfgAgregarPlan = function(){
+  if(!window._ccCfgPlanesActual) window._ccCfgPlanesActual = [];
+  // Sugerir próximo número
+  var usados = window._ccCfgPlanesActual.map(function(p){return p.nro_cuotas;});
+  var nuevo = 2;
+  while(usados.indexOf(nuevo) >= 0) nuevo++;
+  window._ccCfgPlanesActual.push({nro_cuotas: nuevo, recargo_pct: 0, _nuevo: true});
+  _ccCfgRenderPlanes();
+};
+
+window._ccCfgEditarPlan = function(idx, campo, valor){
+  if(!window._ccCfgPlanesActual || !window._ccCfgPlanesActual[idx]) return;
+  if(campo === 'nro_cuotas') valor = parseInt(valor) || 1;
+  else if(campo === 'recargo_pct') valor = parseFloat(valor) || 0;
+  window._ccCfgPlanesActual[idx][campo] = valor;
+};
+
+window._ccCfgBorrarPlan = function(idx){
+  if(!window._ccCfgPlanesActual || !window._ccCfgPlanesActual[idx]) return;
+  if(!confirm('¿Eliminar este plan?')) return;
+  var p = window._ccCfgPlanesActual[idx];
+  if(p.id) p._borrar = true; // marcar para borrar en BD
+  else window._ccCfgPlanesActual.splice(idx, 1);
+  _ccCfgRenderPlanes();
+};
+
 window._ccCfgGuardar = function(id){
   var habilitada = (document.getElementById('_ccCfgHab')||{}).checked || false;
   var modalidad = (document.querySelector('input[name="_ccMod"]:checked')||{}).value || 'cuotas';
@@ -15243,6 +15479,23 @@ window._ccCfgGuardar = function(id){
     if(modalidad === 'cuotas'){
       data.cc_plazo_dias = parseInt((document.getElementById('_ccCfgPlazo')||{value:30}).value) || 30;
       data.limite_credito = parseFloat((document.getElementById('_ccCfgLim')||{value:0}).value) || 0;
+      // FEAT 2026-05-14: frecuencia + modo + mora_modo + descuento_cuota
+      var frec = (document.getElementById('_ccCfgFrec')||{value:''}).value;
+      data.cc_frecuencia = frec || null;
+      if(frec === 'semanal' || frec === 'quincenal'){
+        data.cc_dia_semana = parseInt((document.getElementById('_ccCfgDiaSem')||{value:5}).value);
+        data.cc_dia_mes = null;
+      } else if(frec === 'mensual'){
+        data.cc_dia_mes = Math.max(1, Math.min(28, parseInt((document.getElementById('_ccCfgDiaMes')||{value:10}).value) || 10));
+        data.cc_dia_semana = null;
+      } else {
+        data.cc_dia_semana = null;
+        data.cc_dia_mes = null;
+      }
+      data.cc_modo_cuotas = (document.querySelector('input[name="_ccModoCuotas"]:checked')||{value:'iguales'}).value;
+      data.cc_entrega_inicial_pct = parseFloat((document.getElementById('_ccCfgEntregaPct')||{value:0}).value) || 0;
+      data.cc_mora_modo = (document.querySelector('input[name="_ccMoraModo"]:checked')||{value:'cuota'}).value;
+      data.cc_descuento_cuota_pct = parseFloat((document.getElementById('_ccCfgDescCuota')||{value:0}).value) || 0;
     } else {
       data.cc_dia_cierre = Math.max(1, Math.min(28, parseInt((document.getElementById('_ccCfgCierre')||{value:25}).value) || 25));
       data.cc_dia_vencimiento = Math.max(1, Math.min(28, parseInt((document.getElementById('_ccCfgVenc')||{value:10}).value) || 10));
@@ -15254,17 +15507,55 @@ window._ccCfgGuardar = function(id){
     data.cc_notif_vencimiento = (document.getElementById('_ccCfgNotif')||{}).checked || false;
   }
 
+  // 1) Update cliente
   apiPatch('clientes', data, 'id=eq.'+id).then(function(){
+    // 2) Sync planes (solo si modalidad cuotas)
+    if(habilitada && modalidad === 'cuotas'){
+      return _ccCfgSyncPlanes(id);
+    }
+    return Promise.resolve();
+  }).then(function(){
     toast('Configuración CC guardada ✅','tok');
     var mo = document.getElementById('_moCCConfig');
     if(mo) mo.remove();
-    // Refrescar vista si está abierta la ficha del cliente
     if(typeof refrescarClientes === 'function') refrescarClientes();
   }).catch(function(e){
     toast('Error al guardar: '+(e.message||''),'terr');
     console.error(e);
   });
 };
+
+// FEAT 2026-05-14: sincronizar planes con BD (crear/actualizar/borrar)
+function _ccCfgSyncPlanes(clienteId){
+  var planes = window._ccCfgPlanesActual || [];
+  var promesas = [];
+  planes.forEach(function(p, idx){
+    if(p._borrar && p.id){
+      // Borrar
+      promesas.push(apiDelete('cc_planes_cliente','id=eq.'+p.id));
+    } else if(p._borrar){
+      // No tiene id, ya está fuera de planes (no hacer nada)
+    } else if(p.id){
+      // Update existente
+      promesas.push(apiPatch('cc_planes_cliente',{
+        nro_cuotas: parseInt(p.nro_cuotas)||1,
+        recargo_pct: parseFloat(p.recargo_pct)||0,
+        orden: idx,
+        activo: true
+      },'id=eq.'+p.id));
+    } else {
+      // Nuevo
+      promesas.push(apiPost('cc_planes_cliente',{
+        cliente_id: clienteId,
+        nro_cuotas: parseInt(p.nro_cuotas)||1,
+        recargo_pct: parseFloat(p.recargo_pct)||0,
+        orden: idx,
+        activo: true
+      }));
+    }
+  });
+  return Promise.all(promesas);
+}
 
 // ── Dashboard CC: cartera vencida, próximos vencimientos ────────────────
 window.admAbrirDashboardCC = function(){
@@ -15477,6 +15768,440 @@ window.ccGenerarNotifWA = function(clienteId, tipo){
 };
 
 // ── Función para crear cuotas de un pedido (modalidad cuotas, opcional) ──
+// ════════════════════════════════════════════════════════════════════════════
+// SISTEMA DE CUOTAS CON FRECUENCIA FIJA (FEAT 2026-05-14)
+// ════════════════════════════════════════════════════════════════════════════
+
+// ── Helper: calcular próxima fecha que coincida con frecuencia del cliente ──
+function _ccProximaFechaFrecuencia(cli, desdeFecha){
+  var frec = (cli && cli.cc_frecuencia) || '';
+  var d = desdeFecha ? new Date(desdeFecha) : new Date();
+  d.setHours(0,0,0,0);
+  d.setDate(d.getDate() + 1); // arrancar al día siguiente
+  if(frec === 'semanal' || frec === 'quincenal'){
+    var targetDow = parseInt(cli.cc_dia_semana);
+    if(isNaN(targetDow)) targetDow = 5; // viernes default
+    var diff = (targetDow - d.getDay() + 7) % 7;
+    if(diff === 0) diff = (frec === 'quincenal' ? 14 : 7);
+    d.setDate(d.getDate() + diff);
+    return d;
+  } else if(frec === 'mensual'){
+    var targetDay = parseInt(cli.cc_dia_mes) || 10;
+    var year = d.getFullYear();
+    var month = d.getMonth();
+    var candidate = new Date(year, month, targetDay);
+    if(candidate < d) candidate = new Date(year, month + 1, targetDay);
+    return candidate;
+  } else if(frec === 'cada_10'){
+    d.setDate(d.getDate() + 9); return d;
+  } else if(frec === 'cada_15'){
+    d.setDate(d.getDate() + 14); return d;
+  } else if(frec === 'cada_30'){
+    d.setDate(d.getDate() + 29); return d;
+  }
+  // Sin frecuencia: usar plazo del cliente
+  var plazo = parseInt(cli && cli.cc_plazo_dias) || 30;
+  d.setDate(d.getDate() + plazo - 1); // -1 porque ya sumamos 1 al inicio
+  return d;
+}
+
+// ── Helper: calcular salto entre cuotas según frecuencia ────────────────
+function _ccSaltoCuota(cli){
+  var frec = (cli && cli.cc_frecuencia) || '';
+  if(frec === 'semanal') return 7;
+  if(frec === 'quincenal') return 14;
+  if(frec === 'mensual') return 30;
+  if(frec === 'cada_10') return 10;
+  if(frec === 'cada_15') return 15;
+  if(frec === 'cada_30') return 30;
+  // Sin frecuencia: dividir el plazo en N cuotas
+  return parseInt(cli && cli.cc_plazo_dias) || 30;
+}
+
+// ── Generar cuotas para un pedido CC según el plan elegido ──────────────
+// Args:
+//   pedidoId    : ID del pedido
+//   clienteId   : ID del cliente (para traer config)
+//   planId      : ID del plan elegido (null = sin cuotas, pago único)
+//   totalPedido : total ORIGINAL del pedido (sin recargo)
+//   montosCustom: array opcional de montos personalizados (modo='manual')
+// Returns Promise con array de cuotas creadas
+window.ccGenerarCuotasParaPedido = function(pedidoId, clienteId, planId, totalPedido, montosCustom){
+  if(!pedidoId || !clienteId){ return Promise.reject(new Error('pedidoId/clienteId requeridos')); }
+
+  return Promise.all([
+    apiGet('clientes','select=*&id=eq.'+clienteId+'&limit=1'),
+    planId ? apiGet('cc_planes_cliente','select=*&id=eq.'+planId+'&limit=1') : Promise.resolve([])
+  ]).then(function(res){
+    var cli = (res[0] && res[0][0]) || null;
+    var plan = (res[1] && res[1][0]) || null;
+    if(!cli){ throw new Error('Cliente no encontrado'); }
+
+    var nroCuotas = plan ? parseInt(plan.nro_cuotas) : 1;
+    var recargoPct = plan ? parseFloat(plan.recargo_pct) || 0 : 0;
+    var totalConRecargo = totalPedido * (1 + recargoPct/100);
+    var modo = cli.cc_modo_cuotas || 'iguales';
+    var entregaPct = parseFloat(cli.cc_entrega_inicial_pct) || 0;
+    var diasGracia = 3; // default
+
+    // 1) Calcular montos según modo
+    var montos = [];
+    if(modo === 'manual' && montosCustom && montosCustom.length === nroCuotas){
+      // Manual: usar los montos provistos
+      montos = montosCustom.map(function(m){ return Math.round(parseFloat(m)*100)/100; });
+    } else if(modo === 'entrega_inicial' && nroCuotas > 1 && entregaPct > 0){
+      // Primera cuota = entregaPct%, resto repartido
+      var primera = Math.round(totalConRecargo * (entregaPct/100) * 100) / 100;
+      var restoTotal = totalConRecargo - primera;
+      var resto = Math.floor((restoTotal / (nroCuotas - 1)) * 100) / 100;
+      montos.push(primera);
+      for(var i = 1; i < nroCuotas - 1; i++) montos.push(resto);
+      // Última cuota absorbe el redondeo
+      var ultima = totalConRecargo - primera - (resto * (nroCuotas - 2));
+      if(nroCuotas > 1) montos.push(Math.round(ultima*100)/100);
+    } else {
+      // Iguales (default)
+      var base = Math.floor((totalConRecargo / nroCuotas) * 100) / 100;
+      for(var j = 0; j < nroCuotas - 1; j++) montos.push(base);
+      montos.push(Math.round((totalConRecargo - base * (nroCuotas - 1)) * 100) / 100);
+    }
+
+    // 2) Calcular fechas según frecuencia
+    var fechas = [];
+    var primeraFecha = _ccProximaFechaFrecuencia(cli, new Date());
+    var salto = _ccSaltoCuota(cli);
+    for(var k = 0; k < nroCuotas; k++){
+      var f = new Date(primeraFecha);
+      f.setDate(f.getDate() + (k * salto));
+      fechas.push(f.toISOString().slice(0,10));
+    }
+
+    // 3) Crear cuotas
+    var promesas = [];
+    for(var i2 = 0; i2 < nroCuotas; i2++){
+      promesas.push(apiPost('cc_cuotas', {
+        pedido_id: pedidoId,
+        nro_cuota: i2 + 1,
+        total_cuotas: nroCuotas,
+        monto: montos[i2],
+        fecha_vencimiento: fechas[i2],
+        estado: 'pendiente',
+        dias_gracia: diasGracia,
+        porcentaje: nroCuotas > 0 ? Math.round((montos[i2] / totalConRecargo) * 10000) / 100 : null
+      }));
+    }
+
+    // 4) Actualizar pedido con plan + recargo + total ajustado
+    var fechaVencFinal = fechas[fechas.length - 1]; // última cuota = vencimiento del pedido
+    var pedidoPatch = {
+      cc_plan_id: planId || null,
+      cc_recargo_pct: recargoPct,
+      total_sin_recargo: totalPedido,
+      cc_nro_cuotas_real: nroCuotas,
+      cc_fecha_vencimiento: fechaVencFinal,
+      es_cc: true
+    };
+    // Si hay recargo, actualizar el total del pedido también
+    if(recargoPct > 0){
+      pedidoPatch.total = Math.round(totalConRecargo * 100) / 100;
+    }
+    promesas.push(apiPatch('pedidos_catalogo', pedidoPatch, 'id=eq.'+pedidoId));
+
+    return Promise.all(promesas).then(function(){
+      return { cuotas: montos.map(function(m,i){return {monto:m, fecha:fechas[i]};}), totalConRecargo: totalConRecargo, recargo: recargoPct };
+    });
+  });
+};
+
+// ── Modal: Selector de plan de cuotas al confirmar pedido CC ────────────
+// Se llama después de crear un pedido CC modalidad cuotas.
+// pedidoId, clienteId, totalPedido, callback(planId)
+window.ccAbrirSelectorPlan = function(pedidoId, clienteId, totalPedido, callback){
+  Promise.all([
+    apiGet('clientes','select=*&id=eq.'+clienteId+'&limit=1'),
+    apiGet('cc_planes_cliente','select=*&cliente_id=eq.'+clienteId+'&activo=eq.true&order=nro_cuotas.asc').catch(function(){return [];})
+  ]).then(function(res){
+    var cli = (res[0] && res[0][0]) || null;
+    var planes = Array.isArray(res[1]) ? res[1] : [];
+    if(!cli || !cli.cuenta_corriente_habilitada){
+      toast('Cliente no tiene CC habilitada','twarn');
+      if(callback) callback(null);
+      return;
+    }
+    if(cli.cc_modalidad !== 'cuotas'){
+      // Modalidad resumen: no se muestra selector, simplemente se setea vencimiento
+      if(callback) callback(null);
+      return;
+    }
+    if(!planes.length){
+      // No tiene planes habilitados → tratar como pago único (1 cuota)
+      if(callback) callback(null);
+      return;
+    }
+    if(planes.length === 1){
+      // Único plan → aplicar directo
+      ccGenerarCuotasParaPedido(pedidoId, clienteId, planes[0].id, totalPedido).then(function(){
+        toast('Cuotas generadas ✅','tok');
+        if(callback) callback(planes[0].id);
+      }).catch(function(e){
+        toast('Error: '+(e.message||''),'terr');
+        if(callback) callback(null);
+      });
+      return;
+    }
+    // Múltiples planes → mostrar selector
+    _ccRenderSelectorPlan(cli, planes, pedidoId, totalPedido, callback);
+  });
+};
+
+function _ccRenderSelectorPlan(cli, planes, pedidoId, totalPedido, callback){
+  var mo = document.getElementById('_moCCSelectorPlan');
+  if(mo) mo.remove();
+  mo = document.createElement('div');
+  mo.className = 'mo open';
+  mo.id = '_moCCSelectorPlan';
+  mo.style.zIndex = '99999';
+
+  var modo = cli.cc_modo_cuotas || 'iguales';
+  var frec = cli.cc_frecuencia || '';
+  var frecLbl = {semanal:'semanal',quincenal:'quincenal',mensual:'mensual',cada_10:'cada 10 días',cada_15:'cada 15 días',cada_30:'cada 30 días'}[frec] || 'sin frecuencia';
+
+  var h = "<div class='md' style='max-width:580px;width:96%;max-height:92vh;display:flex;flex-direction:column'>";
+  h += "<div class='mh'><div class='mtt'>💳 Elegir plan de pago</div>";
+  h += "<button class='btn btn-g xb' onclick=\"_ccCancelarSelectorPlan()\">✕</button></div>";
+  h += "<div class='mb' style='overflow-y:auto;flex:1;padding:1rem'>";
+
+  h += "<div style='background:rgba(196,150,90,.05);border:1px solid rgba(196,150,90,.25);border-radius:7px;padding:.6rem .75rem;margin-bottom:.8rem;font-size:.75rem'>";
+  h += "<div style='color:var(--tx2)'>Total del pedido: <b style='color:var(--acc)'>"+fmt(totalPedido)+"</b></div>";
+  h += "<div style='color:var(--tx3);font-size:.68rem;margin-top:.2rem'>Frecuencia del cliente: <b>"+frecLbl+"</b> · Modo: <b>"+modo+"</b></div>";
+  h += "</div>";
+
+  h += "<div style='font-size:.7rem;color:var(--tx3);text-transform:uppercase;font-weight:700;margin-bottom:.4rem'>Planes disponibles</div>";
+  h += "<div id='_ccPlanesOptions' style='display:flex;flex-direction:column;gap:.4rem;margin-bottom:.6rem'>";
+
+  planes.forEach(function(p, idx){
+    var totalConRecargo = totalPedido * (1 + (p.recargo_pct||0)/100);
+    var cuotaProm = Math.round(totalConRecargo / p.nro_cuotas);
+    var checked = idx === 0; // primero por default
+    h += "<label data-plan-id='"+p.id+"' onclick='_ccSelectPlan("+p.id+",this)' style='cursor:pointer;display:block;padding:.6rem .75rem;border:2px solid "+(checked?'var(--acc)':'var(--bd)')+";border-radius:8px;background:"+(checked?'rgba(196,150,90,.06)':'var(--sur)')+"'>";
+    h += "<input type='radio' name='_ccPlanSel' value='"+p.id+"' "+(checked?'checked':'')+" style='display:none'>";
+    h += "<div style='display:flex;justify-content:space-between;align-items:flex-start;gap:.5rem'>";
+    h += "<div style='flex:1'>";
+    h += "<div style='font-size:.85rem;font-weight:700;color:var(--tx)'>"+p.nro_cuotas+" "+(p.nro_cuotas===1?'pago':'cuotas');
+    if(p.recargo_pct > 0) h += " <span style='color:var(--yel);font-size:.72rem'>+"+p.recargo_pct+"%</span>";
+    h += "</div>";
+    h += "<div style='font-size:.65rem;color:var(--tx3);margin-top:.15rem'>"+p.nro_cuotas+" × ~"+fmt(cuotaProm);
+    if(p.recargo_pct > 0) h += " · total con recargo: <b style='color:var(--tx2)'>"+fmt(totalConRecargo)+"</b>";
+    h += "</div>";
+    h += "</div>";
+    h += "</div></label>";
+  });
+  h += "</div>";
+
+  // Preview de cuotas (se actualiza al seleccionar)
+  h += "<div id='_ccPlanPreview' style='background:var(--sur2);border:1px solid var(--bd);border-radius:7px;padding:.6rem .75rem;margin-bottom:.8rem'>";
+  h += "<div style='font-size:.65rem;color:var(--tx3);text-transform:uppercase;font-weight:700;margin-bottom:.3rem'>📅 Vista previa cuotas</div>";
+  h += "<div id='_ccPlanPreviewLista' style='font-size:.72rem;color:var(--tx2)'></div>";
+  h += "</div>";
+
+  h += "</div>"; // mb
+
+  h += "<div style='padding:.7rem 1rem;border-top:1px solid var(--bd);display:flex;justify-content:flex-end;gap:.5rem'>";
+  h += "<button class='btn btn-g' onclick='_ccCancelarSelectorPlan()'>Sin cuotas (pago único)</button>";
+  h += "<button class='btn btn-a' onclick='_ccConfirmarPlan("+pedidoId+","+cli.id+","+totalPedido+")'>✅ Confirmar plan</button>";
+  h += "</div>";
+
+  h += "</div>";
+  mo.innerHTML = h;
+  document.body.appendChild(mo);
+
+  // Guardar callback para usar al confirmar/cancelar
+  window._ccSelectorPlanCallback = callback || null;
+  window._ccSelectorPlanCli = cli;
+  window._ccSelectorPlanPlanes = planes;
+  window._ccSelectorPlanTotal = totalPedido;
+
+  // Render preview inicial con primer plan
+  setTimeout(function(){
+    if(planes.length) _ccActualizarPreviewPlan(planes[0].id);
+  }, 50);
+}
+
+window._ccSelectPlan = function(planId, lblEl){
+  // Visual: marcar el seleccionado
+  document.querySelectorAll('#_ccPlanesOptions label').forEach(function(l){
+    var isSel = parseInt(l.dataset.planId) === planId;
+    l.style.borderColor = isSel ? 'var(--acc)' : 'var(--bd)';
+    l.style.background = isSel ? 'rgba(196,150,90,.06)' : 'var(--sur)';
+    var radio = l.querySelector('input[type=radio]');
+    if(radio) radio.checked = isSel;
+  });
+  _ccActualizarPreviewPlan(planId);
+};
+
+window._ccActualizarPreviewPlan = function(planId){
+  var planes = window._ccSelectorPlanPlanes || [];
+  var cli = window._ccSelectorPlanCli;
+  var total = window._ccSelectorPlanTotal || 0;
+  var plan = planes.find(function(p){return p.id === planId;});
+  if(!plan || !cli) return;
+
+  var nroCuotas = parseInt(plan.nro_cuotas);
+  var recargoPct = parseFloat(plan.recargo_pct) || 0;
+  var totalConRecargo = total * (1 + recargoPct/100);
+  var modo = cli.cc_modo_cuotas || 'iguales';
+  var entregaPct = parseFloat(cli.cc_entrega_inicial_pct) || 0;
+
+  // Calcular montos
+  var montos = [];
+  if(modo === 'entrega_inicial' && nroCuotas > 1 && entregaPct > 0){
+    var primera = Math.round(totalConRecargo * (entregaPct/100) * 100) / 100;
+    var restoTotal = totalConRecargo - primera;
+    var resto = Math.floor((restoTotal / (nroCuotas - 1)) * 100) / 100;
+    montos.push(primera);
+    for(var i = 1; i < nroCuotas - 1; i++) montos.push(resto);
+    var ultima = totalConRecargo - primera - (resto * (nroCuotas - 2));
+    if(nroCuotas > 1) montos.push(Math.round(ultima*100)/100);
+  } else {
+    var base = Math.floor((totalConRecargo / nroCuotas) * 100) / 100;
+    for(var j = 0; j < nroCuotas - 1; j++) montos.push(base);
+    montos.push(Math.round((totalConRecargo - base * (nroCuotas - 1)) * 100) / 100);
+  }
+
+  // Calcular fechas
+  var fechas = [];
+  var primeraFecha = _ccProximaFechaFrecuencia(cli, new Date());
+  var salto = _ccSaltoCuota(cli);
+  for(var k = 0; k < nroCuotas; k++){
+    var f = new Date(primeraFecha);
+    f.setDate(f.getDate() + (k * salto));
+    fechas.push(f);
+  }
+
+  // Renderizar preview
+  var prev = document.getElementById('_ccPlanPreviewLista');
+  if(!prev) return;
+  var ph = "";
+  fechas.forEach(function(f, idx){
+    var fStr = f.toLocaleDateString('es-AR',{weekday:'short',day:'2-digit',month:'2-digit',year:'2-digit'});
+    ph += "<div style='display:flex;justify-content:space-between;padding:.2rem 0;border-bottom:1px solid var(--bd)'>";
+    ph += "<span>Cuota "+(idx+1)+"/"+nroCuotas+"</span>";
+    ph += "<span><b style='color:var(--tx)'>"+fmt(montos[idx])+"</b> <span style='color:var(--tx3);margin-left:.4rem'>"+fStr+"</span></span>";
+    ph += "</div>";
+  });
+  if(recargoPct > 0){
+    ph += "<div style='margin-top:.3rem;padding-top:.3rem;border-top:1px solid var(--bd);font-size:.65rem;color:var(--tx3)'>";
+    ph += "Original: "+fmt(total)+" → con +"+recargoPct+"% = <b>"+fmt(totalConRecargo)+"</b>";
+    ph += "</div>";
+  }
+  prev.innerHTML = ph;
+};
+
+window._ccConfirmarPlan = function(pedidoId, clienteId, totalPedido){
+  var radio = document.querySelector('input[name=_ccPlanSel]:checked');
+  if(!radio){ toast('Elegí un plan','twarn'); return; }
+  var planId = parseInt(radio.value);
+  toast('Generando cuotas...','tinfo');
+  ccGenerarCuotasParaPedido(pedidoId, clienteId, planId, totalPedido).then(function(res){
+    toast('✅ '+res.cuotas.length+' cuotas generadas','tok');
+    var mo = document.getElementById('_moCCSelectorPlan');
+    if(mo) mo.remove();
+    var cb = window._ccSelectorPlanCallback;
+    if(cb) cb(planId);
+  }).catch(function(e){
+    toast('Error: '+(e.message||''),'terr');
+    console.error(e);
+  });
+};
+
+window._ccCancelarSelectorPlan = function(){
+  // Sin cuotas (pago único) — usar pedido como está, solo setear fecha de vencimiento
+  var mo = document.getElementById('_moCCSelectorPlan');
+  if(mo) mo.remove();
+  var cb = window._ccSelectorPlanCallback;
+  if(cb) cb(null);
+};
+
+// ── Aplicar pago a cuotas de un pedido (FIFO por vencimiento de cuotas) ──
+// Si el pedido no tiene cuotas asociadas, no hace nada (compat con pedidos sin cuotas)
+window._ccAplicarPagoACuotasPedido = function(pedidoId, monto){
+  if(!pedidoId || monto <= 0) return Promise.resolve();
+  return apiGet('cc_cuotas','select=*&pedido_id=eq.'+pedidoId+'&estado=in.(pendiente,parcial,vencida)&order=fecha_vencimiento.asc,nro_cuota.asc').then(function(cuotas){
+    if(!Array.isArray(cuotas) || !cuotas.length) return; // sin cuotas, nada que hacer
+    var restante = monto;
+    var promesas = [];
+    cuotas.forEach(function(cu){
+      if(restante <= 0) return;
+      var pendiente = (parseFloat(cu.monto)||0) - (parseFloat(cu.monto_pagado)||0);
+      if(pendiente <= 0) return;
+      var aplicar = Math.min(restante, pendiente);
+      var nuevoEstado = aplicar >= pendiente - 0.01 ? 'pagada' : 'parcial';
+      var patch = {
+        monto_pagado: (parseFloat(cu.monto_pagado)||0) + aplicar,
+        estado: nuevoEstado,
+        updated_at: new Date().toISOString()
+      };
+      if(nuevoEstado === 'pagada') patch.fecha_pago = new Date().toISOString().slice(0,10);
+      promesas.push(apiPatch('cc_cuotas', patch, 'id=eq.'+cu.id));
+      restante -= aplicar;
+    });
+    return Promise.all(promesas);
+  }).catch(function(e){
+    console.error('[cc] aplicar pago cuotas error', e);
+  });
+};
+
+// ── Cargar cuotas de pedidos pendientes y renderizarlas dentro del FIFO ──
+window._ccCargarCuotasPedidosFIFO = function(pedidoIds){
+  if(!pedidoIds || !pedidoIds.length) return;
+  apiGet('cc_cuotas','select=*&pedido_id=in.('+pedidoIds.join(',')+')&order=pedido_id.asc,nro_cuota.asc').then(function(cuotas){
+    if(!Array.isArray(cuotas)) cuotas = [];
+    // Agrupar por pedido
+    var porPedido = {};
+    cuotas.forEach(function(cu){
+      if(!porPedido[cu.pedido_id]) porPedido[cu.pedido_id] = [];
+      porPedido[cu.pedido_id].push(cu);
+    });
+    // Renderizar cada grupo
+    pedidoIds.forEach(function(pid){
+      var cont = document.getElementById('_ccCuotasPed'+pid);
+      var btnWrap = document.getElementById('_ccGenBtnWrap'+pid);
+      if(!cont) return;
+      var cs = porPedido[pid] || [];
+      if(!cs.length){
+        // Sin cuotas: mostrar botón generar plan
+        if(btnWrap) btnWrap.style.display = 'block';
+        return;
+      }
+      if(btnWrap) btnWrap.style.display = 'none';
+      var h = "<div style='background:var(--sur);border:1px solid var(--bd);border-radius:5px;padding:.3rem .45rem'>";
+      h += "<div style='font-size:.58rem;color:var(--tx3);text-transform:uppercase;font-weight:700;margin-bottom:.25rem;letter-spacing:.04em'>📅 Cuotas</div>";
+      cs.forEach(function(cu){
+        var pagado = parseFloat(cu.monto_pagado)||0;
+        var pendiente = (parseFloat(cu.monto)||0) - pagado;
+        var ic = '⏳';
+        var col = 'var(--tx3)';
+        var diasV = _ccDiasHasta(cu.fecha_vencimiento);
+        if(cu.estado === 'pagada'){ ic='✅'; col='#22c55e'; }
+        else if(cu.estado === 'parcial'){ ic='🟡'; col='#fbbf24'; }
+        else if(cu.estado === 'vencida' || (diasV !== null && diasV < -(cu.dias_gracia||0))){ ic='⚠️'; col='#ef4444'; }
+        else if(diasV !== null && diasV <= 3){ col='#fbbf24'; }
+        h += "<div style='display:flex;justify-content:space-between;padding:.15rem 0;font-size:.65rem;border-bottom:1px solid rgba(255,255,255,.04)'>";
+        h += "<span style='color:"+col+"'>"+ic+" Cuota "+cu.nro_cuota+"/"+cu.total_cuotas+" — "+_ccFmtFecha(cu.fecha_vencimiento)+"</span>";
+        h += "<span><b style='color:"+col+"'>"+fmt(pendiente)+"</b>";
+        if(pagado > 0 && cu.estado !== 'pagada'){
+          h += " <span style='color:var(--tx3);font-size:.55rem'>(pag: "+fmt(pagado)+")</span>";
+        }
+        h += "</span>";
+        h += "</div>";
+      });
+      h += "</div>";
+      cont.innerHTML = h;
+    });
+  });
+};
+
+// ── Función legacy mantenida para compatibilidad ───────────────────────
 window.ccCrearCuotas = function(pedidoId, nroCuotas, montoTotal, fechaInicial, diasEntreCuotas){
   if(!pedidoId || !nroCuotas || nroCuotas < 1) return Promise.reject(new Error('Datos inválidos'));
   var montoBase = Math.floor((montoTotal / nroCuotas) * 100) / 100;
@@ -15712,6 +16437,12 @@ function _adminVerCC(clienteId, clienteNombre){
       hf += "<div style='background:var(--sur2);border-radius:8px;padding:.55rem .75rem'>";
       hf += "<div style='font-size:.68rem;color:var(--tx3);text-transform:uppercase;font-weight:600;margin-bottom:.35rem'>Pedidos pendientes ("+pendientesFIFO.length+")</div>";
       hf += "<div style='font-size:.64rem;color:var(--tx3);margin-bottom:.45rem'>Aplicación FIFO: el más viejo primero</div>";
+
+      // FEAT 2026-05-14: cargar cuotas de todos los pedidos en paralelo
+      var pedIds = pendientesFIFO.map(function(p){return p.id;});
+      window._ccPedidosFIFOPendientes = pendientesFIFO;
+      window._ccClienteFIFO = c;
+
       pendientesFIFO.forEach(function(p, i){
         var saldoPed = (parseFloat(p.total)||0) - (parseFloat(p.cobrado_total)||0);
         var fechaPed = new Date(p.created_at).toLocaleDateString("es-AR",{day:"2-digit",month:"2-digit",year:"2-digit"});
@@ -15743,9 +16474,15 @@ function _adminVerCC(clienteId, clienteNombre){
           moraStr = "<div style='font-size:.58rem;color:#ef4444;margin-top:.05rem'>+ mora estimada: "+fmt(moraActual)+"</div>";
         }
 
-        hf += "<div style='display:flex;justify-content:space-between;padding:.35rem .4rem;border-bottom:1px solid var(--bd);font-size:.76rem;"+vencBg+"border-radius:4px;margin:.1rem -.4rem'>";
+        hf += "<div style='border-bottom:1px solid var(--bd);"+vencBg+"border-radius:4px;margin:.1rem -.4rem;padding:.35rem .4rem'>";
+        hf += "<div style='display:flex;justify-content:space-between;font-size:.76rem'>";
         hf += "<div style='flex:1;min-width:0'>";
-        hf += "<div><span style='color:var(--tx3);font-size:.64rem'>"+(i+1)+".</span> <b>"+(p.nro_orden||"#"+p.id)+"</b> <span style='color:var(--tx3);font-size:.68rem'>"+fechaPed+"</span></div>";
+        hf += "<div><span style='color:var(--tx3);font-size:.64rem'>"+(i+1)+".</span> <b>"+(p.nro_orden||"#"+p.id)+"</b> <span style='color:var(--tx3);font-size:.68rem'>"+fechaPed+"</span>";
+        // Mostrar nro de cuotas si está dividido
+        if(p.cc_nro_cuotas_real && p.cc_nro_cuotas_real > 1){
+          hf += " <span style='font-size:.6rem;color:var(--acc);background:rgba(196,150,90,.12);padding:.05rem .3rem;border-radius:3px;margin-left:.3rem'>"+p.cc_nro_cuotas_real+" cuotas</span>";
+        }
+        hf += "</div>";
         hf += "<div style='font-size:.6rem;color:var(--tx3);margin-top:.1rem'>"+fechaVencStr+"</div>";
         hf += "</div>";
         hf += "<div style='text-align:right;flex-shrink:0'>";
@@ -15753,10 +16490,27 @@ function _adminVerCC(clienteId, clienteNombre){
         if(parseFloat(p.cobrado_total)>0) hf += "<div style='font-size:.6rem;color:var(--tx3)'>de "+fmt(p.total)+"</div>";
         hf += moraStr;
         hf += "</div></div>";
+
+        // Contenedor para cuotas (se llena async)
+        hf += "<div id='_ccCuotasPed"+p.id+"' style='margin-top:.35rem;margin-left:.8rem'></div>";
+
+        // Botón generar plan si modalidad cuotas + no tiene cuotas (mostrar siempre, se oculta si ya tiene)
+        if((c.cc_modalidad || 'cuotas') === 'cuotas'){
+          hf += "<div id='_ccGenBtnWrap"+p.id+"' style='margin-top:.3rem;margin-left:.8rem;display:none'>";
+          hf += "<button onclick='ccAbrirSelectorPlan("+p.id+","+c.id+","+saldoPed+",function(){ _adminVerCC("+c.id+",\""+(clienteNombre||'').replace(/\"/g,'')+"\"); })' class='btn btn-g' style='font-size:.66rem;padding:.25rem .5rem;color:var(--acc);border-color:var(--acc)'>🎫 Generar plan de cuotas</button>";
+          hf += "</div>";
+        }
+
+        hf += "</div>";
       });
       hf += "<div style='display:flex;justify-content:space-between;padding-top:.45rem;margin-top:.3rem;border-top:1px solid var(--bd);font-size:.82rem;font-weight:700'>";
       hf += "<span>Total adeudado:</span><span style='color:var(--red)'>"+fmt(totalPendienteFIFO)+"</span>";
       hf += "</div></div>";
+
+      // Cargar cuotas asincrónicamente
+      if(pedIds.length){
+        setTimeout(function(){ _ccCargarCuotasPedidosFIFO(pedIds); }, 100);
+      }
     }
 
     hf += "<div style='background:var(--sur);border:1px solid var(--bd);border-radius:8px;padding:.65rem .8rem'>";
@@ -16407,7 +17161,10 @@ function _admFIFOConfirmarPago(clienteId){
         } else if(fresh.estado !== "cobrado_parcial"){
           patch.estado = "cobrado_parcial";
         }
-        return apiPatch("pedidos_catalogo", patch, "id=eq."+a.pedido.id);
+        // FEAT CC v2 (2026-05-14): aplicar pago a cuotas del pedido (FIFO por fecha de vencimiento)
+        return _ccAplicarPagoACuotasPedido(a.pedido.id, a.aplica).then(function(){
+          return apiPatch("pedidos_catalogo", patch, "id=eq."+a.pedido.id);
+        });
       });
     });
 
