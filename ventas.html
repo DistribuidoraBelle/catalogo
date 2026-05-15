@@ -12983,29 +12983,70 @@ function _rtConfirmarRuta(){
 
 // Abre Google Maps con la ruta navegable. Si hay puntoFinal, lo usa como destination
 // y todas las paradas como waypoints. Si no, la última parada es el destination.
+// FIX 2026-05-15: Google Maps limita a ~9 paradas por URL. Si hay más, dividir en chunks.
 function _rtAbrirEnGoogleMaps(){
   if(!_rt.pedidosOrdenados || !_rt.puntoPartida) return;
-  var url = "https://www.google.com/maps/dir/?api=1";
-  url += "&origin="+_rt.puntoPartida.lat+","+_rt.puntoPartida.lng;
 
-  if(_rt.puntoFinal && _rt.puntoFinal.lat){
-    // Punto final explícito: todas las paradas son waypoints
-    url += "&destination="+_rt.puntoFinal.lat+","+_rt.puntoFinal.lng;
-    if(_rt.pedidosOrdenados.length > 0){
-      var wps = _rt.pedidosOrdenados.map(function(p){return p._dir.lat+","+p._dir.lng;}).join("|");
-      url += "&waypoints="+encodeURIComponent(wps);
-    }
-  } else {
-    // Sin punto final: la última parada es el destination
-    var dest = _rt.pedidosOrdenados[_rt.pedidosOrdenados.length-1];
-    url += "&destination="+dest._dir.lat+","+dest._dir.lng;
-    if(_rt.pedidosOrdenados.length > 1){
-      var wps2 = _rt.pedidosOrdenados.slice(0,-1).map(function(p){return p._dir.lat+","+p._dir.lng;}).join("|");
-      url += "&waypoints="+encodeURIComponent(wps2);
-    }
+  // Armar lista completa de paradas: cada parada = {lat, lng}
+  var paradas = _rt.pedidosOrdenados.map(function(p){return {lat:p._dir.lat, lng:p._dir.lng};});
+  // Si hay punto final, agregarlo como última "parada lógica" para construir tramos.
+  var puntoFinal = _rt.puntoFinal && _rt.puntoFinal.lat ? {lat:_rt.puntoFinal.lat, lng:_rt.puntoFinal.lng} : null;
+
+  // Cada URL de Maps admite máximo: origen + 8 waypoints + destino = 10 puntos.
+  // Por seguridad usamos 9 puntos por tramo (1 origen + 7 waypoints + 1 destino).
+  var MAX_POR_TRAMO = 9;
+
+  // Construir secuencia completa: [origen, parada1, parada2, ..., paradaN, puntoFinal?]
+  var secuencia = [{lat:_rt.puntoPartida.lat, lng:_rt.puntoPartida.lng}];
+  paradas.forEach(function(p){secuencia.push(p);});
+  if(puntoFinal) secuencia.push(puntoFinal);
+
+  // Si entra en 1 sola URL, usar el flujo simple
+  if(secuencia.length <= MAX_POR_TRAMO){
+    var url = _rtBuildMapsUrl(secuencia);
+    window.open(url, "_blank");
+    return;
+  }
+
+  // Tiene > 9 puntos → dividir en tramos solapados (cada tramo empieza donde terminó el anterior)
+  var tramos = [];
+  var idx = 0;
+  while(idx < secuencia.length - 1){
+    var fin = Math.min(idx + MAX_POR_TRAMO - 1, secuencia.length - 1);
+    tramos.push(secuencia.slice(idx, fin + 1));
+    idx = fin; // el siguiente tramo empieza donde terminó este (overlap intencional para continuidad visual)
+  }
+
+  // Avisar al usuario que se abrirán varias pestañas
+  var msg = "Tu ruta tiene "+paradas.length+" paradas. Google Maps solo permite "+(MAX_POR_TRAMO-2)+" paradas intermedias por URL, así que se abrirán "+tramos.length+" pestañas (una por tramo). Cada tramo continúa donde terminó el anterior.\n\n¿Abrir todas?";
+  if(!confirm(msg)) return;
+
+  // Abrir todas las pestañas con un pequeño delay entre cada una (algunos navegadores bloquean popups simultáneos)
+  tramos.forEach(function(t, i){
+    setTimeout(function(){
+      var url = _rtBuildMapsUrl(t);
+      window.open(url, "_blank");
+    }, i * 250);
+  });
+
+  toast("Se abrieron "+tramos.length+" tramos en Maps","tok");
+}
+
+// Helper: construye URL de Maps a partir de un array de puntos [{lat,lng},...]
+// El primer punto es origen, el último es destino, los del medio son waypoints.
+function _rtBuildMapsUrl(puntos){
+  if(!puntos || puntos.length < 2) return "";
+  var origen = puntos[0];
+  var destino = puntos[puntos.length - 1];
+  var url = "https://www.google.com/maps/dir/?api=1";
+  url += "&origin="+origen.lat+","+origen.lng;
+  url += "&destination="+destino.lat+","+destino.lng;
+  if(puntos.length > 2){
+    var wps = puntos.slice(1, -1).map(function(p){return p.lat+","+p.lng;}).join("|");
+    url += "&waypoints="+encodeURIComponent(wps);
   }
   url += "&travelmode=driving";
-  window.open(url, "_blank");
+  return url;
 }
 
 // ── SUB-TAB: EN REPARTO ───────────────────────────────────────────────
@@ -13164,21 +13205,25 @@ function _rbAsignarDirA(pedId){
   var p = (_rt.pedidosTodos||[]).find(function(x){return x.id===pedId;});
   if(!p){toast("Pedido no encontrado","terr");return;}
 
-  // Cargar info del cliente si tiene
+  // FIX (2026-05-15): si tiene cliente, traer también sus direcciones existentes para ofrecerlas
   var clientePromise = p.cliente_id
     ? apiGet("clientes","select=id,nombre,apellido&id=eq."+p.cliente_id+"&limit=1")
     : Promise.resolve([]);
+  var dirsPromise = p.cliente_id
+    ? apiGet("clientes_direcciones","select=id,etiqueta,direccion_completa,referencias,lat,lng,es_principal&cliente_id=eq."+p.cliente_id+"&order=es_principal.desc,id.asc").catch(function(){return [];})
+    : Promise.resolve([]);
 
-  clientePromise.then(function(rows){
-    var cliente = (rows && rows[0]) || null;
-    _rbAbrirModalDir(p, cliente);
+  Promise.all([clientePromise, dirsPromise]).then(function(res){
+    var cliente = (res[0] && res[0][0]) || null;
+    var direcciones = Array.isArray(res[1]) ? res[1] : [];
+    _rbAbrirModalDir(p, cliente, direcciones);
   }).catch(function(e){
     console.error("[belle] _rbAsignarDirA:",e);
-    _rbAbrirModalDir(p, null);
+    _rbAbrirModalDir(p, null, []);
   });
 }
 
-function _rbAbrirModalDir(pedido, cliente){
+function _rbAbrirModalDir(pedido, cliente, direccionesExistentes){
   var old = document.getElementById("_moRbDir"); if(old) old.remove();
   _rbAsigDir = {
     pedidoId: pedido.id,
@@ -13197,8 +13242,13 @@ function _rbAbrirModalDir(pedido, cliente){
       pais: "Argentina"
     },
     map: null,
-    marker: null
+    marker: null,
+    // FIX (2026-05-15): direcciones existentes del cliente para elegir sin recrear
+    direccionesExistentes: Array.isArray(direccionesExistentes) ? direccionesExistentes : [],
+    modoNueva: false // false = mostrar selector, true = mostrar buscador/mapa
   };
+  // Si no hay direcciones existentes, ir directo al modo "nueva"
+  if(!_rbAsigDir.direccionesExistentes.length) _rbAsigDir.modoNueva = true;
 
   var mo = document.createElement("div");
   mo.id = "_moRbDir";
@@ -13216,43 +13266,19 @@ function _rbAbrirModalDir(pedido, cliente){
   h += "<div style=\'background:var(--sur2);border-radius:6px;padding:.55rem .7rem;font-size:.78rem\'>";
   h += "<div style=\'font-weight:600;color:var(--tx)\'>"+(pedido.nro_orden||"#"+pedido.id)+" · "+fmt(pedido.total||0)+"</div>";
   if(cliente){
-    h += "<div style=\'font-size:.7rem;color:var(--tx2);margin-top:.2rem\'>👤 "+(nomCliente||("Cliente #"+cliente.id))+
-      " <span style=\'color:var(--green);font-size:.65rem\'>· la dirección se guardará en el cliente</span></div>";
+    h += "<div style=\'font-size:.7rem;color:var(--tx2);margin-top:.2rem\'>👤 "+(nomCliente||("Cliente #"+cliente.id))+"</div>";
   } else {
     h += "<div style=\'font-size:.7rem;color:var(--yel);margin-top:.2rem\'>⚠ Sin cliente asignado · la dirección queda solo en este pedido</div>";
   }
   h += "</div>";
 
-  // Buscador (autocomplete + botón)
-  h += "<div style=\'background:var(--sur2);border:1px solid var(--bd);border-radius:8px;padding:.55rem .7rem\'>";
-  h += "<div style=\'font-size:.66rem;color:var(--tx3);text-transform:uppercase;font-weight:600;margin-bottom:.3rem\'>🔍 Buscar en Google Maps</div>";
-  h += "<div style=\'display:flex;gap:.4rem\'>";
-  h += "<input type=\'text\' id=\'_rbDirSearch\' placeholder=\'Calle número, ciudad...\' style=\'flex:1;padding:.45rem .6rem;border:1px solid var(--bd);border-radius:7px;font-size:.84rem;background:var(--sur);color:var(--tx);font-family:inherit\' onkeydown=\'if(event.key===&quot;Enter&quot;){event.preventDefault();_rbDirBuscar();}\'>";
-  h += "<button class=\'btn btn-a\' onclick=\'_rbDirBuscar()\' style=\'padding:.4rem .8rem\'>Buscar</button>";
-  h += "</div>";
-  h += "</div>";
-
-  // Mapa
-  h += "<div id=\'_rbDirMap\' style=\'width:100%;height:240px;border-radius:8px;border:1px solid var(--bd);background:var(--sur2)\'></div>";
-
-  // Etiqueta (solo si hay cliente)
-  if(cliente){
-    h += "<div><label style=\'font-size:.66rem;color:var(--tx3);text-transform:uppercase;font-weight:600\'>Etiqueta</label>";
-    h += "<input type=\'text\' id=\'_rbDirEtiqueta\' placeholder=\'Casa, Trabajo, Depto, etc\' style=\'width:100%;padding:.45rem .6rem;border:1px solid var(--bd);border-radius:7px;font-size:.84rem;background:var(--sur2);color:var(--tx);margin-top:.2rem;box-sizing:border-box;font-family:inherit\'></div>";
-  }
-
-  // Dirección completa (readonly, se llena con autocomplete o reverse)
-  h += "<div><label style=\'font-size:.66rem;color:var(--tx3);text-transform:uppercase;font-weight:600\'>Dirección completa</label>";
-  h += "<input type=\'text\' id=\'_rbDirCompleta\' readonly placeholder=\'Buscá arriba o tocá el mapa...\' style=\'width:100%;padding:.45rem .6rem;border:1px solid var(--bd);border-radius:7px;font-size:.84rem;background:var(--sur2);color:var(--tx2);margin-top:.2rem;box-sizing:border-box;font-family:inherit\'></div>";
-
-  // Referencias
-  h += "<div><label style=\'font-size:.66rem;color:var(--tx3);text-transform:uppercase;font-weight:600\'>Referencias (opcional)</label>";
-  h += "<input type=\'text\' id=\'_rbDirReferencias\' placeholder=\'Depto 4B, timbre rojo, casa azul al fondo\' style=\'width:100%;padding:.45rem .6rem;border:1px solid var(--bd);border-radius:7px;font-size:.84rem;background:var(--sur2);color:var(--tx);margin-top:.2rem;box-sizing:border-box;font-family:inherit\'></div>";
+  // FIX (2026-05-15): contenedor del selector + formulario nueva (se alternan)
+  h += "<div id=\'_rbDirContenido\'>"+_rbRenderContenidoDir()+"</div>";
 
   // Botones
   h += "<div style=\'display:flex;gap:.5rem;justify-content:flex-end;margin-top:.4rem\'>";
   h += "<button class=\'btn btn-g\' onclick=\'document.getElementById(&quot;_moRbDir&quot;).remove()\'>Cancelar</button>";
-  h += "<button class=\'btn btn-a\' onclick=\'_rbConfirmarDir()\'>📍 Asignar dirección</button>";
+  h += "<button class=\'btn btn-a\' id=\'_rbDirConfirmarBtn\' onclick=\'_rbConfirmarDir()\'>📍 Asignar dirección</button>";
   h += "</div>";
   h += "</div></div>";
 
@@ -13260,78 +13286,199 @@ function _rbAbrirModalDir(pedido, cliente){
   document.body.appendChild(mo);
   // No cerrar al click fuera (las sugerencias del autocomplete pueden estar fuera)
 
-  // Inicializar mapa
-  setTimeout(function(){
-    var mapEl = document.getElementById("_rbDirMap");
-    if(!mapEl || !window.google || !window.google.maps){
-      if(mapEl) mapEl.innerHTML = "<div style=\'padding:1rem;text-align:center;color:var(--tx3);font-size:.78rem\'>Mapa no disponible — recargá la página.</div>";
-      return;
-    }
-    // Intentar centrar en Córdoba si no hay posición previa
-    var initial = {lat:-31.4201, lng:-64.1888};
-    _rbAsigDir.map = new google.maps.Map(mapEl, {
-      center: initial,
-      zoom: 11,
-      streetViewControl: false,
-      fullscreenControl: false,
-      mapTypeControl: false,
-      gestureHandling: "greedy"
-    });
-    _rbAsigDir.marker = new google.maps.Marker({
-      map: _rbAsigDir.map,
-      position: initial,
-      draggable: true,
-      visible: false // oculto hasta que se elija un punto
-    });
-    // Al arrastrar el marker, hacer reverse geocoding
-    _rbAsigDir.marker.addListener("dragend", function(){
-      var p = _rbAsigDir.marker.getPosition();
-      _rbAsigDir.pos = {lat:p.lat(), lng:p.lng()};
-      _rbDirReverse(_rbAsigDir.pos);
-    });
-    // Click en el mapa también pone el marker
-    _rbAsigDir.map.addListener("click", function(e){
-      _rbAsigDir.pos = {lat:e.latLng.lat(), lng:e.latLng.lng()};
-      _rbAsigDir.marker.setPosition(_rbAsigDir.pos);
-      _rbAsigDir.marker.setVisible(true);
-      _rbDirReverse(_rbAsigDir.pos);
-    });
-
-    // Autocomplete del buscador
-    var inp = document.getElementById("_rbDirSearch");
-    if(inp && google.maps.places && google.maps.places.Autocomplete){
-      try {
-        var ac = new google.maps.places.Autocomplete(inp, {
-          fields: ["formatted_address","geometry","name"],
-          types: ["geocode","establishment"],
-          componentRestrictions: {country:"ar"}
-        });
-        ac.addListener("place_changed", function(){
-          var pl = ac.getPlace();
-          if(pl && pl.geometry && pl.geometry.location){
-            var loc = pl.geometry.location;
-            _rbAsigDir.pos = {lat:loc.lat(), lng:loc.lng()};
-            _rbAsigDir.completa = pl.formatted_address || pl.name || "";
-            _rbAsigDir.map.setCenter(_rbAsigDir.pos);
-            _rbAsigDir.map.setZoom(17);
-            _rbAsigDir.marker.setPosition(_rbAsigDir.pos);
-            _rbAsigDir.marker.setVisible(true);
-            var inpC = document.getElementById("_rbDirCompleta");
-            if(inpC) inpC.value = _rbAsigDir.completa;
-          }
-        });
-        // Forzar z-index del dropdown del autocomplete
-        setTimeout(function(){
-          var pacs = document.querySelectorAll(".pac-container");
-          pacs.forEach(function(p){p.style.zIndex = "999999";});
-        }, 200);
-      } catch(e){
-        console.error("[belle] _rbDir autocomplete:",e);
-      }
-    }
-    if(inp) inp.focus();
-  }, 80);
+  // Si arranca en modo "nueva" (no hay direcciones existentes), inicializar el mapa
+  if(_rbAsigDir.modoNueva){
+    setTimeout(function(){ _rbInitMapaNueva(); }, 80);
+  } else {
+    // Modo selector: desactivar botón hasta que elijan una
+    var btn = document.getElementById("_rbDirConfirmarBtn");
+    if(btn){ btn.disabled = true; btn.style.opacity = ".5"; btn.style.cursor = "not-allowed"; }
+  }
 }
+
+// FIX (2026-05-15): renderiza el contenido del modal según el modo (selector o nueva)
+function _rbRenderContenidoDir(){
+  if(!_rbAsigDir) return "";
+  var h = "";
+
+  if(!_rbAsigDir.modoNueva){
+    // ── MODO SELECTOR: mostrar direcciones existentes del cliente ──
+    h += "<div style=\'background:var(--sur2);border:1px solid var(--bd);border-radius:8px;padding:.6rem .7rem\'>";
+    h += "<div style=\'font-size:.66rem;color:var(--tx3);text-transform:uppercase;font-weight:600;margin-bottom:.45rem\'>📌 Direcciones guardadas del cliente</div>";
+    h += "<div style=\'display:flex;flex-direction:column;gap:.35rem\'>";
+    _rbAsigDir.direccionesExistentes.forEach(function(d){
+      var sel = _rbAsigDir.dirSeleccionadaId === d.id;
+      var bgCol = sel ? "rgba(196,150,90,.12)" : "var(--sur)";
+      var bdCol = sel ? "var(--acc)" : "var(--bd)";
+      h += "<div onclick=\'_rbSelectDirExistente("+d.id+")\' style=\'cursor:pointer;border:2px solid "+bdCol+";background:"+bgCol+";border-radius:7px;padding:.5rem .6rem;transition:all .15s\'>";
+      h += "<div style=\'display:flex;justify-content:space-between;align-items:flex-start;gap:.4rem\'>";
+      h += "<div style=\'flex:1;min-width:0\'>";
+      if(d.etiqueta){
+        h += "<div style=\'font-size:.72rem;font-weight:700;color:var(--tx)\'>"+_esc(d.etiqueta);
+        if(d.es_principal) h += " <span style=\'color:var(--green);font-size:.6rem\'>★ principal</span>";
+        h += "</div>";
+      }
+      h += "<div style=\'font-size:.7rem;color:var(--tx2);margin-top:.1rem;word-wrap:break-word\'>"+_esc(d.direccion_completa||"Sin dirección")+"</div>";
+      if(d.referencias){
+        h += "<div style=\'font-size:.62rem;color:var(--tx3);margin-top:.15rem;font-style:italic\'>📝 "+_esc(d.referencias)+"</div>";
+      }
+      h += "</div>";
+      h += "<div style=\'font-size:.65rem;color:"+(sel?"var(--acc)":"var(--tx3)")+";font-weight:700;flex-shrink:0\'>"+(sel?"✓":"")+"</div>";
+      h += "</div></div>";
+    });
+    h += "</div>";
+    h += "</div>";
+
+    // Botón para crear nueva
+    h += "<button class=\'btn btn-g\' onclick=\'_rbCambiarAModoNueva()\' style=\'width:100%;padding:.55rem;font-size:.78rem;display:flex;align-items:center;justify-content:center;gap:.4rem\'>";
+    h += "<span style=\'font-size:1.05rem\'>+</span> Agregar nueva dirección";
+    h += "</button>";
+
+  } else {
+    // ── MODO NUEVA: buscador + mapa (flujo original) ──
+    // Si hay direcciones existentes, mostrar botón para volver al selector
+    if(_rbAsigDir.direccionesExistentes && _rbAsigDir.direccionesExistentes.length){
+      h += "<button class=\'btn btn-g\' onclick=\'_rbCambiarAModoSelector()\' style=\'padding:.4rem .7rem;font-size:.72rem;align-self:flex-start;display:flex;align-items:center;gap:.3rem\'>";
+      h += "← Volver a direcciones guardadas";
+      h += "</button>";
+    }
+
+    // Buscador (autocomplete + botón)
+    h += "<div style=\'background:var(--sur2);border:1px solid var(--bd);border-radius:8px;padding:.55rem .7rem\'>";
+    h += "<div style=\'font-size:.66rem;color:var(--tx3);text-transform:uppercase;font-weight:600;margin-bottom:.3rem\'>🔍 Buscar en Google Maps</div>";
+    h += "<div style=\'display:flex;gap:.4rem\'>";
+    h += "<input type=\'text\' id=\'_rbDirSearch\' placeholder=\'Calle número, ciudad...\' style=\'flex:1;padding:.45rem .6rem;border:1px solid var(--bd);border-radius:7px;font-size:.84rem;background:var(--sur);color:var(--tx);font-family:inherit\' onkeydown=\'if(event.key===&quot;Enter&quot;){event.preventDefault();_rbDirBuscar();}\'>";
+    h += "<button class=\'btn btn-a\' onclick=\'_rbDirBuscar()\' style=\'padding:.4rem .8rem\'>Buscar</button>";
+    h += "</div>";
+    h += "</div>";
+
+    // Mapa
+    h += "<div id=\'_rbDirMap\' style=\'width:100%;height:240px;border-radius:8px;border:1px solid var(--bd);background:var(--sur2)\'></div>";
+
+    // Etiqueta (solo si hay cliente)
+    if(_rbAsigDir.cliente){
+      h += "<div><label style=\'font-size:.66rem;color:var(--tx3);text-transform:uppercase;font-weight:600\'>Etiqueta</label>";
+      h += "<input type=\'text\' id=\'_rbDirEtiqueta\' placeholder=\'Casa, Trabajo, Depto, etc\' style=\'width:100%;padding:.45rem .6rem;border:1px solid var(--bd);border-radius:7px;font-size:.84rem;background:var(--sur2);color:var(--tx);margin-top:.2rem;box-sizing:border-box;font-family:inherit\'></div>";
+    }
+
+    // Dirección completa (readonly, se llena con autocomplete o reverse)
+    h += "<div><label style=\'font-size:.66rem;color:var(--tx3);text-transform:uppercase;font-weight:600\'>Dirección completa</label>";
+    h += "<input type=\'text\' id=\'_rbDirCompleta\' readonly placeholder=\'Buscá arriba o tocá el mapa...\' style=\'width:100%;padding:.45rem .6rem;border:1px solid var(--bd);border-radius:7px;font-size:.84rem;background:var(--sur2);color:var(--tx2);margin-top:.2rem;box-sizing:border-box;font-family:inherit\'></div>";
+
+    // Referencias
+    h += "<div><label style=\'font-size:.66rem;color:var(--tx3);text-transform:uppercase;font-weight:600\'>Referencias (opcional)</label>";
+    h += "<input type=\'text\' id=\'_rbDirReferencias\' placeholder=\'Depto 4B, timbre rojo, casa azul al fondo\' style=\'width:100%;padding:.45rem .6rem;border:1px solid var(--bd);border-radius:7px;font-size:.84rem;background:var(--sur2);color:var(--tx);margin-top:.2rem;box-sizing:border-box;font-family:inherit\'></div>";
+  }
+
+  return h;
+}
+
+// FIX (2026-05-15): inicializar mapa cuando entran al modo "nueva"
+function _rbInitMapaNueva(){
+  var mapEl = document.getElementById("_rbDirMap");
+  if(!mapEl || !window.google || !window.google.maps){
+    if(mapEl) mapEl.innerHTML = "<div style=\'padding:1rem;text-align:center;color:var(--tx3);font-size:.78rem\'>Mapa no disponible — recargá la página.</div>";
+    return;
+  }
+  // Intentar centrar en Córdoba si no hay posición previa
+  var initial = {lat:-31.4201, lng:-64.1888};
+  _rbAsigDir.map = new google.maps.Map(mapEl, {
+    center: initial,
+    zoom: 11,
+    streetViewControl: false,
+    fullscreenControl: false,
+    mapTypeControl: false,
+    gestureHandling: "greedy"
+  });
+  _rbAsigDir.marker = new google.maps.Marker({
+    map: _rbAsigDir.map,
+    position: initial,
+    draggable: true,
+    visible: false
+  });
+  _rbAsigDir.marker.addListener("dragend", function(){
+    var p = _rbAsigDir.marker.getPosition();
+    _rbAsigDir.pos = {lat:p.lat(), lng:p.lng()};
+    _rbDirReverse(_rbAsigDir.pos);
+  });
+  _rbAsigDir.map.addListener("click", function(e){
+    _rbAsigDir.pos = {lat:e.latLng.lat(), lng:e.latLng.lng()};
+    _rbAsigDir.marker.setPosition(_rbAsigDir.pos);
+    _rbAsigDir.marker.setVisible(true);
+    _rbDirReverse(_rbAsigDir.pos);
+  });
+  // Autocomplete del buscador
+  var inp = document.getElementById("_rbDirSearch");
+  if(inp && google.maps.places && google.maps.places.Autocomplete){
+    try {
+      var ac = new google.maps.places.Autocomplete(inp, {
+        fields: ["formatted_address","geometry","name"],
+        types: ["geocode","establishment"],
+        componentRestrictions: {country:"ar"}
+      });
+      ac.addListener("place_changed", function(){
+        var pl = ac.getPlace();
+        if(pl && pl.geometry && pl.geometry.location){
+          var loc = pl.geometry.location;
+          _rbAsigDir.pos = {lat:loc.lat(), lng:loc.lng()};
+          _rbAsigDir.completa = pl.formatted_address || pl.name || "";
+          _rbAsigDir.map.setCenter(_rbAsigDir.pos);
+          _rbAsigDir.map.setZoom(17);
+          _rbAsigDir.marker.setPosition(_rbAsigDir.pos);
+          _rbAsigDir.marker.setVisible(true);
+          var inpC = document.getElementById("_rbDirCompleta");
+          if(inpC) inpC.value = _rbAsigDir.completa;
+          // Parsear componentes si vinieron
+          if(pl.address_components) _rbParsearComponentes(pl.address_components);
+        }
+      });
+      setTimeout(function(){
+        var pacs = document.querySelectorAll(".pac-container");
+        pacs.forEach(function(p){p.style.zIndex = "999999";});
+      }, 200);
+    } catch(e){
+      console.error("[belle] _rbDir autocomplete:",e);
+    }
+  }
+  if(inp) inp.focus();
+}
+
+// FIX (2026-05-15): switch entre modos
+window._rbCambiarAModoNueva = function(){
+  _rbAsigDir.modoNueva = true;
+  _rbAsigDir.dirSeleccionadaId = null;
+  var cont = document.getElementById("_rbDirContenido");
+  if(cont) cont.innerHTML = _rbRenderContenidoDir();
+  var btn = document.getElementById("_rbDirConfirmarBtn");
+  if(btn){ btn.disabled = false; btn.style.opacity = ""; btn.style.cursor = "pointer"; btn.textContent = "📍 Crear y asignar"; }
+  setTimeout(function(){ _rbInitMapaNueva(); }, 80);
+};
+
+window._rbCambiarAModoSelector = function(){
+  _rbAsigDir.modoNueva = false;
+  _rbAsigDir.pos = null;
+  _rbAsigDir.completa = "";
+  var cont = document.getElementById("_rbDirContenido");
+  if(cont) cont.innerHTML = _rbRenderContenidoDir();
+  var btn = document.getElementById("_rbDirConfirmarBtn");
+  if(btn){
+    btn.textContent = "📍 Asignar dirección";
+    if(_rbAsigDir.dirSeleccionadaId){
+      btn.disabled = false; btn.style.opacity = ""; btn.style.cursor = "pointer";
+    } else {
+      btn.disabled = true; btn.style.opacity = ".5"; btn.style.cursor = "not-allowed";
+    }
+  }
+};
+
+window._rbSelectDirExistente = function(dirId){
+  _rbAsigDir.dirSeleccionadaId = dirId;
+  var cont = document.getElementById("_rbDirContenido");
+  if(cont) cont.innerHTML = _rbRenderContenidoDir();
+  // Habilitar botón
+  var btn = document.getElementById("_rbDirConfirmarBtn");
+  if(btn){ btn.disabled = false; btn.style.opacity = ""; btn.style.cursor = "pointer"; }
+};
 
 // Búsqueda manual con geocoder (igual al de mis direcciones, adaptado)
 // FIX (2026-05-11): parsea address_components de Google y guarda en _rbAsigDir.componentes
@@ -13399,7 +13546,36 @@ function _rbDirReverse(pos){
 
 // Guardar la dirección al pedido (con cliente: en clientes_direcciones; sin cliente: en pedidos_catalogo)
 function _rbConfirmarDir(){
-  if(!_rbAsigDir || !_rbAsigDir.pos){
+  if(!_rbAsigDir){return;}
+
+  // FIX (2026-05-15): si está en modo selector, hacer PATCH al pedido con la dir existente
+  if(!_rbAsigDir.modoNueva){
+    if(!_rbAsigDir.dirSeleccionadaId){
+      toast("Elegí una dirección o creá una nueva","twarn");
+      return;
+    }
+    var dir = (_rbAsigDir.direccionesExistentes||[]).find(function(d){return d.id === _rbAsigDir.dirSeleccionadaId;});
+    if(!dir){toast("Dirección no encontrada","terr");return;}
+    var pedIdSel = _rbAsigDir.pedidoId;
+    apiPatch("pedidos_catalogo", {direccion_entrega_id: dir.id, estado_envio: "en_preparacion"}, "id=eq."+pedIdSel).then(function(){
+      var pCache = (_rt.pedidosTodos||[]).find(function(x){return x.id===pedIdSel;});
+      if(pCache){
+        pCache.direccion_entrega_id = dir.id;
+        pCache._dir = dir;
+      }
+      var mo = document.getElementById("_moRbDir"); if(mo) mo.remove();
+      if(_rt.borradorActivo) _rtMarcarRutaModificada();
+      toast("Dirección asignada al pedido","tok");
+      loadRutas();
+    }).catch(function(e){
+      console.error("[belle] asignar dir existente:",e);
+      toast("Error al asignar dirección","terr");
+    });
+    return;
+  }
+
+  // ── MODO NUEVA (flujo original) ──
+  if(!_rbAsigDir.pos){
     toast("Buscá una dirección o tocá un punto en el mapa","twarn");
     return;
   }
@@ -13701,22 +13877,32 @@ function _rbRegenerarMaps(){
       });
     }
 
-    var url = "https://www.google.com/maps/dir/?api=1";
-    url += "&origin="+br.punto_partida_lat+","+br.punto_partida_lng;
-    if(br.punto_final_lat){
-      url += "&destination="+br.punto_final_lat+","+br.punto_final_lng;
-      url += "&waypoints="+encodeURIComponent(paradasOK.map(function(p){return p.lat+","+p.lng;}).join("|"));
+    // FIX 2026-05-15: soporte para >9 paradas (Maps limita por URL)
+    var MAX = 9;
+    var secuencia = [{lat:br.punto_partida_lat, lng:br.punto_partida_lng}];
+    paradasOK.forEach(function(p){secuencia.push({lat:p.lat, lng:p.lng});});
+    if(br.punto_final_lat) secuencia.push({lat:br.punto_final_lat, lng:br.punto_final_lng});
+
+    if(secuencia.length <= MAX){
+      window.open(_rtBuildMapsUrl(secuencia), "_blank");
+      toast("Maps abierto con "+paradasOK.length+" parada"+(paradasOK.length===1?"":"s"),"tok");
     } else {
-      var ult = paradasOK[paradasOK.length-1];
-      url += "&destination="+ult.lat+","+ult.lng;
-      if(paradasOK.length>1){
-        var wps = paradasOK.slice(0,-1).map(function(p){return p.lat+","+p.lng;}).join("|");
-        url += "&waypoints="+encodeURIComponent(wps);
+      // Chunks solapados
+      var tramos = [];
+      var idx = 0;
+      while(idx < secuencia.length - 1){
+        var fin = Math.min(idx + MAX - 1, secuencia.length - 1);
+        tramos.push(secuencia.slice(idx, fin + 1));
+        idx = fin;
       }
+      if(!confirm("Tu ruta tiene "+paradasOK.length+" paradas. Maps solo permite "+(MAX-2)+" intermedias por URL, así que se abrirán "+tramos.length+" pestañas (una por tramo, encadenadas).\n\n¿Continuar?")){
+        return;
+      }
+      tramos.forEach(function(t, i){
+        setTimeout(function(){ window.open(_rtBuildMapsUrl(t), "_blank"); }, i * 250);
+      });
+      toast("Se abrieron "+tramos.length+" tramos en Maps","tok");
     }
-    url += "&travelmode=driving";
-    window.open(url, "_blank");
-    toast("Maps abierto con "+paradasOK.length+" parada"+(paradasOK.length===1?"":"s"),"tok");
   }
 
   if(!dirIds.length){
