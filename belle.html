@@ -7452,18 +7452,49 @@ function _adminGuardarEditItems(){
     var prec=parseFloat(it.precio)||parseFloat(it.precio_unitario)||0;
     return s+(prec*qty);
   },0);
-  if(!confirm('Guardar cambios?\n\nNuevo total: '+fmt(totalNuevo)+'\n'+items.length+' items\n\n⚠️ Atención: el stock NO se ajusta automáticamente al editar items. Si agregaste/quitaste productos, ajustá el stock manualmente.'))return;
-  apiPatch('pedidos_catalogo',{
-    items:JSON.stringify(items),
-    total:totalNuevo
-  },'id=eq.'+id).then(function(){
-    // Log
-    apiPost('pedidos_estados_log',{pedido_id:id,pedido_tabla:'pedidos_catalogo',estado:'editado',nota:'Items editados por admin (nuevo total '+fmt(totalNuevo)+')',usuario:curUser||'admin'}).catch(function(){});
-    toast('Pedido actualizado ✅','tok');
-    var _m=document.getElementById('_moEditItems');if(_m)_m.remove();
-    var _md=document.getElementById('_moDetallePed');if(_md)_md.remove();
-    loadPedidos();
-  }).catch(function(e){toast('Error: '+(e.message||''),'terr');});
+  // FEAT CC v2 (auditoría 2026-05-14): chequear si tiene cuotas que ajustar
+  apiGet('cc_cuotas','select=id,monto,monto_pagado,estado,pedido_id&pedido_id=eq.'+id+'&estado=neq.cancelada').then(function(cuotas){
+    var tieneCuotas = Array.isArray(cuotas) && cuotas.length > 0;
+    var tienePagos = tieneCuotas && cuotas.some(function(cu){return (parseFloat(cu.monto_pagado)||0) > 0;});
+
+    var msgConfirm = 'Guardar cambios?\n\nNuevo total: '+fmt(totalNuevo)+'\n'+items.length+' items';
+    msgConfirm += '\n\n⚠️ Atención: el stock NO se ajusta automáticamente al editar items.';
+    if(tieneCuotas){
+      if(tienePagos){
+        msgConfirm += '\n\n⚠️⚠️ Este pedido CC tiene '+cuotas.length+' cuotas y YA tiene pagos parciales aplicados. NO se pueden regenerar automáticamente.\n\nSi cambia el total, ajustá las cuotas manualmente desde el panel CC.';
+      } else {
+        msgConfirm += '\n\n💳 Este pedido CC tiene '+cuotas.length+' cuotas pendientes sin pagos. Tras guardar, podés regenerarlas desde el panel CC (botón "🎫 Generar plan de cuotas").';
+      }
+    }
+    if(!confirm(msgConfirm)) return;
+
+    var promesas = [apiPatch('pedidos_catalogo',{
+      items:JSON.stringify(items),
+      total:totalNuevo
+    },'id=eq.'+id)];
+
+    // Si tiene cuotas pendientes SIN pagos: borrar para que admin regenere
+    if(tieneCuotas && !tienePagos){
+      promesas.push(apiDelete('cc_cuotas','pedido_id=eq.'+id+'&estado=eq.pendiente').catch(function(e){console.error('[cc] borrar cuotas:',e);}));
+    }
+
+    Promise.all(promesas).then(function(){
+      apiPost('pedidos_estados_log',{pedido_id:id,pedido_tabla:'pedidos_catalogo',estado:'editado',nota:'Items editados por admin (nuevo total '+fmt(totalNuevo)+')'+(tieneCuotas&&!tienePagos?' — cuotas borradas para regenerar':''),usuario:curUser||'admin'}).catch(function(){});
+      toast('Pedido actualizado ✅'+(tieneCuotas&&!tienePagos?' (cuotas borradas, regenerá)':''),'tok');
+      var _m=document.getElementById('_moEditItems');if(_m)_m.remove();
+      var _md=document.getElementById('_moDetallePed');if(_md)_md.remove();
+      loadPedidos();
+    }).catch(function(e){toast('Error: '+(e.message||''),'terr');});
+  }).catch(function(e){
+    console.error('[cc] check cuotas:', e);
+    // Fallback: editar sin chequear cuotas
+    if(!confirm('Guardar cambios?\nNuevo total: '+fmt(totalNuevo))) return;
+    apiPatch('pedidos_catalogo',{items:JSON.stringify(items),total:totalNuevo},'id=eq.'+id).then(function(){
+      toast('Pedido actualizado ✅','tok');
+      var _m=document.getElementById('_moEditItems');if(_m)_m.remove();
+      loadPedidos();
+    });
+  });
 }
 
 // ═══════════════════════════════════════════════════════════════════
@@ -7782,9 +7813,19 @@ function _adminRevertirCobro(id){
       return Promise.all([p1,p2]);
     }).catch(function(e){console.error('cc_pagos cleanup',e);}));
 
+    // === [E] FEAT CC v2 (auditoría 2026-05-14): resetear cuotas a 'pendiente' ===
+    // Las cuotas que se hayan marcado como 'pagada' o 'parcial' por el cobro anulado
+    // deben volver a pendientes (sin monto pagado) para mantener consistencia.
+    promesas.push(apiPatch('cc_cuotas',{
+      monto_pagado: 0,
+      estado: 'pendiente',
+      fecha_pago: null,
+      updated_at: new Date().toISOString()
+    },'pedido_id=eq.'+id+'&estado=neq.cancelada').catch(function(e){console.error('[cc] reset cuotas anular cobro:',e);}));
+
     return Promise.all(promesas);
   }).then(function(){
-    apiPost('pedidos_estados_log',{pedido_id:id,pedido_tabla:'pedidos_catalogo',estado:'pendiente',nota:'Cobro anulado por admin (ventas borradas, stock devuelto a reserva, cc_pagos borrado)',usuario:curUser||'admin'}).catch(function(){});
+    apiPost('pedidos_estados_log',{pedido_id:id,pedido_tabla:'pedidos_catalogo',estado:'pendiente',nota:'Cobro anulado por admin (ventas borradas, stock devuelto a reserva, cc_pagos borrado, cuotas reseteadas)',usuario:curUser||'admin'}).catch(function(){});
     toast('Cobro anulado ✅ — pedido vuelve a pendiente','tok');
     var _md=document.getElementById('_moDetallePed');if(_md)_md.remove();
     loadPedidos();
@@ -7803,6 +7844,13 @@ function _adminReactivarPedido(id){
     var items=[];try{items=typeof p.items==='string'?JSON.parse(p.items):p.items||[];}catch(e){items=[];}
     if(!confirm('Reactivar este pedido?\n\n• Vuelve a estado "pendiente"\n• Se RE-RESERVA el stock de los items (descuenta stock_actual y suma a reserva)\n• Si no hay stock suficiente puede dar error\n\n¿Continuar?'))return;
     var promesas=[apiPatch('pedidos_catalogo',{estado:'pendiente',confirmado_cobro:false,cobrado_total:0},'id=eq.'+id)];
+    // FEAT CC v2 (auditoría 2026-05-14): reactivar cuotas canceladas
+    promesas.push(apiPatch('cc_cuotas',{
+      estado: 'pendiente',
+      monto_pagado: 0,
+      fecha_pago: null,
+      updated_at: new Date().toISOString()
+    },'pedido_id=eq.'+id+'&estado=eq.cancelada').catch(function(e){console.error('[cc] reactivar cuotas:',e);}));
     if(Array.isArray(items)){
       items.forEach(function(it){
         if(!it.producto_id||it.isDecan)return;
@@ -7845,6 +7893,11 @@ function _adminCancelarPedido(id){
     var estabaCobrado=teniaCobro; // Mantener nombre legacy pero con lógica corregida
     var items=[];try{items=typeof p.items==='string'?JSON.parse(p.items):p.items||[];}catch(e){items=[];}
     var promesas=[apiPatch('pedidos_catalogo',{estado:'cancelado'},'id=eq.'+id)];
+
+    // FEAT CC v2 (2026-05-14): cancelar cuotas asociadas (si existen).
+    // Marcamos cuotas pendientes como 'cancelada' para que NO sigan apareciendo
+    // en el calendario del cliente ni se sumen a la deuda.
+    promesas.push(apiPatch('cc_cuotas',{estado:'cancelada',updated_at:new Date().toISOString()},'pedido_id=eq.'+id+'&estado=in.(pendiente,parcial,vencida)').catch(function(e){console.error('[cc] cancelar cuotas:',e);}));
 
     // Devolver stock: depende si estaba reservado o cobrado (incluido parcial)
     if(Array.isArray(items)){
@@ -8088,6 +8141,8 @@ function cancelarPedido(id){
     try{items=typeof p.items==="string"?JSON.parse(p.items):p.items;}catch(ex){}
     // Marcar pedido cancelado
     apiPatch("pedidos_catalogo",{estado:"cancelado"},"id=eq."+id);
+    // FEAT CC v2 (2026-05-14): cancelar cuotas asociadas
+    apiPatch('cc_cuotas',{estado:'cancelada',updated_at:new Date().toISOString()},'pedido_id=eq.'+id+'&estado=in.(pendiente,parcial,vencida)').catch(function(e){console.error('[cc] cancelar cuotas:',e);});
     // Devolver stock a cada producto (incluyendo combos)
     if(Array.isArray(items)){
       items.forEach(function(it){
@@ -8228,6 +8283,8 @@ function cancelarPedidoWeb(pedId,btn){
         }));
       });
       Promise.all(stockProms).then(function(){
+        // FEAT CC v2: cancelar cuotas asociadas
+        apiPatch('cc_cuotas',{estado:'cancelada',updated_at:new Date().toISOString()},'pedido_id=eq.'+pedId+'&estado=in.(pendiente,parcial,vencida)').catch(function(){});
         return apiPatch("pedidos_catalogo",{estado:"cancelado"},"id=eq."+pedId);
       }).then(function(){
         toast("Pedido cancelado — stock devuelto","twarn");
@@ -8257,6 +8314,8 @@ function cancelarPedReservado(pedId,btn){
         }));
       });
       Promise.all(stockProms).then(function(){
+        // FEAT CC v2: cancelar cuotas asociadas
+        apiPatch('cc_cuotas',{estado:'cancelada',updated_at:new Date().toISOString()},'pedido_id=eq.'+pedId+'&estado=in.(pendiente,parcial,vencida)').catch(function(){});
         return apiPatch("pedidos_catalogo",{estado:"cancelado"},"id=eq."+pedId);
       }).then(function(){
         toast("Pedido reservado cancelado — stock devuelto","twarn");
@@ -16154,7 +16213,8 @@ window._ccAplicarPagoACuotasPedido = function(pedidoId, monto){
 // ── Cargar cuotas de pedidos pendientes y renderizarlas dentro del FIFO ──
 window._ccCargarCuotasPedidosFIFO = function(pedidoIds){
   if(!pedidoIds || !pedidoIds.length) return;
-  apiGet('cc_cuotas','select=*&pedido_id=in.('+pedidoIds.join(',')+')&order=pedido_id.asc,nro_cuota.asc').then(function(cuotas){
+  // FEAT CC v2 (auditoría 2026-05-14): excluir cuotas canceladas
+  apiGet('cc_cuotas','select=*&pedido_id=in.('+pedidoIds.join(',')+')&estado=neq.cancelada&order=pedido_id.asc,nro_cuota.asc').then(function(cuotas){
     if(!Array.isArray(cuotas)) cuotas = [];
     // Agrupar por pedido
     var porPedido = {};
