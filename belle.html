@@ -14483,10 +14483,10 @@ function _renderClientesStats(){
       "<div style='font-size:1.2rem;font-weight:700;color:var(--green)'>"+totalActivos+"</div>"+
       "<div style='font-size:.62rem;color:var(--tx3)'>de "+totalClientes+" totales</div>"+
     "</div>"+
-    "<div class='tbl-wrap' style='padding:.65rem .8rem;border-left:3px solid var(--blue)'>"+
+    "<div class='tbl-wrap' style='padding:.65rem .8rem;border-left:3px solid var(--blue);cursor:pointer' onclick='admAbrirDashboardCC()' title='Click para abrir Dashboard CC'>"+
       "<div style='font-size:.6rem;color:var(--tx3);text-transform:uppercase'>💳 Con CC</div>"+
       "<div style='font-size:1.2rem;font-weight:700;color:var(--blue)'>"+conCC+"</div>"+
-      "<div style='font-size:.62rem;color:var(--tx3)'>cuenta corriente activa</div>"+
+      "<div style='font-size:.62rem;color:var(--acc)'>📊 Ver dashboard →</div>"+
     "</div>"+
     "<div class='tbl-wrap' style='padding:.65rem .8rem;border-left:3px solid var(--red)'>"+
       "<div style='font-size:.6rem;color:var(--tx3);text-transform:uppercase'>🔴 Deuda total</div>"+
@@ -14911,6 +14911,599 @@ function _admBorrarPago(pagoId, clienteId, clienteNombre){
   });
 }
 
+// ════════════════════════════════════════════════════════════════════════════
+// CC v2 — Sistema avanzado de Cuenta Corriente (2026-05-14)
+// Soporta 2 modalidades por cliente:
+//   • 'cuotas'  → Híbrido (límite + cuotas por pedido + fechas de vencimiento)
+//   • 'resumen' → Saldo rotativo mensual (cierre día X, vence día Y)
+// ════════════════════════════════════════════════════════════════════════════
+
+// ── Helper: detectar modalidad activa del cliente ───────────────────────
+function _ccGetModalidad(cli){
+  if(!cli || !cli.cuenta_corriente_habilitada) return null;
+  return cli.cc_modalidad || 'cuotas';
+}
+
+// ── Helper: calcular fecha de vencimiento de un pedido CC ───────────────
+// Devuelve string YYYY-MM-DD
+function _ccCalcularVencimiento(cli, fechaPedido){
+  if(!cli) return null;
+  var d = fechaPedido ? new Date(fechaPedido) : new Date();
+  d.setHours(0,0,0,0);
+  var modalidad = _ccGetModalidad(cli);
+
+  if(modalidad === 'resumen'){
+    // Modalidad resumen: vence el día cc_dia_vencimiento del mes siguiente al cierre
+    var diaCierre = parseInt(cli.cc_dia_cierre) || 25;
+    var diaVenc = parseInt(cli.cc_dia_vencimiento) || 10;
+    // Si la compra es antes o el día del cierre → ciclo actual, vence mes siguiente
+    // Si es después del cierre → próximo ciclo, vence en 2 meses
+    var hoy = new Date(d);
+    if(hoy.getDate() <= diaCierre){
+      // Ciclo actual, vence próximo mes
+      hoy.setMonth(hoy.getMonth() + 1);
+    } else {
+      // Próximo ciclo
+      hoy.setMonth(hoy.getMonth() + 2);
+    }
+    hoy.setDate(diaVenc);
+    return hoy.toISOString().slice(0,10);
+  } else {
+    // Modalidad cuotas: hoy + plazo_dias
+    var plazo = parseInt(cli.cc_plazo_dias) || 30;
+    d.setDate(d.getDate() + plazo);
+    return d.toISOString().slice(0,10);
+  }
+}
+
+// ── Helper: calcular ciclo del pedido (yyyy-mm) para modalidad resumen ──
+function _ccCalcularCiclo(cli, fechaPedido){
+  if(!cli || _ccGetModalidad(cli) !== 'resumen') return null;
+  var d = fechaPedido ? new Date(fechaPedido) : new Date();
+  var diaCierre = parseInt(cli.cc_dia_cierre) || 25;
+  // Si la compra es antes o el día del cierre → ciclo de este mes
+  // Si es después → ciclo del próximo mes
+  if(d.getDate() > diaCierre){
+    d.setMonth(d.getMonth() + 1);
+  }
+  var yyyy = d.getFullYear();
+  var mm = String(d.getMonth()+1).padStart(2,'0');
+  return yyyy+'-'+mm;
+}
+
+// ── Helper: calcular días hasta vencimiento (negativo = ya vencido) ─────
+function _ccDiasHasta(fechaVenc){
+  if(!fechaVenc) return null;
+  var hoy = new Date(); hoy.setHours(0,0,0,0);
+  var f = new Date(fechaVenc + 'T00:00:00');
+  return Math.floor((f - hoy) / 86400000);
+}
+
+// ── Helper: calcular recargo por mora para un pedido vencido ────────────
+function _ccCalcularMora(cli, pedido, saldoActual){
+  if(!cli || !pedido || !pedido.cc_fecha_vencimiento) return 0;
+  var tasa = parseFloat(cli.cc_tasa_mora_pct) || 0;
+  if(tasa <= 0) return 0;
+  var diasAtraso = -_ccDiasHasta(pedido.cc_fecha_vencimiento);
+  if(diasAtraso <= 0) return 0;
+  // Recargo = saldo * tasa% mensual * (días/30)
+  var recargo = saldoActual * (tasa/100) * (diasAtraso/30);
+  return Math.round(recargo*100)/100;
+}
+
+// ── Helper: calcular descuento por pronto pago disponible ───────────────
+function _ccCalcularDescuentoProntoPago(cli, pedido, montoAPagar){
+  if(!cli || !pedido) return 0;
+  var pct = parseFloat(cli.cc_descuento_pronto_pct) || 0;
+  var dias = parseInt(cli.cc_descuento_pronto_dias) || 0;
+  if(pct <= 0 || dias <= 0) return 0;
+  // Calcular si todavía está en el período de descuento (desde fecha del pedido)
+  var fechaPedido = new Date(pedido.created_at);
+  var hoy = new Date();
+  var diasDesdePedido = Math.floor((hoy - fechaPedido) / 86400000);
+  if(diasDesdePedido > dias) return 0;
+  // Descuento sobre el monto a pagar
+  var desc = montoAPagar * (pct/100);
+  return Math.round(desc*100)/100;
+}
+
+// ── Helper: formato corto de fecha ───────────────────────────────────────
+function _ccFmtFecha(s){
+  if(!s) return '—';
+  try { return new Date(s+'T00:00:00').toLocaleDateString('es-AR',{day:'2-digit',month:'2-digit',year:'2-digit'}); }
+  catch(e){ return s; }
+}
+
+// ── Helper: asegura que un pedido CC tenga su fecha de vencimiento ─────
+// Si no la tiene, la calcula y la guarda. Idempotente.
+window.ccAsegurarVencimiento = function(pedidoId){
+  if(!pedidoId) return Promise.resolve(null);
+  return apiGet('pedidos_catalogo','select=id,cliente_id,created_at,cc_fecha_vencimiento,cc_ciclo,es_cc&id=eq.'+pedidoId+'&limit=1').then(function(rows){
+    var p = (rows||[])[0];
+    if(!p) return null;
+    // Si ya tiene fecha, no hacer nada
+    if(p.cc_fecha_vencimiento) return p;
+    if(!p.cliente_id) return p;
+    // Cargar cliente para conocer modalidad
+    return apiGet('clientes','select=cuenta_corriente_habilitada,cc_modalidad,cc_plazo_dias,cc_dia_cierre,cc_dia_vencimiento&id=eq.'+p.cliente_id+'&limit=1').then(function(rcs){
+      var cli = (rcs||[])[0];
+      if(!cli || !cli.cuenta_corriente_habilitada) return p;
+      var fechaVenc = _ccCalcularVencimiento(cli, p.created_at);
+      var ciclo = _ccCalcularCiclo(cli, p.created_at);
+      var patch = {};
+      if(fechaVenc) patch.cc_fecha_vencimiento = fechaVenc;
+      if(ciclo) patch.cc_ciclo = ciclo;
+      if(Object.keys(patch).length){
+        return apiPatch('pedidos_catalogo', patch, 'id=eq.'+pedidoId).then(function(){
+          return Object.assign({}, p, patch);
+        });
+      }
+      return p;
+    });
+  }).catch(function(e){
+    console.warn('ccAsegurarVencimiento error',e);
+    return null;
+  });
+};
+
+// ── Helper: aplicar fechas de vencimiento masivamente (mantenance) ──────
+window.ccBackfillVencimientos = function(){
+  if(!confirm('Esto buscará pedidos CC sin fecha de vencimiento y se las asignará según la modalidad de cada cliente. ¿Continuar?')) return;
+  toast('Procesando...','tinfo');
+  apiGet('pedidos_catalogo','select=id&estado=neq.cancelado&estado=neq.cobrado&cc_fecha_vencimiento=is.null&es_cc=eq.true&limit=1000').then(function(peds){
+    if(!peds || !peds.length){ toast('Sin pedidos para actualizar','tok'); return; }
+    var total = peds.length;
+    var done = 0;
+    var promesas = peds.map(function(p){
+      return ccAsegurarVencimiento(p.id).then(function(){ done++; });
+    });
+    Promise.all(promesas).then(function(){
+      toast('Actualizados '+done+' de '+total+' pedidos','tok');
+    });
+  });
+};
+
+// ── Modal: Configurar CC del cliente (modalidad, plazos, tasas) ─────────
+window.admAbrirCCConfig = function(clienteId, clienteNombre){
+  apiGet('clientes','select=*&id=eq.'+clienteId+'&limit=1').then(function(rows){
+    var c = (rows && rows[0]) || null;
+    if(!c){ toast('Cliente no encontrado','terr'); return; }
+    _ccRenderConfigModal(c, clienteNombre);
+  });
+};
+
+function _ccRenderConfigModal(c, clienteNombre){
+  var modalidad = c.cc_modalidad || 'cuotas';
+  var mo = document.getElementById('_moCCConfig');
+  if(mo) mo.remove();
+  mo = document.createElement('div');
+  mo.className = 'mo open';
+  mo.id = '_moCCConfig';
+  mo.style.zIndex = '99999';
+
+  var ip = "padding:.45rem .6rem;border:1px solid var(--bd);border-radius:6px;background:var(--sur);color:var(--tx);font-size:.85rem;width:100%";
+  var lbl = "font-size:.66rem;color:var(--tx3);text-transform:uppercase;font-weight:600;letter-spacing:.04em;margin-bottom:.2rem;display:block";
+
+  var h = "<div class='md' style='max-width:580px;width:96%;max-height:92vh;display:flex;flex-direction:column'>";
+  h += "<div class='mh'><div class='mtt'>⚙️ Configurar CC — "+_esc(clienteNombre||c.nombre)+"</div>";
+  h += "<button class='btn btn-g xb' onclick=\"document.getElementById('_moCCConfig').remove()\">✕</button></div>";
+  h += "<div class='mb' style='overflow-y:auto;flex:1;display:flex;flex-direction:column;gap:.8rem;padding:1rem'>";
+
+  // ─── Habilitar CC ────────────────────────────
+  h += "<div style='background:var(--sur);border:1px solid var(--bd);border-radius:8px;padding:.7rem'>";
+  h += "<label style='display:flex;align-items:center;gap:.5rem;cursor:pointer;font-size:.82rem;color:var(--tx);font-weight:600'>";
+  h += "<input type='checkbox' id='_ccCfgHab' "+(c.cuenta_corriente_habilitada?'checked':'')+" onchange='_ccCfgToggleHab(this.checked)'>";
+  h += "💳 Cuenta corriente habilitada</label>";
+  h += "<div style='font-size:.65rem;color:var(--tx3);margin-top:.25rem'>El cliente compra y paga después</div>";
+  h += "</div>";
+
+  // ─── Bloque de config CC (oculto si no habilitado) ─────
+  h += "<div id='_ccCfgDetalle' style='display:"+(c.cuenta_corriente_habilitada?'block':'none')+";display:flex;flex-direction:column;gap:.7rem'>";
+
+  // Selector modalidad
+  h += "<div style='background:var(--sur);border:1px solid var(--bd);border-radius:8px;padding:.8rem'>";
+  h += "<div style='font-size:.7rem;color:var(--tx3);text-transform:uppercase;font-weight:700;letter-spacing:.04em;margin-bottom:.5rem'>📋 Modalidad de pago</div>";
+  h += "<div style='display:grid;grid-template-columns:1fr 1fr;gap:.5rem'>";
+  // Opción Cuotas
+  h += "<label style='cursor:pointer'>";
+  h += "<input type='radio' name='_ccMod' value='cuotas' "+(modalidad==='cuotas'?'checked':'')+" onchange='_ccCfgSwitchModalidad(\"cuotas\")' style='display:none'>";
+  h += "<div id='_ccOpCuotas' style='border:2px solid "+(modalidad==='cuotas'?'var(--acc)':'var(--bd)')+";border-radius:8px;padding:.55rem .65rem;background:"+(modalidad==='cuotas'?'rgba(196,150,90,.08)':'var(--sur2)')+"'>";
+  h += "<div style='font-size:.82rem;font-weight:700;color:"+(modalidad==='cuotas'?'var(--acc)':'var(--tx)')+";margin-bottom:.15rem'>🟢 Crédito + cuotas</div>";
+  h += "<div style='font-size:.62rem;color:var(--tx3);line-height:1.3'>Cada pedido tiene su plazo o se divide en cuotas. Más flexible.</div>";
+  h += "</div></label>";
+  // Opción Resumen
+  h += "<label style='cursor:pointer'>";
+  h += "<input type='radio' name='_ccMod' value='resumen' "+(modalidad==='resumen'?'checked':'')+" onchange='_ccCfgSwitchModalidad(\"resumen\")' style='display:none'>";
+  h += "<div id='_ccOpResumen' style='border:2px solid "+(modalidad==='resumen'?'var(--acc)':'var(--bd)')+";border-radius:8px;padding:.55rem .65rem;background:"+(modalidad==='resumen'?'rgba(196,150,90,.08)':'var(--sur2)')+"'>";
+  h += "<div style='font-size:.82rem;font-weight:700;color:"+(modalidad==='resumen'?'var(--acc)':'var(--tx)')+";margin-bottom:.15rem'>🔵 Resumen mensual</div>";
+  h += "<div style='font-size:.62rem;color:var(--tx3);line-height:1.3'>Todas las compras del mes se cobran juntas. Estilo tarjeta.</div>";
+  h += "</div></label>";
+  h += "</div></div>";
+
+  // Bloque modalidad CUOTAS
+  h += "<div id='_ccBlqCuotas' style='display:"+(modalidad==='cuotas'?'block':'none')+";background:var(--sur);border:1px solid var(--bd);border-radius:8px;padding:.8rem'>";
+  h += "<div style='font-size:.7rem;color:var(--tx3);text-transform:uppercase;font-weight:700;margin-bottom:.5rem'>🟢 Config Crédito + cuotas</div>";
+  h += "<div style='display:grid;grid-template-columns:1fr 1fr;gap:.5rem'>";
+  h += "<div><label style='"+lbl+"'>Plazo default (días)</label>";
+  h += "<select id='_ccCfgPlazo' style='"+ip+"'>";
+  [15,30,45,60,90].forEach(function(p){
+    h += "<option value='"+p+"'"+((c.cc_plazo_dias||30)==p?' selected':'')+">"+p+" días</option>";
+  });
+  h += "</select></div>";
+  h += "<div><label style='"+lbl+"'>Límite de crédito ($)</label>";
+  h += "<input type='number' id='_ccCfgLim' value='"+(c.limite_credito||0)+"' min='0' style='"+ip+"'></div>";
+  h += "</div></div>";
+
+  // Bloque modalidad RESUMEN
+  h += "<div id='_ccBlqResumen' style='display:"+(modalidad==='resumen'?'block':'none')+";background:var(--sur);border:1px solid var(--bd);border-radius:8px;padding:.8rem'>";
+  h += "<div style='font-size:.7rem;color:var(--tx3);text-transform:uppercase;font-weight:700;margin-bottom:.5rem'>🔵 Config Resumen mensual</div>";
+  h += "<div style='display:grid;grid-template-columns:1fr 1fr;gap:.5rem;margin-bottom:.5rem'>";
+  h += "<div><label style='"+lbl+"'>Día de cierre (1-28)</label>";
+  h += "<input type='number' id='_ccCfgCierre' value='"+(c.cc_dia_cierre||25)+"' min='1' max='28' style='"+ip+"'></div>";
+  h += "<div><label style='"+lbl+"'>Día de vencimiento (1-28)</label>";
+  h += "<input type='number' id='_ccCfgVenc' value='"+(c.cc_dia_vencimiento||10)+"' min='1' max='28' style='"+ip+"'></div>";
+  h += "</div>";
+  h += "<div><label style='"+lbl+"'>Límite de crédito ($)</label>";
+  h += "<input type='number' id='_ccCfgLimRes' value='"+(c.limite_credito||0)+"' min='0' style='"+ip+"'></div>";
+  h += "<div style='font-size:.62rem;color:var(--tx3);margin-top:.4rem;font-style:italic'>Ej: cierre 25, vence 10 → compras del 1 al 25 se cobran el 10 del mes siguiente</div>";
+  h += "</div>";
+
+  // Mora y descuento (común)
+  h += "<div style='background:var(--sur);border:1px solid var(--bd);border-radius:8px;padding:.8rem'>";
+  h += "<div style='font-size:.7rem;color:var(--tx3);text-transform:uppercase;font-weight:700;margin-bottom:.5rem'>💰 Recargos y descuentos</div>";
+  h += "<div style='display:grid;grid-template-columns:1fr 1fr;gap:.5rem;margin-bottom:.5rem'>";
+  h += "<div><label style='"+lbl+"' title='Recargo % mensual aplicado proporcionalmente sobre el saldo vencido'>Tasa mora (% mensual)</label>";
+  h += "<input type='number' id='_ccCfgMora' value='"+(c.cc_tasa_mora_pct||0)+"' min='0' step='0.5' style='"+ip+"'></div>";
+  h += "<div></div></div>";
+  h += "<div style='display:grid;grid-template-columns:1fr 1fr;gap:.5rem'>";
+  h += "<div><label style='"+lbl+"'>Descuento pronto pago (%)</label>";
+  h += "<input type='number' id='_ccCfgDesc' value='"+(c.cc_descuento_pronto_pct||0)+"' min='0' step='0.5' style='"+ip+"'></div>";
+  h += "<div><label style='"+lbl+"'>Si paga en menos de (días)</label>";
+  h += "<input type='number' id='_ccCfgDescDias' value='"+(c.cc_descuento_pronto_dias||0)+"' min='0' style='"+ip+"'></div>";
+  h += "</div>";
+  h += "<div style='font-size:.62rem;color:var(--tx3);margin-top:.4rem;font-style:italic'>Ej: 3% de descuento si paga en 10 días → premia pronto pago</div>";
+  h += "</div>";
+
+  // Notificaciones
+  h += "<div style='background:var(--sur);border:1px solid var(--bd);border-radius:8px;padding:.7rem'>";
+  h += "<label style='display:flex;align-items:center;gap:.5rem;cursor:pointer;font-size:.78rem;color:var(--tx)'>";
+  h += "<input type='checkbox' id='_ccCfgNotif' "+((c.cc_notif_vencimiento!==false)?'checked':'')+">";
+  h += "🔔 Enviar notificaciones de vencimiento por WhatsApp</label>";
+  h += "<div style='font-size:.62rem;color:var(--tx3);margin-top:.25rem'>3 días antes, el día y 3 días después si no pagó</div>";
+  h += "</div>";
+
+  // Score visible
+  if(c.cuenta_corriente_habilitada){
+    var score = parseInt(c.cc_score!=null?c.cc_score:100);
+    var scoreCol = score >= 80 ? '#22c55e' : score >= 50 ? '#fbbf24' : '#ef4444';
+    var scoreLbl = score >= 80 ? 'Excelente' : score >= 50 ? 'Regular' : 'Bajo';
+    h += "<div style='background:var(--sur);border:1px solid var(--bd);border-radius:8px;padding:.7rem'>";
+    h += "<div style='font-size:.7rem;color:var(--tx3);text-transform:uppercase;font-weight:700;margin-bottom:.3rem'>📊 Score crediticio</div>";
+    h += "<div style='display:flex;align-items:center;gap:.5rem'>";
+    h += "<div style='font-size:1.6rem;font-weight:800;color:"+scoreCol+"'>"+score+"</div>";
+    h += "<div style='flex:1'>";
+    h += "<div style='background:rgba(255,255,255,.06);height:8px;border-radius:4px;overflow:hidden'>";
+    h += "<div style='background:"+scoreCol+";height:100%;width:"+score+"%'></div>";
+    h += "</div>";
+    h += "<div style='font-size:.65rem;color:"+scoreCol+";font-weight:600;margin-top:.2rem'>"+scoreLbl+"</div>";
+    h += "</div></div>";
+    h += "<div style='font-size:.6rem;color:var(--tx3);margin-top:.4rem;font-style:italic'>Calculado en base al historial de pagos. Sube por pagos puntuales, baja por morosidad.</div>";
+    h += "</div>";
+  }
+
+  h += "</div>"; // fin _ccCfgDetalle
+
+  h += "</div>"; // fin mb
+
+  // Footer
+  h += "<div style='padding:.7rem 1rem;border-top:1px solid var(--bd);display:flex;justify-content:flex-end;gap:.5rem'>";
+  h += "<button class='btn btn-g' onclick=\"document.getElementById('_moCCConfig').remove()\">Cancelar</button>";
+  h += "<button class='btn btn-a' onclick='_ccCfgGuardar("+c.id+")'>💾 Guardar</button>";
+  h += "</div>";
+
+  h += "</div>";
+  mo.innerHTML = h;
+  document.body.appendChild(mo);
+}
+
+window._ccCfgToggleHab = function(checked){
+  var d = document.getElementById('_ccCfgDetalle');
+  if(d) d.style.display = checked ? 'flex' : 'none';
+};
+
+window._ccCfgSwitchModalidad = function(mod){
+  document.getElementById('_ccBlqCuotas').style.display  = mod==='cuotas'  ? 'block' : 'none';
+  document.getElementById('_ccBlqResumen').style.display = mod==='resumen' ? 'block' : 'none';
+  // Visual: borde acentuado
+  var opC = document.getElementById('_ccOpCuotas');
+  var opR = document.getElementById('_ccOpResumen');
+  if(opC){
+    opC.style.borderColor = mod==='cuotas' ? 'var(--acc)' : 'var(--bd)';
+    opC.style.background = mod==='cuotas' ? 'rgba(196,150,90,.08)' : 'var(--sur2)';
+    opC.firstChild && (opC.firstChild.style.color = mod==='cuotas' ? 'var(--acc)' : 'var(--tx)');
+  }
+  if(opR){
+    opR.style.borderColor = mod==='resumen' ? 'var(--acc)' : 'var(--bd)';
+    opR.style.background = mod==='resumen' ? 'rgba(196,150,90,.08)' : 'var(--sur2)';
+    opR.firstChild && (opR.firstChild.style.color = mod==='resumen' ? 'var(--acc)' : 'var(--tx)');
+  }
+};
+
+window._ccCfgGuardar = function(id){
+  var habilitada = (document.getElementById('_ccCfgHab')||{}).checked || false;
+  var modalidad = (document.querySelector('input[name="_ccMod"]:checked')||{}).value || 'cuotas';
+
+  var data = {
+    cuenta_corriente_habilitada: habilitada,
+    updated_at: new Date().toISOString()
+  };
+
+  if(habilitada){
+    data.cc_modalidad = modalidad;
+    if(modalidad === 'cuotas'){
+      data.cc_plazo_dias = parseInt((document.getElementById('_ccCfgPlazo')||{value:30}).value) || 30;
+      data.limite_credito = parseFloat((document.getElementById('_ccCfgLim')||{value:0}).value) || 0;
+    } else {
+      data.cc_dia_cierre = Math.max(1, Math.min(28, parseInt((document.getElementById('_ccCfgCierre')||{value:25}).value) || 25));
+      data.cc_dia_vencimiento = Math.max(1, Math.min(28, parseInt((document.getElementById('_ccCfgVenc')||{value:10}).value) || 10));
+      data.limite_credito = parseFloat((document.getElementById('_ccCfgLimRes')||{value:0}).value) || 0;
+    }
+    data.cc_tasa_mora_pct = parseFloat((document.getElementById('_ccCfgMora')||{value:0}).value) || 0;
+    data.cc_descuento_pronto_pct = parseFloat((document.getElementById('_ccCfgDesc')||{value:0}).value) || 0;
+    data.cc_descuento_pronto_dias = parseInt((document.getElementById('_ccCfgDescDias')||{value:0}).value) || 0;
+    data.cc_notif_vencimiento = (document.getElementById('_ccCfgNotif')||{}).checked || false;
+  }
+
+  apiPatch('clientes', data, 'id=eq.'+id).then(function(){
+    toast('Configuración CC guardada ✅','tok');
+    var mo = document.getElementById('_moCCConfig');
+    if(mo) mo.remove();
+    // Refrescar vista si está abierta la ficha del cliente
+    if(typeof refrescarClientes === 'function') refrescarClientes();
+  }).catch(function(e){
+    toast('Error al guardar: '+(e.message||''),'terr');
+    console.error(e);
+  });
+};
+
+// ── Dashboard CC: cartera vencida, próximos vencimientos ────────────────
+window.admAbrirDashboardCC = function(){
+  var mo = document.getElementById('_moDashCC');
+  if(mo) mo.remove();
+  mo = document.createElement('div');
+  mo.className = 'mo open';
+  mo.id = '_moDashCC';
+  mo.style.zIndex = '99999';
+  mo.innerHTML = "<div class='md' style='max-width:780px;width:96%;max-height:92vh;display:flex;flex-direction:column'>"+
+    "<div class='mh'><div class='mtt'>📊 Dashboard Cuenta Corriente</div>"+
+    "<button class='btn btn-g xb' onclick=\"document.getElementById('_moDashCC').remove()\">✕</button></div>"+
+    "<div class='mb' id='_dashCCContent' style='overflow-y:auto;flex:1;padding:1rem'>"+
+      "<div class='loading'><div class='spin'></div>Cargando...</div>"+
+    "</div></div>";
+  document.body.appendChild(mo);
+
+  // Cargar datos: clientes con CC, pedidos pendientes
+  Promise.all([
+    apiGet('clientes','select=id,nombre,apellido,telefono_principal,cc_modalidad,cc_score,limite_credito,cc_tasa_mora_pct&cuenta_corriente_habilitada=eq.true&limit=1000').catch(function(){return [];}),
+    apiGet('pedidos_catalogo','select=id,nro_orden,cliente_id,total,cobrado_total,created_at,cc_fecha_vencimiento,cc_recargo_mora,estado&estado=neq.cancelado&estado=neq.cobrado&order=cc_fecha_vencimiento.asc.nullsfirst&limit=1000').catch(function(){return [];})
+  ]).then(function(res){
+    var clientes = Array.isArray(res[0]) ? res[0] : [];
+    var pedidos = Array.isArray(res[1]) ? res[1] : [];
+
+    // Mapear cliente_id → cliente
+    var cliMap = {};
+    clientes.forEach(function(c){ cliMap[c.id] = c; });
+
+    // Filtrar pedidos de clientes CC
+    var pedsCC = pedidos.filter(function(p){ return p.cliente_id && cliMap[p.cliente_id]; });
+
+    // Métricas
+    var totalCartera = 0, totalVencido = 0, totalProximo = 0;
+    var deudores = {}; // cliente_id → {nombre, vencido, total, pedidos:[]}
+
+    pedsCC.forEach(function(p){
+      var saldo = (parseFloat(p.total)||0) - (parseFloat(p.cobrado_total)||0);
+      if(saldo <= 0.01) return;
+      var cli = cliMap[p.cliente_id];
+      var dias = _ccDiasHasta(p.cc_fecha_vencimiento);
+      totalCartera += saldo;
+      if(dias !== null && dias < 0) totalVencido += saldo;
+      if(dias !== null && dias >= 0 && dias <= 7) totalProximo += saldo;
+
+      if(!deudores[p.cliente_id]){
+        deudores[p.cliente_id] = {
+          cliente: cli,
+          vencido: 0,
+          total: 0,
+          peorAtraso: 0,
+          pedidos: []
+        };
+      }
+      deudores[p.cliente_id].total += saldo;
+      if(dias !== null && dias < 0){
+        deudores[p.cliente_id].vencido += saldo;
+        if(-dias > deudores[p.cliente_id].peorAtraso) deudores[p.cliente_id].peorAtraso = -dias;
+      }
+      deudores[p.cliente_id].pedidos.push({pedido:p, saldo:saldo, dias:dias});
+    });
+
+    var deudoresArr = Object.values(deudores).filter(function(d){return d.total > 0.01;});
+    deudoresArr.sort(function(a,b){
+      // Vencidos primero, después por monto
+      if(a.vencido !== b.vencido) return b.vencido - a.vencido;
+      return b.total - a.total;
+    });
+
+    var h = '';
+
+    // Botón mantenimiento (backfill)
+    h += "<div style='display:flex;justify-content:flex-end;margin-bottom:.6rem;gap:.3rem'>";
+    h += "<button onclick='ccBackfillVencimientos()' class='btn btn-g' style='font-size:.66rem;padding:.3rem .5rem' title='Calcular vencimientos de pedidos que no los tienen'>🔧 Calcular vencimientos faltantes</button>";
+    h += "</div>";
+
+    // Cards de stats
+    h += "<div style='display:grid;grid-template-columns:repeat(auto-fit,minmax(140px,1fr));gap:.6rem;margin-bottom:1rem'>";
+    h += "<div style='background:linear-gradient(135deg,rgba(196,150,90,.1),rgba(196,150,90,.04));border:1px solid rgba(196,150,90,.3);border-radius:8px;padding:.7rem'>";
+    h += "<div style='font-size:.6rem;color:var(--tx3);text-transform:uppercase;font-weight:700'>📦 Cartera total</div>";
+    h += "<div style='font-size:1.25rem;font-weight:800;color:var(--acc);margin-top:.2rem'>"+fmt(totalCartera)+"</div>";
+    h += "<div style='font-size:.6rem;color:var(--tx3);margin-top:.15rem'>"+pedsCC.length+" pedidos pendientes</div>";
+    h += "</div>";
+
+    h += "<div style='background:rgba(239,68,68,.08);border:1px solid rgba(239,68,68,.4);border-radius:8px;padding:.7rem'>";
+    h += "<div style='font-size:.6rem;color:var(--tx3);text-transform:uppercase;font-weight:700'>🚨 Vencido</div>";
+    h += "<div style='font-size:1.25rem;font-weight:800;color:#ef4444;margin-top:.2rem'>"+fmt(totalVencido)+"</div>";
+    var pctVenc = totalCartera > 0 ? (totalVencido/totalCartera*100).toFixed(0) : 0;
+    h += "<div style='font-size:.6rem;color:var(--tx3);margin-top:.15rem'>"+pctVenc+"% de la cartera</div>";
+    h += "</div>";
+
+    h += "<div style='background:rgba(251,191,36,.08);border:1px solid rgba(251,191,36,.4);border-radius:8px;padding:.7rem'>";
+    h += "<div style='font-size:.6rem;color:var(--tx3);text-transform:uppercase;font-weight:700'>⏰ Vence en 7d</div>";
+    h += "<div style='font-size:1.25rem;font-weight:800;color:#fbbf24;margin-top:.2rem'>"+fmt(totalProximo)+"</div>";
+    h += "<div style='font-size:.6rem;color:var(--tx3);margin-top:.15rem'>próximos vencimientos</div>";
+    h += "</div>";
+
+    h += "<div style='background:rgba(34,197,94,.08);border:1px solid rgba(34,197,94,.4);border-radius:8px;padding:.7rem'>";
+    h += "<div style='font-size:.6rem;color:var(--tx3);text-transform:uppercase;font-weight:700'>👥 Deudores</div>";
+    h += "<div style='font-size:1.25rem;font-weight:800;color:#22c55e;margin-top:.2rem'>"+deudoresArr.length+"</div>";
+    h += "<div style='font-size:.6rem;color:var(--tx3);margin-top:.15rem'>de "+clientes.length+" con CC</div>";
+    h += "</div>";
+    h += "</div>";
+
+    // Lista de deudores
+    if(deudoresArr.length){
+      h += "<div style='font-size:.78rem;color:var(--tx);font-weight:700;margin-bottom:.5rem'>Deudores ordenados por urgencia</div>";
+      h += "<div style='display:flex;flex-direction:column;gap:.4rem'>";
+
+      deudoresArr.slice(0, 50).forEach(function(d){
+        var cli = d.cliente;
+        var nom = (cli.nombre+' '+(cli.apellido||'')).trim();
+        var col = d.vencido > 0 ? '#ef4444' : '#fbbf24';
+        h += "<div onclick='_adminVerCC("+cli.id+",&#39;"+_esc(nom).replace(/\'/g,"&#39;")+"&#39;)' style='background:var(--sur);border:1px solid "+(d.vencido>0?col:'var(--bd)')+";border-radius:7px;padding:.55rem .7rem;cursor:pointer;display:flex;justify-content:space-between;align-items:center;gap:.5rem'>";
+        h += "<div style='flex:1;min-width:0'>";
+        h += "<div style='font-size:.82rem;font-weight:600;color:var(--tx)'>"+_esc(nom);
+        if(cli.cc_score < 50){
+          h += " <span style='font-size:.6rem;background:#ef4444;color:#fff;padding:.05rem .3rem;border-radius:4px;margin-left:.3rem'>SCORE "+cli.cc_score+"</span>";
+        }
+        h += "</div>";
+        h += "<div style='font-size:.65rem;color:var(--tx3);margin-top:.15rem'>";
+        h += "📦 "+d.pedidos.length+" pedido"+(d.pedidos.length===1?'':'s');
+        if(cli.cc_modalidad === 'resumen') h += " · 🔵 Resumen";
+        else h += " · 🟢 Cuotas";
+        if(d.peorAtraso > 0) h += " · <span style='color:#ef4444;font-weight:700'>"+d.peorAtraso+" días de atraso</span>";
+        h += "</div>";
+        h += "</div>";
+        h += "<div style='text-align:right;flex-shrink:0'>";
+        h += "<div style='font-size:.92rem;font-weight:800;color:"+col+"'>"+fmt(d.total)+"</div>";
+        if(d.vencido > 0 && d.vencido < d.total){
+          h += "<div style='font-size:.6rem;color:var(--tx3)'>vencido: <b style='color:#ef4444'>"+fmt(d.vencido)+"</b></div>";
+        }
+        h += "</div></div>";
+      });
+
+      h += "</div>";
+    } else {
+      h += "<div style='text-align:center;padding:2rem;color:var(--tx3);font-size:.85rem'>✨ Sin deudores. Excelente gestión.</div>";
+    }
+
+    document.getElementById('_dashCCContent').innerHTML = h;
+  }).catch(function(e){
+    console.error(e);
+    document.getElementById('_dashCCContent').innerHTML = "<div style='color:var(--red);padding:1rem'>Error: "+_esc(e.message||'')+"</div>";
+  });
+};
+
+// ── Helper: generar texto para notificación WhatsApp ────────────────────
+window.ccGenerarNotifWA = function(clienteId, tipo){
+  // tipo: 'recordatorio' | 'vencimiento' | 'mora'
+  apiGet('clientes','select=*&id=eq.'+clienteId+'&limit=1').then(function(rows){
+    var c = (rows||[])[0];
+    if(!c){ toast('Cliente no encontrado','terr'); return; }
+    apiGet('pedidos_catalogo','select=id,nro_orden,total,cobrado_total,cc_fecha_vencimiento&cliente_id=eq.'+clienteId+'&estado=neq.cancelado&estado=neq.cobrado&order=cc_fecha_vencimiento.asc').then(function(peds){
+      var pendientes = (peds||[]).filter(function(p){
+        return (parseFloat(p.total)||0) - (parseFloat(p.cobrado_total)||0) > 0.01;
+      });
+      if(!pendientes.length){ toast('Cliente sin deudas','twarn'); return; }
+
+      var totalDeuda = pendientes.reduce(function(s,p){
+        return s + ((parseFloat(p.total)||0) - (parseFloat(p.cobrado_total)||0));
+      }, 0);
+
+      var nombre = (c.nombre+' '+(c.apellido||'')).trim();
+      var saludo = "Hola "+nombre+"!";
+      var msg = "";
+
+      if(tipo === 'mora'){
+        msg = saludo+"\n\nTe escribo desde Belle Distribuidora.\n\n";
+        msg += "Tenés *"+fmt(totalDeuda)+"* vencidos en tu cuenta corriente:\n";
+        pendientes.forEach(function(p){
+          var saldo = (parseFloat(p.total)||0) - (parseFloat(p.cobrado_total)||0);
+          var d = _ccDiasHasta(p.cc_fecha_vencimiento);
+          if(d !== null && d < 0){
+            msg += "• Pedido "+(p.nro_orden||'#'+p.id)+" — "+fmt(saldo)+" (vencido hace "+(-d)+" días)\n";
+          }
+        });
+        msg += "\n¿Cuándo podés regularizarlo? Avisame por favor.";
+      } else if(tipo === 'recordatorio'){
+        msg = saludo+"\n\nTe escribimos desde Belle Distribuidora para recordarte tus próximos vencimientos:\n\n";
+        pendientes.forEach(function(p){
+          var saldo = (parseFloat(p.total)||0) - (parseFloat(p.cobrado_total)||0);
+          var d = _ccDiasHasta(p.cc_fecha_vencimiento);
+          if(d !== null && d >= 0 && d <= 7){
+            msg += "• Pedido "+(p.nro_orden||'#'+p.id)+" — "+fmt(saldo)+" vence "+(d===0?'HOY':d===1?'mañana':'en '+d+' días')+"\n";
+          }
+        });
+        msg += "\nCualquier consulta, acá estamos!";
+      } else {
+        msg = saludo+"\n\nTu saldo en cuenta corriente:\n*"+fmt(totalDeuda)+"*\n\n";
+        msg += pendientes.length+" pedido"+(pendientes.length===1?'':'s')+" pendiente"+(pendientes.length===1?'':'s')+".";
+      }
+
+      // Copiar al portapapeles + abrir WA
+      if(navigator.clipboard){
+        navigator.clipboard.writeText(msg).then(function(){
+          toast('Texto copiado','tok');
+        });
+      }
+      var tel = c.telefono_principal || '';
+      tel = tel.replace(/[^\d]/g,'');
+      if(tel.length >= 8){
+        if(!tel.startsWith('54')) tel = '54' + tel;
+        window.open('https://wa.me/'+tel+'?text='+encodeURIComponent(msg), '_blank');
+      } else {
+        toast('Sin teléfono. Mensaje copiado.','twarn');
+      }
+    });
+  });
+};
+
+// ── Función para crear cuotas de un pedido (modalidad cuotas, opcional) ──
+window.ccCrearCuotas = function(pedidoId, nroCuotas, montoTotal, fechaInicial, diasEntreCuotas){
+  if(!pedidoId || !nroCuotas || nroCuotas < 1) return Promise.reject(new Error('Datos inválidos'));
+  var montoBase = Math.floor((montoTotal / nroCuotas) * 100) / 100;
+  var ultima = montoTotal - (montoBase * (nroCuotas-1));
+  var promises = [];
+  var fInicial = fechaInicial ? new Date(fechaInicial+'T00:00:00') : new Date();
+  var dias = diasEntreCuotas || 30;
+
+  for(var i=0; i<nroCuotas; i++){
+    var fVenc = new Date(fInicial);
+    fVenc.setDate(fVenc.getDate() + (i * dias));
+    promises.push(apiPost('cc_cuotas', {
+      pedido_id: pedidoId,
+      nro_cuota: i+1,
+      total_cuotas: nroCuotas,
+      monto: i === nroCuotas-1 ? ultima : montoBase,
+      fecha_vencimiento: fVenc.toISOString().slice(0,10),
+      estado: 'pendiente'
+    }));
+  }
+  return Promise.all(promises);
+};
+
+// ════════════════════════════════════════════════════════════════════════════
+// FIN MÓDULO CC v2
+// ════════════════════════════════════════════════════════════════════════════
+
 function _adminVerCC(clienteId, clienteNombre){
   // Guardar referencia al nombre actual para uso de funciones internas (export, borrar pago)
   window._admCCNombreActual = clienteNombre || "";
@@ -14931,7 +15524,7 @@ function _adminVerCC(clienteId, clienteNombre){
   document.body.appendChild(mo);
   Promise.all([
     apiGet("clientes","select=*&id=eq."+clienteId+"&limit=1"),
-    apiGet("pedidos_catalogo","select=id,nro_orden,total,cobrado_total,estado,created_at&cliente_id=eq."+clienteId+"&estado=neq.cancelado&estado=neq.cobrado&order=created_at.asc"),
+    apiGet("pedidos_catalogo","select=id,nro_orden,total,cobrado_total,estado,created_at,cc_fecha_vencimiento,cc_ciclo,cc_recargo_mora,cc_nro_cuotas&cliente_id=eq."+clienteId+"&estado=neq.cancelado&estado=neq.cobrado&order=created_at.asc"),
     apiGet("cc_pagos","select=*&cliente_id=eq."+clienteId+"&order=fecha.desc,created_at.desc&limit=200").catch(function(){return [];})
   ]).then(function(res){
     var el=document.getElementById("_adminCCContenido"); if(!el) return;
@@ -15122,11 +15715,43 @@ function _adminVerCC(clienteId, clienteNombre){
       pendientesFIFO.forEach(function(p, i){
         var saldoPed = (parseFloat(p.total)||0) - (parseFloat(p.cobrado_total)||0);
         var fechaPed = new Date(p.created_at).toLocaleDateString("es-AR",{day:"2-digit",month:"2-digit",year:"2-digit"});
-        hf += "<div style='display:flex;justify-content:space-between;padding:.28rem 0;border-bottom:1px solid var(--bd);font-size:.76rem'>";
+        // FEAT (2026-05-14): fecha de vencimiento + mora
+        var fechaVencStr = '';
+        var diasVenc = null;
+        var vencBg = '';
+        if(p.cc_fecha_vencimiento){
+          diasVenc = _ccDiasHasta(p.cc_fecha_vencimiento);
+          var venceStr = _ccFmtFecha(p.cc_fecha_vencimiento);
+          if(diasVenc < 0){
+            fechaVencStr = " · <span style='color:#ef4444;font-weight:700'>⚠️ Vencido hace "+(-diasVenc)+"d ("+venceStr+")</span>";
+            vencBg = "background:rgba(239,68,68,.05);";
+          } else if(diasVenc === 0){
+            fechaVencStr = " · <span style='color:#fbbf24;font-weight:700'>🔔 Vence HOY ("+venceStr+")</span>";
+            vencBg = "background:rgba(251,191,36,.05);";
+          } else if(diasVenc <= 7){
+            fechaVencStr = " · <span style='color:#fbbf24'>⏰ Vence en "+diasVenc+"d ("+venceStr+")</span>";
+          } else {
+            fechaVencStr = " · <span style='color:var(--tx3)'>Vence "+venceStr+"</span>";
+          }
+        } else {
+          fechaVencStr = " · <span style='color:var(--tx3);font-style:italic'>sin vencimiento</span>";
+        }
+        // Mora actual
+        var moraActual = _ccCalcularMora(c, p, saldoPed);
+        var moraStr = '';
+        if(moraActual > 0){
+          moraStr = "<div style='font-size:.58rem;color:#ef4444;margin-top:.05rem'>+ mora estimada: "+fmt(moraActual)+"</div>";
+        }
+
+        hf += "<div style='display:flex;justify-content:space-between;padding:.35rem .4rem;border-bottom:1px solid var(--bd);font-size:.76rem;"+vencBg+"border-radius:4px;margin:.1rem -.4rem'>";
+        hf += "<div style='flex:1;min-width:0'>";
         hf += "<div><span style='color:var(--tx3);font-size:.64rem'>"+(i+1)+".</span> <b>"+(p.nro_orden||"#"+p.id)+"</b> <span style='color:var(--tx3);font-size:.68rem'>"+fechaPed+"</span></div>";
-        hf += "<div style='text-align:right'>";
+        hf += "<div style='font-size:.6rem;color:var(--tx3);margin-top:.1rem'>"+fechaVencStr+"</div>";
+        hf += "</div>";
+        hf += "<div style='text-align:right;flex-shrink:0'>";
         hf += "<div style='font-weight:600'>"+fmt(saldoPed)+"</div>";
         if(parseFloat(p.cobrado_total)>0) hf += "<div style='font-size:.6rem;color:var(--tx3)'>de "+fmt(p.total)+"</div>";
+        hf += moraStr;
         hf += "</div></div>";
       });
       hf += "<div style='display:flex;justify-content:space-between;padding-top:.45rem;margin-top:.3rem;border-top:1px solid var(--bd);font-size:.82rem;font-weight:700'>";
@@ -15278,8 +15903,10 @@ function verClienteFicha(id){
     // Botones de acción CC (super poderes admin)
     h+="<div style='display:flex;gap:.4rem;flex-wrap:wrap;margin-bottom:.5rem'>";
     h+="<button class='btn btn-a' style='font-size:.72rem;padding:.4rem .65rem' onclick='admAbrirRegistrarPagoFIFO("+c.id+",&#39;"+_adminEscNomJS(nombre)+"&#39;)'>💰 Registrar pago</button>";
-    h+="<button class='btn btn-g' style='font-size:.72rem;padding:.4rem .65rem' onclick='admAbrirCuotaModal("+c.id+",&#39;"+_adminEscNomJS(nombre)+"&#39;)'>📅 Cuota</button>";
+    h+="<button class='btn btn-g' style='font-size:.72rem;padding:.4rem .65rem;color:var(--acc);border-color:var(--acc)' onclick='admAbrirCCConfig("+c.id+",&#39;"+_adminEscNomJS(nombre)+"&#39;)'>⚙️ Config CC</button>";
+    h+="<button class='btn btn-g' style='font-size:.72rem;padding:.4rem .65rem' onclick='admAbrirCuotaModal("+c.id+",&#39;"+_adminEscNomJS(nombre)+"&#39;)'>📅 Cuota rápida</button>";
     h+="<button class='btn btn-g' style='font-size:.72rem;padding:.4rem .65rem' onclick='_adminVerCC("+c.id+",&#39;"+_adminEscNomJS(nombre)+"&#39;)'>📋 Movimientos</button>";
+    h+="<button class='btn btn-g' style='font-size:.72rem;padding:.4rem .65rem' onclick='ccGenerarNotifWA("+c.id+",&quot;recordatorio&quot;)' title='Generar mensaje de WhatsApp con vencimientos próximos'>💬 Notif WA</button>";
     if(c.bloqueado){
       h+="<button class='btn btn-g' style='font-size:.72rem;padding:.4rem .65rem;color:var(--green);border-color:var(--green)' onclick='admDesbloquearCliente("+c.id+")'>✓ Desbloquear</button>";
     } else {
@@ -15287,9 +15914,34 @@ function verClienteFicha(id){
     }
     h+="</div>";
 
+    // Preview de modalidad CC (FEAT 2026-05-14)
+    var _ccMod = c.cc_modalidad || 'cuotas';
+    var _ccModLbl = _ccMod === 'resumen' ? '🔵 Resumen mensual' : '🟢 Crédito + cuotas';
+    var _ccDetalle = _ccMod === 'resumen' 
+      ? 'Cierre día '+(c.cc_dia_cierre||25)+' · Vence día '+(c.cc_dia_vencimiento||10)+' del mes siguiente'
+      : 'Plazo default: '+(c.cc_plazo_dias||30)+' días por pedido';
+    h+="<div style='background:rgba(196,150,90,.05);border:1px solid rgba(196,150,90,.25);border-radius:7px;padding:.5rem .65rem;margin-bottom:.5rem'>";
+    h+="<div style='display:flex;justify-content:space-between;align-items:center;gap:.5rem'>";
+    h+="<div>";
+    h+="<div style='font-size:.62rem;color:var(--tx3);text-transform:uppercase;font-weight:700;letter-spacing:.04em'>Modalidad</div>";
+    h+="<div style='font-size:.85rem;font-weight:700;color:var(--acc);margin-top:.1rem'>"+_ccModLbl+"</div>";
+    h+="<div style='font-size:.62rem;color:var(--tx3);margin-top:.1rem'>"+_ccDetalle+"</div>";
+    h+="</div>";
+    h+="<div style='text-align:right'>";
+    if(c.cc_tasa_mora_pct>0) h+="<div style='font-size:.6rem;color:var(--tx3)'>Mora: <b style='color:var(--yel)'>"+c.cc_tasa_mora_pct+"%/mes</b></div>";
+    if(c.cc_descuento_pronto_pct>0) h+="<div style='font-size:.6rem;color:var(--tx3)'>Desc: <b style='color:var(--green)'>"+c.cc_descuento_pronto_pct+"% en "+(c.cc_descuento_pronto_dias||10)+"d</b></div>";
+    if(c.cc_score != null){
+      var _sc = parseInt(c.cc_score);
+      var _scC = _sc>=80?'#22c55e':_sc>=50?'#fbbf24':'#ef4444';
+      h+="<div style='font-size:.6rem;color:var(--tx3);margin-top:.1rem'>Score: <b style='color:"+_scC+"'>"+_sc+"</b></div>";
+    }
+    h+="</div>";
+    h+="</div>";
+    h+="</div>";
+
     h+="<div><label style='"+labelStyle+"'>Límite de crédito ($)</label>";
     h+="<input type='number' id='_cfLim' value='"+(c.limite_credito||0)+"' style='"+inputStyle+"' placeholder='0'>";
-    h+="<div style='font-size:.6rem;color:var(--tx3);margin-top:.15rem'>Tope máximo de crédito asignado al cliente</div></div>";
+    h+="<div style='font-size:.6rem;color:var(--tx3);margin-top:.15rem'>Para config completa de modalidad/plazos/mora, usá el botón <b>⚙️ Config CC</b> arriba</div></div>";
     h+="</div>";
     h+="</div>";
 
