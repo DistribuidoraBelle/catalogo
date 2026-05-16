@@ -3596,6 +3596,72 @@ function _catModalConfirm(opts){
   document.addEventListener('keydown', escHandler);
 }
 
+// ════════════════════════════════════════════════════════════════════
+// SISTEMA "BOTÓN ATRÁS CIERRA MODAL" — diseño minimalista
+// ════════════════════════════════════════════════════════════════════
+// Cuando el cliente toca el botón "atrás" del celular (o Alt+← en PC),
+// queremos cerrar el modal activo en lugar de salir de la web.
+//
+// PRINCIPIOS DE DISEÑO (para evitar el bug que cerraba la web):
+// 1) JAMÁS llamamos history.back() programáticamente — eso era lo que
+//    en combinación con window.open de WhatsApp cerraba toda la web.
+// 2) Al abrir un modal hacemos UN history.pushState. La entrada queda
+//    en el historial.
+// 3) Si el user cierra con X (o por éxito de compra), NO tocamos el
+//    historial. La entrada queda "fantasma" hasta que toque atrás
+//    (entonces caerá ahí silenciosamente sin afectar nada).
+// 4) Si el user toca atrás: dispara popstate, nuestro listener cierra
+//    el modal del top. NO re-pusheamos nada.
+//
+// Trade-off aceptado: si abre y cierra modal varias veces sin tocar
+// atrás, quedan entradas fantasma en el historial. Cuando finalmente
+// toque atrás, va a "consumir" esas entradas (cada toque consume una)
+// y eventualmente saldrá de la web. Es feo pero NO ROMPE NADA.
+window._catModalStack = window._catModalStack || [];
+
+function _catModalBackRegistrar(modalId, fnCerrar){
+  // Agregar a la pila (LIFO)
+  window._catModalStack.push({id: modalId, cerrar: fnCerrar});
+  // SIEMPRE pushear una nueva entrada al abrir (sin esto, el botón atrás
+  // saldría de la web inmediatamente)
+  try { history.pushState({belleModal: modalId, t: Date.now()}, '', location.href); } catch(e){}
+}
+
+function _catModalBackDesregistrar(modalId){
+  // Sacar de la pila el modal que se cerró
+  var idx = -1;
+  for(var i = window._catModalStack.length - 1; i >= 0; i--){
+    if(window._catModalStack[i].id === modalId){ idx = i; break; }
+  }
+  if(idx >= 0) window._catModalStack.splice(idx, 1);
+  // FIX: si la entrada actual del historial es NUESTRA (tiene belleModal en el state),
+  // la "limpiamos" con replaceState — eso NO navega ni dispara popstate, solo reemplaza
+  // el state actual por uno vacío. Así si el user toca atrás después de cerrar
+  // el modal normalmente, NO consume nuestra entrada fantasma (ya la limpiamos)
+  // sino que va a la entrada real anterior.
+  try {
+    if(history.state && history.state.belleModal){
+      history.replaceState(null, '', location.href);
+    }
+  } catch(e){}
+}
+
+// Listener UNA SOLA VEZ
+if(!window._catModalBackListenerInstalled){
+  window._catModalBackListenerInstalled = true;
+  window.addEventListener('popstate', function(){
+    // Si hay modal abierto: cerrarlo en lugar de dejar que la página navegue atrás
+    if(window._catModalStack.length > 0){
+      var top = window._catModalStack[window._catModalStack.length - 1];
+      // Sacar de la pila ANTES de llamar al cerrar (evita doble-llamada si el cerrar
+      // intentara también desregistrar)
+      window._catModalStack.pop();
+      try { top.cerrar(); } catch(e){ console.error('[belle-cat] cerrar modal:', e); }
+    }
+    // Si no había modales, popstate continúa normal (sale al historial real)
+  });
+}
+
 function _catCobCerrarModal(){
   // Limpiar listener si todavía está activo
   if(window._catCobOnPedidoListener){
@@ -3609,6 +3675,8 @@ function _catCobCerrarModal(){
   }
   var mo = document.getElementById('_catMoCobro');
   if(mo) mo.remove();
+  // FIX 2026-05-15: desregistrar de la pila (botón atrás)
+  _catModalBackDesregistrar('_catMoCobro');
 }
 
 function _catAbrirModalCobro(dirs){
@@ -3787,6 +3855,18 @@ function _catRenderModalCobro(){
   // FIX 2026-05-15: click afuera ya NO cierra el modal (evita cierres accidentales).
   // Solo se cierra con la X. Esto es seguro y simple — sin manejo de historial.
   document.body.appendChild(mo);
+
+  // FIX 2026-05-15: registrar el modal para que el botón "atrás" del celular lo cierre
+  // (en lugar de salir de la web). Pasamos una función que respeta el overlay procesando.
+  _catModalBackRegistrar('_catMoCobro', function(){
+    // Si hay overlay "Procesando" activo, no cerrar el modal
+    if(document.getElementById('_catCobOverlay')) {
+      // Pero al haber consumido la entrada del historial, agregar una nueva para mantener el buffer
+      try { history.pushState({belleModal:'_catMoCobro', t:Date.now()}, '', location.href); } catch(e){}
+      return;
+    }
+    _catCobCerrarModal();
+  });
 
   // Pre-seleccionar dirección: principal si la hay, sino la única, sino la primera
   if(dirs.length){
@@ -4893,6 +4973,8 @@ function _catCobConfirmar(){
       // Éxito: cerrar el modal completo
       var moCerrar = document.getElementById('_catMoCobro');
       if(moCerrar) moCerrar.remove();
+      // FIX 2026-05-15: desregistrar de la pila del botón atrás (modal ya no está)
+      _catModalBackDesregistrar('_catMoCobro');
     } else {
       // Error: ocultar overlay y dejar el modal abierto para que el cliente reintente
       if(ov) ov.remove();
