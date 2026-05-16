@@ -15258,16 +15258,11 @@ function _ccRenderConfigModal(c, clienteNombre){
   h += "🔒 Cliente tiene cuotas pendientes — la frecuencia y modo NO se pueden cambiar hasta saldo en 0";
   h += "</div>";
 
-  // Plazo + límite
-  h += "<div style='display:grid;grid-template-columns:1fr 1fr;gap:.5rem;margin-bottom:.6rem'>";
-  h += "<div><label style='"+lbl+"'>Plazo default (días)</label>";
-  h += "<select id='_ccCfgPlazo' style='"+ip+"'>";
-  [15,30,45,60,90].forEach(function(p){
-    h += "<option value='"+p+"'"+((c.cc_plazo_dias||30)==p?' selected':'')+">"+p+" días</option>";
-  });
-  h += "</select></div>";
-  h += "<div><label style='"+lbl+"'>Límite de crédito ($)</label>";
-  h += "<input type='number' id='_ccCfgLim' value='"+(c.limite_credito||0)+"' min='0' style='"+ip+"'></div>";
+  // Límite de crédito (el plazo se calcula automáticamente del plan elegido)
+  h += "<div style='margin-bottom:.6rem'>";
+  h += "<label style='"+lbl+"'>Límite de crédito ($)</label>";
+  h += "<input type='number' id='_ccCfgLim' value='"+(c.limite_credito||0)+"' min='0' style='"+ip+"'>";
+  h += "<div style='font-size:.62rem;color:var(--tx3);margin-top:.3rem;font-style:italic'>El plazo se calcula automáticamente según el plan de cuotas elegido (frecuencia × cuotas).</div>";
   h += "</div>";
 
   // ─── FRECUENCIA FIJA ───
@@ -15590,11 +15585,21 @@ window._ccCfgGuardar = function(id){
   if(habilitada){
     data.cc_modalidad = modalidad;
     if(modalidad === 'cuotas'){
-      data.cc_plazo_dias = parseInt((document.getElementById('_ccCfgPlazo')||{value:30}).value) || 30;
+      // FIX 2026-05-16: calcular plazo automáticamente según frecuencia × max cuotas del plan
+      // Ya no se pide al usuario (campo "Plazo default" eliminado).
       data.limite_credito = parseFloat((document.getElementById('_ccCfgLim')||{value:0}).value) || 0;
       // FEAT 2026-05-14: frecuencia + modo + mora_modo + descuento_cuota
       var frec = (document.getElementById('_ccCfgFrec')||{value:''}).value;
       data.cc_frecuencia = frec || null;
+      // Plazo = frecuencia (días) × max cuotas habilitadas
+      // Si no hay frec o planes, fallback a 30 días
+      var diasPorPeriodo = {semanal:7, quincenal:15, mensual:30}[frec] || 30;
+      var maxCuotas = 1;
+      var planes = window._ccCfgPlanesActual || [];
+      planes.forEach(function(p){
+        if(p.nro_cuotas > maxCuotas) maxCuotas = p.nro_cuotas;
+      });
+      data.cc_plazo_dias = diasPorPeriodo * maxCuotas;
       if(frec === 'semanal' || frec === 'quincenal'){
         data.cc_dia_semana = parseInt((document.getElementById('_ccCfgDiaSem')||{value:5}).value);
         data.cc_dia_mes = null;
@@ -38134,6 +38139,23 @@ function fpUsarCotizSistema(){
 }
 .belle-clearx-btn:hover{background:rgba(0,0,0,.25)}
 .belle-clearx-btn.visible{display:flex}
+
+/* Ocultar X nativa del navegador (Safari, iOS, Edge) que aparece en inputs */
+input[data-bclx="1"]::-webkit-search-decoration,
+input[data-bclx="1"]::-webkit-search-cancel-button,
+input[data-bclx="1"]::-webkit-search-results-button,
+input[data-bclx="1"]::-webkit-search-results-decoration{
+  -webkit-appearance:none;
+  appearance:none;
+  display:none !important;
+}
+input[data-bclx="1"]::-ms-clear,
+input[data-bclx="1"]::-ms-reveal{
+  display:none !important;
+  width:0 !important;
+  height:0 !important;
+}
+input[type="search"][data-bclx="1"]{-webkit-appearance:textfield;appearance:textfield}
 </style>
 <script id="belleClearXScript">
 (function(){
@@ -38154,70 +38176,70 @@ function fpUsarCotizSistema(){
     return false;
   }
 
-  // Agrega la X a un input
+  // Agrega la X a un input — SIN mover el input en el DOM (evita pérdida de foco)
   function addClearX(inp){
     if(!inp || inp.dataset.bclx === '1') return;
     inp.dataset.bclx = '1';
-    // Necesitamos un wrapper relative. Si el padre ya es relative, lo aprovechamos.
     var parent = inp.parentElement;
     if(!parent) return;
     var parentStyle = window.getComputedStyle(parent);
-    var wrap;
-    if(parentStyle.position === 'relative' || parentStyle.position === 'absolute' || parentStyle.position === 'fixed'){
-      // Reusar el padre como wrap
-      wrap = parent;
-    } else {
-      // Crear wrapper alrededor del input
-      wrap = document.createElement('span');
-      wrap.className = 'belle-clearx-wrap';
-      // Mantener flex inheritance si aplica
-      var inpStyle = window.getComputedStyle(inp);
-      if(inpStyle.width === '100%' || inp.style.width === '100%') wrap.style.display = 'block';
-      parent.insertBefore(wrap, inp);
-      wrap.appendChild(inp);
+    if(parentStyle.position === 'static'){
+      parent.style.position = 'relative';
     }
-    // Crear botón X
     var btn = document.createElement('button');
     btn.type = 'button';
     btn.className = 'belle-clearx-btn';
     btn.innerHTML = '×';
     btn.setAttribute('aria-label','Limpiar búsqueda');
     btn.tabIndex = -1;
-    // Insertar después del input
+    btn.style.position = 'absolute';
     if(inp.nextSibling){
-      inp.parentNode.insertBefore(btn, inp.nextSibling);
+      parent.insertBefore(btn, inp.nextSibling);
     } else {
-      inp.parentNode.appendChild(btn);
+      parent.appendChild(btn);
     }
-    // Mostrar/ocultar según si hay contenido
+    function positionBtn(){
+      var inpRect = inp.getBoundingClientRect();
+      var parentRect = parent.getBoundingClientRect();
+      var rightOffset = parentRect.right - inpRect.right + 8;
+      var topOffset = (inpRect.top + inpRect.height/2 - parentRect.top);
+      btn.style.right = rightOffset + 'px';
+      btn.style.top = topOffset + 'px';
+      btn.style.transform = 'translateY(-50%)';
+    }
     function updateVisibility(){
-      if(inp.value && inp.value.length > 0) btn.classList.add('visible');
-      else btn.classList.remove('visible');
+      if(inp.value && inp.value.length > 0){
+        positionBtn();
+        btn.classList.add('visible');
+      } else {
+        btn.classList.remove('visible');
+      }
     }
     updateVisibility();
-    // Listener para mantener visibilidad sincronizada
     inp.addEventListener('input', updateVisibility);
     inp.addEventListener('change', updateVisibility);
-    // Click en X: limpiar y disparar input
+    inp.addEventListener('focus', updateVisibility);
+    window.addEventListener('resize', function(){if(btn.classList.contains('visible')) positionBtn();});
     btn.addEventListener('click', function(e){
       e.preventDefault();
       e.stopPropagation();
       inp.value = '';
       btn.classList.remove('visible');
-      // Disparar 'input' para que cualquier listener se actualice
       try {
         var ev = new Event('input', {bubbles: true});
         inp.dispatchEvent(ev);
       } catch(err){
-        // Fallback para browsers viejos
         var ev2 = document.createEvent('Event');
         ev2.initEvent('input', true, true);
         inp.dispatchEvent(ev2);
       }
-      // Ejecutar el oninput si existe (algunos no escuchan el evento estándar)
       if(typeof inp.oninput === 'function') inp.oninput.call(inp);
       inp.focus();
     });
+    var curPadRight = parseFloat(window.getComputedStyle(inp).paddingRight) || 0;
+    if(curPadRight < 28){
+      inp.style.paddingRight = '28px';
+    }
   }
 
   // Procesa todos los inputs candidatos del DOM
