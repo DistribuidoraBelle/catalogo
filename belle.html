@@ -10578,15 +10578,46 @@ function pendienteAgregarStock(itemId,prodId,cantOk,cantFallada){
   var p=prods.find(function(x){return x.id===prodId;});
   if(!p){toast("Producto no encontrado","terr");return;}
   if(!confirm("Agregar "+cantOk+" u. de "+p.nombre+" al stock?"))return;
-  Promise.all([
-    patchStockFresco(prodId,{stock_actual:+cantOk,en_viaje:-(cantOk+cantFallada)},'Recepcion pendiente'),
-    apiPatch("pedidos_proveedor_items",{estado_item:"recibido"},"id=eq."+itemId),
-    apiPost("movimientos_stock",{producto_id:prodId,producto_nombre:p.nombre,tipo:"entrada",cantidad:cantOk,motivo:"Recepcion pendiente catalogo",created_at:new Date().toISOString()}).catch(function(e){console.error("[belle] error silencioso:",e);})
-  ]).then(function(){
-    toast("Stock actualizado","tok");
-    loadPendientesCatalogo();
-    renderStock();
-  }).catch(function(){toast("Error","terr");});
+
+  // FIX 2026-05-16: guard de idempotencia (previene duplicaciones por doble-click o race)
+  // Leer item fresco para verificar estado_item ANTES de sumar
+  return apiGet("pedidos_proveedor_items","select=id,cantidad_pedida,estado_item&id=eq."+itemId).then(function(rows){
+    var item = rows && rows[0];
+    if(!item){toast("Item no encontrado","terr");return;}
+
+    // Si ya está procesado, abortar y loggear
+    if(item.estado_item === 'recibido' || item.estado_item === 'en_stock'){
+      toast("Este item ya fue agregado al stock anteriormente","twarn");
+      _logAct('intento_agregar_stock_duplicado_pendiente', {item_id:itemId, estado_actual:item.estado_item, prod_id:prodId, cant:cantOk});
+      return;
+    }
+
+    // Marcar item como 'recibido' ANTES de sumar — con filtro de estado para idempotencia BD
+    return apiPatch("pedidos_proveedor_items",
+      {estado_item:"recibido"},
+      "id=eq."+itemId+"&estado_item=in.(macheado,controlado,borrador_match,nuevo,pendiente_catalogo,faltante,parcial)"
+    ).then(function(){
+      // Re-leer para confirmar que el patch tuvo efecto (otro proceso podría haber ganado la carrera)
+      return apiGet("pedidos_proveedor_items","select=estado_item&id=eq."+itemId+"&limit=1");
+    }).then(function(check){
+      var estadoActual = check && check[0] && check[0].estado_item;
+      if(estadoActual !== 'recibido'){
+        toast("Otro proceso ya marcó el item — abortando","twarn");
+        _logAct('agregar_stock_carrera_perdida', {item_id:itemId, estado_actual:estadoActual});
+        return;
+      }
+      // Ahora sí, sumar al stock
+      return Promise.all([
+        patchStockFresco(prodId,{stock_actual:+cantOk,en_viaje:-(cantOk+cantFallada)},'Recepcion pendiente'),
+        apiPost("movimientos_stock",{producto_id:prodId,producto_nombre:p.nombre,tipo:"entrada",cantidad:cantOk,motivo:"Recepcion pendiente catalogo",created_at:new Date().toISOString()}).catch(function(e){console.error("[belle] error silencioso:",e);})
+      ]).then(function(){
+        toast("Stock actualizado","tok");
+        _logAct('agregar_stock_pendiente', {item_id:itemId, producto_id:prodId, cantidad:cantOk});
+        loadPendientesCatalogo();
+        renderStock();
+      });
+    });
+  }).catch(function(e){toast("Error: "+(e.message||""),"terr");console.error(e);});
 }
 
 
@@ -11189,11 +11220,14 @@ function guardarNuevoProdFromModal(){
   var pestTab=pestanasStk&&pestanasStk.find(function(t){return t.slug===catCat;});
   var pestId=pestTab?pestTab.id:null;
 
+  // FIX 2026-05-16 (bug duplicación stock): crear producto con stock=0.
+  // El stock real lo agrega _doAgregarAlStock al final del flujo (única fuente de verdad).
+  // Antes: se creaba con stock=qty Y después se patcheaba a qty otra vez → loops/duplicaciones.
   var data={
     nombre:nombre,empresa:empresa,cat:cat,cat_catalogo:catCat,pestana_id:pestId,
     genero:({M:"\u2642 Masculino",F:"\u2640 Femenino",U:"Unisex"}[gen]||gen),
     costo_ind:ci,costo_log:3,gan_usd_may:gm,precio_may_ars:pm,precio_med_ars:0,precio_min_ars:0,
-    stock_actual:qty,stock_orig:qty,vendido_david:0,deposito_m:0,reserva:0,
+    stock_actual:0,stock_orig:0,vendido_david:0,deposito_m:0,reserva:0,
     en_viaje:0,activo:true,precio_decan:0,
     notas:notas||"",descripcion:desc||null,
     imagen_url:foto,
@@ -11205,21 +11239,11 @@ function guardarNuevoProdFromModal(){
     if(newId&&window._currNewProdItem){
       var itemId=window._currNewProdItem.item.id;
       var itemQty=window._currNewProdItem.recibido||qty||1;
+      // Solo macheamos el item — el stock se agrega después en _doAgregarAlStock
       apiPatch("pedidos_proveedor_items",{
         producto_id:newId,es_nuevo:false,
         estado_item:"macheado",cantidad_recibida:itemQty
-      },"id=eq."+itemId).then(function(){
-        var newProd=prods.find(function(p){return p.id===newId;});
-        if(!newProd){prods.push({id:newId,nombre:nombre,empresa:empresa,stock_actual:qty,en_viaje:0});}
-        else{newProd.stock_actual=qty;newProd.en_viaje=0;}
-        apiPatch("productos",{stock_actual:qty,en_viaje:0},"id=eq."+newId).then(function(){
-          // FIX 3 (2026-05-11): loguear alta de nuevo producto con stock inicial
-          _logMovStock({pid:newId,nombre:nombre,
-            tipo:'entrada',cantidad:qty,
-            stockAntes:0,stockDespues:qty,
-            motivo:'Alta de producto nuevo desde recepción pedido proveedor (item '+itemId+')'});
-        });
-      });
+      },"id=eq."+itemId);
     }
     toast("Producto agregado al catalogo","tok");
     // Hide banner
@@ -15258,12 +15282,15 @@ function _ccRenderConfigModal(c, clienteNombre){
   h += "🔒 Cliente tiene cuotas pendientes — la frecuencia y modo NO se pueden cambiar hasta saldo en 0";
   h += "</div>";
 
-  // Límite de crédito (el plazo se calcula automáticamente del plan elegido)
-  h += "<div style='margin-bottom:.6rem'>";
-  h += "<label style='"+lbl+"'>Límite de crédito ($)</label>";
-  h += "<input type='number' id='_ccCfgLim' value='"+(c.limite_credito||0)+"' min='0' style='"+ip+"'>";
-  h += "<div style='font-size:.62rem;color:var(--tx3);margin-top:.3rem;font-style:italic'>El plazo se calcula automáticamente según el plan de cuotas elegido (frecuencia × cuotas).</div>";
+  // Límite de crédito + Plazo para planes de 1 sola cuota
+  h += "<div style='display:grid;grid-template-columns:1fr 1fr;gap:.5rem;margin-bottom:.6rem'>";
+  h += "<div><label style='"+lbl+"'>Límite de crédito ($)</label>";
+  h += "<input type='number' id='_ccCfgLim' value='"+(c.limite_credito||0)+"' min='0' style='"+ip+"'></div>";
+  h += "<div><label style='"+lbl+"'>Plazo para 1 cuota (días)</label>";
+  h += "<input type='number' id='_ccCfgPlazo1' value='"+(c.cc_plazo_dias||30)+"' min='1' max='365' style='"+ip+"'>";
   h += "</div>";
+  h += "</div>";
+  h += "<div style='font-size:.62rem;color:var(--tx3);margin-bottom:.6rem;font-style:italic;padding:.4rem .55rem;background:var(--sur2);border-radius:5px;border-left:2px solid var(--acc)'>📌 Para planes con <b>+1 cuota</b>, el plazo se calcula automáticamente según frecuencia × cuotas. El campo \"Plazo para 1 cuota\" se aplica solo cuando el cliente elige un plan de una sola cuota.</div>";
 
   // ─── FRECUENCIA FIJA ───
   h += "<div style='background:var(--sur2);border:1px solid var(--bd);border-radius:7px;padding:.65rem;margin-bottom:.6rem'>";
@@ -15331,15 +15358,35 @@ function _ccRenderConfigModal(c, clienteNombre){
   h += "<div style='background:var(--sur2);border:1px solid var(--bd);border-radius:7px;padding:.65rem;margin-bottom:.6rem'>";
   h += "<div style='font-size:.65rem;color:var(--acc);text-transform:uppercase;font-weight:700;margin-bottom:.4rem'>⚠️ Aplicación de mora</div>";
   var moraModo = c.cc_mora_modo || 'cuota';
-  h += "<div style='display:grid;grid-template-columns:1fr 1fr 1fr;gap:.4rem'>";
+  h += "<div id='_ccMoraModoWrap' style='display:grid;grid-template-columns:1fr 1fr 1fr;gap:.4rem'>";
   [
     {v:'cuota',  lbl:'Por cuota',    desc:'Sobre cuota individual vencida'},
     {v:'pedido', lbl:'Por pedido',   desc:'Cuando el pedido entero vence'},
     {v:'ambas',  lbl:'Ambas',        desc:'Lo que más alto resulte'}
   ].forEach(function(m){
-    h += "<label style='cursor:pointer;padding:.45rem;border:1px solid "+(moraModo===m.v?'var(--acc)':'var(--bd)')+";border-radius:6px;background:"+(moraModo===m.v?'rgba(196,150,90,.08)':'var(--sur)')+";text-align:center'>";
+    h += "<label id='_ccMoraOp_"+m.v+"' onclick='_ccSelMora(\""+m.v+"\")' style='cursor:pointer;padding:.45rem;border:1px solid "+(moraModo===m.v?'var(--acc)':'var(--bd)')+";border-radius:6px;background:"+(moraModo===m.v?'rgba(196,150,90,.08)':'var(--sur)')+";text-align:center'>";
     h += "<input type='radio' name='_ccMoraModo' value='"+m.v+"' "+(moraModo===m.v?'checked':'')+" style='display:none'>";
-    h += "<div style='font-size:.72rem;font-weight:600;color:"+(moraModo===m.v?'var(--acc)':'var(--tx)')+"'>"+m.lbl+"</div>";
+    h += "<div class='_ccMoraOp_lbl' style='font-size:.72rem;font-weight:600;color:"+(moraModo===m.v?'var(--acc)':'var(--tx)')+"'>"+m.lbl+"</div>";
+    h += "<div style='font-size:.58rem;color:var(--tx3);margin-top:.15rem'>"+m.desc+"</div>";
+    h += "</label>";
+  });
+  h += "</div>";
+  h += "</div>";
+
+  // ─── BLOQUEO POR ATRASO ─── (FEAT 2026-05-16)
+  var bloqMode = c.cc_bloqueo_atraso || 'ninguno';
+  h += "<div style='background:var(--sur2);border:1px solid var(--bd);border-radius:7px;padding:.65rem;margin-bottom:.6rem'>";
+  h += "<div style='font-size:.65rem;color:var(--acc);text-transform:uppercase;font-weight:700;margin-bottom:.4rem'>🚫 Bloquear compras por atraso</div>";
+  h += "<div style='font-size:.62rem;color:var(--tx3);margin-bottom:.4rem;font-style:italic'>Si el cliente tiene una cuota o pedido vencido sin pagar, no podrá hacer nuevos pedidos aunque tenga crédito disponible.</div>";
+  h += "<div id='_ccBloqAtrasoWrap' style='display:grid;grid-template-columns:1fr 1fr 1fr;gap:.4rem'>";
+  [
+    {v:'ninguno', lbl:'Sin bloqueo',  desc:'Puede comprar siempre que tenga crédito'},
+    {v:'cuota',   lbl:'Por cuota',    desc:'Bloquear si tiene cuota vencida'},
+    {v:'pedido',  lbl:'Por pedido',   desc:'Bloquear si tiene pedido vencido entero'}
+  ].forEach(function(m){
+    h += "<label id='_ccBloqOp_"+m.v+"' onclick='_ccSelBloq(\""+m.v+"\")' style='cursor:pointer;padding:.45rem;border:1px solid "+(bloqMode===m.v?'var(--red)':'var(--bd)')+";border-radius:6px;background:"+(bloqMode===m.v?'rgba(220,60,60,.08)':'var(--sur)')+";text-align:center'>";
+    h += "<input type='radio' name='_ccBloqAtraso' value='"+m.v+"' "+(bloqMode===m.v?'checked':'')+" style='display:none'>";
+    h += "<div class='_ccBloqOp_lbl' style='font-size:.72rem;font-weight:600;color:"+(bloqMode===m.v?'var(--red)':'var(--tx)')+"'>"+m.lbl+"</div>";
     h += "<div style='font-size:.58rem;color:var(--tx3);margin-top:.15rem'>"+m.desc+"</div>";
     h += "</label>";
   });
@@ -15524,6 +15571,49 @@ window._ccCfgUpdateDia = function(frec){
   }
 };
 
+// FIX 2026-05-16: selector visual de "Aplicación de mora" — re-renderiza los borders al elegir
+window._ccSelMora = function(val){
+  // Update visual de todos los 3 options
+  ['cuota','pedido','ambas'].forEach(function(v){
+    var lbl = document.getElementById('_ccMoraOp_'+v);
+    if(!lbl) return;
+    var radio = lbl.querySelector('input[type="radio"]');
+    var titleDiv = lbl.querySelector('._ccMoraOp_lbl');
+    if(v === val){
+      lbl.style.border = '1px solid var(--acc)';
+      lbl.style.background = 'rgba(196,150,90,.08)';
+      if(titleDiv) titleDiv.style.color = 'var(--acc)';
+      if(radio) radio.checked = true;
+    } else {
+      lbl.style.border = '1px solid var(--bd)';
+      lbl.style.background = 'var(--sur)';
+      if(titleDiv) titleDiv.style.color = 'var(--tx)';
+      if(radio) radio.checked = false;
+    }
+  });
+};
+
+// FEAT 2026-05-16: selector visual de "Bloqueo por atraso"
+window._ccSelBloq = function(val){
+  ['ninguno','cuota','pedido'].forEach(function(v){
+    var lbl = document.getElementById('_ccBloqOp_'+v);
+    if(!lbl) return;
+    var radio = lbl.querySelector('input[type="radio"]');
+    var titleDiv = lbl.querySelector('._ccBloqOp_lbl');
+    if(v === val){
+      lbl.style.border = '1px solid var(--red)';
+      lbl.style.background = 'rgba(220,60,60,.08)';
+      if(titleDiv) titleDiv.style.color = 'var(--red)';
+      if(radio) radio.checked = true;
+    } else {
+      lbl.style.border = '1px solid var(--bd)';
+      lbl.style.background = 'var(--sur)';
+      if(titleDiv) titleDiv.style.color = 'var(--tx)';
+      if(radio) radio.checked = false;
+    }
+  });
+};
+
 // FEAT 2026-05-14: render lista de planes de cuotas habilitados
 window._ccCfgRenderPlanes = function(){
   var lista = document.getElementById('_ccCfgPlanesLista');
@@ -15585,21 +15675,25 @@ window._ccCfgGuardar = function(id){
   if(habilitada){
     data.cc_modalidad = modalidad;
     if(modalidad === 'cuotas'){
-      // FIX 2026-05-16: calcular plazo automáticamente según frecuencia × max cuotas del plan
-      // Ya no se pide al usuario (campo "Plazo default" eliminado).
+      // FIX 2026-05-16: lógica del plazo:
+      //   - Si max cuotas habilitadas = 1 → usar el valor manual del campo "_ccCfgPlazo1"
+      //   - Si max cuotas > 1 → calcular auto: frecuencia × maxCuotas
       data.limite_credito = parseFloat((document.getElementById('_ccCfgLim')||{value:0}).value) || 0;
-      // FEAT 2026-05-14: frecuencia + modo + mora_modo + descuento_cuota
       var frec = (document.getElementById('_ccCfgFrec')||{value:''}).value;
       data.cc_frecuencia = frec || null;
-      // Plazo = frecuencia (días) × max cuotas habilitadas
-      // Si no hay frec o planes, fallback a 30 días
-      var diasPorPeriodo = {semanal:7, quincenal:15, mensual:30}[frec] || 30;
-      var maxCuotas = 1;
       var planes = window._ccCfgPlanesActual || [];
+      var maxCuotas = 1;
       planes.forEach(function(p){
         if(p.nro_cuotas > maxCuotas) maxCuotas = p.nro_cuotas;
       });
-      data.cc_plazo_dias = diasPorPeriodo * maxCuotas;
+      if(maxCuotas <= 1){
+        // Plazo manual del campo
+        data.cc_plazo_dias = parseInt((document.getElementById('_ccCfgPlazo1')||{value:30}).value) || 30;
+      } else {
+        // Plazo automático según frecuencia × cuotas
+        var diasPorPeriodo = {semanal:7, quincenal:15, mensual:30}[frec] || 30;
+        data.cc_plazo_dias = diasPorPeriodo * maxCuotas;
+      }
       if(frec === 'semanal' || frec === 'quincenal'){
         data.cc_dia_semana = parseInt((document.getElementById('_ccCfgDiaSem')||{value:5}).value);
         data.cc_dia_mes = null;
@@ -15613,6 +15707,7 @@ window._ccCfgGuardar = function(id){
       data.cc_modo_cuotas = (document.querySelector('input[name="_ccModoCuotas"]:checked')||{value:'iguales'}).value;
       data.cc_entrega_inicial_pct = parseFloat((document.getElementById('_ccCfgEntregaPct')||{value:0}).value) || 0;
       data.cc_mora_modo = (document.querySelector('input[name="_ccMoraModo"]:checked')||{value:'cuota'}).value;
+      data.cc_bloqueo_atraso = (document.querySelector('input[name="_ccBloqAtraso"]:checked')||{value:'ninguno'}).value;
       data.cc_descuento_cuota_pct = parseFloat((document.getElementById('_ccCfgDescCuota')||{value:0}).value) || 0;
     } else {
       data.cc_dia_cierre = Math.max(1, Math.min(28, parseInt((document.getElementById('_ccCfgCierre')||{value:25}).value) || 25));
@@ -19532,12 +19627,15 @@ function guardarNuevoProd(){
   if(!empresa){empresa=nombre.split(" ")[0]||"SIN MARCA";document.getElementById("npEmpresa").value=empresa;}
   if(!pm&&(!ci||!gm)){toast("Debes ingresar precio manual o costo+ganancia","twarn");return;}
 
+  // FIX 2026-05-16 (bug duplicación stock): crear producto con stock=0.
+  // El stock real lo agrega _doAgregarAlStock al final del flujo (única fuente de verdad).
+  // Antes: se creaba con stock=qty Y después se sumaba otra qty → doble stock.
   var data={
     nombre:nombre,empresa:empresa,
     cat:"S",cat_catalogo:document.getElementById("npCatCatalogo")?document.getElementById("npCatCatalogo").value:"internacionales",
     costo_ind:ci,gan_usd_may:gm,
     precio_may_ars:pm,precio_med_ars:0,precio_min_ars:0,
-    stock_actual:qty,stock_orig:qty,en_viaje:0,
+    stock_actual:0,stock_orig:0,en_viaje:0,
     activo:true,precio_decan:0,
     notas:document.getElementById("npNotas").value||"",
     acordes:"[]",
@@ -19546,7 +19644,8 @@ function guardarNuevoProd(){
 
   apiPost("productos",data).then(function(res){
     var newId=res&&res[0]?res[0].id:null;
-    // Update item with new product_id
+    // Update item with new product_id — pero NO sumamos stock acá.
+    // _doAgregarAlStock se encarga de eso al final, con todos los guards de idempotencia.
     if(newId&&window._currNewProdItem){
       var itemId=window._currNewProdItem.item.id;
       var itemQty=window._currNewProdItem.recibido||1;
@@ -19554,24 +19653,7 @@ function guardarNuevoProd(){
         producto_id:newId,es_nuevo:false,
         estado_item:"macheado",
         cantidad_recibida:itemQty
-      },"id=eq."+itemId).then(function(){
-        // Also add to stock immediately
-        var newProd=prods.find(function(p){return p.id===newId;});
-        if(newProd){
-          var stockAntes=newProd.stock_actual||0;
-          var enViajeAntes=newProd.en_viaje||0;
-          var ns=stockAntes+itemQty;
-          var nv=Math.max(0,enViajeAntes-itemQty);
-          newProd.stock_actual=ns;newProd.en_viaje=nv;
-          apiPatch("productos",{stock_actual:ns,en_viaje:nv},"id=eq."+newId).then(function(){
-            // FIX 3 (2026-05-11): loguear ingreso de producto nuevo al stock
-            _logMovStock({pid:newId,nombre:newProd.nombre||('Prod #'+newId),
-              tipo:'entrada',cantidad:itemQty,
-              stockAntes:stockAntes,stockDespues:ns,
-              motivo:'Ingreso producto nuevo desde recepción pedido proveedor (item '+itemId+')'});
-          });
-        }
-      });
+      },"id=eq."+itemId);
     }
     toast("Producto agregado al catalogo","tok");
     cerrarModal("moNuevoProd");
@@ -19581,9 +19663,8 @@ function guardarNuevoProd(){
     if(_newProdsQueue.length>0){
       setTimeout(procesarNuevoProducto,200);
     } else if(window._pendingStockPedidoId){
-      // All new products configured - now add to stock
+      // All new products configured - now add to stock (única fuente de verdad)
       var pid=window._pendingStockPedidoId;
-      var pitems=window._pendingStockItems;
       window._pendingStockPedidoId=null;
       window._pendingStockItems=null;
       setTimeout(function(){

@@ -3255,7 +3255,7 @@ function sendWA(){
   // Hago fetch FRESCO del cliente para usar el límite actualizado
   // (por si admin modificó el límite mientras el cliente navegaba)
   if(_catCliente.cuenta_corriente_habilitada){
-    apiGet("clientes","select=cuenta_corriente_habilitada,limite_credito,bloqueado&id=eq."+_catCliente.id+"&limit=1").then(function(rowsCli){
+    apiGet("clientes","select=cuenta_corriente_habilitada,limite_credito,bloqueado,cc_bloqueo_atraso,cc_mora_modo&id=eq."+_catCliente.id+"&limit=1").then(function(rowsCli){
       var cliFresh = (Array.isArray(rowsCli)&&rowsCli[0]) ? rowsCli[0] : null;
       if(!cliFresh){
         // No se pudo verificar: continuar (no bloquear)
@@ -3273,47 +3273,26 @@ function sendWA(){
         _sendWAContinuar();
         return;
       }
-      var limiteCredito = parseFloat(cliFresh.limite_credito) || 0;
-      if(limiteCredito <= 0){
-        // Sin límite definido: continuar
-        _sendWAContinuar();
+      // FEAT 2026-05-16: bloqueo por atraso en pago (cuota o pedido vencido)
+      var bloqMode = cliFresh.cc_bloqueo_atraso || 'ninguno';
+      if(bloqMode !== 'ninguno'){
+        // Chequear si tiene cuotas o pedidos vencidos sin pagar
+        _catChequearAtraso(_catCliente.id, bloqMode).then(function(atrasoInfo){
+          if(atrasoInfo && atrasoInfo.bloquear){
+            _catModalAtrasoBloqueo(atrasoInfo);
+            return;
+          }
+          // No hay atraso → seguir con el chequeo de crédito
+          _catValidarCreditoYContinuar(cliFresh, items);
+        }).catch(function(e){
+          console.error("[CC] error chequeando atraso:", e);
+          // Si falla, no bloquear (continuar con chequeo de crédito normal)
+          _catValidarCreditoYContinuar(cliFresh, items);
+        });
         return;
       }
-      // Calcular crédito ya usado
-      apiGet("pedidos_catalogo",
-        "select=total,cobrado_total,estado&cliente_id=eq."+_catCliente.id+
-        "&estado=not.in.(cancelado,cobrado)"
-      ).then(function(pedActivos){
-        var totalActivos = 0, totalCobrado = 0;
-        if(Array.isArray(pedActivos)){
-          pedActivos.forEach(function(p){
-            totalActivos += parseFloat(p.total) || 0;
-            totalCobrado += parseFloat(p.cobrado_total) || 0;
-          });
-        }
-        var creditoUsado = Math.max(0, totalActivos - totalCobrado);
-        var creditoDisponible = limiteCredito - creditoUsado;
-        // Total del nuevo pedido
-        var totalNuevoPedido = items.reduce(function(s, it){
-          return s + (parseFloat(it.precio||0) * parseInt(it.qty||0));
-        }, 0);
-        if(totalNuevoPedido > creditoDisponible + 0.01){
-          // Cartel detallado bloqueando el pedido
-          _catModalCreditoExcedido({
-            credito_total: limiteCredito,
-            credito_usado: creditoUsado,
-            credito_disponible: Math.max(0, creditoDisponible),
-            total_pedido: totalNuevoPedido,
-            excede_por: totalNuevoPedido - creditoDisponible
-          });
-          return;
-        }
-        // Pasó la validación
-        _sendWAContinuar();
-      }).catch(function(e){
-        console.error("[CC] error validando crédito:", e);
-        _sendWAContinuar();
-      });
+      // No tiene bloqueo configurado → ir directo al chequeo de crédito
+      _catValidarCreditoYContinuar(cliFresh, items);
     }).catch(function(e){
       console.error("[CC] error consultando cliente:", e);
       _sendWAContinuar();
@@ -3322,6 +3301,125 @@ function sendWA(){
   }
   // No tiene CC habilitada: flujo normal
   _sendWAContinuar();
+}
+
+// FEAT 2026-05-16: chequea si el cliente tiene cuotas o pedidos vencidos sin pagar
+// Retorna {bloquear: bool, motivo: 'cuota'|'pedido', items: [...]}
+function _catChequearAtraso(clienteId, bloqMode){
+  var hoy = new Date(); hoy.setHours(0,0,0,0);
+  var hoyISO = hoy.toISOString().slice(0,10);
+  if(bloqMode === 'cuota'){
+    // Buscar cuotas vencidas sin pagar (cc_cuotas con fecha_vencimiento < hoy y pagada=false)
+    return apiGet("cc_cuotas",
+      "select=id,nro_cuota,monto,monto_pagado,fecha_vencimiento,pedido_id&cliente_id=eq."+clienteId+
+      "&pagada=eq.false&fecha_vencimiento=lt."+hoyISO+"&limit=20"
+    ).then(function(rows){
+      if(!Array.isArray(rows) || !rows.length) return {bloquear:false};
+      return {bloquear:true, motivo:'cuota', items:rows};
+    });
+  } else if(bloqMode === 'pedido'){
+    // Buscar pedidos con fecha_vencimiento_pago < hoy y sin cobrar
+    return apiGet("pedidos_catalogo",
+      "select=id,nro_orden,total,cobrado_total,fecha_vencimiento_pago&cliente_id=eq."+clienteId+
+      "&estado=not.in.(cancelado,cobrado)&fecha_vencimiento_pago=lt."+hoyISO+"&limit=20"
+    ).then(function(rows){
+      if(!Array.isArray(rows) || !rows.length) return {bloquear:false};
+      // Filtrar los que tienen saldo > 0
+      var conSaldo = rows.filter(function(p){
+        return (parseFloat(p.total)||0) > (parseFloat(p.cobrado_total)||0);
+      });
+      if(!conSaldo.length) return {bloquear:false};
+      return {bloquear:true, motivo:'pedido', items:conSaldo};
+    });
+  }
+  return Promise.resolve({bloquear:false});
+}
+
+// Helper: extrae el chequeo de crédito a una función reusable
+function _catValidarCreditoYContinuar(cliFresh, items){
+  var limiteCredito = parseFloat(cliFresh.limite_credito) || 0;
+  if(limiteCredito <= 0){
+    // Sin límite definido: continuar
+    _sendWAContinuar();
+    return;
+  }
+  // Calcular crédito ya usado
+  apiGet("pedidos_catalogo",
+    "select=total,cobrado_total,estado&cliente_id=eq."+_catCliente.id+
+    "&estado=not.in.(cancelado,cobrado)"
+  ).then(function(pedActivos){
+    var totalActivos = 0, totalCobrado = 0;
+    if(Array.isArray(pedActivos)){
+      pedActivos.forEach(function(p){
+        totalActivos += parseFloat(p.total) || 0;
+        totalCobrado += parseFloat(p.cobrado_total) || 0;
+      });
+    }
+    var creditoUsado = Math.max(0, totalActivos - totalCobrado);
+    var creditoDisponible = limiteCredito - creditoUsado;
+    var totalNuevoPedido = items.reduce(function(s, it){
+      return s + (parseFloat(it.precio||0) * parseInt(it.qty||0));
+    }, 0);
+    if(totalNuevoPedido > creditoDisponible + 0.01){
+      _catModalCreditoExcedido({
+        credito_total: limiteCredito,
+        credito_usado: creditoUsado,
+        credito_disponible: Math.max(0, creditoDisponible),
+        total_pedido: totalNuevoPedido,
+        excede_por: totalNuevoPedido - creditoDisponible
+      });
+      return;
+    }
+    _sendWAContinuar();
+  }).catch(function(e){
+    console.error("[CC] error validando crédito:", e);
+    _sendWAContinuar();
+  });
+}
+
+// Modal que muestra el bloqueo por atraso de pago
+function _catModalAtrasoBloqueo(info){
+  var existing = document.getElementById('_catMoAtraso');
+  if(existing) existing.remove();
+  var mo = document.createElement('div');
+  mo.id = '_catMoAtraso';
+  mo.style.cssText = 'position:fixed;inset:0;background:rgba(20,15,8,.75);z-index:1300;display:flex;align-items:center;justify-content:center;padding:1rem';
+  var fmt = function(n){ return '$' + (parseFloat(n)||0).toLocaleString('es-AR',{maximumFractionDigits:0}); };
+  var cantPend = info.items.length;
+  var totalPend = 0;
+  info.items.forEach(function(it){
+    if(info.motivo === 'cuota'){
+      totalPend += (parseFloat(it.monto)||0) - (parseFloat(it.monto_pagado)||0);
+    } else {
+      totalPend += (parseFloat(it.total)||0) - (parseFloat(it.cobrado_total)||0);
+    }
+  });
+  var titulo = info.motivo === 'cuota'
+    ? 'Tenés ' + cantPend + ' cuota' + (cantPend>1?'s':'') + ' vencida' + (cantPend>1?'s':'') + ' sin pagar'
+    : 'Tenés ' + cantPend + ' pedido' + (cantPend>1?'s':'') + ' vencido' + (cantPend>1?'s':'') + ' sin pagar';
+  mo.innerHTML =
+    '<div style="background:#fff;border-radius:14px;max-width:420px;width:100%;padding:1.4rem;box-shadow:0 8px 40px rgba(0,0,0,.3);text-align:center">' +
+      '<div style="font-size:2.5rem;margin-bottom:.4rem">🚫</div>' +
+      '<div style="font-size:1.1rem;font-weight:700;color:#c5443a;margin-bottom:.6rem">No podés hacer pedidos nuevos</div>' +
+      '<div style="font-size:.92rem;color:#1a1a1a;margin-bottom:.8rem;line-height:1.5">' + titulo + '.</div>' +
+      '<div style="background:#fdf0ee;border:1px solid #f5c0bb;border-radius:8px;padding:.7rem .8rem;margin-bottom:1rem">' +
+        '<div style="font-size:.7rem;color:#888;text-transform:uppercase;letter-spacing:.05em;margin-bottom:.3rem">Saldo pendiente</div>' +
+        '<div style="font-size:1.4rem;font-weight:700;color:#c5443a">' + fmt(totalPend) + '</div>' +
+      '</div>' +
+      '<div style="font-size:.82rem;color:#555;margin-bottom:1.1rem;line-height:1.55">Para poder hacer nuevos pedidos, primero regularizá los pagos pendientes. Hablá con tu vendedor o usá la sección <b>Mi cuenta</b> para ver el detalle.</div>' +
+      '<div style="display:flex;gap:.5rem">' +
+        '<button onclick="_catMoAtrasoCerrar()" style="flex:1;padding:.7rem;background:#eee;border:none;border-radius:8px;font-weight:600;cursor:pointer;font-size:.85rem">Cerrar</button>' +
+        '<button onclick="_catMoAtrasoCerrar();if(typeof toggleMiCuenta===\'function\')toggleMiCuenta()" style="flex:1;padding:.7rem;background:#c4965a;color:#fff;border:none;border-radius:8px;font-weight:600;cursor:pointer;font-size:.85rem">Ver Mi cuenta</button>' +
+      '</div>' +
+    '</div>';
+  document.body.appendChild(mo);
+  _catModalBackRegistrar('_catMoAtraso', _catMoAtrasoCerrar);
+}
+
+function _catMoAtrasoCerrar(){
+  var m = document.getElementById('_catMoAtraso');
+  if(m) m.remove();
+  _catModalBackDesregistrar('_catMoAtraso');
 }
 
 // ════════════════════════════════════════════════════════════════
@@ -10610,6 +10708,24 @@ function _catScrollHighlight(card){
 }
 .belle-clearx-btn:hover{background:rgba(0,0,0,.25)}
 .belle-clearx-btn.visible{display:flex}
+
+/* Ocultar X nativa del navegador (Safari, iOS, Edge) que aparece en inputs */
+input[data-bclx="1"]::-webkit-search-decoration,
+input[data-bclx="1"]::-webkit-search-cancel-button,
+input[data-bclx="1"]::-webkit-search-results-button,
+input[data-bclx="1"]::-webkit-search-results-decoration{
+  -webkit-appearance:none;
+  appearance:none;
+  display:none !important;
+}
+input[data-bclx="1"]::-ms-clear,
+input[data-bclx="1"]::-ms-reveal{
+  display:none !important;
+  width:0 !important;
+  height:0 !important;
+}
+/* También por si el browser usa type="search" */
+input[type="search"][data-bclx="1"]{-webkit-appearance:textfield;appearance:textfield}
 </style>
 <script id="belleClearXScript">
 (function(){
@@ -10630,70 +10746,70 @@ function _catScrollHighlight(card){
     return false;
   }
 
-  // Agrega la X a un input
+  // Agrega la X a un input — SIN mover el input en el DOM (evita pérdida de foco)
   function addClearX(inp){
     if(!inp || inp.dataset.bclx === '1') return;
     inp.dataset.bclx = '1';
-    // Necesitamos un wrapper relative. Si el padre ya es relative, lo aprovechamos.
     var parent = inp.parentElement;
     if(!parent) return;
     var parentStyle = window.getComputedStyle(parent);
-    var wrap;
-    if(parentStyle.position === 'relative' || parentStyle.position === 'absolute' || parentStyle.position === 'fixed'){
-      // Reusar el padre como wrap
-      wrap = parent;
-    } else {
-      // Crear wrapper alrededor del input
-      wrap = document.createElement('span');
-      wrap.className = 'belle-clearx-wrap';
-      // Mantener flex inheritance si aplica
-      var inpStyle = window.getComputedStyle(inp);
-      if(inpStyle.width === '100%' || inp.style.width === '100%') wrap.style.display = 'block';
-      parent.insertBefore(wrap, inp);
-      wrap.appendChild(inp);
+    if(parentStyle.position === 'static'){
+      parent.style.position = 'relative';
     }
-    // Crear botón X
     var btn = document.createElement('button');
     btn.type = 'button';
     btn.className = 'belle-clearx-btn';
     btn.innerHTML = '×';
     btn.setAttribute('aria-label','Limpiar búsqueda');
     btn.tabIndex = -1;
-    // Insertar después del input
+    btn.style.position = 'absolute';
     if(inp.nextSibling){
-      inp.parentNode.insertBefore(btn, inp.nextSibling);
+      parent.insertBefore(btn, inp.nextSibling);
     } else {
-      inp.parentNode.appendChild(btn);
+      parent.appendChild(btn);
     }
-    // Mostrar/ocultar según si hay contenido
+    function positionBtn(){
+      var inpRect = inp.getBoundingClientRect();
+      var parentRect = parent.getBoundingClientRect();
+      var rightOffset = parentRect.right - inpRect.right + 8;
+      var topOffset = (inpRect.top + inpRect.height/2 - parentRect.top);
+      btn.style.right = rightOffset + 'px';
+      btn.style.top = topOffset + 'px';
+      btn.style.transform = 'translateY(-50%)';
+    }
     function updateVisibility(){
-      if(inp.value && inp.value.length > 0) btn.classList.add('visible');
-      else btn.classList.remove('visible');
+      if(inp.value && inp.value.length > 0){
+        positionBtn();
+        btn.classList.add('visible');
+      } else {
+        btn.classList.remove('visible');
+      }
     }
     updateVisibility();
-    // Listener para mantener visibilidad sincronizada
     inp.addEventListener('input', updateVisibility);
     inp.addEventListener('change', updateVisibility);
-    // Click en X: limpiar y disparar input
+    inp.addEventListener('focus', updateVisibility);
+    window.addEventListener('resize', function(){if(btn.classList.contains('visible')) positionBtn();});
     btn.addEventListener('click', function(e){
       e.preventDefault();
       e.stopPropagation();
       inp.value = '';
       btn.classList.remove('visible');
-      // Disparar 'input' para que cualquier listener se actualice
       try {
         var ev = new Event('input', {bubbles: true});
         inp.dispatchEvent(ev);
       } catch(err){
-        // Fallback para browsers viejos
         var ev2 = document.createEvent('Event');
         ev2.initEvent('input', true, true);
         inp.dispatchEvent(ev2);
       }
-      // Ejecutar el oninput si existe (algunos no escuchan el evento estándar)
       if(typeof inp.oninput === 'function') inp.oninput.call(inp);
       inp.focus();
     });
+    var curPadRight = parseFloat(window.getComputedStyle(inp).paddingRight) || 0;
+    if(curPadRight < 28){
+      inp.style.paddingRight = '28px';
+    }
   }
 
   // Procesa todos los inputs candidatos del DOM
