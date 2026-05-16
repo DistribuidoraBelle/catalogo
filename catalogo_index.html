@@ -3596,6 +3596,59 @@ function _catModalConfirm(opts){
   document.addEventListener('keydown', escHandler);
 }
 
+// FIX 2026-05-15: helper centralizado para registrar modales con soporte de:
+// 1) Botón "atrás" del celular → cierra el modal (no la web)
+// 2) Re-registración limpia si se abren modales encadenados
+//
+// Uso: al abrir un modal, llamar _catModalRegistrar(id, fnCerrar).
+//      al cerrar manualmente (X), llamar fnCerrar directamente — el helper
+//      hace history.back() limpio para no romper la pila.
+window._catModalStack = window._catModalStack || []; // pila de modales abiertos
+window._catModalCerrandoFromBack = false; // flag para distinguir cierres manuales vs popstate
+
+function _catModalRegistrar(modalId, fnCerrar){
+  // Agregar a la pila
+  window._catModalStack.push({id: modalId, cerrar: fnCerrar});
+  // Pushear estado en el historial para capturar el "atrás"
+  try { history.pushState({belleModal: modalId}, '', ''); } catch(e){}
+}
+
+function _catModalDesregistrar(modalId){
+  // Sacar del top de la pila (asumimos LIFO — el modal que cierra es el último)
+  var idx = -1;
+  for(var i = window._catModalStack.length - 1; i >= 0; i--){
+    if(window._catModalStack[i].id === modalId){ idx = i; break; }
+  }
+  if(idx >= 0) window._catModalStack.splice(idx, 1);
+  // Si NO estamos cerrando por popstate, hacemos history.back() para limpiar la entrada
+  if(!window._catModalCerrandoFromBack){
+    try {
+      // Usar flag para que el listener popstate no dispare un cierre extra
+      window._catModalSkipNextPopstate = true;
+      history.back();
+    } catch(e){}
+  }
+}
+
+// Listener global de popstate — UNA sola vez
+if(!window._catModalPopstateListenerInstalled){
+  window._catModalPopstateListenerInstalled = true;
+  window.addEventListener('popstate', function(){
+    // Si fue history.back() programático, ignorar
+    if(window._catModalSkipNextPopstate){
+      window._catModalSkipNextPopstate = false;
+      return;
+    }
+    // Si hay modal en la pila, cerrarlo
+    if(window._catModalStack.length > 0){
+      var top = window._catModalStack[window._catModalStack.length - 1];
+      window._catModalCerrandoFromBack = true;
+      try { top.cerrar(); } catch(e){ console.error('[belle-cat] cerrar modal:',e); }
+      window._catModalCerrandoFromBack = false;
+    }
+  });
+}
+
 function _catCobCerrarModal(){
   // Limpiar listener si todavía está activo
   if(window._catCobOnPedidoListener){
@@ -3609,6 +3662,11 @@ function _catCobCerrarModal(){
   }
   var mo = document.getElementById('_catMoCobro');
   if(mo) mo.remove();
+  // FIX 2026-05-15: limpiar marker de registro
+  var marker = document.getElementById('_catMoCobro_registered');
+  if(marker) marker.remove();
+  // FIX 2026-05-15: desregistrar de la pila de modales (limpia history.pushState)
+  _catModalDesregistrar('_catMoCobro');
 }
 
 function _catAbrirModalCobro(dirs){
@@ -3622,6 +3680,7 @@ function _catAbrirModalCobro(dirs){
     _formaPagoDefault = 'cuenta_corriente';
   }
   window._catCobState = {
+    paso: 1, // FIX 2026-05-15: modal en 2 pasos. Paso 1 = entrega, Paso 2 = pago
     forma_pago: _formaPagoDefault,
     direccion_id: null,
     modo_entrega: null,
@@ -3669,6 +3728,7 @@ function _catRenderModalCobro(){
   var dirs = window._catCobDirs || [];
   var cfg = window._catCobConfig || {};
   var st = window._catCobState;
+  var paso = st.paso || 1;
 
   // Calcular subtotal del carrito (replica lógica de renderDrawer)
   var subtotal = _catCobCalcSubtotal();
@@ -3677,19 +3737,42 @@ function _catRenderModalCobro(){
   mo.id = '_catMoCobro';
   mo.style.cssText = 'position:fixed;inset:0;background:rgba(20,15,8,.75);z-index:1500;display:flex;align-items:flex-start;justify-content:center;padding:1rem;overflow-y:auto';
 
+  // Indicador de pasos (visualización del progreso)
+  var paso1Activo = paso === 1;
+  var paso2Activo = paso === 2;
+  var indicadorPasos = "<div style='display:flex;align-items:center;gap:.4rem;margin-top:.45rem'>"+
+    "<div style='display:flex;align-items:center;gap:.3rem;flex:1'>"+
+      "<div style='width:1.4rem;height:1.4rem;border-radius:50%;background:"+(paso1Activo||paso2Activo?'var(--accent)':'#e8d9bf')+";color:#fff;display:flex;align-items:center;justify-content:center;font-size:.7rem;font-weight:700;flex-shrink:0'>"+(paso2Activo?'✓':'1')+"</div>"+
+      "<div style='font-size:.7rem;font-weight:"+(paso1Activo?'700':'500')+";color:"+(paso1Activo?'var(--dark)':'var(--mid)')+"'>Entrega</div>"+
+    "</div>"+
+    "<div style='flex:1;height:2px;background:"+(paso2Activo?'var(--accent)':'#e8d9bf')+"'></div>"+
+    "<div style='display:flex;align-items:center;gap:.3rem;flex:1;justify-content:flex-end'>"+
+      "<div style='font-size:.7rem;font-weight:"+(paso2Activo?'700':'500')+";color:"+(paso2Activo?'var(--dark)':'var(--mid)')+"'>Pago</div>"+
+      "<div style='width:1.4rem;height:1.4rem;border-radius:50%;background:"+(paso2Activo?'var(--accent)':'#e8d9bf')+";color:"+(paso2Activo?'#fff':'var(--mid)')+";display:flex;align-items:center;justify-content:center;font-size:.7rem;font-weight:700;flex-shrink:0'>2</div>"+
+    "</div>"+
+  "</div>";
+
   var h = "<div style='background:#fff;border-radius:14px;max-width:520px;width:100%;max-height:96vh;display:flex;flex-direction:column;box-shadow:0 8px 40px rgba(0,0,0,.3);margin:auto'>"+
-    // HEADER
-    "<div style='padding:1rem 1.1rem;border-bottom:1px solid #e8d9bf;display:flex;justify-content:space-between;align-items:center;background:linear-gradient(to bottom,#fff,#faf6ee)'>"+
-      "<div>"+
-        "<div style='font-size:1rem;font-weight:700;color:var(--dark)'>Confirmá tu pedido</div>"+
-        "<div style='font-size:.7rem;color:var(--mid);margin-top:.1rem'>Completá los datos para enviarlo</div>"+
+    // HEADER con indicador de paso
+    "<div style='padding:1rem 1.1rem;border-bottom:1px solid #e8d9bf;background:linear-gradient(to bottom,#fff,#faf6ee)'>"+
+      "<div style='display:flex;justify-content:space-between;align-items:center'>"+
+        "<div>"+
+          "<div style='font-size:1rem;font-weight:700;color:var(--dark)'>"+(paso1Activo?'Datos de entrega':'Método de pago')+"</div>"+
+          "<div style='font-size:.7rem;color:var(--mid);margin-top:.1rem'>"+(paso1Activo?'¿A dónde te lo enviamos?':'¿Cómo querés pagar?')+"</div>"+
+        "</div>"+
+        "<button onclick='_catCobCerrarModal()' style='background:none;border:none;font-size:1.4rem;cursor:pointer;color:var(--mid);padding:0;line-height:1'>&times;</button>"+
       "</div>"+
-      "<button onclick='_catCobCerrarModal()' style='background:none;border:none;font-size:1.4rem;cursor:pointer;color:var(--mid);padding:0;line-height:1'>&times;</button>"+
+      indicadorPasos+
     "</div>"+
 
     "<div style='overflow-y:auto;padding:1rem 1.1rem;flex:1;display:grid;gap:.9rem'>";
 
-    // ── SECCIÓN 1: DOMICILIO DE ENTREGA ─────────────────────────
+  if(paso1Activo){
+    // ══════════════════════════════════════════════════════════════
+    // PASO 1: ENTREGA (dirección + teléfono + modo de entrega)
+    // ══════════════════════════════════════════════════════════════
+
+    // ── DIRECCIÓN ─────────────────────────────────────────────
     h += "<div>"+
       "<div style='font-size:.78rem;font-weight:700;color:var(--dark);margin-bottom:.45rem;display:flex;align-items:center;gap:.3rem'><span>📍</span><span>Dirección de entrega</span></div>"+
       "<div id='_catCobDirs' style='display:grid;gap:.4rem'>";
@@ -3710,23 +3793,55 @@ function _catRenderModalCobro(){
     h += "<button onclick='_catCobCerrarModal();_catNuevaDir()' style='width:100%;background:transparent;color:var(--accent);border:1px dashed var(--accent);padding:.5rem;border-radius:7px;font-size:.78rem;cursor:pointer'>+ Agregar nueva dirección</button>";
     h += "</div></div>";
 
-    // ── SECCIÓN 2: TELÉFONO ─────────────────────────────────────
+    // ── TELÉFONO ──────────────────────────────────────────────
     h += "<div>"+
       "<div style='font-size:.78rem;font-weight:700;color:var(--dark);margin-bottom:.45rem;display:flex;align-items:center;gap:.3rem'><span>📱</span><span>Teléfono de contacto</span></div>"+
       "<input type='tel' id='_catCobTel' value='"+_catEsc(st.telefono||'')+"' placeholder='Ej: 351 123 4567' oninput='_catCobActState()' style='width:100%;padding:.55rem .7rem;background:#faf6ee;border:1px solid #e8d9bf;border-radius:7px;font-size:.85rem;color:var(--dark)'>"+
     "</div>";
 
-    // ── SECCIÓN 3: MODO DE ENTREGA ──────────────────────────────
+    // ── MODO DE ENTREGA ────────────────────────────────────────
     h += "<div id='_catCobModoEntregaCont'>"+
       "<div style='font-size:.78rem;font-weight:700;color:var(--dark);margin-bottom:.45rem;display:flex;align-items:center;gap:.3rem'><span>🚚</span><span>Modo de entrega</span></div>"+
       "<div style='font-size:.7rem;color:var(--mid);font-style:italic'>Elegí una dirección para ver opciones de entrega</div>"+
     "</div>";
 
-    // ── SECCIÓN 4: MÉTODO DE PAGO ───────────────────────────────
+    // ── RESUMEN SIMPLIFICADO (productos + envío en proceso) ────
+    h += "<div style='background:#faf6ee;border:1px solid #e8d9bf;border-radius:9px;padding:.7rem .85rem'>"+
+      "<div style='display:flex;justify-content:space-between;font-size:.78rem;color:var(--dark);margin-bottom:.25rem'>"+
+        "<span>Productos:</span><span id='_catCobSubtot'>"+fmt(subtotal)+"</span>"+
+      "</div>"+
+      "<div style='display:flex;justify-content:space-between;font-size:.78rem;color:var(--dark);margin-bottom:.4rem'>"+
+        "<span>Envío:</span><span id='_catCobEnvio' style='color:var(--mid);font-style:italic'>Elegí entrega</span>"+
+      "</div>"+
+      "<div style='display:flex;justify-content:space-between;font-size:1rem;font-weight:700;color:var(--accent);padding-top:.4rem;border-top:1px solid #e8d9bf'>"+
+        "<span>Total:</span><span id='_catCobTotal'>"+fmt(subtotal)+"</span>"+
+      "</div>"+
+    "</div>";
+
+  } else {
+    // ══════════════════════════════════════════════════════════════
+    // PASO 2: PAGO (método de pago + CC + resumen final)
+    // ══════════════════════════════════════════════════════════════
+
+    // ── RESUMEN DE LO ELEGIDO EN PASO 1 (compacto, no editable) ──
+    var dirSel = dirs.find(function(d){return d.id===st.direccion_id;});
+    var dirSelTxt = dirSel ? (dirSel.direccion_completa || ((dirSel.calle||'')+' '+(dirSel.numero||''))) : '—';
+    var modoTxt = '—';
+    if(st.modo_entrega === 'retiro') modoTxt = '🏪 Retiro en local';
+    else if(st.modo_entrega === 'domicilio') modoTxt = '🚚 Envío a domicilio';
+    else if(st.modo_entrega === 'andreani') modoTxt = '📦 Andreani';
+    h += "<div style='background:#faf6ee;border:1px solid #e8d9bf;border-radius:8px;padding:.6rem .8rem;font-size:.74rem;color:var(--dark)'>"+
+      "<div style='display:flex;justify-content:space-between;align-items:center;margin-bottom:.3rem'>"+
+        "<span style='font-weight:600'>📍 "+_catEsc(dirSelTxt)+"</span>"+
+        "<button onclick='_catCobIrAPaso(1)' style='background:none;border:none;color:var(--accent);cursor:pointer;font-size:.7rem;font-weight:600'>✏️ Cambiar</button>"+
+      "</div>"+
+      "<div style='color:var(--mid)'>"+modoTxt+" · 📱 "+_catEsc(st.telefono||'')+"</div>"+
+    "</div>";
+
+    // ── MÉTODO DE PAGO ─────────────────────────────────────────
     h += "<div>"+
       "<div style='font-size:.78rem;font-weight:700;color:var(--dark);margin-bottom:.45rem;display:flex;align-items:center;gap:.3rem'><span>💳</span><span>Método de pago</span></div>"+
       "<div style='display:grid;grid-template-columns:1fr 1fr;gap:.4rem'>";
-    // FEAT CC v2 (2026-05-14): si cliente tiene CC habilitada, ofrecer como primera opción
     var _catTieneCC = !!(typeof _catCliente!=='undefined' && _catCliente && _catCliente.cuenta_corriente_habilitada);
     var metodos = [];
     if(_catTieneCC){
@@ -3743,7 +3858,6 @@ function _catRenderModalCobro(){
       var disabled = !m.hab;
       var op = disabled ? ';opacity:.5;cursor:not-allowed' : ';cursor:pointer';
       var click = disabled ? "_catToast('"+(m.soon?'Próximamente':'No habilitado')+"','twarn')" : "_catCobSelPago('"+m.k+"')";
-      // Si es CC y destacado, agregar badge dorado
       var bgExtra = (m.destacado && !sel) ? ';background:linear-gradient(135deg,rgba(196,150,90,.08),rgba(196,150,90,.02))' : '';
       var borderCol = sel ? 'var(--accent)' : (m.destacado ? 'rgba(196,150,90,.6)' : '#e8d9bf');
       h += "<div id='_catCobPago_"+m.k+"' onclick=\""+click+"\" style='border:2px solid "+borderCol+";background:"+(sel?'rgba(196,150,90,.08)':'#fff')+bgExtra+";border-radius:8px;padding:.55rem .55rem;text-align:center;font-size:.78rem;font-weight:600;color:"+(disabled?'var(--mid)':'var(--dark)')+";transition:all .15s"+op+"'>"+
@@ -3753,56 +3867,118 @@ function _catRenderModalCobro(){
     });
     h += "</div></div>";
 
-    // ── SECCIÓN 4b: DATOS BANCARIOS (si elige transferencia) ────
+    // ── DATOS BANCARIOS (si transferencia) ─────────────────────
     h += "<div id='_catCobBancoBox' style='display:none'></div>";
 
-    // ── SECCIÓN 4c: PANEL CC (si elige cuenta corriente) ─────────
+    // ── PANEL CC (si cuenta corriente) ─────────────────────────
     h += "<div id='_catCobCCBox' style='display:none'></div>";
 
-    // ── SECCIÓN AVISOS DE RESTRICCIONES (campaña / compra mínima) ────
+    // ── AVISOS DE RESTRICCIONES ────────────────────────────────
     h += "<div id='_catCobAvisosBox'></div>";
 
-    // ── SECCIÓN 5: RESUMEN / TOTAL ──────────────────────────────
+    // ── RESUMEN COMPLETO (con envío calculado) ─────────────────
     h += "<div style='background:#faf6ee;border:1px solid #e8d9bf;border-radius:9px;padding:.7rem .85rem'>"+
       "<div style='display:flex;justify-content:space-between;font-size:.78rem;color:var(--dark);margin-bottom:.25rem'>"+
         "<span>Productos:</span><span id='_catCobSubtot'>"+fmt(subtotal)+"</span>"+
       "</div>"+
       "<div style='display:flex;justify-content:space-between;font-size:.78rem;color:var(--dark);margin-bottom:.4rem'>"+
-        "<span>Envío:</span><span id='_catCobEnvio' style='color:var(--mid);font-style:italic'>Elegí entrega</span>"+
+        "<span>Envío:</span><span id='_catCobEnvio'>"+(st.envio_a_confirmar?'A confirmar':(st.costo_envio===0?'GRATIS':fmt(st.costo_envio)))+"</span>"+
       "</div>"+
       "<div style='display:flex;justify-content:space-between;font-size:1rem;font-weight:700;color:var(--accent);padding-top:.4rem;border-top:1px solid #e8d9bf'>"+
-        "<span>Total:</span><span id='_catCobTotal'>"+fmt(subtotal)+"</span>"+
+        "<span>Total:</span><span id='_catCobTotal'>"+fmt(subtotal+(st.costo_envio||0))+"</span>"+
       "</div>"+
     "</div>";
+  }
 
   h += "</div>";  // cierra body
 
-    // ── FOOTER: BOTÓN ENVIAR ────────────────────────────────────
-    h += "<div style='padding:.75rem 1.1rem;border-top:1px solid #e8d9bf;background:#fff'>"+
-      "<button id='_catCobBtn' onclick='_lockClick(this,_catCobConfirmar,{texto:&quot;Procesando...&quot;,timeout:30000})' disabled style='width:100%;padding:.85rem;border:none;border-radius:9px;font-size:.95rem;font-weight:700;cursor:not-allowed;background:#ccc;color:#fff;transition:all .2s'>Completá los datos para continuar</button>"+
+  // ── FOOTER: BOTÓN ADAPTATIVO SEGÚN PASO ──────────────────────
+  h += "<div style='padding:.75rem 1.1rem;border-top:1px solid #e8d9bf;background:#fff'>";
+  if(paso1Activo){
+    h += "<button id='_catCobBtn' onclick='_catCobIrAPaso(2)' disabled style='width:100%;padding:.85rem;border:none;border-radius:9px;font-size:.95rem;font-weight:700;cursor:not-allowed;background:#ccc;color:#fff;transition:all .2s'>Completá los datos para continuar</button>";
+  } else {
+    // Paso 2: dos botones (Atrás + Comprar)
+    h += "<div style='display:flex;gap:.5rem'>"+
+      "<button onclick='_catCobIrAPaso(1)' style='flex:0 0 auto;padding:.85rem 1rem;border:1px solid #e8d9bf;border-radius:9px;font-size:.85rem;font-weight:600;cursor:pointer;background:#fff;color:var(--mid)'>← Atrás</button>"+
+      "<button id='_catCobBtn' onclick='_lockClick(this,_catCobConfirmar,{texto:&quot;Procesando...&quot;,timeout:30000})' disabled style='flex:1;padding:.85rem;border:none;border-radius:9px;font-size:.95rem;font-weight:700;cursor:not-allowed;background:#ccc;color:#fff;transition:all .2s'>Elegí un método de pago</button>"+
     "</div>";
+  }
+  h += "</div>";
 
   h += "</div>";  // cierra modal box
   mo.innerHTML = h;
-  // Click fuera del modal: solo cerrar si NO hay overlay "Procesando" activo (no cancelar mid-flight).
-  mo.addEventListener('click', function(e){
-    if(e.target !== mo) return;
-    if(document.getElementById('_catCobOverlay')) return; // procesando: ignorar click fuera
-    _catCobCerrarModal();  // limpia listener huérfano + cierra
-  });
+  // FIX 2026-05-15: click fuera ya NO cierra el modal (evita cierres accidentales).
+  // Solo cierra con la X o con el botón "atrás" del celular.
   document.body.appendChild(mo);
+  // Registrar en la pila para soporte de botón "atrás" del celular (solo en primer render)
+  if(!document.getElementById('_catMoCobro_registered')){
+    _catModalRegistrar('_catMoCobro', function(){
+      if(document.getElementById('_catCobOverlay')) return; // procesando: ignorar
+      // FIX 2026-05-15: si estoy en paso 2, el "atrás" debe volver al paso 1 (no cerrar)
+      var stCur = window._catCobState;
+      if(stCur && stCur.paso === 2){
+        // No cerramos, vamos al paso 1
+        _catCobIrAPaso(1);
+        // Pusheamos otra entrada para no perder el "atrás" futuro
+        try { history.pushState({belleModal:'_catMoCobro'}, '', ''); } catch(e){}
+        return;
+      }
+      _catCobCerrarModal();
+    });
+    // Marca para no re-registrar al cambiar de paso
+    var marker = document.createElement('div');
+    marker.id = '_catMoCobro_registered';
+    marker.style.display = 'none';
+    document.body.appendChild(marker);
+  }
 
-  // Pre-seleccionar dirección: principal si la hay, sino la única, sino la primera
-  if(dirs.length){
-    var dirPreseleccionada = dirs.find(function(d){return d.es_principal || d.principal;}) || dirs[0];
-    if(dirPreseleccionada){
-      _catCobSelDir(dirPreseleccionada.id);
+  if(paso1Activo){
+    // Pre-seleccionar dirección: principal si la hay, sino la única, sino la primera
+    if(dirs.length && !st.direccion_id){
+      var dirPreseleccionada = dirs.find(function(d){return d.es_principal || d.principal;}) || dirs[0];
+      if(dirPreseleccionada){
+        _catCobSelDir(dirPreseleccionada.id);
+      }
+    } else if(st.direccion_id){
+      // Re-render del modo de entrega para la dirección ya seleccionada
+      _catCobRefrescarEntregas();
+    }
+    _catCobActState();
+  } else {
+    // Paso 2: refrescar caja de pago según selección, panel CC si aplica
+    if(st.forma_pago){
+      // Simulamos la selección visual sin re-disparar la validación
+      _catCobSelPago(st.forma_pago);
+    }
+    // FEAT CC v2: si la forma_pago es CC, renderizar el panel CC
+    if(st.forma_pago === 'cuenta_corriente'){
+      setTimeout(function(){ _catRenderCCBox(); }, 100);
+    }
+    _catCobActState();
+  }
+}
+
+// FIX 2026-05-15: navegación entre pasos del modal de checkout
+function _catCobIrAPaso(n){
+  var st = window._catCobState;
+  if(!st) return;
+  if(n === 2){
+    // Validar que paso 1 esté completo antes de avanzar
+    var falta = [];
+    if(!st.direccion_id) falta.push('dirección');
+    if(!st.modo_entrega) falta.push('modo de entrega');
+    if(!st.telefono || st.telefono.length < 6) falta.push('teléfono');
+    if(falta.length){
+      _catToast('Completá: '+falta.join(', '), 'twarn');
+      return;
     }
   }
-  // FEAT CC v2 (2026-05-14): si la forma_pago default es CC, renderizar el panel CC ya
-  if(window._catCobState && window._catCobState.forma_pago === 'cuenta_corriente'){
-    setTimeout(function(){ _catRenderCCBox(); }, 100);
-  }
+  st.paso = n;
+  // Quitar el marker para forzar re-registro NO (queremos que NO se re-registre)
+  // Quitar modal viejo y volver a renderizar
+  var mo = document.getElementById('_catMoCobro');
+  if(mo) mo.remove();
+  _catRenderModalCobro();
 }
 
 function _catCobSelDir(id){
@@ -4715,6 +4891,7 @@ function _catGenerarCuotasCliente(pedidoId, clienteId, planId, totalPedido){
 function _catCobActState(){
   // Actualizar el botón final + total con envío
   var st = window._catCobState;
+  var paso = st.paso || 1;
   var telEl = document.getElementById('_catCobTel');
   if(telEl) st.telefono = telEl.value.trim();
 
@@ -4752,9 +4929,32 @@ function _catCobActState(){
     }
   }
 
-  // Validaciones del botón final
+  // Validaciones del botón final (cambia según el paso actual)
   var btn = document.getElementById('_catCobBtn');
   if(!btn) return;
+
+  // FIX 2026-05-15: en paso 1 solo validamos entrega; en paso 2 validamos pago
+  if(paso === 1){
+    var faltaP1 = [];
+    if(!st.direccion_id) faltaP1.push('dirección');
+    if(!st.modo_entrega) faltaP1.push('entrega');
+    if(!st.telefono || st.telefono.length < 6) faltaP1.push('teléfono');
+    if(faltaP1.length){
+      btn.disabled = true;
+      btn.style.cursor = 'not-allowed';
+      btn.style.background = '#ccc';
+      btn.textContent = 'Falta: '+faltaP1.join(', ');
+    } else {
+      btn.disabled = false;
+      btn.style.cursor = 'pointer';
+      btn.style.background = 'linear-gradient(to bottom,#c4965a,#a07840)';
+      btn.style.color = '#fff';
+      btn.textContent = 'Siguiente → Método de pago';
+    }
+    return;
+  }
+
+  // Paso 2: validación completa (incluye pago + restricciones + CC)
   var falta = [];
   if(!st.direccion_id) falta.push('dirección');
   if(!st.modo_entrega) falta.push('entrega');
