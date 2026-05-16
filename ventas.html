@@ -8148,25 +8148,86 @@ var PAGES=["clientes-vend","catalogo","pedidos-web","rutas","transferidas","hist
 
 
 // ═══════════════════════════════════════════════════════════════════════
-// SISTEMA DE RECLAMOS v2
+// SISTEMA DE RECLAMOS v2 (rediseño 2026-05-15)
+// ═══════════════════════════════════════════════════════════════════════
+// Flujo nuevo:
+//  1) Vendedor elige "A qué se refiere" (venta / gasto / rendición / otro)
+//  2) Si es "venta": elige modo de búsqueda (últimas / por orden / por cliente)
+//  3) Selecciona la venta (agrupada por nro_orden, no por línea)
+//  4) Opcionalmente elige un producto específico dentro de esa venta
 // ═══════════════════════════════════════════════════════════════════════
 var _recVentas=[], _recGastos=[], _recRendiciones=[];
+var _recVentasGrupos=[];   // ventas agrupadas por nro_orden
+var _recClientesUnicos=[]; // lista única de clientes (para autocomplete)
+var _recSelMode='ultimas'; // ultimas | nroorden | cliente
+var _recSelVenta=null;     // venta agrupada seleccionada
+var _recSelProducto=null;  // producto específico dentro de la venta (null = toda la venta)
 
 function loadReclamo(){
   var pg=document.getElementById('pg-reclamo');
   pg.innerHTML="<div class='loading'><div class='spin'></div>Cargando...</div>";
-  // Cargar ventas, gastos y rendiciones para seleccionar en el reclamo
+  // Cargar ventas (todas las del vendedor), gastos y rendiciones
   Promise.all([
-    api('GET','ventas',null,'vendedor_id=eq.'+VENDEDOR_ID+'&order=created_at.desc&limit=100&select=id,producto_nombre,total,created_at,segmento'),
+    api('GET','ventas',null,'vendedor_id=eq.'+VENDEDOR_ID+'&order=created_at.desc&limit=500&select=id,producto_id,producto_nombre,cantidad,precio_unitario,total,segmento,nro_orden,cliente_nombre,created_at,forma_cobro'),
     api('GET','gastos_vendedor',null,'vendedor_id=eq.'+VENDEDOR_ID+'&order=created_at.desc&limit=50&select=id,concepto,monto,created_at'),
     api('GET','rendiciones',null,'vendedor_id=eq.'+VENDEDOR_ID+'&tipo=neq.reclamo&order=created_at.desc&limit=50&select=id,concepto,monto,created_at')
   ]).then(function(res){
     _recVentas=Array.isArray(res[0])?res[0]:[];
     _recGastos=Array.isArray(res[1])?res[1]:[];
     _recRendiciones=Array.isArray(res[2])?res[2]:[];
+    // Agrupar ventas por nro_orden
+    _recAgruparVentas();
+    // Resetear selección
+    _recSelMode='ultimas';
+    _recSelVenta=null;
+    _recSelProducto=null;
     renderReclamoForm();
     loadReclamosList();
   });
+}
+
+// Agrupa líneas de venta por nro_orden. Cada grupo es una "venta real".
+function _recAgruparVentas(){
+  var mapa={};
+  _recVentas.forEach(function(v){
+    var k=v.nro_orden||('s_'+v.id);
+    if(!mapa[k]){
+      mapa[k]={
+        nro_orden: v.nro_orden||null,
+        cliente_nombre: v.cliente_nombre||'(sin cliente)',
+        created_at: v.created_at,
+        total: 0,
+        productos: [],
+        // Mantenemos un id "representativo" para retro-compatibilidad
+        // (en realidad el reclamo se asocia al primer producto del grupo)
+        id_principal: v.id
+      };
+    }
+    mapa[k].total += parseFloat(v.total)||0;
+    mapa[k].productos.push({
+      id: v.id,
+      producto_id: v.producto_id,
+      producto_nombre: v.producto_nombre,
+      cantidad: v.cantidad,
+      precio_unitario: v.precio_unitario,
+      segmento: v.segmento,
+      total: parseFloat(v.total)||0
+    });
+    // Quedarse con el created_at más temprano del grupo
+    if(new Date(v.created_at) < new Date(mapa[k].created_at)) mapa[k].created_at = v.created_at;
+  });
+  _recVentasGrupos = Object.keys(mapa).map(function(k){return mapa[k];});
+  // Ordenar por fecha desc
+  _recVentasGrupos.sort(function(a,b){return new Date(b.created_at)-new Date(a.created_at);});
+  // Lista única de clientes para autocomplete
+  var clienteSet={};
+  _recVentasGrupos.forEach(function(g){
+    if(g.cliente_nombre && g.cliente_nombre !== '(sin cliente)'){
+      var key = g.cliente_nombre.toLowerCase().trim();
+      if(!clienteSet[key]) clienteSet[key] = g.cliente_nombre;
+    }
+  });
+  _recClientesUnicos = Object.keys(clienteSet).map(function(k){return clienteSet[k];}).sort();
 }
 
 function renderReclamoForm(){
@@ -8194,19 +8255,11 @@ function renderReclamoForm(){
     "<option value='venta'>Una venta específica</option>"+
     "<option value='gasto'>Un gasto registrado</option>"+
     "<option value='rendicion'>Una rendición</option>"+
-    "<option value='otro'>Otro / general</option>"+
+    "<option value='otro'>Otro motivo / general</option>"+
     "</select></div></div>"+
 
-    // Selector dinámico del objeto
-    "<div class='form-row' id='recObjetoWrap'><div class='fg full'>"+
-    "<label id='recObjetoLabel'>Seleccionar venta</label>"+
-    "<select class='sel' id='recObjetoId' style='width:100%'>"+
-    "<option value=''>-- Seleccionar --</option>"+
-    _recVentas.map(function(v){
-      var f=new Date(v.created_at).toLocaleDateString('es-AR',{timeZone:"America/Argentina/Buenos_Aires"});
-      return "<option value='"+v.id+"' data-desc='"+v.producto_nombre+"'>"+f+" — "+v.producto_nombre+" — "+fmt(v.total)+"</option>";
-    }).join('')+
-    "</select></div></div>"+
+    // Selector dinámico del objeto (lo renderiza recActualizarObjeto)
+    "<div id='recObjetoWrap'></div>"+
 
     // Titulo
     "<div class='form-row'><div class='fg full'>"+
@@ -8233,6 +8286,9 @@ function renderReclamoForm(){
     "<div class='sec-title'>Mis reclamos</div>"+
     "<div id='reclamosList'><div class='loading'><div class='spin'></div>Cargando...</div></div>";
 
+  // Render inicial del selector de venta
+  recActualizarObjeto();
+
   // Preview foto
   document.getElementById('recFoto').addEventListener('change',function(){
     var f=this.files[0]; if(!f) return;
@@ -8247,26 +8303,198 @@ function renderReclamoForm(){
 
 function recActualizarObjeto(){
   var tipo=document.getElementById('recTipoObjeto').value;
-  var lbl=document.getElementById('recObjetoLabel');
-  var sel=document.getElementById('recObjetoId');
   var wrap=document.getElementById('recObjetoWrap');
-  if(tipo==='otro'){wrap.style.display='none';return;}
-  wrap.style.display='';
-  var items=tipo==='venta'?_recVentas:tipo==='gasto'?_recGastos:_recRendiciones;
-  var labels={venta:'Seleccionar venta',gasto:'Seleccionar gasto',rendicion:'Seleccionar rendición'};
-  lbl.textContent=labels[tipo];
-  sel.innerHTML='<option value="">-- Seleccionar --</option>'+items.map(function(x){
+  // Resetear selección al cambiar tipo
+  _recSelVenta=null;
+  _recSelProducto=null;
+  if(tipo==='otro'){
+    wrap.innerHTML='';
+    return;
+  }
+  if(tipo==='venta'){
+    wrap.innerHTML = _recRenderSelectorVenta();
+    return;
+  }
+  // gasto / rendicion → select clásico
+  var items = tipo==='gasto'?_recGastos:_recRendiciones;
+  var labels = {gasto:'Seleccionar gasto',rendicion:'Seleccionar rendición'};
+  var opts = '<option value="">-- Seleccionar --</option>'+items.map(function(x){
     var f=new Date(x.created_at).toLocaleDateString('es-AR',{timeZone:"America/Argentina/Buenos_Aires"});
-    var desc=x.producto_nombre||x.concepto||'Sin descripción';
-    var monto=x.total||x.monto||0;
-    return "<option value='"+x.id+"' data-desc='"+desc+"'>"+f+" — "+desc+(monto?" — "+fmt(monto):"")+"</option>";
+    var desc=x.concepto||'Sin descripción';
+    var monto=x.monto||0;
+    return "<option value='"+x.id+"' data-desc=\""+_recEsc(desc)+"\">"+f+" — "+desc+(monto?" — "+fmt(monto):"")+"</option>";
   }).join('');
+  wrap.innerHTML =
+    "<div class='form-row'><div class='fg full'>"+
+    "<label>"+labels[tipo]+"</label>"+
+    "<select class='sel' id='recObjetoId' style='width:100%'>"+opts+"</select>"+
+    "</div></div>";
+}
+
+// Helper escape para evitar XSS en innerHTML
+function _recEsc(s){
+  return String(s||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;').replace(/'/g,'&#39;');
+}
+
+// Renderiza el selector de venta con tabs (últimas / nro orden / cliente)
+function _recRenderSelectorVenta(){
+  var h = "<div class='form-row'><div class='fg full'>"+
+    "<label>Seleccionar venta</label>"+
+    // Tabs de modo de búsqueda
+    "<div style='display:flex;gap:.4rem;margin-bottom:.5rem;flex-wrap:wrap'>"+
+      _recBtnModo('ultimas','🕐 Últimas')+
+      _recBtnModo('nroorden','🔍 Nro orden')+
+      _recBtnModo('cliente','👤 Cliente')+
+    "</div>"+
+    // Caja de búsqueda según modo
+    "<div id='recBusquedaBox'></div>"+
+    // Resultados / venta seleccionada
+    "<div id='recVentasResultado' style='margin-top:.5rem'></div>"+
+    // Si hay venta seleccionada: mostrar productos
+    "<div id='recProductosBox' style='margin-top:.5rem'></div>"+
+  "</div></div>";
+  // Render diferido para que existan los elementos
+  setTimeout(function(){
+    _recRenderBusquedaBox();
+    _recRenderResultados();
+  }, 0);
+  return h;
+}
+
+function _recBtnModo(modo, label){
+  var sel = _recSelMode === modo;
+  var bg = sel ? 'var(--accent)' : 'var(--bg-soft)';
+  var color = sel ? '#fff' : 'var(--tx)';
+  var bd = sel ? 'var(--accent)' : 'var(--bd)';
+  return "<button type='button' onclick='_recCambiarModo(\""+modo+"\")' style='flex:1;min-width:90px;padding:.45rem .5rem;background:"+bg+";color:"+color+";border:1px solid "+bd+";border-radius:6px;font-size:.78rem;font-weight:600;cursor:pointer;font-family:inherit'>"+label+"</button>";
+}
+
+function _recCambiarModo(modo){
+  _recSelMode = modo;
+  // Re-renderizar solo el área de tabs+caja
+  var wrap = document.getElementById('recObjetoWrap');
+  if(wrap) wrap.innerHTML = _recRenderSelectorVenta();
+}
+
+function _recRenderBusquedaBox(){
+  var box = document.getElementById('recBusquedaBox');
+  if(!box) return;
+  if(_recSelMode === 'ultimas'){
+    box.innerHTML = "<div style='font-size:.7rem;color:var(--tx-soft)'>Mostrando las últimas 20 ventas</div>";
+  } else if(_recSelMode === 'nroorden'){
+    box.innerHTML = "<input class='fi' id='recBusqNroOrden' type='text' placeholder='Ej: 1234' oninput='_recRenderResultados()' style='width:100%' inputmode='numeric'>";
+  } else if(_recSelMode === 'cliente'){
+    var dl = "<datalist id='recClientesDL'>"+_recClientesUnicos.map(function(c){return "<option value=\""+_recEsc(c)+"\">";}).join('')+"</datalist>";
+    box.innerHTML = "<input class='fi' id='recBusqCliente' type='text' placeholder='Escribí el nombre del cliente' oninput='_recRenderResultados()' list='recClientesDL' style='width:100%'>"+dl;
+  }
+}
+
+function _recRenderResultados(){
+  var box = document.getElementById('recVentasResultado');
+  if(!box) return;
+  var grupos = _recVentasGrupos;
+  if(_recSelMode === 'ultimas'){
+    grupos = grupos.slice(0, 20);
+  } else if(_recSelMode === 'nroorden'){
+    var q = (document.getElementById('recBusqNroOrden')||{value:''}).value.trim();
+    if(!q){
+      box.innerHTML = "<div style='font-size:.72rem;color:var(--tx-soft);padding:.5rem;background:var(--bg-soft);border-radius:6px;text-align:center'>Escribí un nro de orden para buscar</div>";
+      return;
+    }
+    grupos = grupos.filter(function(g){
+      return g.nro_orden && String(g.nro_orden).indexOf(q) >= 0;
+    });
+  } else if(_recSelMode === 'cliente'){
+    var qc = (document.getElementById('recBusqCliente')||{value:''}).value.trim().toLowerCase();
+    if(!qc){
+      box.innerHTML = "<div style='font-size:.72rem;color:var(--tx-soft);padding:.5rem;background:var(--bg-soft);border-radius:6px;text-align:center'>Escribí parte del nombre del cliente</div>";
+      return;
+    }
+    grupos = grupos.filter(function(g){
+      return g.cliente_nombre && g.cliente_nombre.toLowerCase().indexOf(qc) >= 0;
+    });
+  }
+  if(grupos.length === 0){
+    box.innerHTML = "<div style='font-size:.72rem;color:var(--tx-soft);padding:.5rem;background:var(--bg-soft);border-radius:6px;text-align:center'>Sin resultados</div>";
+    return;
+  }
+  // Pintar lista de ventas (max 20 si es búsqueda)
+  var lim = (_recSelMode === 'ultimas') ? grupos : grupos.slice(0, 30);
+  var h = "<div style='max-height:240px;overflow-y:auto;border:1px solid var(--bd);border-radius:6px'>";
+  lim.forEach(function(g, idx){
+    var f = new Date(g.created_at).toLocaleDateString('es-AR',{timeZone:"America/Argentina/Buenos_Aires"});
+    var nProds = g.productos.length;
+    var selBg = (_recSelVenta && _recSelVenta.nro_orden === g.nro_orden && _recSelVenta.id_principal === g.id_principal) ? 'background:var(--accent-light)' : '';
+    h += "<div onclick='_recSeleccionarVenta("+idx+")' style='padding:.55rem .7rem;border-bottom:1px solid var(--bd);cursor:pointer;"+selBg+"'>"+
+      "<div style='display:flex;justify-content:space-between;gap:.5rem;align-items:flex-start'>"+
+        "<div style='flex:1;min-width:0'>"+
+          "<div style='font-size:.78rem;font-weight:600;color:var(--tx);white-space:nowrap;overflow:hidden;text-overflow:ellipsis'>"+
+            (g.nro_orden ? "#"+g.nro_orden+" · " : "") + _recEsc(g.cliente_nombre) +
+          "</div>"+
+          "<div style='font-size:.65rem;color:var(--tx-soft);margin-top:.1rem'>"+f+" · "+nProds+" producto"+(nProds!==1?'s':'')+"</div>"+
+        "</div>"+
+        "<div style='font-size:.78rem;font-weight:700;color:var(--accent);white-space:nowrap'>"+fmt(g.total)+"</div>"+
+      "</div>"+
+    "</div>";
+  });
+  h += "</div>";
+  // Guardar grupos filtrados en variable global para _recSeleccionarVenta
+  window._recGruposFiltrados = lim;
+  box.innerHTML = h;
+  // Si había venta seleccionada, mantener el panel de productos visible
+  if(_recSelVenta) _recRenderProductos();
+}
+
+function _recSeleccionarVenta(idx){
+  var grupos = window._recGruposFiltrados || [];
+  var g = grupos[idx];
+  if(!g) return;
+  _recSelVenta = g;
+  _recSelProducto = null; // Reset producto al cambiar venta
+  // Re-renderizar la lista para marcar el seleccionado
+  _recRenderResultados();
+  _recRenderProductos();
+}
+
+function _recRenderProductos(){
+  var box = document.getElementById('recProductosBox');
+  if(!box) return;
+  if(!_recSelVenta){box.innerHTML = ''; return;}
+  var prods = _recSelVenta.productos;
+  var h = "<div style='background:var(--bg-soft);border:1px solid var(--bd);border-radius:6px;padding:.55rem .7rem'>"+
+    "<div style='font-size:.7rem;color:var(--tx-soft);font-weight:600;margin-bottom:.4rem'>¿El reclamo es por toda la venta o por un producto específico?</div>"+
+    "<div style='display:flex;flex-direction:column;gap:.3rem'>";
+  // Opción "toda la venta"
+  var selTotal = _recSelProducto === null;
+  var bgT = selTotal ? 'var(--accent-light)' : '#fff';
+  var bdT = selTotal ? 'var(--accent)' : 'var(--bd)';
+  h += "<label style='display:flex;align-items:center;gap:.5rem;padding:.45rem .55rem;background:"+bgT+";border:1px solid "+bdT+";border-radius:5px;cursor:pointer;font-size:.78rem'>"+
+    "<input type='radio' name='recProdSel' "+(selTotal?'checked':'')+" onchange='_recSelProducto=null;_recRenderProductos()' style='margin:0'>"+
+    "<span style='font-weight:600'>Toda la venta ("+fmt(_recSelVenta.total)+")</span>"+
+  "</label>";
+  // Productos
+  prods.forEach(function(p){
+    var sel = _recSelProducto && _recSelProducto.id === p.id;
+    var bg = sel ? 'var(--accent-light)' : '#fff';
+    var bd = sel ? 'var(--accent)' : 'var(--bd)';
+    h += "<label style='display:flex;align-items:center;gap:.5rem;padding:.45rem .55rem;background:"+bg+";border:1px solid "+bd+";border-radius:5px;cursor:pointer;font-size:.78rem'>"+
+      "<input type='radio' name='recProdSel' "+(sel?'checked':'')+" onchange='_recElegirProducto("+p.id+")' style='margin:0'>"+
+      "<span style='flex:1;white-space:nowrap;overflow:hidden;text-overflow:ellipsis'>"+_recEsc(p.producto_nombre)+(p.cantidad>1?" × "+p.cantidad:"")+" — "+fmt(p.total)+"</span>"+
+    "</label>";
+  });
+  h += "</div></div>";
+  box.innerHTML = h;
+}
+
+function _recElegirProducto(prodLineaId){
+  if(!_recSelVenta) return;
+  _recSelProducto = _recSelVenta.productos.find(function(p){return p.id===prodLineaId;}) || null;
+  _recRenderProductos();
 }
 
 function enviarReclamo(){
   var categoria=document.getElementById('recCategoria').value;
   var tipoObjeto=document.getElementById('recTipoObjeto').value;
-  var objetoId=document.getElementById('recObjetoId').value;
   var titulo=document.getElementById('recTitulo').value.trim();
   var desc=document.getElementById('recDesc').value.trim();
   var fotoInput=document.getElementById('recFoto');
@@ -8274,13 +8502,41 @@ function enviarReclamo(){
   if(!titulo){toast('Escribí un título para el reclamo','twarn');return;}
   if(!desc){toast('Describí el problema','twarn');return;}
 
-  // Obtener descripción del objeto seleccionado
-  var objetoDesc='';
-  if(objetoId){
-    var sel=document.getElementById('recObjetoId');
-    var opt=sel.options[sel.selectedIndex];
-    objetoDesc=opt?opt.dataset.desc||opt.text:'';
+  // Determinar objeto_id y objeto_desc según tipo
+  var objetoId = null;
+  var objetoDesc = '';
+  if(tipoObjeto === 'venta'){
+    if(!_recSelVenta){
+      toast('Seleccioná la venta a la que se refiere el reclamo','twarn');
+      return;
+    }
+    if(_recSelProducto){
+      // Reclamo por producto específico → ID de esa línea de venta
+      objetoId = _recSelProducto.id;
+      objetoDesc = (_recSelVenta.nro_orden ? '#'+_recSelVenta.nro_orden+' · ' : '') +
+                   _recSelVenta.cliente_nombre + ' · ' +
+                   _recSelProducto.producto_nombre +
+                   (_recSelProducto.cantidad > 1 ? ' × '+_recSelProducto.cantidad : '') +
+                   ' (' + fmt(_recSelProducto.total) + ')';
+    } else {
+      // Reclamo por toda la venta → ID representativo (primer producto)
+      objetoId = _recSelVenta.id_principal;
+      objetoDesc = (_recSelVenta.nro_orden ? '#'+_recSelVenta.nro_orden+' · ' : '') +
+                   _recSelVenta.cliente_nombre + ' · ' +
+                   _recSelVenta.productos.length + ' producto' + (_recSelVenta.productos.length!==1?'s':'') +
+                   ' (' + fmt(_recSelVenta.total) + ')';
+    }
+  } else if(tipoObjeto === 'gasto' || tipoObjeto === 'rendicion'){
+    var selEl = document.getElementById('recObjetoId');
+    if(!selEl || !selEl.value){
+      toast('Seleccioná el '+(tipoObjeto==='gasto'?'gasto':'rendición')+' al que se refiere el reclamo','twarn');
+      return;
+    }
+    objetoId = parseInt(selEl.value);
+    var opt = selEl.options[selEl.selectedIndex];
+    objetoDesc = opt ? (opt.dataset.desc || opt.text) : '';
   }
+  // si es "otro": objetoId queda null, objetoDesc vacío — está bien
 
   function doPost(imgUrl){
     var VNOMBRE={1:'David',2:'Facu',3:'Marcela'};
@@ -8288,15 +8544,14 @@ function enviarReclamo(){
       vendedor_id:VENDEDOR_ID,
       vendedor_nombre:VNOMBRE[VENDEDOR_ID]||'Vendedor',
       tipo_objeto:tipoObjeto,
-      objeto_id:objetoId?parseInt(objetoId):null,
+      objeto_id:objetoId,
       objeto_desc:objetoDesc,
       categoria:categoria,
       titulo:titulo,
       descripcion:desc,
       imagen_url:imgUrl||null,
       estado:'pendiente',
-      prioridad:'normal'
-    ,
+      prioridad:'normal',
       nro_operacion:'RECLA-'+Math.floor(10000+Math.random()*90000)
     }).then(function(res){
       var recId=Array.isArray(res)&&res[0]?res[0].id:null;
@@ -8311,10 +8566,15 @@ function enviarReclamo(){
         });
       }
       toast('Reclamo enviado correctamente','tok');
+      // Reset selecciones y form
+      _recSelVenta = null;
+      _recSelProducto = null;
       document.getElementById('recTitulo').value='';
       document.getElementById('recDesc').value='';
       document.getElementById('recFoto').value='';
       document.getElementById('recFotoPreview').innerHTML='';
+      // Re-renderizar selector para limpiar la venta seleccionada
+      recActualizarObjeto();
       loadReclamosList();
     });
   }
@@ -16159,6 +16419,170 @@ function vcBloquearCliente(clienteId){
 // FIN sistema CC FIFO ════════════════════════════════════════════════
 
 
+</script>
+
+<!-- ═══════════════════════════════════════════════════════════════════
+     SISTEMA DE BOTÓN X PARA LIMPIAR BÚSQUEDAS (2026-05-15)
+     Auto-aplica una X clickable a inputs cuyo placeholder contenga
+     "Buscar"/"buscar". Al hacer click, limpia y dispara el oninput
+     para que la búsqueda se actualice.
+     ═══════════════════════════════════════════════════════════════ -->
+<style id="belleClearXStyle">
+.belle-clearx-wrap{position:relative;display:inline-block;flex:inherit}
+.belle-clearx-wrap > input{padding-right:28px !important}
+.belle-clearx-btn{
+  position:absolute;
+  right:6px;
+  top:50%;
+  transform:translateY(-50%);
+  width:18px;
+  height:18px;
+  border-radius:50%;
+  background:rgba(0,0,0,.12);
+  color:#fff;
+  border:none;
+  cursor:pointer;
+  font-size:11px;
+  font-weight:700;
+  line-height:18px;
+  text-align:center;
+  padding:0;
+  display:none;
+  align-items:center;
+  justify-content:center;
+  font-family:inherit;
+  user-select:none;
+  z-index:5;
+}
+.belle-clearx-btn:hover{background:rgba(0,0,0,.25)}
+.belle-clearx-btn.visible{display:flex}
+</style>
+<script id="belleClearXScript">
+(function(){
+  // Detecta si un input es candidato para tener X de limpieza
+  function isSearchInput(inp){
+    if(!inp || inp.tagName !== 'INPUT') return false;
+    var t = (inp.type||'').toLowerCase();
+    if(t && t !== 'text' && t !== 'search' && t !== 'tel') return false;
+    if(inp.readOnly || inp.disabled) return false;
+    if(inp.dataset.bclx === '1') return false; // ya procesado
+    var ph = (inp.placeholder||'').toLowerCase();
+    // Detecta inputs de búsqueda por placeholder
+    if(ph.indexOf('buscar') >= 0 || ph.indexOf('search') >= 0 ||
+       ph.indexOf('🔍') >= 0 || ph.indexOf('nombre, id') >= 0 ||
+       ph.indexOf('ej: ') >= 0 && (ph.indexOf('orden')>=0 || ph.indexOf('cliente')>=0)){
+      return true;
+    }
+    return false;
+  }
+
+  // Agrega la X a un input
+  function addClearX(inp){
+    if(!inp || inp.dataset.bclx === '1') return;
+    inp.dataset.bclx = '1';
+    // Necesitamos un wrapper relative. Si el padre ya es relative, lo aprovechamos.
+    var parent = inp.parentElement;
+    if(!parent) return;
+    var parentStyle = window.getComputedStyle(parent);
+    var wrap;
+    if(parentStyle.position === 'relative' || parentStyle.position === 'absolute' || parentStyle.position === 'fixed'){
+      // Reusar el padre como wrap
+      wrap = parent;
+    } else {
+      // Crear wrapper alrededor del input
+      wrap = document.createElement('span');
+      wrap.className = 'belle-clearx-wrap';
+      // Mantener flex inheritance si aplica
+      var inpStyle = window.getComputedStyle(inp);
+      if(inpStyle.width === '100%' || inp.style.width === '100%') wrap.style.display = 'block';
+      parent.insertBefore(wrap, inp);
+      wrap.appendChild(inp);
+    }
+    // Crear botón X
+    var btn = document.createElement('button');
+    btn.type = 'button';
+    btn.className = 'belle-clearx-btn';
+    btn.innerHTML = '×';
+    btn.setAttribute('aria-label','Limpiar búsqueda');
+    btn.tabIndex = -1;
+    // Insertar después del input
+    if(inp.nextSibling){
+      inp.parentNode.insertBefore(btn, inp.nextSibling);
+    } else {
+      inp.parentNode.appendChild(btn);
+    }
+    // Mostrar/ocultar según si hay contenido
+    function updateVisibility(){
+      if(inp.value && inp.value.length > 0) btn.classList.add('visible');
+      else btn.classList.remove('visible');
+    }
+    updateVisibility();
+    // Listener para mantener visibilidad sincronizada
+    inp.addEventListener('input', updateVisibility);
+    inp.addEventListener('change', updateVisibility);
+    // Click en X: limpiar y disparar input
+    btn.addEventListener('click', function(e){
+      e.preventDefault();
+      e.stopPropagation();
+      inp.value = '';
+      btn.classList.remove('visible');
+      // Disparar 'input' para que cualquier listener se actualice
+      try {
+        var ev = new Event('input', {bubbles: true});
+        inp.dispatchEvent(ev);
+      } catch(err){
+        // Fallback para browsers viejos
+        var ev2 = document.createEvent('Event');
+        ev2.initEvent('input', true, true);
+        inp.dispatchEvent(ev2);
+      }
+      // Ejecutar el oninput si existe (algunos no escuchan el evento estándar)
+      if(typeof inp.oninput === 'function') inp.oninput.call(inp);
+      inp.focus();
+    });
+  }
+
+  // Procesa todos los inputs candidatos del DOM
+  function processAll(){
+    var inputs = document.querySelectorAll('input:not([data-bclx])');
+    for(var i=0;i<inputs.length;i++){
+      if(isSearchInput(inputs[i])) addClearX(inputs[i]);
+    }
+  }
+
+  // Inicializar
+  function init(){
+    processAll();
+    // Observer para inputs nuevos
+    if(window.MutationObserver){
+      var obs = new MutationObserver(function(mutations){
+        var shouldProcess = false;
+        for(var i=0;i<mutations.length;i++){
+          var m = mutations[i];
+          if(m.addedNodes && m.addedNodes.length){
+            shouldProcess = true;
+            break;
+          }
+        }
+        if(shouldProcess){
+          // Debounce: procesar después de un frame
+          if(window._belleClearXTimer) return;
+          window._belleClearXTimer = setTimeout(function(){
+            window._belleClearXTimer = null;
+            processAll();
+          }, 100);
+        }
+      });
+      obs.observe(document.body, {childList:true, subtree:true});
+    }
+  }
+
+  if(document.readyState === 'loading'){
+    document.addEventListener('DOMContentLoaded', init);
+  } else {
+    init();
+  }
+})();
 </script>
 </body>
 <!-- build:20260329-233522 -->
