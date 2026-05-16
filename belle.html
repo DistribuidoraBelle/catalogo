@@ -7936,9 +7936,16 @@ function _adminReactivarPedido(id){
 // ═══════════════════════════════════════════════════════════════════
 function _adminCancelarPedido(id){
   if(!confirm('Cancelar este pedido?\n\nSe va a:\n• Marcar como cancelado\n• DEVOLVER el stock al inventario\n• Si estaba cobrado: BORRAR las ventas creadas y el pago de CC (si era CC)\n\nNO se borra el pedido (queda como cancelado para histórico).'))return;
+  // FIX 2026-05-16: guard de idempotencia
   apiGet('pedidos_catalogo','select=*&id=eq.'+id).then(function(data){
     if(!Array.isArray(data)||!data.length)return;
     var p=data[0];
+    // Si ya está cancelado, abortar
+    if(p.estado === 'cancelado'){
+      toast('Este pedido ya está cancelado','twarn');
+      _logAct('intento_cancelar_pedido_duplicado',{pedido_id:id});
+      return;
+    }
     var nroOrden=p.nro_orden||('WEB-'+id);
     // ── Detectar correctamente si tenía cobros (incluso parciales) ──
     // Si tenía cobros parciales, ya hay ventas creadas y stock descontado a vendido_david.
@@ -7946,7 +7953,7 @@ function _adminCancelarPedido(id){
     var teniaCobro = (p.estado==='cobrado' || p.estado==='cobrado_parcial' || p.confirmado_cobro || (parseFloat(p.cobrado_total)||0) > 0);
     var estabaCobrado=teniaCobro; // Mantener nombre legacy pero con lógica corregida
     var items=[];try{items=typeof p.items==='string'?JSON.parse(p.items):p.items||[];}catch(e){items=[];}
-    var promesas=[apiPatch('pedidos_catalogo',{estado:'cancelado'},'id=eq.'+id)];
+    var promesas=[apiPatch('pedidos_catalogo',{estado:'cancelado'},'id=eq.'+id+'&estado=not.eq.cancelado')];
 
     // FEAT CC v2 (2026-05-14): cancelar cuotas asociadas (si existen).
     // Marcamos cuotas pendientes como 'cancelada' para que NO sigan apareciendo
@@ -10557,10 +10564,18 @@ function incAgregarStockDirecto(itemId,prodId,cantRec,cantFal){
 
 function incEliminar(itemId){
   if(!confirm("Quitar este reclamo? El en viaje del producto se actualizará."))return;
-  apiGet("pedidos_proveedor_items","select=id,producto_id,cantidad_pedida,cantidad_recibida&id=eq."+itemId).then(function(rows){
+  // FIX 2026-05-16: guard de idempotencia — chequear si ya está cancelado antes de tocar en_viaje
+  apiGet("pedidos_proveedor_items","select=id,producto_id,cantidad_pedida,cantidad_recibida,estado_item&id=eq."+itemId).then(function(rows){
     var it=rows&&rows[0];
-    var ops=[apiPatch("pedidos_proveedor_items",{estado_item:"cancelado"},"id=eq."+itemId)];
-    if(it&&it.producto_id){
+    if(!it){toast("Item no encontrado","terr");return;}
+    // Si ya estaba cancelado, no hacer nada (evita restar en_viaje dos veces)
+    if(it.estado_item === 'cancelado'){
+      toast("Este item ya fue cancelado","twarn");
+      return;
+    }
+    // Patch con filtro de estado para idempotencia BD
+    var ops=[apiPatch("pedidos_proveedor_items",{estado_item:"cancelado"},"id=eq."+itemId+"&estado_item=not.eq.cancelado")];
+    if(it.producto_id){
       var cantRestante=Math.max(0,(it.cantidad_pedida||0)-(it.cantidad_recibida||0));
       if(cantRestante>0){
         ops.push(patchStockFresco(it.producto_id,{en_viaje:-cantRestante},"Reclamo eliminado — en viaje ajustado"));
@@ -19453,60 +19468,118 @@ function recepcionCheckFaltante(idx,pedido,val){
 }
 
 function confirmarRecepcion(){
-  var recibidos=[];var faltantes=[];var nuevos=[];
-  _recepcionItems.forEach(function(it,i){
-    var recibido=parseInt(document.getElementById("recv-"+i).value)||0;
-    var faltante=it.cantidad_pedida-recibido;
-    recibidos.push({item:it,recibido:recibido,faltante:faltante});
-    if(faltante>0)faltantes.push({item:it,faltante:faltante});
-    if(it.es_nuevo&&recibido>0)nuevos.push({item:it,recibido:recibido});
-  });
+  // ════════════════════════════════════════════════════════════════════
+  // FIX 2026-05-16: agregar guards de idempotencia (igual que _doAgregarAlStock)
+  // Antes: doble-click → suma stock dos veces
+  // Ahora: lock global + verificación de estado_item por item antes de sumar
+  // ════════════════════════════════════════════════════════════════════
+  var pedidoId = _recepcionPedidoId;
+  if(!pedidoId){toast("Sin pedido","terr");return;}
 
-  var hayFaltantes=faltantes.length>0;
-  var nuevoEstado=hayFaltantes?"parcial":"recibido";
+  // Guard 1: lock global por pedidoId
+  window._recepcionLock = window._recepcionLock || {};
+  if(window._recepcionLock[pedidoId]){
+    console.warn("[belle] confirmarRecepcion ya en ejecución para pedido "+pedidoId);
+    toast("Ya se está procesando este pedido — esperá","twarn");
+    return;
+  }
+  window._recepcionLock[pedidoId] = true;
+  var _recTimeout = setTimeout(function(){delete window._recepcionLock[pedidoId];},60000);
+  function _liberarRecLock(){clearTimeout(_recTimeout);delete window._recepcionLock[pedidoId];}
 
-  var promises=[];
+  // Deshabilitar botón inmediato
+  var btnCnf = document.querySelector('button[onclick*="confirmarRecepcion"]');
+  if(btnCnf){btnCnf.disabled=true;btnCnf.style.opacity='.6';btnCnf.textContent='Procesando...';}
 
-  // Update each item
-  recibidos.forEach(function(r){
-    var matchedId=(_recepcionMatches&&_recepcionMatches[r.item.id])||r.item.producto_id||null;
-    promises.push(apiPatch("pedidos_proveedor_items",{
-      cantidad_recibida:r.recibido,
-      estado_item:r.faltante>0?"faltante":"recibido",
-      producto_id:matchedId
-    },"id=eq."+r.item.id));
-    if(matchedId&&r.recibido>0){
-      var p=prods.find(function(x){return x.id===matchedId;});
-      promises.push(patchStockFresco(matchedId,{stock_actual:+r.recibido,en_viaje:-(r.item.cantidad_pedida||0)},'Recepcion pedido'));
-      promises.push(apiPost("movimientos_stock",{producto_id:matchedId,producto_nombre:(p?p.nombre:r.item.nombre_proveedor||("Prod #"+matchedId)),tipo:"entrada",cantidad:r.recibido,motivo:"Recepcion pedido proveedor. Pedido: "+(_recepcionPedidoId||"?")+(r.faltante>0?" Faltante: "+r.faltante+"u":""),created_at:new Date().toISOString()}).catch(function(e){console.error("[belle] error silencioso:",e);}));
-    } else if(!matchedId&&r.recibido>0){
-      nuevos.push({item:r.item,recibido:r.recibido});
+  // Guard 2: leer items frescos de BD para chequear que no están ya 'recibido' o 'en_stock'
+  apiGet("pedidos_proveedor_items","select=id,estado_item&pedido_id=eq."+pedidoId).then(function(freshItems){
+    if(!Array.isArray(freshItems)){_liberarRecLock();return;}
+    // Mapear estado_item por id
+    var estadoPorId = {};
+    freshItems.forEach(function(it){estadoPorId[it.id] = it.estado_item;});
+
+    var recibidos=[];var faltantes=[];var nuevos=[];var saltados=0;
+    _recepcionItems.forEach(function(it,i){
+      var estadoActual = estadoPorId[it.id];
+      // Si ya fue procesado, saltar
+      if(estadoActual === 'recibido' || estadoActual === 'en_stock' || estadoActual === 'parcial'){
+        saltados++;
+        return;
+      }
+      var recibido=parseInt(document.getElementById("recv-"+i).value)||0;
+      var faltante=it.cantidad_pedida-recibido;
+      recibidos.push({item:it,recibido:recibido,faltante:faltante});
+      if(faltante>0)faltantes.push({item:it,faltante:faltante});
+      if(it.es_nuevo&&recibido>0)nuevos.push({item:it,recibido:recibido});
+    });
+
+    if(saltados>0 && recibidos.length===0){
+      _liberarRecLock();
+      if(btnCnf){btnCnf.disabled=false;btnCnf.style.opacity='1';btnCnf.textContent='Confirmar y actualizar stock';}
+      toast("⚠️ Este pedido ya fue procesado anteriormente","twarn");
+      _logAct('intento_recepcion_duplicada',{pedido_id:pedidoId,items_ya_procesados:saltados});
+      return;
     }
-  });
 
-  // Update pedido status
-  promises.push(apiPatch("pedidos_proveedor",{estado:nuevoEstado},"id=eq."+_recepcionPedidoId));
+    var hayFaltantes=faltantes.length>0;
+    var nuevoEstado=hayFaltantes?"parcial":"recibido";
+    var promises=[];
 
-  Promise.all(promises).then(function(){
-    cerrarModal("moRecepcion");
-    toast("Recepcion confirmada. Stock actualizado.","tok");
-    loadPedidosProveedor();
-    apiGet("productos","select=*&activo=is.true&order=empresa,nombre&limit=2000").then(function(d){if(Array.isArray(d))prods=d;renderStock();});
+    // Update each item — pero con filtro de estado para idempotencia BD
+    recibidos.forEach(function(r){
+      var matchedId=(_recepcionMatches&&_recepcionMatches[r.item.id])||r.item.producto_id||null;
+      // Patch con filtro: solo si el item NO está ya en recibido/en_stock/parcial
+      promises.push(apiPatch("pedidos_proveedor_items",{
+        cantidad_recibida:r.recibido,
+        estado_item:r.faltante>0?"faltante":"recibido",
+        producto_id:matchedId
+      },"id=eq."+r.item.id+"&estado_item=not.in.(recibido,en_stock,parcial)"));
+      if(matchedId&&r.recibido>0){
+        var p=prods.find(function(x){return x.id===matchedId;});
+        var stockAntes = p ? (p.stock_actual||0) : 0;
+        promises.push(patchStockFresco(matchedId,{stock_actual:+r.recibido,en_viaje:-(r.item.cantidad_pedida||0)},'Recepcion pedido'));
+        // Log con valores correctos (stock_antes + recibido = stock_despues)
+        promises.push(apiPost("movimientos_stock",{
+          producto_id:matchedId,
+          producto_nombre:(p?p.nombre:r.item.nombre_proveedor||("Prod #"+matchedId)),
+          tipo:"proveedor",
+          cantidad:r.recibido,
+          stock_antes:stockAntes,
+          stock_despues:stockAntes+r.recibido,
+          motivo:"Recepcion pedido proveedor. Pedido: "+pedidoId+(r.faltante>0?" Faltante: "+r.faltante+"u":""),
+          usuario:"admin",
+          created_at:new Date().toISOString()
+        }).catch(function(e){console.error("[belle] error silencioso log:",e);}));
+      } else if(!matchedId&&r.recibido>0){
+        nuevos.push({item:r.item,recibido:r.recibido});
+      }
+    });
 
-    // Handle new products
-    if(nuevos.length>0){
-      _newProdsQueue=nuevos.slice();
-      setTimeout(procesarNuevoProducto,300);
-    }
+    // Update pedido status
+    promises.push(apiPatch("pedidos_proveedor",{estado:nuevoEstado},"id=eq."+pedidoId));
 
-    // Show faltantes summary
-    if(faltantes.length>0){
-      var msg="Faltantes registrados:\n"+faltantes.map(function(f){
-        return"- "+f.item.nombre_proveedor+": "+f.faltante+" unidades";
-      }).join("\n");
-      var copyBtn=document.createElement("div");
-      copyBtn.innerHTML="<div style='position:fixed;bottom:80px;right:20px;background:var(--sur);border:1px solid var(--red);border-radius:var(--r);padding:.9rem 1.1rem;max-width:320px;z-index:500'>"+
-        "<div style='font-size:.78rem;font-weight:600;color:var(--red);margin-bottom:.4rem'>"+faltantes.length+" faltantes registrados</div>"+
+    Promise.all(promises).then(function(){
+      _liberarRecLock();
+      cerrarModal("moRecepcion");
+      toast("Recepcion confirmada. Stock actualizado.","tok");
+      _logAct('recepcion_pedido',{pedido_id:pedidoId,items_procesados:recibidos.length,faltantes:faltantes.length});
+      loadPedidosProveedor();
+      apiGet("productos","select=*&activo=is.true&order=empresa,nombre&limit=2000").then(function(d){if(Array.isArray(d))prods=d;renderStock();});
+
+      // Handle new products
+      if(nuevos.length>0){
+        _newProdsQueue=nuevos.slice();
+        setTimeout(procesarNuevoProducto,300);
+      }
+
+      // Show faltantes summary
+      if(faltantes.length>0){
+        var msg="Faltantes registrados:\n"+faltantes.map(function(f){
+          return"- "+f.item.nombre_proveedor+": "+f.faltante+" unidades";
+        }).join("\n");
+        var copyBtn=document.createElement("div");
+        copyBtn.innerHTML="<div style='position:fixed;bottom:80px;right:20px;background:var(--sur);border:1px solid var(--red);border-radius:var(--r);padding:.9rem 1.1rem;max-width:320px;z-index:500'>"+
+          "<div style='font-size:.78rem;font-weight:600;color:var(--red);margin-bottom:.4rem'>"+faltantes.length+" faltantes registrados</div>"+
         faltantes.map(function(f){return"<div style='font-size:.72rem;color:var(--tx2)'>&#8226; "+f.item.nombre_proveedor+" ("+f.faltante+" u.)</div>";}).join("")+
         "<div style='display:flex;gap:.4rem;margin-top:.6rem'>"+
           "<button class='btn btn-red' onclick='copiarFaltantesWA("+JSON.stringify(faltantes.map(function(f){return f.item.nombre_proveedor+" x"+f.faltante;})).replace(/'/g,"&#39;")+")' style='flex:1;font-size:.68rem'>Copiar para WA</button>"+
@@ -19515,7 +19588,8 @@ function confirmarRecepcion(){
       "</div>";
       document.body.appendChild(copyBtn);
     }
-  }).catch(function(){toast("Error confirmando recepcion","terr");});
+  }).catch(function(){_liberarRecLock();toast("Error confirmando recepcion","terr");if(btnCnf){btnCnf.disabled=false;btnCnf.style.opacity='1';btnCnf.textContent='Confirmar y actualizar stock';}});
+  }).catch(function(e){_liberarRecLock();toast("Error: "+(e&&e.message||""),"terr");if(btnCnf){btnCnf.disabled=false;btnCnf.style.opacity='1';btnCnf.textContent='Confirmar y actualizar stock';}});
 }
 
 function copiarFaltantesWA(items){
@@ -19753,13 +19827,23 @@ function cpGuardarMatchesExistente(){
   if(!pedidoId||!itemIds){toast("Error: sin referencia de pedido","terr");return;}
   var d=window._pedidoParaConfirmar;
   if(!d){toast("Error: sin datos del pedido","terr");return;}
+  // FIX 2026-05-16: lock global por pedidoId para prevenir doble ejecución
+  window._cpGuardarLock = window._cpGuardarLock || {};
+  if(window._cpGuardarLock[pedidoId]){
+    toast("Ya se está guardando este pedido","twarn");
+    return;
+  }
+  window._cpGuardarLock[pedidoId] = true;
+  var _cpTimeout = setTimeout(function(){delete window._cpGuardarLock[pedidoId];}, 60000);
+  function _liberarCp(){clearTimeout(_cpTimeout);delete window._cpGuardarLock[pedidoId];}
+
   var btn=document.getElementById("cpConfirmarBtn");
   if(btn){btn.disabled=true;btn.textContent="Guardando...";}
 
   // Releer items frescos de BD para obtener producto_id y estado actual
   // (no confiar en cache — el match anterior pudo haberse modificado en otra pestaña)
   apiGet("pedidos_proveedor_items","select=id,producto_id,cantidad_pedida,estado_item&pedido_id=eq."+pedidoId).then(function(itemsBd){
-    if(!Array.isArray(itemsBd)){toast("Error leyendo items","terr");return;}
+    if(!Array.isArray(itemsBd)){_liberarCp();toast("Error leyendo items","terr");return;}
     // Mapa por id para buscar rápido
     var bdById={};
     itemsBd.forEach(function(it){bdById[it.id]=it;});
@@ -19812,6 +19896,7 @@ function cpGuardarMatchesExistente(){
   }).then(function(){
     cerrarModal("moConfirmarPedido");
     toast("Matches guardados — En Viaje actualizado correctamente","tok");
+    _liberarCp();
     // Reset to normal confirm behavior
     var btn2=document.getElementById("cpConfirmarBtn");
     if(btn2){btn2.disabled=false;btn2.textContent="Confirmar pedido realizado";btn2.onclick=function(){cpEjecutarConfirmar();};}
@@ -19819,6 +19904,7 @@ function cpGuardarMatchesExistente(){
     window._editMatchesItemIds=null;
     loadPedidosProveedor();
   }).catch(function(e){
+    _liberarCp();
     toast("Error guardando matches: "+(e&&e.message||""),"terr");
     console.error("[cpGuardarMatches] error:",e);
     if(btn){btn.disabled=false;btn.textContent="Guardar matches";}
@@ -23848,108 +23934,160 @@ function bcUpdateListaTable(nombre){
 
 function guardarControlPedido(){
   if(!_controlPedidoId){toast('Error: no hay pedido activo','terr');return;}
+  // FIX 2026-05-16: lock global por pedido para prevenir doble ejecución
+  window._ctrlPedLock = window._ctrlPedLock || {};
+  if(window._ctrlPedLock[_controlPedidoId]){
+    toast('Ya se está guardando el control de este pedido','twarn');
+    return;
+  }
+  window._ctrlPedLock[_controlPedidoId] = true;
+  var pedidoIdLocal = _controlPedidoId;
+  var _ctrlTimeout = setTimeout(function(){delete window._ctrlPedLock[pedidoIdLocal];}, 60000);
+  function _liberarCtrl(){clearTimeout(_ctrlTimeout);delete window._ctrlPedLock[pedidoIdLocal];}
+
   var btn=document.getElementById('ctrlGuardarBtn');
   if(btn){btn.disabled=true;btn.textContent='Guardando...';}
 
-  var decisions=_controlDecisions;
-  var proms=[];
+  // FIX 2026-05-16: releer items frescos de BD para no duplicar si ya están "controlado"/"recibido"/"en_stock"
+  apiGet('pedidos_proveedor_items','select=id,producto_id,cantidad_pedida,estado_item,nombre_proveedor,precio_usd&pedido_id=eq.'+pedidoIdLocal).then(function(freshItems){
+    if(!Array.isArray(freshItems)){_liberarCtrl();toast('Error leyendo items','terr');return;}
+    var estadoPorId={};
+    freshItems.forEach(function(it){estadoPorId[it.id]=it.estado_item;});
 
-  Object.keys(decisions).forEach(function(itemId){
-    var d=decisions[itemId];
-    var itemOrig=(_controlItems||[]).find(function(it){return String(it.id)===String(itemId);})||{};
-    var cantPedida=itemOrig.cantidad_pedida||0;
-    var cantRecibida=d.cantRecibida||0;
-    var noLlego=cantPedida>0&&cantRecibida===0;
-    var llegoParcial=cantPedida>0&&cantRecibida>0&&cantRecibida<cantPedida;
+    var decisions=_controlDecisions;
+    var proms=[];
+    var procesadosSkip=0;
 
-    // Determinar estado_item correcto
-    var estadoItem;
-    if(noLlego){
-      estadoItem='faltante';
-    } else if(d.catalogoAccion==='match'){
-      estadoItem='macheado';
-    } else if(d.catalogoAccion==='nuevo'){
-      estadoItem='nuevo';
-    } else {
-      estadoItem='pendiente_catalogo';
+    Object.keys(decisions).forEach(function(itemId){
+      var d=decisions[itemId];
+      var itemOrig=(_controlItems||[]).find(function(it){return String(it.id)===String(itemId);})||{};
+      var estadoActual = estadoPorId[itemId];
+
+      // GUARD: si el item ya fue marcado como controlado/recibido/en_stock previamente,
+      // saltarlo (no duplicar stock_actual)
+      if(estadoActual === 'controlado' || estadoActual === 'recibido' || estadoActual === 'en_stock'){
+        procesadosSkip++;
+        return;
+      }
+
+      var cantPedida=itemOrig.cantidad_pedida||0;
+      var cantRecibida=d.cantRecibida||0;
+      var noLlego=cantPedida>0&&cantRecibida===0;
+      var llegoParcial=cantPedida>0&&cantRecibida>0&&cantRecibida<cantPedida;
+
+      // Determinar estado_item correcto
+      var estadoItem;
+      if(noLlego){
+        estadoItem='faltante';
+      } else if(d.catalogoAccion==='match'){
+        estadoItem='macheado';
+      } else if(d.catalogoAccion==='nuevo'){
+        estadoItem='nuevo';
+      } else {
+        estadoItem='pendiente_catalogo';
+      }
+
+      var patch={
+        cantidad_recibida: cantRecibida,
+        cantidad_fallada: d.cantFallada||0,
+        estado_item: estadoItem,
+        // FIX: si acción=nuevo, producto_id siempre null (sin importar el fuzzy match)
+        producto_id: (noLlego||d.catalogoAccion==='nuevo')?null:(d.prodId||null),
+        observacion: d.obsFallada||''
+      };
+      if(llegoParcial&&!patch.observacion){
+        patch.observacion='Llegaron '+cantRecibida+' de '+cantPedida+' pedidas';
+      }
+      // PATCH con filtro de estado — solo si el item NO está en estados ya procesados
+      proms.push(apiPatch('pedidos_proveedor_items',patch,'id=eq.'+itemId+'&estado_item=not.in.(controlado,recibido,en_stock)'));
+
+      // ── Manejar en_viaje y stock ────────────────────────────────────
+      // El en_viaje SOLO se sube desde incConfirmarMatch / cpGuardarMatchesExistente (macheo manual).
+      // guardarControlPedido solo lo BAJA en casos donde corresponde:
+
+      // CASO 1: acción=nuevo y el item YA ESTABA macheado en BD
+      // → el en_viaje fue sumado previamente → hay que bajarlo
+      if(d.catalogoAccion==='nuevo'&&itemOrig.producto_id&&
+         (estadoActual==='macheado'||estadoActual==='borrador_match')){
+        var pidViejo=itemOrig.producto_id;
+        proms.push(
+          apiGet('productos','select=id,en_viaje&id=eq.'+pidViejo).then(function(rows){
+            var p=rows&&rows[0];if(!p)return;
+            var nv=Math.max(0,(p.en_viaje||0)-cantPedida);
+            return apiPatch('productos',{en_viaje:nv},'id=eq.'+pidViejo);
+          }).catch(function(e){console.error('[belle] error silencioso:',e);})
+        );
+      }
+
+      // CASO 2: acción=match Y cantRecibida>0 → llegó, hay que SUMAR stock_actual y BAJAR en_viaje
+      // Solo si el item estaba en estado_item donde el en_viaje fue sumado (macheado o borrador_match)
+      // NUNCA si ya estaba 'controlado' (sería duplicación)
+      if(d.catalogoAccion==='match'&&cantRecibida>0&&d.prodId&&
+         (estadoActual==='macheado'||estadoActual==='borrador_match')){
+        var pidNuevo=d.prodId;
+        var cantBajar=Math.min(cantRecibida,cantPedida);
+        proms.push(
+          apiGet('productos','select=id,stock_actual,en_viaje,costo_ind&id=eq.'+pidNuevo).then(function(rows){
+            var p=rows&&rows[0];if(!p)return;
+            var stockAntes = p.stock_actual||0;
+            var ns=stockAntes+cantRecibida;
+            var nv=Math.max(0,(p.en_viaje||0)-cantBajar);
+            var patchProd={stock_actual:ns,en_viaje:nv};
+            // Costo promedio ponderado
+            var cActual=p.costo_ind||0;
+            var pCompra=itemOrig.precio_usd||0;
+            if(pCompra>0&&ns>0){
+              patchProd.costo_ind=Math.round(((( p.stock_actual||0)*cActual)+(cantRecibida*pCompra))/ns*100)/100;
+            }
+            return apiPatch('productos',patchProd,'id=eq.'+pidNuevo).then(function(){
+              // Loggear movimiento con valores correctos
+              return apiPost('movimientos_stock',{
+                producto_id:pidNuevo,
+                producto_nombre:p.nombre||(itemOrig.nombre_proveedor||'Prod '+pidNuevo),
+                tipo:'proveedor',
+                cantidad:cantRecibida,
+                stock_antes:stockAntes,
+                stock_despues:ns,
+                motivo:'Control pedido proveedor — '+(itemOrig.nombre_proveedor||''),
+                usuario:(document.getElementById('sbUser')||{}).textContent||'admin',
+                periodo:periodoActual||''
+              }).catch(function(e){console.error('[belle] error silencioso:',e);});
+            });
+          }).catch(function(e){console.error('[belle] error silencioso:',e);})
+        );
+      }
+    });
+
+    if(procesadosSkip > 0 && proms.length === 0){
+      _liberarCtrl();
+      if(btn){btn.disabled=false;btn.textContent='\u2713 Guardar control';}
+      toast('⚠️ Todos los items ya fueron controlados previamente','twarn');
+      _logAct('intento_control_duplicado',{pedido_id:pedidoIdLocal,items_ya_procesados:procesadosSkip});
+      return;
     }
 
-    var patch={
-      cantidad_recibida: cantRecibida,
-      cantidad_fallada: d.cantFallada||0,
-      estado_item: estadoItem,
-      // FIX: si acción=nuevo, producto_id siempre null (sin importar el fuzzy match)
-      producto_id: (noLlego||d.catalogoAccion==='nuevo')?null:(d.prodId||null),
-      observacion: d.obsFallada||''
-    };
-    if(llegoParcial&&!patch.observacion){
-      patch.observacion='Llegaron '+cantRecibida+' de '+cantPedida+' pedidas';
-    }
-    proms.push(apiPatch('pedidos_proveedor_items',patch,'id=eq.'+itemId));
+    // Mark pedido as controlado
+    var userName=(document.getElementById('sbUser')||{}).textContent||'Admin';
+    proms.push(apiPatch('pedidos_proveedor',{
+      estado:'controlado',
+      controlado_por: userName.trim(),
+      controlado_at: new Date().toISOString()
+    },'id=eq.'+pedidoIdLocal));
 
-    // ── Manejar en_viaje ──────────────────────────────────────────
-    // El en_viaje SOLO se sube desde incConfirmarMatch (macheo manual).
-    // guardarControlPedido solo lo BAJA en casos donde corresponde:
-
-    // CASO 1: acción=nuevo y el item YA ESTABA macheado en BD (estado=macheado)
-    // → el en_viaje fue sumado previamente por incConfirmarMatch → hay que bajarlo
-    if(d.catalogoAccion==='nuevo'&&itemOrig.producto_id&&
-       (itemOrig.estado_item==='macheado'||itemOrig.estado_item==='controlado')){
-      var pidViejo=itemOrig.producto_id;
-      proms.push(
-        apiGet('productos','select=id,en_viaje&id=eq.'+pidViejo).then(function(rows){
-          var p=rows&&rows[0];if(!p)return;
-          var nv=Math.max(0,(p.en_viaje||0)-cantPedida);
-          return apiPatch('productos',{en_viaje:nv},'id=eq.'+pidViejo);
-        }).catch(function(e){console.error('[belle] error silencioso:',e);})
-      );
-    }
-
-    // CASO 2: acción=match Y cantRecibida>0 → llegó, hay que bajar en_viaje
-    // Solo si el item YA ESTABA macheado en BD (en_viaje fue sumado previamente)
-    if(d.catalogoAccion==='match'&&cantRecibida>0&&d.prodId&&
-       (itemOrig.estado_item==='macheado'||itemOrig.estado_item==='controlado')){
-      var pidNuevo=d.prodId;
-      var cantBajar=Math.min(cantRecibida,cantPedida);
-      proms.push(
-        apiGet('productos','select=id,stock_actual,en_viaje,costo_ind&id=eq.'+pidNuevo).then(function(rows){
-          var p=rows&&rows[0];if(!p)return;
-          var ns=(p.stock_actual||0)+cantRecibida;
-          var nv=Math.max(0,(p.en_viaje||0)-cantBajar);
-          var patchProd={stock_actual:ns,en_viaje:nv};
-          // Costo promedio ponderado
-          var cActual=p.costo_ind||0;
-          var pCompra=itemOrig.precio_usd||0;
-          if(pCompra>0&&ns>0){
-            patchProd.costo_ind=Math.round(((( p.stock_actual||0)*cActual)+(cantRecibida*pCompra))/ns*100)/100;
-          }
-          return apiPatch('productos',patchProd,'id=eq.'+pidNuevo);
-        }).catch(function(e){console.error('[belle] error silencioso:',e);})
-      );
-      // Registrar movimiento
-      proms.push(apiPost('movimientos_stock',{
-        producto_id:pidNuevo,tipo:'entrada',cantidad:cantRecibida,
-        motivo:'Control pedido proveedor — '+(itemOrig.nombre_proveedor||''),
-        usuario:(document.getElementById('sbUser')||{}).textContent||'admin',
-        periodo:periodoActual||''
-      }).catch(function(e){console.error('[belle] error silencioso:',e);}));
-    }
-  });
-
-  // Mark pedido as controlado
-  var userName=(document.getElementById('sbUser')||{}).textContent||'Admin';
-  proms.push(apiPatch('pedidos_proveedor',{
-    estado:'controlado',
-    controlado_por: userName.trim(),
-    controlado_at: new Date().toISOString()
-  },'id=eq.'+_controlPedidoId));
-
-  Promise.all(proms).then(function(){
-    toast('Control guardado correctamente','tok');
-    cerrarModal('moControlPedido');
-    loadPedidosProveedor();
+    Promise.all(proms).then(function(){
+      _liberarCtrl();
+      toast('Control guardado correctamente'+(procesadosSkip>0?' ('+procesadosSkip+' items ya estaban procesados)':''),'tok');
+      _logAct('control_pedido',{pedido_id:pedidoIdLocal,items_procesados:proms.length-1,saltados:procesadosSkip});
+      cerrarModal('moControlPedido');
+      loadPedidosProveedor();
+    }).catch(function(e){
+      _liberarCtrl();
+      toast('Error guardando: '+e.message,'terr');
+      if(btn){btn.disabled=false;btn.textContent='\u2713 Guardar control';}
+    });
   }).catch(function(e){
-    toast('Error guardando: '+e.message,'terr');
+    _liberarCtrl();
+    toast('Error leyendo items: '+(e&&e.message||''),'terr');
     if(btn){btn.disabled=false;btn.textContent='\u2713 Guardar control';}
   });
 }
@@ -27897,19 +28035,43 @@ function recRenderFiltrado(el,reclamos,tipo){
 // === ACCIONES FALTANTES ===
 function recAgregarFaltante(itemId,prodId,cant,prodNom,itemNom){
   if(!confirm('Agregar '+cant+'u de "'+prodNom+'" al stock?\nEstas unidades faltantes llegaron.'))return;
-  var p=typeof prods!=='undefined'&&prods?prods.find(function(x){return x.id===prodId;}):null;
-  var stockAntes=p?p.stock_actual||0:0;
-  var nuevoStock=stockAntes+cant;
-  Promise.all([
-    patchStockFresco(prodId,{stock_actual:+cant,en_viaje:-cant},'Agregar faltante'),
-    apiPatch('pedidos_proveedor_items',{estado_item:'en_stock',cantidad_recibida:cant},'id=eq.'+itemId),
-    apiPost('movimientos_stock',{producto_id:prodId,producto_nombre:prodNom,tipo:'ingreso_faltante',cantidad:cant,stock_antes:stockAntes,stock_despues:nuevoStock,motivo:'Llegó faltante de pedido: '+(itemNom||prodNom),usuario:'admin',periodo:periodoActual||''}).catch(function(e){console.error('mov error:',e);}),
-    apiPost('reclamos',{vendedor_id:null,vendedor_nombre:'Admin '+(curUser||''),tipo_objeto:'pedido_proveedor',objeto_id:itemId,objeto_desc:prodNom,categoria:'stock',titulo:'Faltante resuelto — llegó al stock',descripcion:(cant+'u de '+(itemNom||prodNom)+' agregadas al stock'),estado:'aceptado',prioridad:'normal'}).catch(function(e){console.error("[belle] error silencioso:",e);})
-  ]).then(function(){
-    toast(cant+'u de '+prodNom+' agregadas al stock ✅','tok');
-    loadReclamos();
-    if(typeof renderStock==='function')renderStock();
-  }).catch(function(e){toast('Error: '+e.message,'terr');});
+  // FIX 2026-05-16: guard de idempotencia para evitar duplicación por doble-click
+  apiGet('pedidos_proveedor_items','select=id,estado_item,cantidad_recibida&id=eq.'+itemId).then(function(rows){
+    var item = rows && rows[0];
+    if(!item){toast('Item no encontrado','terr');return;}
+    if(item.estado_item === 'en_stock' || item.estado_item === 'recibido'){
+      toast('Este faltante ya fue agregado al stock','twarn');
+      _logAct('intento_agregar_faltante_duplicado',{item_id:itemId,estado_actual:item.estado_item});
+      return;
+    }
+    // Patch del item con filtro de estado (idempotencia BD)
+    return apiPatch('pedidos_proveedor_items',
+      {estado_item:'en_stock',cantidad_recibida:cant},
+      'id=eq.'+itemId+'&estado_item=not.in.(en_stock,recibido)'
+    ).then(function(){
+      // Re-leer para confirmar el patch
+      return apiGet('pedidos_proveedor_items','select=estado_item&id=eq.'+itemId+'&limit=1');
+    }).then(function(check){
+      var estadoActual = check && check[0] && check[0].estado_item;
+      if(estadoActual !== 'en_stock'){
+        toast('Otro proceso ya marcó el item — abortando','twarn');
+        return;
+      }
+      var p=typeof prods!=='undefined'&&prods?prods.find(function(x){return x.id===prodId;}):null;
+      var stockAntes=p?p.stock_actual||0:0;
+      var nuevoStock=stockAntes+cant;
+      return Promise.all([
+        patchStockFresco(prodId,{stock_actual:+cant,en_viaje:-cant},'Agregar faltante'),
+        apiPost('movimientos_stock',{producto_id:prodId,producto_nombre:prodNom,tipo:'ingreso_faltante',cantidad:cant,stock_antes:stockAntes,stock_despues:nuevoStock,motivo:'Llegó faltante de pedido: '+(itemNom||prodNom),usuario:'admin',periodo:periodoActual||''}).catch(function(e){console.error('mov error:',e);}),
+        apiPost('reclamos',{vendedor_id:null,vendedor_nombre:'Admin '+(curUser||''),tipo_objeto:'pedido_proveedor',objeto_id:itemId,objeto_desc:prodNom,categoria:'stock',titulo:'Faltante resuelto — llegó al stock',descripcion:(cant+'u de '+(itemNom||prodNom)+' agregadas al stock'),estado:'aceptado',prioridad:'normal'}).catch(function(e){console.error("[belle] error silencioso:",e);})
+      ]).then(function(){
+        toast(cant+'u de '+prodNom+' agregadas al stock ✅','tok');
+        _logAct('agregar_faltante_resuelto',{item_id:itemId,producto_id:prodId,cantidad:cant});
+        loadReclamos();
+        if(typeof renderStock==='function')renderStock();
+      });
+    });
+  }).catch(function(e){toast('Error: '+e.message,'terr');console.error(e);});
 }
 
 function recAgregarParcialFaltante(itemId,prodId,cantMax){
@@ -27968,36 +28130,66 @@ function recAgregarParcialFaltante(itemId,prodId,cantMax){
 function _recAgregarParcialConfirmar(itemId,prodId,cantMax){
   var cant=parseInt((document.getElementById('_recParcCant')||{value:''}).value)||0;
   if(cant<=0||cant>cantMax){toast('Cantidad inválida','twarn');return;}
-  var p=typeof prods!=='undefined'&&prods?prods.find(function(x){return x.id===prodId;}):null;
-  var prodNom=p?p.nombre:'Producto';
-  var stockAntes=p?p.stock_actual||0:0;
-  var nuevoStock=stockAntes+cant;
-  var quedanFaltando=cantMax-cant;
-
-  Promise.all([
-    patchStockFresco(prodId,{stock_actual:+cant,en_viaje:-cant},'Agregar parcial faltante'),
-    apiPatch('pedidos_proveedor_items',{cantidad_recibida:cant,estado_item:quedanFaltando>0?'faltante':'en_stock'},'id=eq.'+itemId),
-    apiPost('movimientos_stock',{producto_id:prodId,producto_nombre:prodNom,tipo:'ingreso_faltante',cantidad:cant,stock_antes:stockAntes,stock_despues:nuevoStock,motivo:'Llegó faltante parcial ('+quedanFaltando+' todavía faltan)',usuario:'admin',periodo:periodoActual||''}).catch(function(e){console.error('mov error:',e);}),
-    apiPost('reclamos',{vendedor_id:null,vendedor_nombre:'Admin '+(curUser||''),tipo_objeto:'pedido_proveedor',objeto_id:itemId,objeto_desc:prodNom,categoria:'stock',titulo:'Faltante parcial resuelto',descripcion:(cant+'u agregadas. Quedan '+quedanFaltando+'u pendientes.'),estado:'aceptado',prioridad:'normal'}).catch(function(e){console.error("[belle] error silencioso:",e);})
-  ]).then(function(){
-    toast(cant+'u agregadas. Quedan '+quedanFaltando+'u pendientes.','tok');
-    var _m=document.getElementById('_moRecParcial');if(_m)_m.remove();
-    loadReclamos();
-    if(typeof renderStock==='function')renderStock();
-  }).catch(function(e){toast('Error: '+e.message,'terr');});
+  var btnConfirm = document.querySelector('#_moRecParcial button[onclick*="_recAgregarParcialConfirmar"]');
+  if(btnConfirm){
+    if(btnConfirm.dataset.processing === '1'){toast('Ya se está procesando','twarn');return;}
+    btnConfirm.dataset.processing = '1';
+    btnConfirm.disabled = true;
+    btnConfirm.style.opacity = '.5';
+  }
+  // FIX 2026-05-16: guard de idempotencia
+  apiGet('pedidos_proveedor_items','select=id,estado_item&id=eq.'+itemId).then(function(rows){
+    var item = rows && rows[0];
+    if(!item){toast('Item no encontrado','terr');return;}
+    if(item.estado_item === 'en_stock' || item.estado_item === 'recibido'){
+      toast('Este faltante ya fue agregado','twarn');
+      var _m=document.getElementById('_moRecParcial');if(_m)_m.remove();
+      return;
+    }
+    var p=typeof prods!=='undefined'&&prods?prods.find(function(x){return x.id===prodId;}):null;
+    var prodNom=p?p.nombre:'Producto';
+    var stockAntes=p?p.stock_actual||0:0;
+    var nuevoStock=stockAntes+cant;
+    var quedanFaltando=cantMax-cant;
+    var nuevoEstado = quedanFaltando>0?'faltante':'en_stock';
+    // Patch con filtro: si llegó completo (en_stock) usar filtro fuerte; si es parcial, permitir múltiples updates
+    var filtroPatch = quedanFaltando>0 ? 'id=eq.'+itemId : 'id=eq.'+itemId+'&estado_item=not.in.(en_stock,recibido)';
+    return apiPatch('pedidos_proveedor_items',{cantidad_recibida:cant,estado_item:nuevoEstado},filtroPatch).then(function(){
+      return Promise.all([
+        patchStockFresco(prodId,{stock_actual:+cant,en_viaje:-cant},'Agregar parcial faltante'),
+        apiPost('movimientos_stock',{producto_id:prodId,producto_nombre:prodNom,tipo:'ingreso_faltante',cantidad:cant,stock_antes:stockAntes,stock_despues:nuevoStock,motivo:'Llegó faltante parcial ('+quedanFaltando+' todavía faltan)',usuario:'admin',periodo:periodoActual||''}).catch(function(e){console.error('mov error:',e);}),
+        apiPost('reclamos',{vendedor_id:null,vendedor_nombre:'Admin '+(curUser||''),tipo_objeto:'pedido_proveedor',objeto_id:itemId,objeto_desc:prodNom,categoria:'stock',titulo:'Faltante parcial resuelto',descripcion:(cant+'u agregadas. Quedan '+quedanFaltando+'u pendientes.'),estado:'aceptado',prioridad:'normal'}).catch(function(e){console.error("[belle] error silencioso:",e);})
+      ]);
+    }).then(function(){
+      toast(cant+'u agregadas. Quedan '+quedanFaltando+'u pendientes.','tok');
+      _logAct('agregar_faltante_parcial',{item_id:itemId,cantidad:cant,quedan:quedanFaltando});
+      var _m=document.getElementById('_moRecParcial');if(_m)_m.remove();
+      loadReclamos();
+      if(typeof renderStock==='function')renderStock();
+    });
+  }).catch(function(e){
+    if(btnConfirm){btnConfirm.dataset.processing='';btnConfirm.disabled=false;btnConfirm.style.opacity='1';}
+    toast('Error: '+e.message,'terr');
+  });
 }
 
 function recMarcarFaltanteDefinitivo(itemId){
   if(!confirm('Marcar como definitivamente no llegará.\nSe cerrará esta incidencia sin agregar stock y se descuenta de en viaje.'))return;
-  // Buscar el item para saber producto_id y cantidad para descontar en_viaje
-  apiGet('pedidos_proveedor_items','select=id,producto_id,cantidad_pedida,cantidad_recibida&id=eq.'+itemId).then(function(rows){
+  // FIX 2026-05-16: guard de idempotencia
+  apiGet('pedidos_proveedor_items','select=id,producto_id,cantidad_pedida,cantidad_recibida,estado_item,nombre_proveedor&id=eq.'+itemId).then(function(rows){
     var it=rows&&rows[0];
-    var cantRestante=it?Math.max(0,(it.cantidad_pedida||0)-(it.cantidad_recibida||0)):0;
-    var ops=[apiPatch('pedidos_proveedor_items',{estado_item:'cancelado'},'id=eq.'+itemId)];
-    if(it&&it.producto_id&&cantRestante>0){
+    if(!it){toast('Item no encontrado','terr');return;}
+    if(it.estado_item === 'cancelado'){
+      toast('Este faltante ya fue marcado como no llegará','twarn');
+      return;
+    }
+    var cantRestante=Math.max(0,(it.cantidad_pedida||0)-(it.cantidad_recibida||0));
+    // Patch con filtro de estado (idempotencia BD)
+    var ops=[apiPatch('pedidos_proveedor_items',{estado_item:'cancelado'},'id=eq.'+itemId+'&estado_item=not.eq.cancelado')];
+    if(it.producto_id&&cantRestante>0){
       ops.push(patchStockFresco(it.producto_id,{en_viaje:-cantRestante},'Faltante definitivo — no llega'));
     }
-    ops.push(apiPost('reclamos',{vendedor_id:null,vendedor_nombre:'Admin '+(curUser||''),tipo_objeto:'pedido_proveedor',objeto_id:itemId,objeto_desc:(it&&it.nombre_proveedor)||'Producto',categoria:'stock',titulo:'Faltante — definitivamente no llega',descripcion:'Item marcado como definitivamente no llegará. '+(cantRestante>0?cantRestante+'u descontadas de en viaje.':''),estado:'cancelado',prioridad:'normal'}).catch(function(e){console.error("[belle] error silencioso:",e);}));
+    ops.push(apiPost('reclamos',{vendedor_id:null,vendedor_nombre:'Admin '+(curUser||''),tipo_objeto:'pedido_proveedor',objeto_id:itemId,objeto_desc:it.nombre_proveedor||'Producto',categoria:'stock',titulo:'Faltante — definitivamente no llega',descripcion:'Item marcado como definitivamente no llegará. '+(cantRestante>0?cantRestante+'u descontadas de en viaje.':''),estado:'cancelado',prioridad:'normal'}).catch(function(e){console.error("[belle] error silencioso:",e);}));
     return Promise.all(ops);
   }).then(function(){toast('Marcado como no llegará — en viaje actualizado','tok');loadReclamos();})
     .catch(function(e){toast('Error: '+e.message,'terr');});
@@ -28081,17 +28273,36 @@ function _macheElegir(itemId,prodId,prodNom){
 // === ACCIONES FALLADOS ===
 function recDescontarFallado(itemId,prodId,cant,prodNom){
   if(!confirm('Descontar '+cant+'u falladas del stock de "'+prodNom+'"?'))return;
-  var p=typeof prods!=='undefined'&&prods?prods.find(function(x){return x.id===prodId;}):null;
-  var stockAntes=p?p.stock_actual||0:0;
-  var nuevoStock=Math.max(0,stockAntes-cant);
-  Promise.all([
-    patchStockFresco(prodId,{stock_actual:-cant},'Descontar fallados'),
-    apiPatch('pedidos_proveedor_items',{estado_item:'resuelto'},'id=eq.'+itemId),
-    apiPost('movimientos_stock',{producto_id:prodId,producto_nombre:prodNom,tipo:'baja_fallado',cantidad:-cant,stock_antes:stockAntes,stock_despues:nuevoStock,motivo:'Baja por fallado en pedido proveedor',usuario:'admin',periodo:periodoActual||''}).catch(function(e){console.error("[belle] error silencioso:",e);})
-  ]).then(function(){
-    toast(cant+'u descontadas del stock','tok');
-    loadReclamos();
-    if(typeof renderStock==='function')renderStock();
+  // FIX 2026-05-16: guard de idempotencia
+  apiGet('pedidos_proveedor_items','select=id,estado_item&id=eq.'+itemId).then(function(rows){
+    var item = rows && rows[0];
+    if(!item){toast('Item no encontrado','terr');return;}
+    if(item.estado_item === 'resuelto'){
+      toast('Este fallado ya fue procesado','twarn');
+      return;
+    }
+    // Patch con filtro de estado
+    return apiPatch('pedidos_proveedor_items',{estado_item:'resuelto'},'id=eq.'+itemId+'&estado_item=not.eq.resuelto').then(function(){
+      // Re-check
+      return apiGet('pedidos_proveedor_items','select=estado_item&id=eq.'+itemId+'&limit=1');
+    }).then(function(check){
+      var estadoActual = check && check[0] && check[0].estado_item;
+      if(estadoActual !== 'resuelto'){
+        toast('Otro proceso ya marcó el item — abortando','twarn');
+        return;
+      }
+      var p=typeof prods!=='undefined'&&prods?prods.find(function(x){return x.id===prodId;}):null;
+      var stockAntes=p?p.stock_actual||0:0;
+      var nuevoStock=Math.max(0,stockAntes-cant);
+      return Promise.all([
+        patchStockFresco(prodId,{stock_actual:-cant},'Descontar fallados'),
+        apiPost('movimientos_stock',{producto_id:prodId,producto_nombre:prodNom,tipo:'baja_fallado',cantidad:-cant,stock_antes:stockAntes,stock_despues:nuevoStock,motivo:'Baja por fallado en pedido proveedor',usuario:'admin',periodo:periodoActual||''}).catch(function(e){console.error("[belle] error silencioso:",e);})
+      ]).then(function(){
+        toast(cant+'u descontadas del stock','tok');
+        loadReclamos();
+        if(typeof renderStock==='function')renderStock();
+      });
+    });
   }).catch(function(e){toast('Error: '+e.message,'terr');});
 }
 
@@ -36270,7 +36481,13 @@ function ppConfirmarMatch(btn){
 }
 
 function ppAgregarStock(btn){
+  // FIX 2026-05-16: agregar guard de idempotencia con _lockClick para prevenir doble-click
   var key=btn.dataset.key;
+  // Lock del botón inmediato
+  if(btn.dataset.processing === '1'){
+    toast('Ya se está procesando','twarn');
+    return;
+  }
   var g=_ppData.find(function(g){return g.key===key;});
   if(!g||!g.pid){toast('No macheado','twarn');return;}
   var allProds=(typeof prods!=='undefined'&&prods)?prods:[];
@@ -36278,8 +36495,13 @@ function ppAgregarStock(btn){
   if(!p){toast('Producto no encontrado en catálogo. Cargá stock primero.','twarn');return;}
   var qty=parseInt(prompt('Unidades a agregar al stock (en pedidos: '+g.qtot+', en viaje cat.: '+(p.en_viaje||0)+'):',g.qtot)||0);
   if(!qty||qty<=0)return;
+  // Bloquear el botón
+  btn.dataset.processing = '1';
+  btn.disabled = true;
+  btn.style.opacity = '.5';
+  var origText = btn.textContent;
+  btn.textContent = 'Agregando...';
   // FIX 3 (2026-05-11): leer stock fresco para tener antes/después correctos en el log.
-  // Antes el código usaba 'nS' que no estaba definido → bug que generaba mov stock corrupto.
   var stockAntes=p.stock_actual||0;
   Promise.all([
     patchStockFresco(g.pid,{stock_actual:+qty,en_viaje:-qty},'Agregar stock pedido viaje')
@@ -36288,24 +36510,68 @@ function ppAgregarStock(btn){
           cantidad:qty,stockAntes:stockAntes,stockDespues:stockAntes+qty,
           motivo:'Ingreso panel productos en viaje'});
       })
-  ]).then(function(){toast(qty+'u agregadas al stock ✅','tok');ppLoad();if(typeof _reloadStock==='function')_reloadStock();})
-  .catch(function(e){toast('Error: '+e.message,'terr');});
+  ]).then(function(){
+    toast(qty+'u agregadas al stock ✅','tok');
+    btn.dataset.processing = '';
+    btn.disabled = false;
+    btn.style.opacity = '1';
+    btn.textContent = origText;
+    ppLoad();
+    if(typeof _reloadStock==='function')_reloadStock();
+  })
+  .catch(function(e){
+    btn.dataset.processing = '';
+    btn.disabled = false;
+    btn.style.opacity = '1';
+    btn.textContent = origText;
+    toast('Error: '+e.message,'terr');
+  });
 }
 
 function ppAgregarTodos(){
+  // FIX 2026-05-16: agregar lock global + reparar bug `nS` no definida en log
+  if(window._ppAgregarTodosLock){
+    toast('Ya se está procesando','twarn');
+    return;
+  }
   var allProds=(typeof prods!=='undefined'&&prods)?prods:[];
   var lista=_ppData.filter(function(g){return g.pid&&g.qtot>0;});
   if(!lista.length){toast('Sin productos macheados','twarn');return;}
   if(!confirm('Agregar '+lista.length+' referencias al stock?'))return;
+  window._ppAgregarTodosLock = true;
+  var _ppTimeout = setTimeout(function(){window._ppAgregarTodosLock = false;}, 60000);
+  function _liberarPp(){clearTimeout(_ppTimeout);window._ppAgregarTodosLock = false;}
+
   var proms=[];
   lista.forEach(function(g){
     var p=allProds.find(function(x){return x.id===g.pid;});
     if(!p)return;
+    // FIX: stock_antes correcto (era `nS` no definida → NaN en BD)
+    var stockAntes = p.stock_actual || 0;
+    var stockDespues = stockAntes + g.qtot;
     proms.push(patchStockFresco(g.pid,{stock_actual:+g.qtot,en_viaje:-g.qtot},'Agregar todos al stock'));
-    proms.push(apiPost('movimientos_stock',{producto_id:g.pid,producto_nombre:p.nombre,tipo:'ingreso_pedido',cantidad:g.qtot,stock_antes:nS-g.qtot,stock_despues:nS,motivo:'Ingreso masivo productos en viaje',usuario:'admin',periodo:periodoActual}));
+    proms.push(apiPost('movimientos_stock',{
+      producto_id:g.pid,
+      producto_nombre:p.nombre,
+      tipo:'ingreso_pedido',
+      cantidad:g.qtot,
+      stock_antes:stockAntes,
+      stock_despues:stockDespues,
+      motivo:'Ingreso masivo productos en viaje',
+      usuario:'admin',
+      periodo:(typeof periodoActual!=='undefined'?periodoActual:'')||''
+    }).catch(function(e){console.error("[belle] error silencioso log:",e);}));
   });
-  Promise.all(proms).then(function(){toast('Stock actualizado: '+lista.length+' productos ✅','tok');ppLoad();if(typeof _reloadStock==='function')_reloadStock();})
-  .catch(function(e){toast('Error: '+e.message,'terr');});
+  Promise.all(proms).then(function(){
+    _liberarPp();
+    toast('Stock actualizado: '+lista.length+' productos ✅','tok');
+    ppLoad();
+    if(typeof _reloadStock==='function')_reloadStock();
+  })
+  .catch(function(e){
+    _liberarPp();
+    toast('Error: '+e.message,'terr');
+  });
 }
 
 
@@ -36491,10 +36757,16 @@ function incObs(itemId,inputId){
 
 function incNoLlega(itemId){
   if(!confirm('Cerrar esta incidencia — el producto definitivamente no llegará.\nEl en viaje del producto se actualizará.\n¿Confirmar?'))return;
-  apiGet('pedidos_proveedor_items','select=id,producto_id,cantidad_pedida,cantidad_recibida&id=eq.'+itemId).then(function(rows){
+  // FIX 2026-05-16: guard de idempotencia
+  apiGet('pedidos_proveedor_items','select=id,producto_id,cantidad_pedida,cantidad_recibida,estado_item&id=eq.'+itemId).then(function(rows){
     var it=rows&&rows[0];
-    var ops=[apiPatch('pedidos_proveedor_items',{estado_item:'cancelado'},'id=eq.'+itemId)];
-    if(it&&it.producto_id){
+    if(!it){toast("Item no encontrado","terr");return;}
+    if(it.estado_item === 'cancelado'){
+      toast("Este item ya fue cancelado","twarn");
+      return;
+    }
+    var ops=[apiPatch('pedidos_proveedor_items',{estado_item:'cancelado'},'id=eq.'+itemId+'&estado_item=not.eq.cancelado')];
+    if(it.producto_id){
       var cantRestante=Math.max(0,(it.cantidad_pedida||0)-(it.cantidad_recibida||0));
       if(cantRestante>0){
         ops.push(patchStockFresco(it.producto_id,{en_viaje:-cantRestante},'Incidencia cerrada — definitivamente no llega'));
@@ -36584,18 +36856,40 @@ function incResolverDev(incId,vendedorId){
   var nota=(document.getElementById('idn-'+incId)||{}).value||'';
   if(dec.agregar===undefined){toast('Decidí primero qué pasa con el stock','twarn');return;}
   if(!confirm('Resolver devolución:\n• Stock: '+(dec.agregar?'Agregar '+dec.cant+'u':'No agregar')+'\n• Reintegro: $'+monto.toLocaleString('es-AR')+'\n¿Confirmar?'))return;
-  var proms=[
-    apiPatch('incidencias',{estado:'resuelto',decision_stock:dec.agregar?'agregar':'no_agregar',decision_monto:monto,decision_nota:nota,resuelto_por:'Admin',resuelto_at:new Date().toISOString()},'id=eq.'+incId)
-  ];
-  if(dec.agregar&&dec.prodId&&dec.cant>0){
-    var p=typeof prods!=='undefined'&&prods?prods.find(function(x){return x.id===dec.prodId;}):null;
-    proms.push(patchStockFresco(dec.prodId,{stock_actual:+dec.cant},'Incidencia resolver devolucion'));
-    proms.push(apiPost('movimientos_stock',{producto_id:dec.prodId,tipo:'devolucion_cliente',cantidad:dec.cant,stock_antes:sA,stock_despues:nS,motivo:'Devolución aprobada admin',usuario:'Admin',periodo:periodoActual||''}));
-  }
-  if(monto>0){
-    proms.push(apiPost('rendiciones',{vendedor_id:vendedorId,monto:-monto,tipo:'devolucion_cliente',estado:'aprobada',concepto:'Reintegro devolución — incidencia #'+incId,periodo:periodoActual||''}));
-  }
-  Promise.all(proms).then(function(){
+  // FIX 2026-05-16: guard de idempotencia
+  apiGet('incidencias','select=id,estado&id=eq.'+incId).then(function(rows){
+    var inc = rows && rows[0];
+    if(!inc){toast('Incidencia no encontrada','terr');return;}
+    if(inc.estado === 'resuelto' || inc.estado === 'cancelado'){
+      toast('Esta incidencia ya fue resuelta','twarn');
+      return;
+    }
+    var proms=[
+      apiPatch('incidencias',{estado:'resuelto',decision_stock:dec.agregar?'agregar':'no_agregar',decision_monto:monto,decision_nota:nota,resuelto_por:'Admin',resuelto_at:new Date().toISOString()},'id=eq.'+incId+'&estado=not.in.(resuelto,cancelado)')
+    ];
+    if(dec.agregar&&dec.prodId&&dec.cant>0){
+      var p=typeof prods!=='undefined'&&prods?prods.find(function(x){return x.id===dec.prodId;}):null;
+      // FIX: calcular stock_antes/stock_despues correctos (antes usaba sA/nS no definidas)
+      var stockAntes = p ? (p.stock_actual||0) : 0;
+      var stockDespues = stockAntes + dec.cant;
+      proms.push(patchStockFresco(dec.prodId,{stock_actual:+dec.cant},'Incidencia resolver devolucion'));
+      proms.push(apiPost('movimientos_stock',{
+        producto_id:dec.prodId,
+        producto_nombre:p?p.nombre:'Prod '+dec.prodId,
+        tipo:'devolucion_cliente',
+        cantidad:dec.cant,
+        stock_antes:stockAntes,
+        stock_despues:stockDespues,
+        motivo:'Devolución aprobada admin — incidencia #'+incId,
+        usuario:'Admin',
+        periodo:periodoActual||''
+      }).catch(function(e){console.error("[belle] error silencioso log:",e);}));
+    }
+    if(monto>0){
+      proms.push(apiPost('rendiciones',{vendedor_id:vendedorId,monto:-monto,tipo:'devolucion_cliente',estado:'aprobada',concepto:'Reintegro devolución — incidencia #'+incId,periodo:periodoActual||''}));
+    }
+    return Promise.all(proms);
+  }).then(function(){
     toast('Devolución resuelta ✅','tok');
     delete _incDevDecisiones[incId];
     incLoad();
