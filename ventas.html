@@ -14311,7 +14311,7 @@ function _rbEntregarYCobrarModal(pedId){
     var cobradoYa = Math.max(parseFloat(rec.cobrado_parcial)||0, parseFloat(rec.cobrado_total)||0);
     var saldo = Math.max(0, total - cobradoYa);
     var nroOrden = rec.nro_orden || ('#'+pedId);
-    if(saldo <= 0.01){
+    if(saldo <= 0.01 && !rec.es_cc){
       // Ya está saldado — preguntar si solo quiere marcar entregado
       if(confirm('Este pedido ya está saldado completamente ('+fmt(cobradoYa)+'/'+fmt(total)+'). ¿Marcar solo como entregado?')){
         _rbEntregarEjecutar(pedId);
@@ -14319,46 +14319,277 @@ function _rbEntregarYCobrarModal(pedId){
       return;
     }
 
-    // Construir modal paso 1: elegir método
-    var ov = document.createElement('div');
-    ov.id = '_moEntregarCobrar';
-    ov.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,.7);z-index:99999;display:flex;align-items:center;justify-content:center;padding:1rem';
-    window._ecPedidoActual = rec; // guardo para paso 2
-    var esCC = !!rec.es_cc;
-    ov.innerHTML = "<div style='background:var(--sur);max-width:460px;width:100%;border-radius:12px;padding:1.2rem;box-shadow:0 8px 40px rgba(0,0,0,.5);max-height:92vh;overflow-y:auto'>"+
-      "<div style='font-size:1.3rem;font-weight:700;color:#3fa9c9;margin-bottom:.4rem'>💰 Entregar + Cobrar</div>"+
-      "<div style='font-size:.85rem;color:var(--tx);margin-bottom:.6rem'>Pedido <b>"+nroOrden+"</b></div>"+
-      "<div style='background:var(--sur3);border-radius:8px;padding:.6rem .8rem;margin-bottom:.9rem;font-size:.8rem'>"+
-        "<div style='display:flex;justify-content:space-between;margin-bottom:.2rem'><span style='color:var(--tx3)'>Total pedido</span><b>"+fmt(total)+"</b></div>"+
-        (cobradoYa>0?"<div style='display:flex;justify-content:space-between;margin-bottom:.2rem'><span style='color:var(--tx3)'>Ya cobrado</span><b style='color:var(--green)'>"+fmt(cobradoYa)+"</b></div>":"")+
-        "<div style='display:flex;justify-content:space-between;padding-top:.3rem;border-top:1px solid var(--bd)'><span style='color:var(--tx2);font-weight:700'>A cobrar ahora</span><b style='color:var(--acc);font-size:1rem'>"+fmt(saldo)+"</b></div>"+
-      "</div>"+
-      (esCC ? "<div style='background:rgba(196,150,90,.12);border:1px solid var(--acc);border-radius:6px;padding:.5rem .7rem;margin-bottom:.8rem;font-size:.72rem;color:var(--acc)'>💳 Este pedido es CC — el cobro se aplica a las cuotas pendientes (FIFO)</div>" : "")+
-      "<div style='font-size:.72rem;font-weight:700;color:var(--tx3);text-transform:uppercase;margin-bottom:.4rem'>Método de pago</div>"+
-      "<div style='display:grid;grid-template-columns:1fr 1fr;gap:.4rem;margin-bottom:1rem'>"+
-        "<button class='_ecBtnPago' data-forma='efectivo' onclick='_ecSeleccionarForma(this)' style='padding:.7rem .5rem;border:2px solid var(--bd);background:var(--sur2);color:var(--tx);border-radius:8px;cursor:pointer;font-size:.85rem;font-weight:600;display:flex;flex-direction:column;align-items:center;gap:.2rem'>"+
-          "<span style='font-size:1.3rem'>💵</span><span>Efectivo</span>"+
-        "</button>"+
-        "<button class='_ecBtnPago' data-forma='transferencia' onclick='_ecSeleccionarForma(this)' style='padding:.7rem .5rem;border:2px solid var(--bd);background:var(--sur2);color:var(--tx);border-radius:8px;cursor:pointer;font-size:.85rem;font-weight:600;display:flex;flex-direction:column;align-items:center;gap:.2rem'>"+
-          "<span style='font-size:1.3rem'>🏦</span><span>Transferencia</span>"+
-        "</button>"+
-        "<button class='_ecBtnPago' data-forma='debito' onclick='_ecSeleccionarForma(this)' style='padding:.7rem .5rem;border:2px solid var(--bd);background:var(--sur2);color:var(--tx);border-radius:8px;cursor:pointer;font-size:.85rem;font-weight:600;display:flex;flex-direction:column;align-items:center;gap:.2rem'>"+
-          "<span style='font-size:1.3rem'>💳</span><span>Débito</span>"+
-        "</button>"+
-        "<button class='_ecBtnPago' data-forma='credito' onclick='_ecSeleccionarForma(this)' style='padding:.7rem .5rem;border:2px solid var(--bd);background:var(--sur2);color:var(--tx);border-radius:8px;cursor:pointer;font-size:.85rem;font-weight:600;display:flex;flex-direction:column;align-items:center;gap:.2rem'>"+
-          "<span style='font-size:1.3rem'>💳</span><span>Crédito</span>"+
-        "</button>"+
-      "</div>"+
-      "<div style='display:flex;gap:.5rem;justify-content:flex-end'>"+
-        "<button class='btn btn-g' onclick='document.getElementById(\"_moEntregarCobrar\").remove();window._ecPedidoActual=null;window._ecFormaSel=null;' style='padding:.5rem 1rem'>Cancelar</button>"+
-        "<button id='_ecBtnSiguiente' class='btn btn-a' onclick='_ecPasoConfirmar()' style='padding:.5rem 1rem;background:#3fa9c9;border-color:#3fa9c9;font-weight:600;opacity:.4;cursor:not-allowed' disabled>Siguiente →</button>"+
-      "</div></div>";
-    ov.addEventListener('click', function(e){if(e.target===ov){ov.remove();window._ecPedidoActual=null;window._ecFormaSel=null;}});
-    document.body.appendChild(ov);
+    window._ecPedidoActual = rec;
+    window._ecFormaSel = null;
+    window._ecModoCobro = null; // 'pedido' | 'a_cuenta' (solo si CC)
+    window._ecMontoACuenta = 0; // monto a cobrar si modo='a_cuenta'
+
+    // Si es CC → empezar por el paso 0 (elegir modalidad)
+    if(rec.es_cc && rec.cliente_id){
+      _ecPasoTipoCC();
+    } else {
+      // Cliente común → ir directo al paso 1 (elegir forma de pago)
+      window._ecModoCobro = 'pedido';
+      _ecPasoFormaPago();
+    }
   }).catch(function(e){
     console.error('[belle] _rbEntregarYCobrarModal:',e);
     toast('Error cargando pedido','terr');
   });
+}
+
+// PASO 0 (solo CC): elegir entre cobrar pedido completo o recibir a cuenta
+function _ecPasoTipoCC(){
+  var rec = window._ecPedidoActual;
+  if(!rec) return;
+  var total = parseFloat(rec.total||0);
+  var cobradoYa = Math.max(parseFloat(rec.cobrado_parcial)||0, parseFloat(rec.cobrado_total)||0);
+  var saldo = Math.max(0, total - cobradoYa);
+  var nroOrden = rec.nro_orden || ('#'+rec.id);
+
+  // Cargar info de saldo CC + cuota próxima para informar al vendedor
+  var cliId = rec.cliente_id;
+  Promise.all([
+    apiGet('cc_cuotas','select=*&pedido_id=eq.'+rec.id+'&estado=in.(pendiente,parcial,vencida)&order=fecha_vencimiento.asc'),
+    apiGet('clientes','select=saldo_cc,nombre,apellido&id=eq.'+cliId+'&limit=1')
+  ]).then(function(res){
+    var cuotasPed = Array.isArray(res[0]) ? res[0] : [];
+    var cli = (res[1] && res[1][0]) || {};
+    var totalPendienteCuotas = cuotasPed.reduce(function(s,cu){
+      return s + Math.max(0, (parseFloat(cu.monto)||0) - (parseFloat(cu.monto_pagado)||0));
+    }, 0);
+
+    // También cargar cuotas de OTROS pedidos del cliente (para FIFO global del cliente)
+    return apiGet('cc_cuotas','select=monto,monto_pagado,pedido_id&estado=in.(pendiente,parcial,vencida)&pedido_id=in.(select id from pedidos_catalogo where cliente_id='+cliId+')').then(function(otrasCuotas){
+      // Acá vamos a usar otra query más simple: traemos los pedidos del cliente y unimos
+      return apiGet('pedidos_catalogo','select=id&cliente_id=eq.'+cliId+'&es_cc=is.true').then(function(pedsCli){
+        var pedIds = (Array.isArray(pedsCli)?pedsCli:[]).map(function(p){return p.id;});
+        if(!pedIds.length) return _ecPasoTipoCCRender(cuotasPed, totalPendienteCuotas, 0, cli);
+        return apiGet('cc_cuotas','select=monto,monto_pagado&pedido_id=in.('+pedIds.join(',')+')&estado=in.(pendiente,parcial,vencida)').then(function(allCuotas){
+          allCuotas = Array.isArray(allCuotas)?allCuotas:[];
+          var totalGlobalCuotas = allCuotas.reduce(function(s,cu){
+            return s + Math.max(0, (parseFloat(cu.monto)||0) - (parseFloat(cu.monto_pagado)||0));
+          }, 0);
+          _ecPasoTipoCCRender(cuotasPed, totalPendienteCuotas, totalGlobalCuotas, cli);
+        });
+      });
+    });
+  }).catch(function(e){
+    console.error('[belle] _ecPasoTipoCC:',e);
+    // Si falla la carga, mostrar el modal igual con info mínima
+    _ecPasoTipoCCRender([], 0, 0, {});
+  });
+}
+
+function _ecPasoTipoCCRender(cuotasPed, totalPedCuotas, totalGlobalCuotas, cli){
+  var rec = window._ecPedidoActual;
+  var total = parseFloat(rec.total||0);
+  var cobradoYa = Math.max(parseFloat(rec.cobrado_parcial)||0, parseFloat(rec.cobrado_total)||0);
+  var saldo = Math.max(0, total - cobradoYa);
+  var nroOrden = rec.nro_orden || ('#'+rec.id);
+  var cliNom = ((cli.nombre||'')+' '+(cli.apellido||'')).trim() || 'Cliente';
+
+  // Crear o reutilizar el contenedor
+  var ov = document.getElementById('_moEntregarCobrar');
+  if(!ov){
+    ov = document.createElement('div');
+    ov.id = '_moEntregarCobrar';
+    ov.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,.7);z-index:99999;display:flex;align-items:center;justify-content:center;padding:1rem';
+    ov.addEventListener('click', function(e){
+      if(e.target===ov){
+        ov.remove();
+        window._ecPedidoActual=null; window._ecFormaSel=null;
+        window._ecModoCobro=null; window._ecMontoACuenta=0;
+      }
+    });
+    document.body.appendChild(ov);
+  }
+  ov.innerHTML = "<div style='background:var(--sur);max-width:480px;width:100%;border-radius:12px;padding:1.2rem;box-shadow:0 8px 40px rgba(0,0,0,.5);max-height:92vh;overflow-y:auto'>"+
+    "<div style='font-size:1.3rem;font-weight:700;color:#3fa9c9;margin-bottom:.3rem'>💳 Cliente CC</div>"+
+    "<div style='font-size:.8rem;color:var(--tx);margin-bottom:.2rem'><b>"+_esc(cliNom)+"</b></div>"+
+    "<div style='font-size:.75rem;color:var(--tx3);margin-bottom:.8rem'>Pedido <b>"+nroOrden+"</b> · "+fmt(total)+"</div>"+
+
+    "<div style='background:rgba(196,150,90,.08);border:1px solid var(--acc);border-radius:8px;padding:.55rem .75rem;margin-bottom:.9rem;font-size:.75rem'>"+
+      "<div style='display:flex;justify-content:space-between;margin-bottom:.2rem'>"+
+        "<span style='color:var(--tx3)'>Saldo del pedido</span>"+
+        "<b style='color:var(--acc)'>"+fmt(saldo)+"</b>"+
+      "</div>"+
+      "<div style='display:flex;justify-content:space-between;font-size:.7rem'>"+
+        "<span style='color:var(--tx3)'>Cuotas pendientes del cliente</span>"+
+        "<b style='color:"+(totalGlobalCuotas>0?'var(--yel)':'var(--tx3)')+"'>"+fmt(totalGlobalCuotas)+"</b>"+
+      "</div>"+
+    "</div>"+
+
+    "<div style='font-size:.7rem;color:var(--tx3);text-transform:uppercase;font-weight:600;margin-bottom:.5rem'>¿Cómo querés cobrar?</div>"+
+
+    // Opción A: Cobrar el pedido
+    "<button class='_ecModoOp' data-modo='pedido' onclick='_ecSeleccionarModoCC(this)' style='display:block;width:100%;text-align:left;padding:.75rem .9rem;border:2px solid var(--bd);background:var(--sur2);color:var(--tx);border-radius:8px;cursor:pointer;font-size:.82rem;margin-bottom:.5rem;transition:all .15s'>"+
+      "<div style='display:flex;justify-content:space-between;align-items:center;gap:.5rem;margin-bottom:.2rem'>"+
+        "<span style='font-weight:700'>🛒 Cobrar el pedido</span>"+
+        "<span style='font-size:.95rem;font-weight:800;color:var(--acc)'>"+fmt(saldo)+"</span>"+
+      "</div>"+
+      "<div style='font-size:.68rem;color:var(--tx3);line-height:1.35'>Cobrás el saldo del pedido completo (como cliente común). El cobro se aplica a las cuotas del pedido.</div>"+
+    "</button>"+
+
+    // Opción B: A cuenta
+    "<button class='_ecModoOp' data-modo='a_cuenta' onclick='_ecSeleccionarModoCC(this)' style='display:block;width:100%;text-align:left;padding:.75rem .9rem;border:2px solid var(--bd);background:var(--sur2);color:var(--tx);border-radius:8px;cursor:pointer;font-size:.82rem;margin-bottom:.5rem;transition:all .15s'>"+
+      "<div style='display:flex;justify-content:space-between;align-items:center;gap:.5rem;margin-bottom:.2rem'>"+
+        "<span style='font-weight:700'>💰 Recibir a cuenta</span>"+
+        "<span style='font-size:.7rem;color:var(--yel);font-style:italic'>monto libre</span>"+
+      "</div>"+
+      "<div style='font-size:.68rem;color:var(--tx3);line-height:1.35'>Ingresás un monto que el cliente entrega a su cuenta corriente. Se aplica FIFO a las cuotas más viejas del cliente.</div>"+
+    "</button>"+
+
+    "<div style='display:flex;gap:.5rem;justify-content:flex-end;margin-top:.8rem'>"+
+      "<button class='btn btn-g' onclick='document.getElementById(\"_moEntregarCobrar\").remove();window._ecPedidoActual=null;window._ecFormaSel=null;window._ecModoCobro=null;' style='padding:.5rem 1rem'>Cancelar</button>"+
+    "</div>"+
+    "</div>";
+}
+
+function _ecSeleccionarModoCC(btn){
+  var modo = btn.dataset.modo;
+  window._ecModoCobro = modo;
+  if(modo === 'pedido'){
+    // Cobro el saldo del pedido → ir al paso 1 (forma de pago)
+    window._ecMontoACuenta = 0;
+    _ecPasoFormaPago();
+  } else {
+    // A cuenta → primero pedir monto, después forma de pago
+    _ecPasoMontoACuenta();
+  }
+}
+
+// PASO intermedio (solo modo a_cuenta): pedir monto
+function _ecPasoMontoACuenta(){
+  var rec = window._ecPedidoActual;
+  if(!rec) return;
+  var ov = document.getElementById('_moEntregarCobrar');
+  if(!ov) return;
+
+  ov.innerHTML = "<div style='background:var(--sur);max-width:460px;width:100%;border-radius:12px;padding:1.2rem;box-shadow:0 8px 40px rgba(0,0,0,.5);max-height:92vh;overflow-y:auto'>"+
+    "<div style='font-size:1.3rem;font-weight:700;color:#3fa9c9;margin-bottom:.4rem'>💰 Recibir a cuenta</div>"+
+    "<div style='font-size:.75rem;color:var(--tx3);margin-bottom:.9rem'>El monto se aplicará a las cuotas más viejas del cliente (FIFO)</div>"+
+
+    "<div style='font-size:.72rem;color:var(--tx3);text-transform:uppercase;font-weight:600;margin-bottom:.3rem'>Monto que entrega el cliente</div>"+
+    "<div style='position:relative;margin-bottom:.4rem'>"+
+      "<span style='position:absolute;left:.7rem;top:50%;transform:translateY(-50%);color:var(--tx3);font-weight:700;font-size:1.1rem'>$</span>"+
+      "<input id='_ecInputMonto' type='number' min='1' step='0.01' placeholder='0' style='width:100%;padding:.6rem .7rem .6rem 1.7rem;border:2px solid var(--bd);border-radius:8px;font-size:1.3rem;font-weight:700;background:var(--sur2);color:var(--tx)' oninput='_ecValidarMonto()' onkeydown='if(event.key===\"Enter\"){event.preventDefault();_ecPasarADesdeMonto();}'>"+
+    "</div>"+
+    "<div id='_ecMontoMsg' style='font-size:.68rem;color:var(--tx3);min-height:1rem;margin-bottom:.8rem'></div>"+
+
+    "<div style='display:flex;gap:.5rem;justify-content:space-between;align-items:center'>"+
+      "<button class='btn btn-g' onclick='_ecPasoTipoCC()' style='padding:.5rem .9rem'>← Volver</button>"+
+      "<button id='_ecBtnSiguiente' class='btn btn-a' onclick='_ecPasarADesdeMonto()' style='padding:.5rem 1rem;background:#3fa9c9;border-color:#3fa9c9;font-weight:600;opacity:.4;cursor:not-allowed' disabled>Siguiente →</button>"+
+    "</div>"+
+    "</div>";
+
+  setTimeout(function(){
+    var inp = document.getElementById('_ecInputMonto'); if(inp) inp.focus();
+  }, 50);
+}
+
+function _ecValidarMonto(){
+  var inp = document.getElementById('_ecInputMonto');
+  var btn = document.getElementById('_ecBtnSiguiente');
+  var msg = document.getElementById('_ecMontoMsg');
+  if(!inp || !btn) return;
+  var val = parseFloat(inp.value) || 0;
+  if(val > 0){
+    btn.disabled = false;
+    btn.style.opacity = '1';
+    btn.style.cursor = 'pointer';
+    if(msg) msg.textContent = '✓ Se aplicará '+fmt(val)+' a las cuotas más viejas del cliente';
+    if(msg) msg.style.color = '#5a8a4a';
+  } else {
+    btn.disabled = true;
+    btn.style.opacity = '.4';
+    btn.style.cursor = 'not-allowed';
+    if(msg) msg.textContent = '';
+  }
+}
+
+function _ecPasarADesdeMonto(){
+  var inp = document.getElementById('_ecInputMonto');
+  var val = parseFloat(inp.value) || 0;
+  if(val <= 0){toast('Ingresá un monto mayor a 0','twarn');return;}
+  window._ecMontoACuenta = val;
+  _ecPasoFormaPago();
+}
+
+// PASO 1: forma de pago (común a ambos modos)
+function _ecPasoFormaPago(){
+  var rec = window._ecPedidoActual;
+  if(!rec) return;
+  var total = parseFloat(rec.total||0);
+  var cobradoYa = Math.max(parseFloat(rec.cobrado_parcial)||0, parseFloat(rec.cobrado_total)||0);
+  var saldo = Math.max(0, total - cobradoYa);
+  var nroOrden = rec.nro_orden || ('#'+rec.id);
+  var esCC = !!rec.es_cc;
+  var modo = window._ecModoCobro;
+  var montoACobrar = (modo === 'a_cuenta') ? window._ecMontoACuenta : saldo;
+
+  var ov = document.getElementById('_moEntregarCobrar');
+  if(!ov){
+    ov = document.createElement('div');
+    ov.id = '_moEntregarCobrar';
+    ov.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,.7);z-index:99999;display:flex;align-items:center;justify-content:center;padding:1rem';
+    ov.addEventListener('click', function(e){
+      if(e.target===ov){
+        ov.remove();
+        window._ecPedidoActual=null; window._ecFormaSel=null; window._ecModoCobro=null;
+      }
+    });
+    document.body.appendChild(ov);
+  }
+
+  // Determinar de dónde "volvemos" según el flujo:
+  // - Si NO es CC: no hay volver (estamos en el primer paso real)
+  // - Si CC modo pedido: volver al paso 0
+  // - Si CC modo a_cuenta: volver al paso de monto
+  var btnVolverHtml = '';
+  if(esCC && modo === 'pedido'){
+    btnVolverHtml = "<button class='btn btn-g' onclick='_ecPasoTipoCC()' style='padding:.5rem .9rem'>← Volver</button>";
+  } else if(esCC && modo === 'a_cuenta'){
+    btnVolverHtml = "<button class='btn btn-g' onclick='_ecPasoMontoACuenta()' style='padding:.5rem .9rem'>← Volver</button>";
+  } else {
+    btnVolverHtml = "<button class='btn btn-g' onclick='document.getElementById(\"_moEntregarCobrar\").remove();window._ecPedidoActual=null;window._ecFormaSel=null;window._ecModoCobro=null;' style='padding:.5rem 1rem'>Cancelar</button>";
+  }
+
+  var headerLbl = (modo === 'a_cuenta')
+    ? "<div style='font-size:1.2rem;font-weight:700;color:#3fa9c9;margin-bottom:.4rem'>💰 A cuenta — Método</div><div style='font-size:.78rem;color:var(--tx);margin-bottom:.6rem'>Monto: <b style='color:var(--acc);font-size:.95rem'>"+fmt(montoACobrar)+"</b></div>"
+    : "<div style='font-size:1.3rem;font-weight:700;color:#3fa9c9;margin-bottom:.4rem'>💰 Entregar + Cobrar</div><div style='font-size:.85rem;color:var(--tx);margin-bottom:.6rem'>Pedido <b>"+nroOrden+"</b></div>";
+
+  ov.innerHTML = "<div style='background:var(--sur);max-width:460px;width:100%;border-radius:12px;padding:1.2rem;box-shadow:0 8px 40px rgba(0,0,0,.5);max-height:92vh;overflow-y:auto'>"+
+    headerLbl +
+    (modo !== 'a_cuenta' ?
+      "<div style='background:var(--sur3);border-radius:8px;padding:.6rem .8rem;margin-bottom:.9rem;font-size:.8rem'>"+
+        "<div style='display:flex;justify-content:space-between;margin-bottom:.2rem'><span style='color:var(--tx3)'>Total pedido</span><b>"+fmt(total)+"</b></div>"+
+        (cobradoYa>0?"<div style='display:flex;justify-content:space-between;margin-bottom:.2rem'><span style='color:var(--tx3)'>Ya cobrado</span><b style='color:var(--green)'>"+fmt(cobradoYa)+"</b></div>":"")+
+        "<div style='display:flex;justify-content:space-between;padding-top:.3rem;border-top:1px solid var(--bd)'><span style='color:var(--tx2);font-weight:700'>A cobrar ahora</span><b style='color:var(--acc);font-size:1rem'>"+fmt(saldo)+"</b></div>"+
+      "</div>"
+      : ""
+    ) +
+    (esCC && modo==='pedido' ? "<div style='background:rgba(196,150,90,.12);border:1px solid var(--acc);border-radius:6px;padding:.5rem .7rem;margin-bottom:.8rem;font-size:.72rem;color:var(--acc)'>💳 CC — el cobro se aplica a las cuotas pendientes (FIFO)</div>" : "")+
+    (esCC && modo==='a_cuenta' ? "<div style='background:rgba(196,150,90,.12);border:1px solid var(--acc);border-radius:6px;padding:.5rem .7rem;margin-bottom:.8rem;font-size:.72rem;color:var(--acc)'>💳 A cuenta — se aplicará FIFO a las cuotas más viejas del cliente</div>" : "")+
+    "<div style='font-size:.72rem;font-weight:700;color:var(--tx3);text-transform:uppercase;margin-bottom:.4rem'>Método de pago</div>"+
+    "<div style='display:grid;grid-template-columns:1fr 1fr;gap:.4rem;margin-bottom:1rem'>"+
+      "<button class='_ecBtnPago' data-forma='efectivo' onclick='_ecSeleccionarForma(this)' style='padding:.7rem .5rem;border:2px solid var(--bd);background:var(--sur2);color:var(--tx);border-radius:8px;cursor:pointer;font-size:.85rem;font-weight:600;display:flex;flex-direction:column;align-items:center;gap:.2rem'>"+
+        "<span style='font-size:1.3rem'>💵</span><span>Efectivo</span>"+
+      "</button>"+
+      "<button class='_ecBtnPago' data-forma='transferencia' onclick='_ecSeleccionarForma(this)' style='padding:.7rem .5rem;border:2px solid var(--bd);background:var(--sur2);color:var(--tx);border-radius:8px;cursor:pointer;font-size:.85rem;font-weight:600;display:flex;flex-direction:column;align-items:center;gap:.2rem'>"+
+        "<span style='font-size:1.3rem'>🏦</span><span>Transferencia</span>"+
+      "</button>"+
+      "<button class='_ecBtnPago' data-forma='debito' onclick='_ecSeleccionarForma(this)' style='padding:.7rem .5rem;border:2px solid var(--bd);background:var(--sur2);color:var(--tx);border-radius:8px;cursor:pointer;font-size:.85rem;font-weight:600;display:flex;flex-direction:column;align-items:center;gap:.2rem'>"+
+        "<span style='font-size:1.3rem'>💳</span><span>Débito</span>"+
+      "</button>"+
+      "<button class='_ecBtnPago' data-forma='credito' onclick='_ecSeleccionarForma(this)' style='padding:.7rem .5rem;border:2px solid var(--bd);background:var(--sur2);color:var(--tx);border-radius:8px;cursor:pointer;font-size:.85rem;font-weight:600;display:flex;flex-direction:column;align-items:center;gap:.2rem'>"+
+        "<span style='font-size:1.3rem'>💳</span><span>Crédito</span>"+
+      "</button>"+
+    "</div>"+
+    "<div style='display:flex;gap:.5rem;justify-content:space-between;align-items:center'>"+
+      btnVolverHtml +
+      "<button id='_ecBtnSiguiente' class='btn btn-a' onclick='_ecPasoConfirmar()' style='padding:.5rem 1rem;background:#3fa9c9;border-color:#3fa9c9;font-weight:600;opacity:.4;cursor:not-allowed' disabled>Siguiente →</button>"+
+    "</div></div>";
 }
 
 // Click en un método → resaltar + habilitar botón siguiente
@@ -14395,37 +14626,38 @@ function _ecPasoConfirmar(){
   var nroOrden = rec.nro_orden || ('#'+rec.id);
   var formaLbl = {efectivo:'💵 Efectivo', transferencia:'🏦 Transferencia', debito:'💳 Débito', credito:'💳 Crédito'}[window._ecFormaSel] || window._ecFormaSel;
   var esCC = !!rec.es_cc;
+  var modo = window._ecModoCobro || 'pedido';
+  var montoCobrar = (modo === 'a_cuenta') ? window._ecMontoACuenta : saldo;
+
+  // Si es CC modo "pedido" y el saldo es 0 (ya saldado antes), avisar
+  var advertencia = '';
+  if(esCC && modo === 'pedido' && saldo <= 0.01){
+    advertencia = "<div style='background:rgba(245,166,35,.1);border:1px solid var(--yel);border-radius:6px;padding:.4rem .6rem;margin-bottom:.7rem;font-size:.7rem;color:var(--yel)'>⚠️ Este pedido ya está saldado. Solo se marcará como entregado.</div>";
+    montoCobrar = 0;
+  }
 
   // Reemplazar contenido del modal con el paso de confirmación
   var modal = document.querySelector('#_moEntregarCobrar > div');
   if(!modal) return;
+  var lblAccion = (modo === 'a_cuenta') ? '💰 Pago a cuenta' : '💰 Cobro pedido';
   modal.innerHTML = "<div style='font-size:1.3rem;font-weight:700;color:#3fa9c9;margin-bottom:.4rem'>📋 Confirmar</div>"+
     "<div style='font-size:.85rem;color:var(--tx);margin-bottom:.9rem'>Pedido <b>"+nroOrden+"</b></div>"+
+    advertencia +
     "<div style='background:rgba(63,169,201,.08);border:1px solid #3fa9c9;border-radius:8px;padding:.7rem .9rem;margin-bottom:1rem'>"+
       "<div style='font-size:.72rem;color:var(--tx3);text-transform:uppercase;font-weight:600;margin-bottom:.5rem'>Se va a registrar:</div>"+
       "<div style='display:flex;justify-content:space-between;margin-bottom:.45rem;font-size:.85rem'><span style='color:#5a8a4a'>✓ Entregado</span><b style='color:#5a8a4a'>"+VENDEDOR_NOMBRE+"</b></div>"+
-      "<div style='display:flex;justify-content:space-between;margin-bottom:.45rem;font-size:.85rem'><span style='color:#3fa9c9'>💰 Cobro</span><b style='color:#3fa9c9'>"+formaLbl+"</b></div>"+
-      "<div style='display:flex;justify-content:space-between;padding-top:.45rem;border-top:1px solid rgba(63,169,201,.3);font-size:1rem'><span style='color:var(--tx2);font-weight:700'>Monto</span><b style='color:var(--acc);font-size:1.1rem'>"+fmt(saldo)+"</b></div>"+
-      (esCC ? "<div style='font-size:.66rem;color:var(--acc);margin-top:.4rem;font-style:italic'>El cobro se aplicará a las cuotas pendientes del cliente (FIFO)</div>" : "")+
+      (montoCobrar > 0
+        ? "<div style='display:flex;justify-content:space-between;margin-bottom:.45rem;font-size:.85rem'><span style='color:#3fa9c9'>"+lblAccion+"</span><b style='color:#3fa9c9'>"+formaLbl+"</b></div>"+
+          "<div style='display:flex;justify-content:space-between;padding-top:.45rem;border-top:1px solid rgba(63,169,201,.3);font-size:1rem'><span style='color:var(--tx2);font-weight:700'>Monto</span><b style='color:var(--acc);font-size:1.1rem'>"+fmt(montoCobrar)+"</b></div>"
+        : "<div style='font-size:.7rem;color:var(--tx3);font-style:italic'>Sin cobro asociado — solo entrega</div>"
+      )+
+      (esCC && modo === 'pedido' && montoCobrar > 0 ? "<div style='font-size:.66rem;color:var(--acc);margin-top:.4rem;font-style:italic'>Se aplicará a las cuotas pendientes del cliente (FIFO)</div>" : "")+
+      (esCC && modo === 'a_cuenta' ? "<div style='font-size:.66rem;color:var(--acc);margin-top:.4rem;font-style:italic'>Va a la cuenta del cliente — FIFO sobre todas sus cuotas más viejas</div>" : "")+
     "</div>"+
     "<div style='display:flex;gap:.5rem;justify-content:flex-end'>"+
-      "<button class='btn btn-g' onclick='_ecVolverAPaso1()' style='padding:.5rem 1rem'>← Volver</button>"+
-      "<button id='_ecBtnConfirmar' class='btn btn-a' onclick='_ecEjecutar()' style='padding:.5rem 1rem;background:#3fa9c9;border-color:#3fa9c9;font-weight:600'>✓ Confirmar cobro</button>"+
+      "<button class='btn btn-g' onclick='_ecPasoFormaPago();setTimeout(function(){var b=document.querySelector(\"._ecBtnPago[data-forma=\\\""+window._ecFormaSel+"\\\"]\");if(b)_ecSeleccionarForma(b);},50);' style='padding:.5rem 1rem'>← Volver</button>"+
+      "<button id='_ecBtnConfirmar' class='btn btn-a' onclick='_ecEjecutar()' style='padding:.5rem 1rem;background:#3fa9c9;border-color:#3fa9c9;font-weight:600'>✓ Confirmar</button>"+
     "</div>";
-}
-
-function _ecVolverAPaso1(){
-  // Re-abrir el modal paso 1 con el mismo pedido
-  var rec = window._ecPedidoActual;
-  if(!rec) return;
-  var formaPrev = window._ecFormaSel;
-  document.getElementById('_moEntregarCobrar').remove();
-  _rbEntregarYCobrarModal(rec.id);
-  // Re-seleccionar la forma previa después de un tick
-  setTimeout(function(){
-    var btnPrev = document.querySelector('._ecBtnPago[data-forma="'+formaPrev+'"]');
-    if(btnPrev) _ecSeleccionarForma(btnPrev);
-  }, 50);
 }
 
 // Ejecutar: marcar entregado + crear cobro + aplicar a CC si corresponde
@@ -14442,63 +14674,98 @@ function _ecEjecutar(){
   var pedId = rec.id;
   var nroOrden = rec.nro_orden || ('#'+pedId);
   var esCC = !!rec.es_cc;
-  var nuevoCobradoTotal = cobradoYa + saldo;
-  var esSaldado = nuevoCobradoTotal >= total - 0.01;
+  var modo = window._ecModoCobro || 'pedido';
 
-  // 1) Patch del pedido: estado_envio=entregado + cobrado
+  // Monto a cobrar según modo
+  var montoCobrar = (modo === 'a_cuenta') ? parseFloat(window._ecMontoACuenta) || 0 : saldo;
+
+  // 1) Patch del pedido — depende del modo
+  var nuevoCobradoTotal = cobradoYa;
+  var esSaldado = false;
   var patchPed = {
     estado_envio: 'entregado',
-    entregado_at: new Date().toISOString(),
-    cobrado_total: nuevoCobradoTotal,
-    cobrado_parcial: nuevoCobradoTotal,
-    forma_pago: forma
+    entregado_at: new Date().toISOString()
   };
-  if(esSaldado){
-    patchPed.estado = 'cobrado';
-    patchPed.cobrado_at = new Date().toISOString();
+  if(modo === 'pedido' && montoCobrar > 0){
+    // Modo pedido: sumar al cobrado del pedido
+    nuevoCobradoTotal = cobradoYa + montoCobrar;
+    esSaldado = nuevoCobradoTotal >= total - 0.01;
+    patchPed.cobrado_total = nuevoCobradoTotal;
+    patchPed.cobrado_parcial = nuevoCobradoTotal;
+    patchPed.forma_pago = forma;
+    if(esSaldado){
+      patchPed.estado = 'cobrado';
+      patchPed.cobrado_at = new Date().toISOString();
+    }
   }
+  // Modo a_cuenta: NO se toca cobrado_total del pedido (el monto va a la CC del cliente)
+  // El pedido solo se marca entregado.
 
   var proms = [
     apiPatch('pedidos_catalogo', patchPed, 'id=eq.'+pedId)
   ];
 
-  // 2) Si es CC: crear cc_pago + aplicar a cuotas
-  if(esCC && rec.cliente_id){
+  // 2) Si es CC y hay monto a cobrar → crear cc_pago + aplicar a cuotas
+  var cuotasAfectadasInfo = null;
+  if(esCC && rec.cliente_id && montoCobrar > 0){
+    var notaPago = (modo === 'a_cuenta')
+      ? 'Pago a cuenta en ruta (referencia pedido '+nroOrden+')'
+      : 'Cobro pedido en ruta — '+nroOrden;
     var ccProm = apiPost('cc_pagos', {
       cliente_id: rec.cliente_id,
-      monto: saldo,
+      monto: montoCobrar,
       forma_pago: forma,
       fecha: new Date().toISOString().split('T')[0],
       vendedor_id: VENDEDOR_ID,
-      registrado_por: VENDEDOR_NOMBRE+' (ruta — entregado+cobrado)',
-      nota: 'Cobro en ruta — pedido '+nroOrden,
+      registrado_por: VENDEDOR_NOMBRE+' (ruta '+modo+')',
+      nota: notaPago,
       saldo_a_favor: 0
     }).then(function(rowsP){
       var pago = Array.isArray(rowsP) && rowsP.length ? rowsP[0] : null;
-      if(pago && pago.id){
-        // Aplicar a cuotas (FIFO interno) si existe el helper
-        var aplicarProm = (typeof _ccAplicarPagoACuotasPedido === 'function')
-          ? _ccAplicarPagoACuotasPedido(pedId, saldo).catch(function(e){console.error('[cc cuotas]',e);})
+      if(!pago || !pago.id) return;
+      // Aplicar a cuotas (FIFO):
+      // - modo 'pedido': solo a cuotas DE ESTE pedido
+      // - modo 'a_cuenta': a TODAS las cuotas del cliente (FIFO global por fecha)
+      var aplicarProm;
+      if(modo === 'pedido'){
+        aplicarProm = (typeof _ccAplicarPagoACuotasPedido === 'function')
+          ? _ccAplicarPagoACuotasPedido(pedId, montoCobrar)
+              .then(function(infoCuotas){return _ecDetectarCuotasPagadas(pedId, cobradoYa, montoCobrar);})
+              .catch(function(e){console.error('[cc cuotas]',e);})
           : Promise.resolve();
-        return aplicarProm.then(function(){
-          return apiPost('cc_pagos_aplicaciones', {
-            pago_id: pago.id,
-            pedido_id: pedId,
-            monto_aplicado: saldo,
-            cubrio_pedido_completo: !!esSaldado
-          });
-        });
+      } else {
+        // a_cuenta → FIFO global sobre todas las cuotas activas del cliente
+        aplicarProm = _ecAplicarPagoACuentaFIFO(rec.cliente_id, montoCobrar)
+          .catch(function(e){console.error('[cc cuotas a_cuenta]',e);});
       }
+      return aplicarProm.then(function(info){
+        cuotasAfectadasInfo = info; // {cuotasPagadas, cuotasParciales, sobraACredito}
+        // Registrar la aplicación (vincular pago al pedido como referencia)
+        return apiPost('cc_pagos_aplicaciones', {
+          pago_id: pago.id,
+          pedido_id: pedId,
+          monto_aplicado: montoCobrar,
+          cubrio_pedido_completo: (modo === 'pedido' && esSaldado)
+        });
+      });
     }).catch(function(e){console.error('[belle] cc_pago:',e);});
     proms.push(ccProm);
   }
 
   // 3) Log de estados
+  var notaLog;
+  if(modo === 'a_cuenta'){
+    notaLog = 'Entregado por '+VENDEDOR_NOMBRE+' + pago a cuenta de '+fmt(montoCobrar)+' ('+forma+')';
+  } else if(montoCobrar > 0){
+    notaLog = 'Entregado y cobrado ('+forma+', '+fmt(montoCobrar)+') por '+VENDEDOR_NOMBRE;
+  } else {
+    notaLog = 'Entregado por '+VENDEDOR_NOMBRE+' (sin cobro)';
+  }
   proms.push(apiPost('pedidos_estados_log', {
     pedido_id: pedId,
     pedido_tabla: 'pedidos_catalogo',
     estado: 'entregado',
-    nota: 'Entregado y cobrado ('+forma+', '+fmt(saldo)+') por '+VENDEDOR_NOMBRE,
+    nota: notaLog,
     usuario: VENDEDOR_NOMBRE
   }).catch(function(e){console.error('[belle] log:',e);}));
 
@@ -14508,18 +14775,149 @@ function _ecEjecutar(){
   }
 
   Promise.all(proms).then(function(){
-    toast('Pedido entregado y cobrado '+fmt(saldo)+' ✓','tok');
+    // Mensaje según resultado
+    var msg;
+    if(modo === 'a_cuenta'){
+      msg = 'Entrega + pago a cuenta '+fmt(montoCobrar)+' ✓';
+    } else if(montoCobrar > 0){
+      msg = 'Pedido entregado y cobrado '+fmt(montoCobrar)+' ✓';
+    } else {
+      msg = 'Pedido entregado ✓';
+    }
+    toast(msg,'tok');
+
+    // Si hubo cuotas pagadas, mostrar resumen
+    if(cuotasAfectadasInfo && cuotasAfectadasInfo.cuotasPagadas && cuotasAfectadasInfo.cuotasPagadas.length > 0){
+      setTimeout(function(){
+        var n = cuotasAfectadasInfo.cuotasPagadas.length;
+        toast('💰 '+n+' cuota'+(n>1?'s':'')+' pagada'+(n>1?'s':'')+' por completo','tok');
+      }, 800);
+    }
+    if(cuotasAfectadasInfo && cuotasAfectadasInfo.sobraACredito > 0){
+      setTimeout(function(){
+        toast('🎁 Sobró '+fmt(cuotasAfectadasInfo.sobraACredito)+' — queda a favor del cliente','tok');
+      }, 1500);
+    }
+
     var mo = document.getElementById('_moEntregarCobrar'); if(mo) mo.remove();
     window._ecPedidoActual = null;
     window._ecFormaSel = null;
+    window._ecModoCobro = null;
+    window._ecMontoACuenta = 0;
     if(typeof _rtRenderSubTab === 'function') _rtRenderSubTab();
     if(typeof loadRutas === 'function') loadRutas();
     if(typeof _rbVerificarAutoCompletar === 'function' && _rt.borradorActivo) _rbVerificarAutoCompletar();
   }).catch(function(e){
     console.error('[belle] _ecEjecutar:',e);
     toast('Error: '+(e&&e.message||'al procesar'),'terr');
-    if(btn){btn.disabled=false; btn.textContent='✓ Confirmar cobro'; btn.style.opacity='1';}
+    if(btn){btn.disabled=false; btn.textContent='✓ Confirmar'; btn.style.opacity='1';}
   });
+}
+
+// Helper: aplicar pago FIFO GLOBAL a todas las cuotas del cliente (modo a_cuenta)
+// Devuelve {cuotasPagadas:[], cuotasParciales:[], sobraACredito:0}
+// Además actualiza cobrado_total de los pedidos cuyas cuotas se pagaron (para que
+// el cliente vea el saldo correcto en su panel).
+function _ecAplicarPagoACuentaFIFO(clienteId, monto){
+  if(!clienteId || monto <= 0) return Promise.resolve({cuotasPagadas:[], cuotasParciales:[], sobraACredito:0});
+
+  // 1) Traer todos los pedidos CC del cliente
+  return apiGet('pedidos_catalogo','select=id,total,cobrado_total,cobrado_parcial,estado&cliente_id=eq.'+clienteId+'&es_cc=is.true&estado=neq.cancelado').then(function(peds){
+    var pedsArr = Array.isArray(peds) ? peds : [];
+    var pedIds = pedsArr.map(function(p){return p.id;});
+    if(!pedIds.length){
+      return _ecGuardarSaldoAFavor(clienteId, monto).then(function(){
+        return {cuotasPagadas:[], cuotasParciales:[], sobraACredito:monto};
+      });
+    }
+    var pedMap = {}; pedsArr.forEach(function(p){pedMap[p.id]=p;});
+
+    // 2) Traer todas las cuotas pendientes/parciales/vencidas ordenadas por fecha (FIFO global)
+    return apiGet('cc_cuotas','select=*&pedido_id=in.('+pedIds.join(',')+')&estado=in.(pendiente,parcial,vencida)&order=fecha_vencimiento.asc,nro_cuota.asc').then(function(cuotas){
+      cuotas = Array.isArray(cuotas) ? cuotas : [];
+      if(!cuotas.length){
+        return _ecGuardarSaldoAFavor(clienteId, monto).then(function(){
+          return {cuotasPagadas:[], cuotasParciales:[], sobraACredito:monto};
+        });
+      }
+
+      // 3) Aplicar FIFO y trackear cuánto se aplicó por pedido
+      var restante = monto;
+      var aplicadoPorPedido = {}; // pedido_id → monto aplicado
+      var promesas = [];
+      var cuotasPagadas = [];
+      var cuotasParciales = [];
+      cuotas.forEach(function(cu){
+        if(restante <= 0.01) return;
+        var pendiente = (parseFloat(cu.monto)||0) - (parseFloat(cu.monto_pagado)||0);
+        if(pendiente <= 0) return;
+        var aplicar = Math.min(restante, pendiente);
+        var nuevoEstado = aplicar >= pendiente - 0.01 ? 'pagada' : 'parcial';
+        var patch = {
+          monto_pagado: (parseFloat(cu.monto_pagado)||0) + aplicar,
+          estado: nuevoEstado,
+          updated_at: new Date().toISOString()
+        };
+        if(nuevoEstado === 'pagada'){
+          patch.fecha_pago = new Date().toISOString().slice(0,10);
+          cuotasPagadas.push({nro:cu.nro_cuota, total:cu.total_cuotas, pedido_id:cu.pedido_id, monto:aplicar});
+        } else {
+          cuotasParciales.push({nro:cu.nro_cuota, total:cu.total_cuotas, pedido_id:cu.pedido_id, monto:aplicar});
+        }
+        promesas.push(apiPatch('cc_cuotas', patch, 'id=eq.'+cu.id));
+        // Trackear para actualizar pedido después
+        aplicadoPorPedido[cu.pedido_id] = (aplicadoPorPedido[cu.pedido_id]||0) + aplicar;
+        restante -= aplicar;
+      });
+
+      // 4) Actualizar cobrado_total de cada pedido afectado (para que el cliente vea saldo correcto)
+      Object.keys(aplicadoPorPedido).forEach(function(pid){
+        var p = pedMap[pid];
+        if(!p) return;
+        var cobradoAct = parseFloat(p.cobrado_total) || 0;
+        var nuevoCobrado = cobradoAct + aplicadoPorPedido[pid];
+        var totalP = parseFloat(p.total) || 0;
+        var patchP = {
+          cobrado_total: nuevoCobrado,
+          cobrado_parcial: nuevoCobrado
+        };
+        if(nuevoCobrado >= totalP - 0.01){
+          patchP.estado = 'cobrado';
+          patchP.cobrado_at = new Date().toISOString();
+        }
+        promesas.push(apiPatch('pedidos_catalogo', patchP, 'id=eq.'+pid));
+      });
+
+      // 5) Si sobra → saldo a favor
+      var sobra = Math.max(0, restante);
+      if(sobra > 0.01){
+        promesas.push(_ecGuardarSaldoAFavor(clienteId, sobra));
+      }
+
+      return Promise.all(promesas).then(function(){
+        return {cuotasPagadas:cuotasPagadas, cuotasParciales:cuotasParciales, sobraACredito:sobra};
+      });
+    });
+  });
+}
+
+// Helper: sumar saldo a favor del cliente
+function _ecGuardarSaldoAFavor(clienteId, monto){
+  return apiGet('clientes','select=saldo_cc&id=eq.'+clienteId+'&limit=1').then(function(rows){
+    var act = (rows && rows[0] && parseFloat(rows[0].saldo_cc)) || 0;
+    return apiPatch('clientes',{saldo_cc: act + monto},'id=eq.'+clienteId);
+  }).catch(function(e){console.error('[ec saldo favor]',e);});
+}
+
+// Helper: detectar qué cuotas se pagaron por completo (modo 'pedido')
+function _ecDetectarCuotasPagadas(pedId, cobradoAntes, montoAplicado){
+  return apiGet('cc_cuotas','select=nro_cuota,total_cuotas,pedido_id,estado,fecha_pago&pedido_id=eq.'+pedId+'&estado=eq.pagada&order=fecha_vencimiento.asc').then(function(cuotas){
+    cuotas = Array.isArray(cuotas) ? cuotas : [];
+    // Filtrar las que se pagaron HOY (fecha_pago=hoy)
+    var hoyStr = new Date().toISOString().slice(0,10);
+    var recientes = cuotas.filter(function(c){return c.fecha_pago === hoyStr;});
+    return {cuotasPagadas: recientes, cuotasParciales:[], sobraACredito:0};
+  }).catch(function(){return {cuotasPagadas:[], cuotasParciales:[], sobraACredito:0};});
 }
 
 function _rbMarcarEntregado(pedId){
