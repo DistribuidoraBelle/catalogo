@@ -8668,7 +8668,26 @@ function renderMovimientos(){
       var color=colores[m.tipo]||"var(--tx3)";
       var icono=iconos[m.tipo]||"📋";
       var hora=m.created_at?new Date(m.created_at).toLocaleTimeString("es-AR",{timeZone:"America/Argentina/Buenos_Aires",hour:"2-digit",minute:"2-digit"}):"";
-      var signo=(m.tipo==="devolucion"||m.tipo==="cancelacion"||m.tipo==="proveedor"||m.tipo==="entrada"||m.tipo==="ingreso_faltante")?"+":"-";
+      // FIX 2026-05-17: detectar suma/resta comparando stock_antes vs stock_despues
+      // (más confiable — antes 'proveedor', 'ingreso_faltante', 'devolucion_cliente', 'ingreso_pedido'
+      // se mostraban como '-' rojo aunque sumaban)
+      var sa = parseFloat(m.stock_antes);
+      var sd = parseFloat(m.stock_despues);
+      var sumaResta = null;
+      if(!isNaN(sa) && !isNaN(sd)){
+        if(sd > sa) sumaResta = true;
+        else if(sd < sa) sumaResta = false;
+      }
+      if(sumaResta === null){
+        var tiposSuma = ['entrada','devolucion','devolucion_cliente','proveedor','ingreso_faltante','ingreso_pedido'];
+        var tiposResta = ['salida','venta','reserva','cancelacion','baja_fallado','ajuste_baja'];
+        if(tiposSuma.indexOf(m.tipo) >= 0) sumaResta = true;
+        else if(tiposResta.indexOf(m.tipo) >= 0) sumaResta = false;
+        else if((parseFloat(m.cantidad)||0) > 0) sumaResta = true;
+        else if((parseFloat(m.cantidad)||0) < 0) sumaResta = false;
+      }
+      var signo = sumaResta === true ? '+' : (sumaResta === false ? '-' : '');
+      var colCant = sumaResta === true ? 'var(--green)' : (sumaResta === false ? 'var(--red)' : 'var(--tx3)');
       var cantAbs=Math.abs(m.cantidad||0);
 
       var row=document.createElement("div");
@@ -8681,12 +8700,12 @@ function renderMovimientos(){
       var info=document.createElement("div");
       info.style.cssText="flex:1;min-width:0";
       info.innerHTML="<div style='font-size:.78rem;font-weight:600;color:var(--tx);white-space:nowrap;overflow:hidden;text-overflow:ellipsis'>"+(m.producto_nombre||"Sin nombre")+"</div>"+
-        "<div style='font-size:.63rem;color:var(--tx3);margin-top:.1rem'>"+(m.motivo||m.tipo)+(m.usuario?" · <b>"+m.usuario+"</b>":"")+" · "+hora+"</div>"+
+        "<div style='font-size:.63rem;color:"+color+";margin-top:.1rem'>"+(m.motivo||m.tipo)+(m.usuario?" · <b style='color:var(--tx3)'>"+m.usuario+"</b>":"")+" <span style='color:var(--tx3)'>· "+hora+"</span></div>"+
         (m.total?"<div style='font-size:.65rem;color:var(--green)'>$"+Math.round(m.total).toLocaleString("es-AR")+"</div>":"");
 
       var nums=document.createElement("div");
       nums.style.cssText="text-align:right;flex-shrink:0";
-      nums.innerHTML="<div style='font-size:.88rem;font-weight:700;color:"+color+"'>"+signo+cantAbs+"u</div>"+
+      nums.innerHTML="<div style='font-size:.88rem;font-weight:700;color:"+colCant+"'>"+signo+cantAbs+"u</div>"+
         (m.stock_despues!==null&&m.stock_despues!==undefined?"<div style='font-size:.6rem;color:var(--tx3)'>stock: "+m.stock_despues+"</div>":"");
 
       row.appendChild(ico);row.appendChild(info);row.appendChild(nums);
@@ -32944,11 +32963,39 @@ function adminVerMovimientos(prodId,prodNombre){
     var rows=data.map(function(m){
       var fecha=new Date(m.created_at).toLocaleDateString('es-AR',{day:'2-digit',month:'2-digit',timeZone:"America/Argentina/Buenos_Aires"});
       var hora=new Date(m.created_at).toLocaleTimeString('es-AR',{hour:'2-digit',minute:'2-digit',timeZone:"America/Argentina/Buenos_Aires"});
-      var isIn=m.tipo==='entrada'||m.tipo==='devolucion';
-      var col=isIn?'var(--green)':'var(--red)';
-      return '<tr style="border-bottom:1px solid var(--bd)"><td style="padding:.3rem .4rem;white-space:nowrap;font-size:.7rem">'+fecha+' '+hora+'</td><td><span style="font-size:.7rem;color:'+col+'">'+m.tipo+'</span></td><td style="font-weight:700;color:'+col+';font-size:.8rem">'+(isIn?'+':'-')+Math.abs(m.cantidad||0)+'</td><td style="color:var(--tx3);font-size:.7rem">'+(m.stock_antes!=null?m.stock_antes:'-')+'</td><td style="font-size:.7rem">'+(m.stock_despues!=null?m.stock_despues:'-')+'</td><td style="color:var(--tx3);font-size:.68rem;max-width:160px;overflow:hidden;text-overflow:ellipsis">'+(m.motivo||'-')+'</td><td style="color:var(--tx3);font-size:.7rem">'+(m.usuario||'-')+'</td></tr>';
+      // FIX 2026-05-17: detectar suma/resta comparando stock_antes vs stock_despues
+      // (más confiable que hardcoded list — antes 'proveedor' aparecía como resta cuando en realidad suma)
+      var sa = parseFloat(m.stock_antes);
+      var sd = parseFloat(m.stock_despues);
+      var cant = Math.abs(parseFloat(m.cantidad)||0);
+      var sumaResta = null; // true=suma, false=resta, null=indeterminado
+      if(!isNaN(sa) && !isNaN(sd)){
+        if(sd > sa) sumaResta = true;
+        else if(sd < sa) sumaResta = false;
+      }
+      // Fallback por tipo si no hay stock_antes/despues confiables
+      if(sumaResta === null){
+        var tiposSuma = ['entrada','devolucion','devolucion_cliente','proveedor','ingreso_faltante','ingreso_pedido'];
+        var tiposResta = ['salida','venta','reserva','cancelacion','baja_fallado','ajuste_baja'];
+        if(tiposSuma.indexOf(m.tipo) >= 0) sumaResta = true;
+        else if(tiposResta.indexOf(m.tipo) >= 0) sumaResta = false;
+        // ajuste/manual: usar signo de cantidad si viene
+        else if((parseFloat(m.cantidad)||0) > 0) sumaResta = true;
+        else if((parseFloat(m.cantidad)||0) < 0) sumaResta = false;
+      }
+      var col = sumaResta === true ? 'var(--green)' : (sumaResta === false ? 'var(--red)' : 'var(--tx3)');
+      var signo = sumaResta === true ? '+' : (sumaResta === false ? '-' : '');
+      var icon = sumaResta === true ? '↑' : (sumaResta === false ? '↓' : '·');
+      return '<tr style="border-bottom:1px solid var(--bd)">'+
+        '<td style="padding:.3rem .4rem;white-space:nowrap;font-size:.7rem">'+fecha+' '+hora+'</td>'+
+        '<td><span style="font-size:.7rem;color:'+col+'">'+icon+' '+m.tipo+'</span></td>'+
+        '<td style="font-weight:700;color:'+col+';font-size:.8rem">'+signo+cant+'</td>'+
+        '<td style="color:var(--tx3);font-size:.7rem">'+(m.stock_antes!=null?m.stock_antes:'-')+'</td>'+
+        '<td style="font-size:.7rem;font-weight:600">'+(m.stock_despues!=null?m.stock_despues:'-')+'</td>'+
+        '<td style="color:var(--tx3);font-size:.68rem;max-width:160px;overflow:hidden;text-overflow:ellipsis">'+(m.motivo||'-')+'</td>'+
+        '<td style="color:var(--tx3);font-size:.7rem">'+(m.usuario||'-')+'</td></tr>';
     }).join('');
-    body.innerHTML='<div style="overflow-y:auto;max-height:60vh"><table style="width:100%;border-collapse:collapse"><thead><tr style="color:var(--tx3);font-size:.63rem"><th style="padding:.3rem .4rem;text-align:left">Fecha</th><th>Tipo</th><th>Cant</th><th>Antes</th><th>Despues</th><th>Motivo</th><th>Usuario</th></tr></thead><tbody>'+rows+'</tbody></table></div>';
+    body.innerHTML='<div style="overflow-y:auto;max-height:60vh"><table style="width:100%;border-collapse:collapse"><thead><tr style="color:var(--tx3);font-size:.63rem"><th style="padding:.3rem .4rem;text-align:left">Fecha</th><th style="text-align:left">Tipo</th><th style="text-align:right">Cant</th><th style="text-align:right">Antes</th><th style="text-align:right">Despues</th><th style="text-align:left">Motivo</th><th style="text-align:left">Usuario</th></tr></thead><tbody>'+rows+'</tbody></table></div>';
   });
 }
 // ═══════════════════════════════════════════════════════════════════════════
