@@ -2024,6 +2024,8 @@ function _renderClientesVend(pg){
     html+="<div style='display:flex;gap:.5rem;margin-bottom:1rem;flex-wrap:wrap;align-items:center'>";
     html+="<input type='text' id='vcSrch' placeholder='Buscar por nombre, ID, teléfono...' value=\""+qEsc+"\" oninput='_vcFiltrar(this.value)' style='flex:1;min-width:150px;padding:.45rem .7rem;border:1px solid var(--bd);border-radius:7px;font-size:.82rem;background:var(--sur2);color:var(--tx)'>";
     html+="<button class='btn btn-a' style='padding:.45rem .8rem;font-size:.78rem' onclick='abrirCrearCliente()'>➕ Nuevo cliente</button>";
+    html+="<button class='btn btn-g' style='padding:.45rem .8rem;font-size:.78rem;color:var(--acc);border-color:var(--acc)' onclick='abrirCalendarioCobranzasV()' title='Calendario mensual de cuotas a cobrar'>📅 Calendario CC</button>";
+    html+="<button class='btn btn-g' style='padding:.45rem .8rem;font-size:.78rem;color:var(--red);border-color:var(--red)' onclick='abrirReporteMorosidadV()' title='Tus clientes con cuotas vencidas'>⚠️ Morosidad</button>";
     html+="<span style='font-size:.72rem;color:var(--tx3)'>"+lista.length+" mostrados</span>";
     html+="</div>";
 
@@ -2336,6 +2338,8 @@ function abrirFichaCliente(clienteId){
       html+="<button class='btn btn-g' style='font-size:.72rem;padding:.4rem .65rem' onclick='vcAbrirCreditoModal("+c.id+",&quot;"+((c.nombre||"")+" "+(c.apellido||"")).trim().replace(/&/g,"&amp;").replace(/'/g,"&#39;").replace(/\"/g,"&quot;")+"&quot;)'>👑 Crédito</button>";
       html+="<button class='btn btn-g' style='font-size:.72rem;padding:.4rem .65rem' onclick='vcVerCC("+c.id+",&quot;"+((c.nombre||"")+" "+(c.apellido||"")).trim().replace(/&/g,"&amp;").replace(/'/g,"&#39;").replace(/\"/g,"&quot;")+"&quot;)'>📋 Movs</button>";
       html+="<button class='btn btn-g' style='font-size:.72rem;padding:.4rem .65rem' onclick='vcGenerarNotifWA("+c.id+",&quot;recordatorio&quot;)' title='Mensaje WhatsApp con vencimientos'>💬 Notif WA</button>";
+      html+="<button class='btn btn-g' style='font-size:.72rem;padding:.4rem .65rem' onclick='abrirHistorialComCobranzaV("+c.id+",&quot;"+((c.nombre||"")+" "+(c.apellido||"")).trim().replace(/&/g,"&amp;").replace(/'/g,"&#39;").replace(/\"/g,"&quot;")+"&quot;)' title='Historial de contactos'>📞 Historial</button>";
+      html+="<button class='btn btn-g' style='font-size:.72rem;padding:.4rem .65rem;color:var(--yel);border-color:var(--yel)' onclick='abrirHistorialMorasV("+c.id+",&quot;"+((c.nombre||"")+" "+(c.apellido||"")).trim().replace(/&/g,"&amp;").replace(/'/g,"&#39;").replace(/\"/g,"&quot;")+"&quot;)' title='Ver moras aplicadas'>⚖️ Moras</button>";
       if(c.bloqueado){
         html+="<button class='btn btn-g' style='font-size:.72rem;padding:.4rem .65rem;color:var(--green);border-color:var(--green)' onclick='vcDesbloquearCliente("+c.id+")'>✓ Desbloquear</button>";
       } else {
@@ -16617,6 +16621,834 @@ input[type="search"][data-bclx="1"]{-webkit-appearance:textfield;appearance:text
     init();
   }
 })();
+
+// ═══════════════════════════════════════════════════════════════════════════
+// FEAT 2026-05-16: FUNCIONES CC AVANZADAS PARA VENDEDOR
+// Replica de belle.html — filtradas a SUS clientes (no ve los de otros vendedores)
+// ═══════════════════════════════════════════════════════════════════════════
+
+// Helper: registrar comunicación de cobranza (no-bloqueante)
+function _registrarComCobranzaV(opts){
+  if(!opts || !opts.cliente_id || !opts.canal || !opts.tipo) return Promise.resolve();
+  var payload = {
+    cliente_id: opts.cliente_id,
+    pedido_id: opts.pedido_id || null,
+    cuota_id: opts.cuota_id || null,
+    canal: opts.canal,
+    tipo: opts.tipo,
+    mensaje: opts.mensaje || null,
+    estado: opts.estado || 'enviado',
+    usuario: VENDEDOR_NOMBRE || ('Vend #'+VENDEDOR_ID),
+    vendedor_id: VENDEDOR_ID || null
+  };
+  return apiPost('cobranza_comunicaciones', payload).catch(function(e){
+    console.warn('[com cobranza vend] no se pudo registrar:', e.message||e);
+  });
+}
+
+// Helper: limpia teléfono para wa.me
+function _vWaNumLimpio(tel){
+  if(!tel) return '';
+  var limpio = String(tel).replace(/[^0-9]/g,'');
+  if(limpio.length === 10) limpio = '549'+limpio;
+  if(limpio.length === 11 && limpio.charAt(0) === '5') limpio = '54'+limpio.substring(1);
+  return limpio;
+}
+
+// ───────── CALENDARIO COBRANZAS (vendedor) ─────────
+function abrirCalendarioCobranzasV(){
+  var mo = document.createElement('div');
+  mo.className = 'modal-ov open';
+  mo.id = '_moCalendarioCC_V';
+  mo.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,.55);z-index:99999;display:flex;align-items:center;justify-content:center;padding:1rem';
+  var hoy = new Date();
+  window._calCcMesV = hoy.getMonth();
+  window._calCcAnioV = hoy.getFullYear();
+  mo.innerHTML = "<div class='modal' style='max-width:760px;width:96%;max-height:92vh;display:flex;flex-direction:column'>"+
+    "<div style='display:flex;justify-content:space-between;align-items:center;margin-bottom:.7rem;flex-shrink:0'>"+
+      "<h3 style='color:var(--acc);font-size:.95rem;margin:0'>📅 Calendario de Cobranzas</h3>"+
+      "<div style='display:flex;gap:.3rem'>"+
+        "<button class='btn btn-g' onclick='_calCcExportCSVV()' style='font-size:.68rem;padding:.25rem .55rem'>📥 CSV</button>"+
+        "<button class='btn btn-g' onclick='document.getElementById(\"_moCalendarioCC_V\").remove()' style='padding:.2rem .5rem'>X</button>"+
+      "</div>"+
+    "</div>"+
+    "<div style='overflow-y:auto;flex:1'>"+
+      "<div id='_calCcBodyV'><div class='empty'>Cargando...</div></div>"+
+    "</div></div>";
+  document.body.appendChild(mo);
+  _calCcRenderV();
+}
+
+function _calCcRenderV(){
+  var body = document.getElementById('_calCcBodyV');
+  if(!body) return;
+  body.innerHTML = "<div class='empty'>Cargando cuotas...</div>";
+  var mes = window._calCcMesV;
+  var anio = window._calCcAnioV;
+  var primerDia = new Date(anio, mes, 1);
+  var ultimoDia = new Date(anio, mes + 1, 0);
+  var primerStr = primerDia.toISOString().slice(0,10);
+  var ultimoStr = ultimoDia.toISOString().slice(0,10);
+  var nombresMes = ['Enero','Febrero','Marzo','Abril','Mayo','Junio','Julio','Agosto','Septiembre','Octubre','Noviembre','Diciembre'];
+
+  // POR AHORA: vendedor ve TODAS las cuotas (no solo de sus clientes asignados)
+  // En el futuro se filtrará por VENDEDOR_ID — ver memoria del proyecto
+  apiGet('clientes','select=id,nombre,apellido,telefono,vendedor_asignado_id&limit=2000').then(function(misClis){
+    misClis = Array.isArray(misClis) ? misClis : [];
+    if(!misClis.length){
+      body.innerHTML = "<div class='empty' style='padding:2.5rem 1rem;text-align:center;color:var(--tx3)'>"+
+        "<div style='font-size:2rem;margin-bottom:.5rem;opacity:.4'>📅</div>"+
+        "<div style='font-size:.85rem;color:var(--tx2);margin-bottom:.3rem'>No hay clientes cargados</div>"+
+        "</div>";
+      return;
+    }
+    var cliMap = {};
+    var cliIds = misClis.map(function(c){cliMap[c.id]=c; return c.id;});
+
+    // OPTIMIZACIÓN: ir a cc_cuotas directo (filtrado por mes+estado), después joinear pedidos
+    return apiGet('cc_cuotas','select=*&fecha_vencimiento=gte.'+primerStr+'&fecha_vencimiento=lte.'+ultimoStr+'&estado=in.(pendiente,parcial,vencida)&order=fecha_vencimiento.asc').then(function(cuotas){
+      cuotas = Array.isArray(cuotas) ? cuotas : [];
+      if(!cuotas.length) return {cuotas:[], pedMap:{}, cliMap:cliMap};
+      var pedIds = cuotas.map(function(cu){return cu.pedido_id;}).filter(function(v,i,a){return a.indexOf(v)===i;});
+      return apiGet('pedidos_catalogo','select=id,cliente_id,nro_orden,total,cobrado_total&id=in.('+pedIds.join(',')+')&estado=neq.cancelado').then(function(pedidos){
+        pedidos = Array.isArray(pedidos) ? pedidos : [];
+        var pedMap = {}; pedidos.forEach(function(p){pedMap[p.id]=p;});
+        return {cuotas:cuotas, pedMap:pedMap, cliMap:cliMap};
+      });
+    });
+  }).then(function(res){
+    if(!res) return;
+    var cuotas = res.cuotas;
+    var pedMap = res.pedMap;
+    var cliMap = res.cliMap;
+
+    var porDia = {};
+    var totalMes = 0;
+    var cantTotal = 0;
+    cuotas.forEach(function(cu){
+      var dia = cu.fecha_vencimiento;
+      if(!porDia[dia]) porDia[dia] = [];
+      var p = pedMap[cu.pedido_id];
+      var cli = p ? cliMap[p.cliente_id] : null;
+      var pendiente = (parseFloat(cu.monto)||0) - (parseFloat(cu.monto_pagado)||0);
+      totalMes += pendiente;
+      cantTotal++;
+      porDia[dia].push({cu:cu, ped:p, cli:cli, pendiente:pendiente});
+    });
+
+    window._calCcDataActualV = {mes:mes, anio:anio, porDia:porDia, totalMes:totalMes};
+
+    var h = "";
+    h += "<div style='display:flex;justify-content:space-between;align-items:center;background:var(--sur2);border:1px solid var(--bd);border-radius:8px;padding:.6rem .85rem;margin-bottom:.7rem'>";
+    h += "<button class='btn btn-g' onclick='_calCcCambiarMesV(-1)' style='font-size:.72rem;padding:.3rem .55rem'>← Ant</button>";
+    h += "<div style='text-align:center;flex:1'>";
+    h += "<div style='font-size:.95rem;font-weight:700;color:var(--tx)'>"+nombresMes[mes]+" "+anio+"</div>";
+    h += "<div style='font-size:.7rem;color:var(--tx3);margin-top:.15rem'>"+cantTotal+" cuotas · Total: <b style='color:var(--acc)'>"+fmt(totalMes)+"</b></div>";
+    h += "</div>";
+    h += "<button class='btn btn-g' onclick='_calCcCambiarMesV(1)' style='font-size:.72rem;padding:.3rem .55rem'>Sig →</button>";
+    h += "</div>";
+
+    var hoyMes = new Date();
+    if(mes !== hoyMes.getMonth() || anio !== hoyMes.getFullYear()){
+      h += "<div style='text-align:center;margin-bottom:.6rem'>";
+      h += "<button class='btn btn-g' onclick='_calCcMesActualV()' style='font-size:.7rem;padding:.25rem .55rem;color:var(--acc);border-color:var(--acc)'>📍 Volver al mes actual</button>";
+      h += "</div>";
+    }
+
+    if(cantTotal === 0){
+      h += "<div class='empty' style='padding:2rem 1rem;text-align:center;color:var(--tx3)'>";
+      h += "<div style='font-size:2.5rem;margin-bottom:.5rem;opacity:.4'>📅</div>";
+      h += "<div style='font-size:.85rem;color:var(--tx2);margin-bottom:.3rem'>Sin cuotas pendientes en este mes</div>";
+      h += "</div>";
+    } else {
+      var diasOrd = Object.keys(porDia).sort();
+      var hoyStr = new Date().toISOString().slice(0,10);
+      diasOrd.forEach(function(dia){
+        var items = porDia[dia];
+        var totalDia = items.reduce(function(s,x){return s+x.pendiente;}, 0);
+        var fecha = new Date(dia+'T00:00:00');
+        var diaSem = ['Dom','Lun','Mar','Mié','Jue','Vie','Sáb'][fecha.getDay()];
+        var diaNum = fecha.getDate();
+        var esVencido = dia < hoyStr;
+        var esHoy = dia === hoyStr;
+        var colorBorde = esVencido ? 'var(--red)' : (esHoy ? 'var(--acc)' : 'var(--bd)');
+        var colorBg = esVencido ? 'rgba(220,80,80,.08)' : (esHoy ? 'rgba(196,150,90,.08)' : 'var(--sur2)');
+
+        h += "<div style='border:1px solid "+colorBorde+";background:"+colorBg+";border-radius:8px;padding:.6rem .8rem;margin-bottom:.45rem'>";
+        h += "<div style='display:flex;justify-content:space-between;align-items:center;margin-bottom:.4rem'>";
+        h += "<div style='display:flex;align-items:center;gap:.55rem'>";
+        h += "<div style='width:42px;height:42px;border-radius:50%;background:"+(esVencido?'var(--red)':(esHoy?'var(--acc)':'var(--sur3)'))+";color:"+(esVencido||esHoy?'#fff':'var(--tx)')+";display:flex;align-items:center;justify-content:center;font-weight:700;font-size:.95rem;flex-shrink:0'>"+diaNum+"</div>";
+        h += "<div>";
+        h += "<div style='font-size:.78rem;font-weight:700;color:var(--tx)'>"+diaSem+" "+diaNum+"</div>";
+        h += "<div style='font-size:.66rem;color:var(--tx3)'>"+items.length+" cuota"+(items.length>1?'s':'')+(esVencido?' · ⚠️ Vencidas':'')+(esHoy?' · 🔔 HOY':'')+"</div>";
+        h += "</div></div>";
+        h += "<div style='text-align:right'><div style='font-size:.92rem;font-weight:800;color:"+(esVencido?'var(--red)':'var(--acc)')+"'>"+fmt(totalDia)+"</div></div>";
+        h += "</div>";
+
+        h += "<div style='display:flex;flex-direction:column;gap:.25rem;margin-left:.3rem;border-left:2px solid "+colorBorde+";padding-left:.55rem'>";
+        items.forEach(function(it){
+          var cliNom = it.cli ? ((it.cli.nombre||'')+' '+(it.cli.apellido||'')).trim() : '(cliente)';
+          var pedNum = it.ped ? (it.ped.nro_orden||'#'+it.ped.id) : '#'+it.cu.pedido_id;
+          var nroCu = it.cu.nro_cuota+'/'+it.cu.total_cuotas;
+          var esMio = it.cli && it.cli.vendedor_asignado_id === VENDEDOR_ID;
+          h += "<div style='display:flex;justify-content:space-between;align-items:center;padding:.3rem 0;font-size:.74rem;gap:.3rem'>";
+          h += "<div style='flex:1;min-width:0'>";
+          h += "<div style='font-weight:600;color:var(--tx);display:flex;align-items:center;gap:.3rem;flex-wrap:wrap'>";
+          if(esMio) h += "<span style='background:var(--acc);color:#fff;font-size:.55rem;font-weight:700;padding:.05rem .3rem;border-radius:3px;letter-spacing:.04em'>⭐</span>";
+          h += "<span>"+_esc(cliNom)+"</span>";
+          h += "</div>";
+          h += "<div style='font-size:.62rem;color:var(--tx3)'>"+pedNum+" · Cuota "+nroCu+(it.cu.estado==='parcial'?' (parcial)':'')+"</div>";
+          h += "</div>";
+          h += "<div style='display:flex;gap:.3rem;align-items:center;flex-shrink:0'>";
+          h += "<span style='font-weight:700;color:var(--tx)'>"+fmt(it.pendiente)+"</span>";
+          if(it.cli){
+            h += "<button class='btn btn-g' onclick='vcVerCC("+it.cli.id+",&#39;"+_escNomJS(cliNom)+"&#39;)' style='font-size:.6rem;padding:.2rem .4rem;color:var(--acc);border-color:var(--acc)'>💳</button>";
+            if(it.cli.telefono){
+              var msg = 'Hola '+(it.cli.nombre||'')+', te recordamos tu cuota '+nroCu+' de '+fmt(it.pendiente)+' que vence '+_ccFmtFecha(dia)+'. ¿Necesitás ayuda con el pago?';
+              h += "<button class='btn btn-g' onclick='_calCcEnviarWAV("+it.cli.id+","+it.cu.pedido_id+","+it.cu.id+",&quot;"+_escNomJS(_vWaNumLimpio(it.cli.telefono))+"&quot;,&quot;"+_escNomJS(msg)+"&quot;)' style='font-size:.6rem;padding:.2rem .4rem;color:#25d366;border-color:#25d366'>💬</button>";
+            }
+          }
+          h += "</div></div>";
+        });
+        h += "</div></div>";
+      });
+    }
+    body.innerHTML = h;
+  }).catch(function(e){
+    console.error('[cal cc v]',e);
+    body.innerHTML = "<div class='empty'>Error: "+(e.message||'')+"</div>";
+  });
+}
+
+function _calCcCambiarMesV(delta){
+  window._calCcMesV += delta;
+  if(window._calCcMesV > 11){ window._calCcMesV = 0; window._calCcAnioV++; }
+  if(window._calCcMesV < 0){ window._calCcMesV = 11; window._calCcAnioV--; }
+  _calCcRenderV();
+}
+
+function _calCcMesActualV(){
+  var hoy = new Date();
+  window._calCcMesV = hoy.getMonth();
+  window._calCcAnioV = hoy.getFullYear();
+  _calCcRenderV();
+}
+
+function _calCcEnviarWAV(cliId, pedId, cuotaId, telLimpio, msg){
+  var url = 'https://wa.me/'+telLimpio+'?text='+encodeURIComponent(msg);
+  window.open(url, '_blank');
+  _registrarComCobranzaV({
+    cliente_id: cliId, pedido_id: pedId, cuota_id: cuotaId,
+    canal: 'whatsapp', tipo: 'recordatorio', mensaje: msg
+  });
+}
+
+function _calCcExportCSVV(){
+  var data = window._calCcDataActualV;
+  if(!data || !data.porDia){ toast('No hay datos','twarn'); return; }
+  var nombresMes = ['enero','febrero','marzo','abril','mayo','junio','julio','agosto','septiembre','octubre','noviembre','diciembre'];
+  var rows = ['Fecha,Cliente,Telefono,Pedido,Cuota,Monto pendiente,Estado'];
+  Object.keys(data.porDia).sort().forEach(function(dia){
+    data.porDia[dia].forEach(function(it){
+      var cliNom = it.cli ? ((it.cli.nombre||'')+' '+(it.cli.apellido||'')).trim() : '';
+      var tel = it.cli ? (it.cli.telefono||'') : '';
+      var pedNum = it.ped ? (it.ped.nro_orden||'#'+it.ped.id) : '#'+it.cu.pedido_id;
+      var nroCu = it.cu.nro_cuota+'/'+it.cu.total_cuotas;
+      rows.push([dia,'"'+cliNom.replace(/"/g,'""')+'"','"'+tel+'"','"'+pedNum+'"',nroCu,it.pendiente,it.cu.estado].join(','));
+    });
+  });
+  var blob = new Blob([rows.join('\n')], {type:'text/csv;charset=utf-8'});
+  var url = URL.createObjectURL(blob);
+  var a = document.createElement('a');
+  a.href = url;
+  a.download = 'cobranzas_'+nombresMes[data.mes]+'_'+data.anio+'.csv';
+  a.click();
+  setTimeout(function(){URL.revokeObjectURL(url);}, 100);
+  toast('CSV descargado','tok');
+}
+
+// ───────── REPORTE DE MOROSIDAD (vendedor) ─────────
+function abrirReporteMorosidadV(){
+  var mo = document.createElement('div');
+  mo.className = 'modal-ov open';
+  mo.id = '_moMorosidadV';
+  mo.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,.55);z-index:99999;display:flex;align-items:center;justify-content:center;padding:1rem';
+  window._morosOrdenV = 'urgencia';
+  window._morosFiltVendV = '';
+  mo.innerHTML = "<div class='modal' style='max-width:780px;width:96%;max-height:92vh;display:flex;flex-direction:column'>"+
+    "<div style='display:flex;justify-content:space-between;align-items:center;margin-bottom:.7rem;flex-shrink:0'>"+
+      "<h3 style='color:var(--red);font-size:.95rem;margin:0'>⚠️ Reporte de Morosidad</h3>"+
+      "<div style='display:flex;gap:.3rem'>"+
+        "<button class='btn btn-g' onclick='_morosExportCSVV()' style='font-size:.68rem;padding:.25rem .55rem'>📥 CSV</button>"+
+        "<button class='btn btn-g' onclick='document.getElementById(\"_moMorosidadV\").remove()' style='padding:.2rem .5rem'>X</button>"+
+      "</div>"+
+    "</div>"+
+    "<div style='overflow-y:auto;flex:1'>"+
+      "<div id='_morosBodyV'><div class='empty'>Cargando...</div></div>"+
+    "</div></div>";
+  document.body.appendChild(mo);
+  _morosRenderV();
+}
+
+function _morosRenderV(){
+  var body = document.getElementById('_morosBodyV');
+  if(!body) return;
+  body.innerHTML = "<div class='empty'>Calculando...</div>";
+  var hoy = new Date(); hoy.setHours(0,0,0,0);
+  var hoyStr = hoy.toISOString().slice(0,10);
+
+  // POR AHORA: vendedor ve TODOS los morosos (no solo los suyos)
+  // En el futuro se filtrará por VENDEDOR_ID
+  apiGet('clientes','select=id,nombre,apellido,telefono,email,vendedor_asignado_id,cc_tasa_mora_pct,cc_bloqueo_atraso,bloqueado&limit=2000').then(function(misClis){
+    misClis = Array.isArray(misClis) ? misClis : [];
+    if(!misClis.length){
+      body.innerHTML = "<div class='empty' style='padding:2.5rem 1rem;text-align:center'>No hay clientes.</div>";
+      return;
+    }
+    var cliMap = {};
+    misClis.forEach(function(c){cliMap[c.id]=c;});
+
+    // Cuotas vencidas (filtradas por fecha — sin restringir clientes)
+    return apiGet('cc_cuotas','select=*&fecha_vencimiento=lt.'+hoyStr+'&estado=in.(pendiente,parcial,vencida)&order=fecha_vencimiento.asc').then(function(cuotas){
+      cuotas = Array.isArray(cuotas) ? cuotas : [];
+      if(!cuotas.length) return _morosRenderResultV([], {}, cliMap, hoy);
+      var pedIds = cuotas.map(function(cu){return cu.pedido_id;}).filter(function(v,i,a){return a.indexOf(v)===i;});
+      return apiGet('pedidos_catalogo','select=id,cliente_id,nro_orden,total,cobrado_total&id=in.('+pedIds.join(',')+')&estado=neq.cancelado').then(function(pedidos){
+        pedidos = Array.isArray(pedidos) ? pedidos : [];
+        var pedMap = {}; pedidos.forEach(function(p){pedMap[p.id]=p;});
+        return _morosRenderResultV(cuotas, pedMap, cliMap, hoy);
+      });
+    });
+  }).catch(function(e){
+    console.error('[morosidad v]',e);
+    body.innerHTML = "<div class='empty'>Error: "+(e.message||'')+"</div>";
+  });
+}
+
+function _morosRenderResultV(cuotasVencidas, pedMap, cliMap, hoy){
+  var body = document.getElementById('_morosBodyV');
+  if(!body) return;
+  var vencidasReales = cuotasVencidas.filter(function(cu){
+    var diasGracia = parseInt(cu.dias_gracia) || 0;
+    var fVenc = new Date(cu.fecha_vencimiento+'T00:00:00');
+    var fLim = new Date(fVenc); fLim.setDate(fLim.getDate()+diasGracia);
+    return fLim < hoy;
+  });
+
+  if(!vencidasReales.length){
+    body.innerHTML = "<div class='empty' style='padding:2.5rem 1rem;text-align:center'>"+
+      "<div style='font-size:2.5rem;margin-bottom:.5rem;color:#22c55e'>✅</div>"+
+      "<div style='font-size:.95rem;font-weight:600;color:#22c55e;margin-bottom:.3rem'>Sin morosidad</div>"+
+      "<div style='font-size:.78rem;color:var(--tx3)'>Ningún cliente tiene cuotas vencidas pasada la gracia</div>"+
+      "</div>";
+    return;
+  }
+
+  var porCliente = {};
+  vencidasReales.forEach(function(cu){
+    var p = pedMap[cu.pedido_id];
+    if(!p) return;
+    var cli = cliMap[p.cliente_id];
+    if(!cli) return;
+    var pendiente = (parseFloat(cu.monto)||0) - (parseFloat(cu.monto_pagado)||0);
+    var diasGracia = parseInt(cu.dias_gracia) || 0;
+    var fVenc = new Date(cu.fecha_vencimiento+'T00:00:00');
+    var fLim = new Date(fVenc); fLim.setDate(fLim.getDate()+diasGracia);
+    var diasAtraso = Math.floor((hoy - fLim) / 86400000);
+
+    if(!porCliente[cli.id]){
+      porCliente[cli.id] = {cli:cli, cuotas:[], totalAtrasado:0, maxDiasAtraso:0, mora:0};
+    }
+    var g = porCliente[cli.id];
+    g.cuotas.push({cu:cu, ped:p, pendiente:pendiente, diasAtraso:diasAtraso});
+    g.totalAtrasado += pendiente;
+    if(diasAtraso > g.maxDiasAtraso) g.maxDiasAtraso = diasAtraso;
+    var tasa = parseFloat(cli.cc_tasa_mora_pct) || 0;
+    if(tasa > 0 && diasAtraso > 0){
+      g.mora += pendiente * (tasa/100) * (diasAtraso/30);
+    }
+  });
+
+  var arr = Object.values(porCliente);
+
+  // Filtro por vendedor (cuando ve todos)
+  var filtVend = window._morosFiltVendV || '';
+  if(filtVend === '__mios'){
+    arr = arr.filter(function(g){ return g.cli.vendedor_asignado_id === VENDEDOR_ID; });
+  } else if(filtVend === '__sin'){
+    arr = arr.filter(function(g){ return !g.cli.vendedor_asignado_id; });
+  } else if(filtVend && filtVend.match(/^\d+$/)){
+    arr = arr.filter(function(g){ return g.cli.vendedor_asignado_id === parseInt(filtVend); });
+  }
+
+  var orden = window._morosOrdenV;
+  arr.sort(function(a,b){
+    if(orden === 'urgencia') return (b.maxDiasAtraso*b.totalAtrasado) - (a.maxDiasAtraso*a.totalAtrasado);
+    if(orden === 'monto') return b.totalAtrasado - a.totalAtrasado;
+    if(orden === 'dias') return b.maxDiasAtraso - a.maxDiasAtraso;
+    if(orden === 'cliente'){
+      var na = (a.cli.nombre||'')+(a.cli.apellido||'');
+      var nb = (b.cli.nombre||'')+(b.cli.apellido||'');
+      return na.localeCompare(nb);
+    }
+    return 0;
+  });
+  window._morosDataV = arr;
+
+  var totalGlobal = arr.reduce(function(s,g){return s+g.totalAtrasado;}, 0);
+  var moraGlobal = arr.reduce(function(s,g){return s+g.mora;}, 0);
+  var h = "";
+  h += "<div style='display:grid;grid-template-columns:repeat(auto-fit,minmax(120px,1fr));gap:.45rem;margin-bottom:.7rem'>";
+  h += "<div style='background:var(--sur2);border:1px solid var(--red);border-radius:7px;padding:.55rem .7rem'>";
+  h += "<div style='font-size:.62rem;color:var(--tx3);text-transform:uppercase;font-weight:600'>Morosos</div>";
+  h += "<div style='font-size:1.05rem;font-weight:800;color:var(--red)'>"+arr.length+"</div>";
+  h += "</div>";
+  h += "<div style='background:var(--sur2);border:1px solid var(--red);border-radius:7px;padding:.55rem .7rem'>";
+  h += "<div style='font-size:.62rem;color:var(--tx3);text-transform:uppercase;font-weight:600'>Atrasado</div>";
+  h += "<div style='font-size:1.05rem;font-weight:800;color:var(--red)'>"+fmt(totalGlobal)+"</div>";
+  h += "</div>";
+  if(moraGlobal > 0){
+    h += "<div style='background:var(--sur2);border:1px solid var(--yel);border-radius:7px;padding:.55rem .7rem'>";
+    h += "<div style='font-size:.62rem;color:var(--tx3);text-transform:uppercase;font-weight:600'>+ Mora est.</div>";
+    h += "<div style='font-size:1.05rem;font-weight:800;color:var(--yel)'>"+fmt(moraGlobal)+"</div>";
+    h += "</div>";
+  }
+  h += "</div>";
+
+  h += "<div style='display:flex;gap:.4rem;flex-wrap:wrap;margin-bottom:.6rem;align-items:center'>";
+  h += "<select onchange='_morosCambiarOrdenV(this.value)' style='padding:.35rem .55rem;border:1px solid var(--bd);border-radius:6px;font-size:.7rem;background:var(--sur2);color:var(--tx)'>";
+  var ordenes = [['urgencia','🚨 Urgencia (días × monto)'],['monto','💰 Mayor monto'],['dias','⏰ Más días vencidos'],['cliente','🔤 Por cliente A→Z']];
+  ordenes.forEach(function(o){
+    h += "<option value='"+o[0]+"'"+(orden===o[0]?' selected':'')+">"+o[1]+"</option>";
+  });
+  h += "</select>";
+  // Filtro vendedor (FEAT 2026-05-17: vendedor ve todos por ahora, pero puede filtrar)
+  h += "<select onchange='_morosCambiarVendV(this.value)' style='padding:.35rem .55rem;border:1px solid var(--bd);border-radius:6px;font-size:.7rem;background:var(--sur2);color:var(--tx)'>";
+  h += "<option value=''"+(filtVend===''?' selected':'')+">Todos los morosos</option>";
+  h += "<option value='__mios'"+(filtVend==='__mios'?' selected':'')+">⭐ Solo míos</option>";
+  h += "<option value='__sin'"+(filtVend==='__sin'?' selected':'')+">Sin asignar</option>";
+  h += "</select>";
+  h += "</div>";
+
+  arr.forEach(function(g){
+    var cli = g.cli;
+    var cliNom = ((cli.nombre||'')+' '+(cli.apellido||'')).trim();
+    var n;
+    if(g.maxDiasAtraso > 30) n = {color:'#b91c1c', label:'CRÍTICO', bg:'rgba(185,28,28,.1)'};
+    else if(g.maxDiasAtraso > 14) n = {color:'var(--red)', label:'ALTO', bg:'rgba(220,80,80,.08)'};
+    else if(g.maxDiasAtraso > 7) n = {color:'var(--yel)', label:'MEDIO', bg:'rgba(232,160,40,.08)'};
+    else n = {color:'#a06820', label:'BAJO', bg:'rgba(160,104,32,.06)'};
+
+    h += "<div style='background:"+n.bg+";border:1px solid "+n.color+";border-radius:8px;padding:.65rem .8rem;margin-bottom:.5rem'>";
+    h += "<div style='display:flex;justify-content:space-between;align-items:flex-start;gap:.5rem;margin-bottom:.45rem'>";
+    h += "<div style='flex:1;min-width:0'>";
+    h += "<div style='display:flex;align-items:center;gap:.4rem;margin-bottom:.2rem;flex-wrap:wrap'>";
+    h += "<span style='background:"+n.color+";color:#fff;font-size:.58rem;font-weight:700;padding:.1rem .35rem;border-radius:3px;letter-spacing:.04em'>"+n.label+"</span>";
+    if(cli.vendedor_asignado_id === VENDEDOR_ID){
+      h += "<span style='background:var(--acc);color:#fff;font-size:.58rem;font-weight:700;padding:.1rem .35rem;border-radius:3px;letter-spacing:.04em' title='Tu cliente asignado'>⭐ MÍO</span>";
+    } else if(!cli.vendedor_asignado_id){
+      h += "<span style='background:var(--tx3);color:#fff;font-size:.58rem;font-weight:600;padding:.1rem .35rem;border-radius:3px;letter-spacing:.04em' title='Cliente sin asignar'>SIN ASIG</span>";
+    }
+    h += "<span style='font-size:.85rem;font-weight:700;color:var(--tx)'>"+_esc(cliNom)+"</span>";
+    if(cli.bloqueado) h += "<span style='font-size:.6rem;background:var(--red);color:#fff;padding:.1rem .3rem;border-radius:3px'>🚫 BLOQ</span>";
+    h += "</div>";
+    h += "<div style='font-size:.65rem;color:var(--tx3)'>"+g.cuotas.length+" cuota"+(g.cuotas.length>1?'s':'')+" vencida"+(g.cuotas.length>1?'s':'')+"</div>";
+    h += "</div>";
+    h += "<div style='text-align:right;flex-shrink:0'>";
+    h += "<div style='font-size:1rem;font-weight:800;color:"+n.color+"'>"+fmt(g.totalAtrasado)+"</div>";
+    h += "<div style='font-size:.62rem;color:var(--tx3)'>"+g.maxDiasAtraso+"d atraso</div>";
+    if(g.mora > 0) h += "<div style='font-size:.62rem;color:var(--yel);margin-top:.1rem'>+ mora: "+fmt(g.mora)+"</div>";
+    h += "</div></div>";
+
+    h += "<div style='display:flex;gap:.3rem;flex-wrap:wrap;padding-top:.4rem;border-top:1px solid rgba(255,255,255,.06)'>";
+    h += "<button class='btn btn-g' onclick='vcVerCC("+cli.id+",&#39;"+_escNomJS(cliNom)+"&#39;)' style='font-size:.66rem;padding:.25rem .5rem;color:var(--acc);border-color:var(--acc)'>💳 Ver CC</button>";
+    h += "<button class='btn btn-g' onclick='vcAbrirRegistrarPagoFIFO("+cli.id+",&#39;"+_escNomJS(cliNom)+"&#39;)' style='font-size:.66rem;padding:.25rem .5rem;color:#22c55e;border-color:#22c55e'>💰 Cobrar</button>";
+    if(cli.telefono){
+      var msg = 'Hola '+(cli.nombre||'')+', te recordamos que tenés '+g.cuotas.length+' cuota'+(g.cuotas.length>1?'s':'')+' vencida'+(g.cuotas.length>1?'s':'')+' por '+fmt(g.totalAtrasado)+'. ¿Podemos coordinar el pago? Gracias!';
+      h += "<button class='btn btn-g' onclick='_morosEnviarWAV("+cli.id+",&quot;"+_escNomJS(_vWaNumLimpio(cli.telefono))+"&quot;,&quot;"+_escNomJS(msg)+"&quot;)' style='font-size:.66rem;padding:.25rem .5rem;color:#25d366;border-color:#25d366'>💬 WhatsApp</button>";
+    }
+    h += "<button class='btn btn-g' onclick='_morosVerDetalleV("+cli.id+")' style='font-size:.66rem;padding:.25rem .5rem'>📋 Detalle</button>";
+    h += "<button class='btn btn-g' onclick='abrirHistorialComCobranzaV("+cli.id+",&#39;"+_escNomJS(cliNom)+"&#39;)' style='font-size:.66rem;padding:.25rem .5rem'>📞 Historial</button>";
+    h += "</div></div>";
+  });
+
+  body.innerHTML = h;
+}
+
+function _morosCambiarOrdenV(o){ window._morosOrdenV = o; _morosRenderV(); }
+function _morosCambiarVendV(v){ window._morosFiltVendV = v; _morosRenderV(); }
+
+function _morosVerDetalleV(cliId){
+  var grupo = (window._morosDataV||[]).find(function(g){return g.cli.id===cliId;});
+  if(!grupo){toast('No encontrado','terr');return;}
+  var cliNom = ((grupo.cli.nombre||'')+' '+(grupo.cli.apellido||'')).trim();
+  var h = "<div style='font-size:.85rem;font-weight:700;margin-bottom:.5rem'>Cuotas vencidas de "+_esc(cliNom)+"</div>";
+  grupo.cuotas.forEach(function(it){
+    var pedNum = it.ped ? (it.ped.nro_orden||'#'+it.ped.id) : '#'+it.cu.pedido_id;
+    h += "<div style='background:var(--sur2);border:1px solid var(--bd);border-radius:6px;padding:.45rem .65rem;margin-bottom:.3rem;display:flex;justify-content:space-between;align-items:center;gap:.4rem'>";
+    h += "<div style='flex:1;min-width:0'>";
+    h += "<div style='font-size:.78rem;font-weight:600;color:var(--tx)'>"+pedNum+" — Cuota "+it.cu.nro_cuota+"/"+it.cu.total_cuotas+"</div>";
+    h += "<div style='font-size:.65rem;color:var(--tx3)'>Venc: "+_ccFmtFecha(it.cu.fecha_vencimiento)+" · "+it.diasAtraso+"d atraso</div>";
+    h += "</div>";
+    h += "<div style='font-size:.85rem;font-weight:700;color:var(--red)'>"+fmt(it.pendiente)+"</div>";
+    h += "</div>";
+  });
+  var mo = document.createElement('div');
+  mo.className = 'modal-ov open';
+  mo.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,.6);z-index:999999;display:flex;align-items:center;justify-content:center;padding:1rem';
+  mo.innerHTML = "<div class='modal' style='max-width:500px;width:95%'>"+
+    "<div style='display:flex;justify-content:space-between;align-items:center;margin-bottom:.7rem'>"+
+    "<h3 style='color:var(--acc);font-size:.9rem;margin:0'>Detalle morosidad</h3>"+
+    "<button class='btn btn-g' onclick='this.closest(\".modal-ov\").remove()' style='padding:.2rem .5rem'>X</button>"+
+    "</div>"+h+"</div>";
+  document.body.appendChild(mo);
+}
+
+function _morosEnviarWAV(cliId, telLimpio, msg){
+  var url = 'https://wa.me/'+telLimpio+'?text='+encodeURIComponent(msg);
+  window.open(url, '_blank');
+  _registrarComCobranzaV({
+    cliente_id: cliId, canal: 'whatsapp', tipo: 'intimacion', mensaje: msg
+  });
+}
+
+function _morosExportCSVV(){
+  var arr = window._morosDataV || [];
+  if(!arr.length){ toast('No hay morosos','twarn'); return; }
+  var rows = ['Cliente,Telefono,Email,Cuotas vencidas,Total atrasado,Dias max atraso,Mora estimada'];
+  arr.forEach(function(g){
+    var cliNom = ((g.cli.nombre||'')+' '+(g.cli.apellido||'')).trim();
+    rows.push([
+      '"'+cliNom.replace(/"/g,'""')+'"',
+      '"'+(g.cli.telefono||'')+'"',
+      '"'+(g.cli.email||'')+'"',
+      g.cuotas.length, g.totalAtrasado, g.maxDiasAtraso,
+      Math.round(g.mora*100)/100
+    ].join(','));
+  });
+  var blob = new Blob([rows.join('\n')], {type:'text/csv;charset=utf-8'});
+  var url = URL.createObjectURL(blob);
+  var a = document.createElement('a');
+  a.href = url;
+  a.download = 'morosidad_'+VENDEDOR_NOMBRE+'_'+new Date().toISOString().slice(0,10)+'.csv';
+  a.click();
+  setTimeout(function(){URL.revokeObjectURL(url);}, 100);
+  toast('CSV descargado','tok');
+}
+
+// ───────── HISTORIAL DE COMUNICACIONES (vendedor) ─────────
+function abrirHistorialComCobranzaV(clienteId, clienteNombre){
+  var mo = document.createElement('div');
+  mo.className = 'modal-ov open';
+  mo.id = '_moHistComCobV';
+  mo.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,.55);z-index:999999;display:flex;align-items:center;justify-content:center;padding:1rem';
+  mo.innerHTML = "<div class='modal' style='max-width:620px;width:96%;max-height:92vh;display:flex;flex-direction:column'>"+
+    "<div style='display:flex;justify-content:space-between;align-items:center;margin-bottom:.7rem;flex-shrink:0'>"+
+    "<h3 style='color:var(--acc);font-size:.92rem;margin:0'>📋 Historial — "+_esc(clienteNombre||"Cliente")+"</h3>"+
+    "<div style='display:flex;gap:.3rem'>"+
+      "<button class='btn btn-a' onclick='_abrirRegistrarComManualV("+clienteId+",&#39;"+_escNomJS(clienteNombre||'')+"&#39;)' style='font-size:.68rem;padding:.25rem .55rem'>+ Registrar</button>"+
+      "<button class='btn btn-g' onclick='document.getElementById(\"_moHistComCobV\").remove()' style='padding:.2rem .5rem'>X</button>"+
+    "</div></div>"+
+    "<div style='overflow-y:auto;flex:1'>"+
+      "<div id='_histComCobBodyV'><div class='empty'>Cargando...</div></div>"+
+    "</div></div>";
+  document.body.appendChild(mo);
+  _histComCobRenderV(clienteId);
+}
+
+function _histComCobRenderV(clienteId){
+  var body = document.getElementById('_histComCobBodyV');
+  if(!body) return;
+  body.innerHTML = "<div class='empty'>Cargando...</div>";
+  apiGet('cobranza_comunicaciones','select=*&cliente_id=eq.'+clienteId+'&order=created_at.desc&limit=100').then(function(rows){
+    rows = Array.isArray(rows) ? rows : [];
+    if(!rows.length){
+      body.innerHTML = "<div class='empty' style='padding:2.5rem 1rem;text-align:center'>"+
+        "<div style='font-size:2.5rem;margin-bottom:.5rem;opacity:.5'>📭</div>"+
+        "<div style='font-size:.85rem;font-weight:600;color:var(--tx2);margin-bottom:.3rem'>Sin comunicaciones</div>"+
+        "<div style='font-size:.72rem;color:var(--tx3)'>Cuando contactes al cliente queda registrado acá</div>"+
+        "</div>";
+      return;
+    }
+    var canalLabels = {whatsapp:'WhatsApp', email:'Email', llamada:'Llamada', nota_interna:'Nota interna', sms:'SMS', presencial:'Presencial'};
+    var canalIcons = {whatsapp:'💬', email:'📧', llamada:'📞', nota_interna:'📝', sms:'✉️', presencial:'🤝'};
+    var tipoLabels = {recordatorio:'Recordatorio', intimacion:'Intimación', acuerdo:'Acuerdo', respuesta_cliente:'Respuesta', seguimiento:'Seguimiento', otro:'Otro'};
+
+    var porCanal = {};
+    rows.forEach(function(r){porCanal[r.canal] = (porCanal[r.canal]||0)+1;});
+    var h = "<div style='display:flex;gap:.4rem;flex-wrap:wrap;margin-bottom:.7rem'>";
+    Object.keys(porCanal).forEach(function(canal){
+      h += "<div style='background:var(--sur2);border:1px solid var(--bd);border-radius:6px;padding:.3rem .55rem;font-size:.68rem'>";
+      h += (canalIcons[canal]||'')+" "+canalLabels[canal]+": <b>"+porCanal[canal]+"</b></div>";
+    });
+    h += "</div>";
+
+    rows.forEach(function(r){
+      var ic = canalIcons[r.canal] || '•';
+      var canalLbl = canalLabels[r.canal] || r.canal;
+      var tipoLbl = tipoLabels[r.tipo] || r.tipo;
+      var fecha = new Date(r.created_at).toLocaleString('es-AR',{day:'2-digit',month:'2-digit',year:'2-digit',hour:'2-digit',minute:'2-digit'});
+      h += "<div style='background:var(--sur2);border:1px solid var(--bd);border-radius:7px;padding:.55rem .7rem;margin-bottom:.4rem'>";
+      h += "<div style='display:flex;justify-content:space-between;align-items:flex-start;gap:.5rem;margin-bottom:.3rem'>";
+      h += "<div style='flex:1;min-width:0'>";
+      h += "<div style='display:flex;align-items:center;gap:.4rem;flex-wrap:wrap'>";
+      h += "<span style='font-size:1rem'>"+ic+"</span>";
+      h += "<span style='font-size:.78rem;font-weight:700;color:var(--tx)'>"+canalLbl+"</span>";
+      h += "<span style='font-size:.6rem;background:var(--sur3);color:var(--tx2);padding:.1rem .35rem;border-radius:3px;text-transform:uppercase'>"+tipoLbl+"</span>";
+      h += "</div>";
+      h += "<div style='font-size:.65rem;color:var(--tx3);margin-top:.15rem'>"+fecha+(r.usuario?' · '+_esc(r.usuario):'')+"</div>";
+      h += "</div>";
+      // Solo el vendedor que lo creó puede borrarlo
+      if(r.vendedor_id === VENDEDOR_ID){
+        h += "<button class='btn btn-g' onclick='_borrarComCobranzaV("+r.id+","+clienteId+")' style='font-size:.6rem;padding:.15rem .35rem;color:var(--red);border-color:var(--red)' title='Borrar registro'>🗑</button>";
+      }
+      h += "</div>";
+      if(r.mensaje){
+        h += "<div style='font-size:.74rem;color:var(--tx);background:var(--sur);padding:.4rem .55rem;border-radius:5px;white-space:pre-wrap;word-wrap:break-word'>"+_esc(r.mensaje)+"</div>";
+      }
+      if(r.respuesta){
+        h += "<div style='font-size:.7rem;color:var(--tx2);background:var(--sur);padding:.35rem .55rem;border-radius:5px;margin-top:.25rem;border-left:3px solid var(--acc)'>";
+        h += "<div style='font-size:.6rem;color:var(--acc);font-weight:600;margin-bottom:.1rem'>💬 RESPUESTA</div>";
+        h += _esc(r.respuesta)+"</div>";
+      }
+      h += "</div>";
+    });
+    body.innerHTML = h;
+  }).catch(function(e){
+    body.innerHTML = "<div class='empty'>Error: "+(e.message||'la tabla cobranza_comunicaciones aún no existe — admin debe ejecutar el SQL')+"</div>";
+  });
+}
+
+function _abrirRegistrarComManualV(clienteId, clienteNombre){
+  var mo = document.createElement('div');
+  mo.className = 'modal-ov open';
+  mo.id = '_moRegComV';
+  mo.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,.6);z-index:9999999;display:flex;align-items:center;justify-content:center;padding:1rem';
+  mo.innerHTML = "<div class='modal' style='max-width:480px;width:95%'>"+
+    "<div style='display:flex;justify-content:space-between;align-items:center;margin-bottom:.7rem'>"+
+    "<h3 style='color:var(--acc);font-size:.9rem;margin:0'>+ Registrar contacto</h3>"+
+    "<button class='btn btn-g' onclick='document.getElementById(\"_moRegComV\").remove()' style='padding:.2rem .5rem'>X</button></div>"+
+    "<div style='display:flex;flex-direction:column;gap:.55rem'>"+
+      "<div><label style='font-size:.65rem;color:var(--tx3);text-transform:uppercase;font-weight:600'>Canal</label>"+
+      "<select id='_regComCanalV' style='width:100%;padding:.5rem .7rem;border:1px solid var(--bd);border-radius:6px;font-size:.85rem;background:var(--sur2);color:var(--tx);margin-top:.2rem'>"+
+        "<option value='whatsapp'>💬 WhatsApp</option>"+
+        "<option value='email'>📧 Email</option>"+
+        "<option value='llamada'>📞 Llamada</option>"+
+        "<option value='nota_interna'>📝 Nota interna</option>"+
+        "<option value='presencial'>🤝 Presencial</option>"+
+        "<option value='sms'>✉️ SMS</option>"+
+      "</select></div>"+
+      "<div><label style='font-size:.65rem;color:var(--tx3);text-transform:uppercase;font-weight:600'>Tipo</label>"+
+      "<select id='_regComTipoV' style='width:100%;padding:.5rem .7rem;border:1px solid var(--bd);border-radius:6px;font-size:.85rem;background:var(--sur2);color:var(--tx);margin-top:.2rem'>"+
+        "<option value='recordatorio'>Recordatorio</option>"+
+        "<option value='intimacion'>Intimación</option>"+
+        "<option value='acuerdo'>Acuerdo de pago</option>"+
+        "<option value='respuesta_cliente'>Respuesta del cliente</option>"+
+        "<option value='seguimiento'>Seguimiento</option>"+
+        "<option value='otro'>Otro</option>"+
+      "</select></div>"+
+      "<div><label style='font-size:.65rem;color:var(--tx3);text-transform:uppercase;font-weight:600'>Mensaje / Detalle</label>"+
+      "<textarea id='_regComMsgV' rows='3' style='width:100%;padding:.5rem .7rem;border:1px solid var(--bd);border-radius:6px;font-size:.82rem;background:var(--sur2);color:var(--tx);margin-top:.2rem;resize:vertical;font-family:inherit' placeholder='Qué se conversó/envió...'></textarea></div>"+
+      "<div><label style='font-size:.65rem;color:var(--tx3);text-transform:uppercase;font-weight:600'>Respuesta del cliente (opcional)</label>"+
+      "<textarea id='_regComRespV' rows='2' style='width:100%;padding:.5rem .7rem;border:1px solid var(--bd);border-radius:6px;font-size:.82rem;background:var(--sur2);color:var(--tx);margin-top:.2rem;resize:vertical;font-family:inherit' placeholder='Si ya respondió...'></textarea></div>"+
+      "<div style='display:flex;gap:.4rem;justify-content:flex-end;padding-top:.3rem'>"+
+        "<button class='btn btn-g' onclick='document.getElementById(\"_moRegComV\").remove()'>Cancelar</button>"+
+        "<button class='btn btn-a' onclick='_guardarComManualV("+clienteId+")'>Guardar</button>"+
+      "</div></div></div>";
+  document.body.appendChild(mo);
+}
+
+function _guardarComManualV(clienteId){
+  var canal = (document.getElementById('_regComCanalV')||{}).value || 'nota_interna';
+  var tipo = (document.getElementById('_regComTipoV')||{}).value || 'otro';
+  var msg = ((document.getElementById('_regComMsgV')||{}).value||'').trim();
+  var resp = ((document.getElementById('_regComRespV')||{}).value||'').trim();
+  if(!msg && !resp){ toast('Escribí al menos un mensaje o respuesta','twarn'); return; }
+  apiPost('cobranza_comunicaciones', {
+    cliente_id: clienteId,
+    canal: canal,
+    tipo: tipo,
+    mensaje: msg || null,
+    respuesta: resp || null,
+    estado: resp ? 'respondido' : 'enviado',
+    usuario: VENDEDOR_NOMBRE,
+    vendedor_id: VENDEDOR_ID
+  }).then(function(){
+    toast('Contacto registrado ✅','tok');
+    var m = document.getElementById('_moRegComV'); if(m) m.remove();
+    _histComCobRenderV(clienteId);
+  }).catch(function(e){
+    toast('Error: '+(e.message||'tabla aún no creada'),'terr');
+  });
+}
+
+function _borrarComCobranzaV(id, clienteId){
+  if(!confirm('Borrar este registro?'))return;
+  apiDelete('cobranza_comunicaciones','id=eq.'+id).then(function(){
+    toast('Borrado','tok');
+    _histComCobRenderV(clienteId);
+  }).catch(function(e){toast('Error: '+e.message,'terr');});
+}
+
+// ───────── APLICAR MORA (vendedor) ─────────
+function abrirAplicarMoraCuotaV(cuotaId, clienteId, montoCuotaActual, diasAtraso, moraCalculada){
+  var mo = document.createElement('div');
+  mo.className = 'modal-ov open';
+  mo.id = '_moAplMoraV';
+  mo.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,.6);z-index:9999999;display:flex;align-items:center;justify-content:center;padding:1rem';
+  mo.innerHTML = "<div class='modal' style='max-width:480px;width:95%'>"+
+    "<div style='display:flex;justify-content:space-between;align-items:center;margin-bottom:.7rem'>"+
+    "<h3 style='color:var(--yel);font-size:.9rem;margin:0'>⚖️ Aplicar mora a cuota</h3>"+
+    "<button class='btn btn-g' onclick='document.getElementById(\"_moAplMoraV\").remove()' style='padding:.2rem .5rem'>X</button></div>"+
+    "<div style='display:flex;flex-direction:column;gap:.6rem'>"+
+      "<div style='background:rgba(232,160,40,.08);border:1px solid var(--yel);border-radius:7px;padding:.55rem .7rem;font-size:.74rem;color:var(--tx2)'>"+
+        "<div style='margin-bottom:.25rem'><b>Días de atraso:</b> "+diasAtraso+"</div>"+
+        "<div style='margin-bottom:.25rem'><b>Monto cuota actual:</b> "+fmt(montoCuotaActual)+"</div>"+
+        "<div><b>Mora calculada:</b> <span style='color:var(--yel);font-weight:700'>"+fmt(moraCalculada)+"</span></div>"+
+      "</div>"+
+      "<div><label style='font-size:.65rem;color:var(--tx3);text-transform:uppercase;font-weight:600'>Monto a aplicar ($)</label>"+
+      "<input type='number' id='_aplMoraMontoV' value='"+Math.round(moraCalculada*100)/100+"' min='0' step='0.01' style='width:100%;padding:.5rem .7rem;border:1px solid var(--bd);border-radius:6px;font-size:.95rem;font-weight:700;background:var(--sur2);color:var(--tx);margin-top:.2rem'>"+
+      "<div style='font-size:.6rem;color:var(--tx3);margin-top:.1rem'>Podés ajustar el monto si querés cobrar menos</div></div>"+
+      "<div><label style='font-size:.65rem;color:var(--tx3);text-transform:uppercase;font-weight:600'>Motivo / observación</label>"+
+      "<input type='text' id='_aplMoraMotivoV' placeholder='Ej: cliente no respondió WhatsApp por 5 días' style='width:100%;padding:.5rem .7rem;border:1px solid var(--bd);border-radius:6px;font-size:.82rem;background:var(--sur2);color:var(--tx);margin-top:.2rem'></div>"+
+      "<div style='display:flex;gap:.4rem;justify-content:flex-end;padding-top:.3rem'>"+
+        "<button class='btn btn-g' onclick='document.getElementById(\"_moAplMoraV\").remove()'>Cancelar</button>"+
+        "<button class='btn btn-a' style='background:var(--yel)' onclick='_confirmarAplicarMoraV("+cuotaId+","+clienteId+","+diasAtraso+")'>⚖️ Aplicar mora</button>"+
+      "</div></div></div>";
+  document.body.appendChild(mo);
+}
+
+function _confirmarAplicarMoraV(cuotaId, clienteId, diasAtraso){
+  var monto = parseFloat((document.getElementById('_aplMoraMontoV')||{value:0}).value) || 0;
+  var motivo = ((document.getElementById('_aplMoraMotivoV')||{value:''}).value||'').trim();
+  if(monto <= 0){ toast('Monto inválido','twarn'); return; }
+  if(!confirm('Aplicar mora de '+fmt(monto)+' a esta cuota?'))return;
+
+  apiGet('cc_cuotas','select=monto,monto_pagado&id=eq.'+cuotaId+'&limit=1').then(function(rows){
+    var cuota = rows && rows[0];
+    if(!cuota){throw new Error('Cuota no encontrada');}
+    var montoAntes = parseFloat(cuota.monto)||0;
+    var montoDespues = montoAntes + monto;
+    return apiGet('clientes','select=cc_tasa_mora_pct&id=eq.'+clienteId+'&limit=1').then(function(rc){
+      var tasa = (rc && rc[0]) ? parseFloat(rc[0].cc_tasa_mora_pct)||0 : 0;
+      return apiPost('cc_aplicaciones_mora', {
+        cuota_id: cuotaId,
+        cliente_id: clienteId,
+        monto_mora: monto,
+        dias_atraso: diasAtraso,
+        tasa_aplicada: tasa,
+        monto_cuota_antes: montoAntes,
+        monto_cuota_despues: montoDespues,
+        motivo: motivo || null,
+        aplicado_por: VENDEDOR_NOMBRE
+      });
+    }).then(function(){
+      return apiPatch('cc_cuotas', {monto: montoDespues}, 'id=eq.'+cuotaId);
+    });
+  }).then(function(){
+    toast('Mora aplicada: '+fmt(monto)+' ✅','tok');
+    var m = document.getElementById('_moAplMoraV'); if(m) m.remove();
+    if(typeof _morosRenderV === 'function' && document.getElementById('_moMorosidadV')) _morosRenderV();
+  }).catch(function(e){
+    console.error('[apl mora v]',e);
+    toast('Error: '+(e.message||'tabla cc_aplicaciones_mora puede no existir'),'terr');
+  });
+}
+
+function abrirHistorialMorasV(clienteId, clienteNombre){
+  var mo = document.createElement('div');
+  mo.className = 'modal-ov open';
+  mo.id = '_moHistMoraV';
+  mo.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,.55);z-index:999999;display:flex;align-items:center;justify-content:center;padding:1rem';
+  mo.innerHTML = "<div class='modal' style='max-width:600px;width:96%;max-height:90vh;display:flex;flex-direction:column'>"+
+    "<div style='display:flex;justify-content:space-between;align-items:center;margin-bottom:.7rem;flex-shrink:0'>"+
+    "<h3 style='color:var(--yel);font-size:.9rem;margin:0'>⚖️ Moras aplicadas — "+_esc(clienteNombre||"Cliente")+"</h3>"+
+    "<button class='btn btn-g' onclick='document.getElementById(\"_moHistMoraV\").remove()' style='padding:.2rem .5rem'>X</button></div>"+
+    "<div style='overflow-y:auto;flex:1'>"+
+      "<div id='_histMoraBodyV'><div class='empty'>Cargando...</div></div>"+
+    "</div></div>";
+  document.body.appendChild(mo);
+  _histMoraRenderV(clienteId);
+}
+
+function _histMoraRenderV(clienteId){
+  var body = document.getElementById('_histMoraBodyV');
+  if(!body) return;
+  body.innerHTML = "<div class='empty'>Cargando...</div>";
+  apiGet('cc_aplicaciones_mora','select=*&cliente_id=eq.'+clienteId+'&order=created_at.desc').then(function(rows){
+    rows = Array.isArray(rows) ? rows : [];
+    if(!rows.length){
+      body.innerHTML = "<div class='empty' style='padding:2rem 1rem;text-align:center'>Sin moras aplicadas</div>";
+      return;
+    }
+    var totalAct = 0, totalCond = 0;
+    rows.forEach(function(r){
+      var m = parseFloat(r.monto_mora)||0;
+      if(r.condonada) totalCond += m; else totalAct += m;
+    });
+    var h = "<div style='display:grid;grid-template-columns:1fr 1fr;gap:.4rem;margin-bottom:.7rem'>";
+    h += "<div style='background:var(--sur2);border:1px solid var(--yel);border-radius:6px;padding:.4rem .55rem'>";
+    h += "<div style='font-size:.6rem;color:var(--tx3);text-transform:uppercase'>Mora activa</div>";
+    h += "<div style='font-size:.95rem;font-weight:700;color:var(--yel)'>"+fmt(totalAct)+"</div></div>";
+    h += "<div style='background:var(--sur2);border:1px solid #22c55e;border-radius:6px;padding:.4rem .55rem'>";
+    h += "<div style='font-size:.6rem;color:var(--tx3);text-transform:uppercase'>Condonado</div>";
+    h += "<div style='font-size:.95rem;font-weight:700;color:#22c55e'>"+fmt(totalCond)+"</div></div></div>";
+
+    rows.forEach(function(r){
+      var fecha = new Date(r.created_at).toLocaleString('es-AR',{day:'2-digit',month:'2-digit',year:'2-digit',hour:'2-digit',minute:'2-digit'});
+      var bg = r.condonada ? 'rgba(34,197,94,.08)' : 'rgba(232,160,40,.08)';
+      var bc = r.condonada ? '#22c55e' : 'var(--yel)';
+      h += "<div style='background:"+bg+";border:1px solid "+bc+";border-radius:7px;padding:.55rem .7rem;margin-bottom:.4rem'>";
+      h += "<div style='display:flex;justify-content:space-between;align-items:flex-start;gap:.5rem'>";
+      h += "<div style='flex:1;min-width:0'>";
+      h += "<div style='font-size:.78rem;font-weight:700;color:var(--tx)'>Cuota #"+r.cuota_id+" · "+r.dias_atraso+"d atraso · "+(r.tasa_aplicada||0)+"%/mes</div>";
+      h += "<div style='font-size:.62rem;color:var(--tx3);margin-top:.1rem'>"+fecha+(r.aplicado_por?' · '+_esc(r.aplicado_por):'')+"</div>";
+      if(r.motivo) h += "<div style='font-size:.7rem;color:var(--tx2);margin-top:.2rem;font-style:italic'>"+_esc(r.motivo)+"</div>";
+      if(r.condonada){
+        h += "<div style='font-size:.65rem;color:#22c55e;margin-top:.2rem;font-weight:600'>✓ CONDONADA"+(r.condonada_por?' por '+_esc(r.condonada_por):'')+(r.condonada_motivo?' — '+_esc(r.condonada_motivo):'')+"</div>";
+      }
+      h += "</div>";
+      h += "<div style='text-align:right;flex-shrink:0'>";
+      h += "<div style='font-size:1rem;font-weight:800;color:"+bc+";text-decoration:"+(r.condonada?'line-through':'none')+"'>"+fmt(r.monto_mora)+"</div>";
+      if(!r.condonada){
+        h += "<button class='btn btn-g' onclick='_condonarMoraV("+r.id+","+clienteId+")' style='font-size:.6rem;padding:.2rem .4rem;margin-top:.2rem;color:#22c55e;border-color:#22c55e' title='Condonar'>↶ Condonar</button>";
+      }
+      h += "</div></div></div>";
+    });
+    body.innerHTML = h;
+  }).catch(function(e){
+    body.innerHTML = "<div class='empty'>Error: "+(e.message||'tabla no existe')+"</div>";
+  });
+}
+
+function _condonarMoraV(moraId, clienteId){
+  var motivo = prompt('Motivo de la condonación:');
+  if(motivo === null) return;
+  apiGet('cc_aplicaciones_mora','select=*&id=eq.'+moraId+'&limit=1').then(function(rows){
+    var m = rows && rows[0];
+    if(!m){throw new Error('No encontrada');}
+    if(m.condonada){toast('Ya estaba condonada','twarn');return;}
+    var montoMora = parseFloat(m.monto_mora)||0;
+    return Promise.all([
+      apiPatch('cc_aplicaciones_mora',{
+        condonada: true,
+        condonada_at: new Date().toISOString(),
+        condonada_por: VENDEDOR_NOMBRE,
+        condonada_motivo: motivo || null
+      },'id=eq.'+moraId),
+      apiGet('cc_cuotas','select=monto&id=eq.'+m.cuota_id+'&limit=1').then(function(rc){
+        var c = rc && rc[0];
+        if(!c) return;
+        var nuevoMonto = Math.max(0, (parseFloat(c.monto)||0) - montoMora);
+        return apiPatch('cc_cuotas',{monto:nuevoMonto},'id=eq.'+m.cuota_id);
+      })
+    ]);
+  }).then(function(){
+    toast('Mora condonada ✅','tok');
+    _histMoraRenderV(clienteId);
+  }).catch(function(e){toast('Error: '+e.message,'terr');});
+}
+
 </script>
 </body>
 <!-- build:20260329-233522 -->
