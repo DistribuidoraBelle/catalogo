@@ -1682,6 +1682,8 @@ td{padding:.35rem .5rem;font-size:.78rem;color:var(--tx2);vertical-align:middle;
           <option value="deuda">🔴 Mayor deuda CC</option>
         </select>
         <button class="btn btn-a" style="padding:.45rem .8rem;font-size:.78rem" onclick="abrirCrearClienteAdmin()">➕ Nuevo cliente</button>
+        <button class="btn btn-g" style="padding:.45rem .8rem;font-size:.78rem;color:var(--acc);border-color:var(--acc)" onclick="abrirCalendarioCobranzas()" title="Calendario mensual de cuotas a cobrar">📅 Calendario CC</button>
+        <button class="btn btn-g" style="padding:.45rem .8rem;font-size:.78rem;color:var(--red);border-color:var(--red)" onclick="abrirReporteMorosidad()" title="Clientes con cuotas vencidas">⚠️ Morosidad</button>
         <span id="clientesCount" style="font-size:.72rem;color:var(--tx3)">— mostrados</span>
       </div>
 
@@ -13716,6 +13718,22 @@ function _gestionarPedido(tipo,id){
   });
 }
 function _mgConfirmarCobro(){
+  // FIX 2026-05-16: lock para prevenir doble-click
+  var lockBtn = document.getElementById('_mgBtnCobrar');
+  if(lockBtn){
+    if(lockBtn.dataset.processing === '1'){
+      toast('Ya se está procesando el cobro','twarn');
+      return;
+    }
+    lockBtn.dataset.processing = '1';
+    lockBtn.disabled = true;
+  }
+  function _liberarMgLock(){
+    if(lockBtn){lockBtn.dataset.processing='';lockBtn.disabled=false;}
+  }
+  // Timeout de seguridad: 30s
+  setTimeout(_liberarMgLock, 30000);
+
   var tipo=window._mgTipo||'web';
   var id=window._mgId||0;
   var cobradoYa=window._mgCobradoYa||0;
@@ -13826,23 +13844,36 @@ function _mgConfirmarCobro(){
   // ── Si es pedido CC, registrar cc_pago + aplicación ──
   // Esto mantiene consistencia con el sistema FIFO y el panel CC del cliente.
   if(rec.es_cc && rec.cliente_id){
-    var ccProm = apiPost('cc_pagos',{
-      cliente_id: rec.cliente_id,
-      monto: montoCobrar,
-      forma_pago: forma,
-      fecha: new Date().toISOString().split('T')[0],
-      vendedor_id: rec.vendedor_id || null,
-      registrado_por: 'admin (gestión)',
-      nota: 'Cobro desde gestión — pedido '+nroOrden,
-      saldo_a_favor: 0
+    // FIX 2026-05-16 (regla canónica): admin cobra → vendedor_id = vendedor asignado al cliente
+    // Antes: usaba rec.vendedor_id (vendedor del pedido) — inconsistente con _admFIFOConfirmarPago
+    var ccProm = apiGet('clientes','select=vendedor_asignado_id&id=eq.'+rec.cliente_id+'&limit=1').then(function(rowsCli){
+      var vendCli = (rowsCli && rowsCli[0] && rowsCli[0].vendedor_asignado_id) || rec.vendedor_id || null;
+      return apiPost('cc_pagos',{
+        cliente_id: rec.cliente_id,
+        monto: montoCobrar,
+        forma_pago: forma,
+        fecha: new Date().toISOString().split('T')[0],
+        vendedor_id: vendCli,
+        registrado_por: 'admin (gestión)',
+        nota: 'Cobro desde gestión — pedido '+nroOrden,
+        saldo_a_favor: 0
+      });
     }).then(function(rowsP){
       var pago = Array.isArray(rowsP)&&rowsP.length ? rowsP[0] : null;
       if(pago && pago.id){
-        return apiPost('cc_pagos_aplicaciones',{
-          pago_id: pago.id,
-          pedido_id: id,
-          monto_aplicado: montoCobrar,
-          cubrio_pedido_completo: !!esSaldado
+        // FIX 2026-05-16 (BUG CRÍTICO): aplicar el pago a las cuotas del pedido (FIFO interno)
+        // Antes este flujo creaba cc_pago pero NO actualizaba cc_cuotas — las cuotas quedaban
+        // eternamente "pendiente" aunque el pedido estuviera pagado.
+        return _ccAplicarPagoACuotasPedido(id, montoCobrar).catch(function(e){
+          console.error('[cc cuotas] err aplicando en _mgConfirmarCobro:', e);
+          // No bloquear: cuotas son secundarias al pago
+        }).then(function(){
+          return apiPost('cc_pagos_aplicaciones',{
+            pago_id: pago.id,
+            pedido_id: id,
+            monto_aplicado: montoCobrar,
+            cubrio_pedido_completo: !!esSaldado
+          });
         });
       }
     }).catch(function(e){console.error('cc_pagos en _mgConfirmarCobro:',e);});
@@ -13861,11 +13892,12 @@ function _mgConfirmarCobro(){
   }
 
   Promise.all(proms).then(function(){
+    _liberarMgLock();
     toast('Cobro de '+fmt(montoCobrar)+' registrado'+(esSaldado?' — ¡Pedido saldado!':''),'tok');
     document.getElementById('_moGestionar').remove();
     loadPedidosWeb();
     loadDineroData();renderCat();
-  }).catch(function(e){toast('Error: '+(e.message||'ver consola'),'terr');});
+  }).catch(function(e){_liberarMgLock();toast('Error: '+(e.message||'ver consola'),'terr');});
 }
 
 function _cargarPestanasComboChips(selecIds){
@@ -15136,13 +15168,41 @@ function _ccDiasHasta(fechaVenc){
 
 // ── Helper: calcular recargo por mora para un pedido vencido ────────────
 function _ccCalcularMora(cli, pedido, saldoActual){
-  if(!cli || !pedido || !pedido.cc_fecha_vencimiento) return 0;
+  // FIX 2026-05-16: ahora respeta cc_mora_modo (cuota/pedido/ambas)
+  // Antes solo calculaba mora a nivel pedido. Esto generaba que el selector de mora no afecte el cálculo.
+  if(!cli || !pedido) return 0;
   var tasa = parseFloat(cli.cc_tasa_mora_pct) || 0;
   if(tasa <= 0) return 0;
-  var diasAtraso = -_ccDiasHasta(pedido.cc_fecha_vencimiento);
-  if(diasAtraso <= 0) return 0;
-  // Recargo = saldo * tasa% mensual * (días/30)
-  var recargo = saldoActual * (tasa/100) * (diasAtraso/30);
+  var moraModo = cli.cc_mora_modo || 'cuota'; // default: por cuota
+  var moraPorPedido = 0;
+  var moraPorCuota = 0;
+  // Mora por pedido: solo si el pedido entero está vencido
+  if(pedido.cc_fecha_vencimiento){
+    var diasAtrasoPed = -_ccDiasHasta(pedido.cc_fecha_vencimiento);
+    if(diasAtrasoPed > 0){
+      moraPorPedido = saldoActual * (tasa/100) * (diasAtrasoPed/30);
+    }
+  }
+  // Mora por cuota: suma de mora de cada cuota vencida
+  // (esto se calcula async desde cc_cuotas, pero acá usamos solo lo que está en `pedido` si tenemos las cuotas)
+  if(Array.isArray(pedido.cuotas)){
+    pedido.cuotas.forEach(function(cu){
+      if(cu.estado === 'pagada' || cu.estado === 'cancelada') return;
+      var diasAtrCu = -_ccDiasHasta(cu.fecha_vencimiento);
+      var diasGracia = parseInt(cu.dias_gracia) || 0;
+      if(diasAtrCu > diasGracia){
+        var pendiente = (parseFloat(cu.monto)||0) - (parseFloat(cu.monto_pagado)||0);
+        if(pendiente > 0){
+          moraPorCuota += pendiente * (tasa/100) * ((diasAtrCu - diasGracia)/30);
+        }
+      }
+    });
+  }
+  // Aplicar según modo
+  var recargo = 0;
+  if(moraModo === 'pedido') recargo = moraPorPedido;
+  else if(moraModo === 'cuota') recargo = moraPorCuota;
+  else if(moraModo === 'ambas') recargo = Math.max(moraPorPedido, moraPorCuota); // el más alto
   return Math.round(recargo*100)/100;
 }
 
@@ -16417,17 +16477,29 @@ window._ccCargarCuotasPedidosFIFO = function(pedidoIds){
         var ic = '⏳';
         var col = 'var(--tx3)';
         var diasV = _ccDiasHasta(cu.fecha_vencimiento);
+        var diasGracia = parseInt(cu.dias_gracia)||0;
+        var estaVencida = false;
         if(cu.estado === 'pagada'){ ic='✅'; col='#22c55e'; }
         else if(cu.estado === 'parcial'){ ic='🟡'; col='#fbbf24'; }
-        else if(cu.estado === 'vencida' || (diasV !== null && diasV < -(cu.dias_gracia||0))){ ic='⚠️'; col='#ef4444'; }
+        else if(cu.estado === 'vencida' || (diasV !== null && diasV < -diasGracia)){ ic='⚠️'; col='#ef4444'; estaVencida = true; }
         else if(diasV !== null && diasV <= 3){ col='#fbbf24'; }
-        h += "<div style='display:flex;justify-content:space-between;padding:.15rem 0;font-size:.65rem;border-bottom:1px solid rgba(255,255,255,.04)'>";
-        h += "<span style='color:"+col+"'>"+ic+" Cuota "+cu.nro_cuota+"/"+cu.total_cuotas+" — "+_ccFmtFecha(cu.fecha_vencimiento)+"</span>";
-        h += "<span><b style='color:"+col+"'>"+fmt(pendiente)+"</b>";
+        h += "<div style='display:flex;justify-content:space-between;align-items:center;padding:.15rem 0;font-size:.65rem;border-bottom:1px solid rgba(255,255,255,.04);gap:.3rem'>";
+        h += "<span style='color:"+col+";flex:1;min-width:0'>"+ic+" Cuota "+cu.nro_cuota+"/"+cu.total_cuotas+" — "+_ccFmtFecha(cu.fecha_vencimiento)+"</span>";
+        h += "<span style='flex-shrink:0'><b style='color:"+col+"'>"+fmt(pendiente)+"</b>";
         if(pagado > 0 && cu.estado !== 'pagada'){
           h += " <span style='color:var(--tx3);font-size:.55rem'>(pag: "+fmt(pagado)+")</span>";
         }
         h += "</span>";
+        // FEAT 2026-05-16: botón aplicar mora en cuotas vencidas
+        if(estaVencida && pendiente > 0 && window._ccClienteFIFO){
+          var diasAtraso = -(diasV + diasGracia);
+          var cli = window._ccClienteFIFO;
+          var tasa = parseFloat(cli.cc_tasa_mora_pct)||0;
+          var moraCalc = tasa > 0 ? pendiente * (tasa/100) * (diasAtraso/30) : 0;
+          if(moraCalc > 0){
+            h += "<button onclick='abrirAplicarMoraCuota("+cu.id+","+cli.id+","+(parseFloat(cu.monto)||0)+","+diasAtraso+","+Math.round(moraCalc*100)/100+")' class='btn btn-g' style='font-size:.55rem;padding:.1rem .3rem;color:var(--yel);border-color:var(--yel);flex-shrink:0' title='Aplicar mora: "+fmt(moraCalc)+"'>⚖️</button>";
+          }
+        }
         h += "</div>";
       });
       h += "</div>";
@@ -16472,7 +16544,7 @@ function _adminVerCC(clienteId, clienteNombre){
   mo.innerHTML="<div class='md' style='max-width:560px;width:95%;max-height:90vh;display:flex;flex-direction:column'>"+
     "<div class='mh'><div class='mtt'>💳 CC — "+(clienteNombre||"Cliente")+"</div>"+
     "<div style='display:flex;gap:.3rem;align-items:center'>"+
-      "<button class='btn btn-g' onclick='_admCCExportExcel("+clienteId+",&#39;"+_admEscNomJS(clienteNombre||"")+"&#39;)' style='font-size:.7rem;padding:.25rem .5rem' title='Export Excel'>📥</button>"+
+      "<button class='btn btn-g' onclick='_admCCExportExcel("+clienteId+",&#39;"+_adminEscNomJS(clienteNombre||"")+"&#39;)' style='font-size:.7rem;padding:.25rem .5rem' title='Export Excel'>📥</button>"+
       "<button class='btn btn-g xb' onclick='var _m=document.getElementById(\"_moAdminCC\");if(_m)_m.remove()'>✕</button>"+
     "</div></div>"+
     "<div class='mb' style='overflow-y:auto;flex:1;display:flex;flex-direction:column;gap:.7rem'>"+
@@ -16632,7 +16704,7 @@ function _adminVerCC(clienteId, clienteNombre){
         h += "<div style='display:flex;align-items:center;gap:.4rem;flex-shrink:0'>";
         h += "<div style='font-weight:700;color:var(--green)'>+"+fmt(monto)+"</div>";
         // Botón eliminar pago (Fix #9)
-        h += "<button onclick='_admBorrarPago("+p.id+","+clienteId+",&#39;"+_admEscNomJS(clienteNombre||"")+"&#39;)' style='background:transparent;border:1px solid var(--bd);color:var(--red);border-radius:4px;padding:.15rem .35rem;cursor:pointer;font-size:.7rem' title='Eliminar pago'>🗑</button>";
+        h += "<button onclick='_admBorrarPago("+p.id+","+clienteId+",&#39;"+_adminEscNomJS(clienteNombre||"")+"&#39;)' style='background:transparent;border:1px solid var(--bd);color:var(--red);border-radius:4px;padding:.15rem .35rem;cursor:pointer;font-size:.7rem' title='Eliminar pago'>🗑</button>";
         h += "</div>";
         h += "</div>";
       });
@@ -16896,6 +16968,8 @@ function verClienteFicha(id){
     h+="<button class='btn btn-g' style='font-size:.72rem;padding:.4rem .65rem' onclick='admAbrirCuotaModal("+c.id+",&#39;"+_adminEscNomJS(nombre)+"&#39;)'>📅 Cuota rápida</button>";
     h+="<button class='btn btn-g' style='font-size:.72rem;padding:.4rem .65rem' onclick='_adminVerCC("+c.id+",&#39;"+_adminEscNomJS(nombre)+"&#39;)'>📋 Movimientos</button>";
     h+="<button class='btn btn-g' style='font-size:.72rem;padding:.4rem .65rem' onclick='ccGenerarNotifWA("+c.id+",&quot;recordatorio&quot;)' title='Generar mensaje de WhatsApp con vencimientos próximos'>💬 Notif WA</button>";
+    h+="<button class='btn btn-g' style='font-size:.72rem;padding:.4rem .65rem' onclick='abrirHistorialComCobranza("+c.id+",&#39;"+_adminEscNomJS(nombre)+"&#39;)' title='Historial de contactos con el cliente'>📞 Historial</button>";
+    h+="<button class='btn btn-g' style='font-size:.72rem;padding:.4rem .65rem;color:var(--yel);border-color:var(--yel)' onclick='abrirHistorialMoras("+c.id+",&#39;"+_adminEscNomJS(nombre)+"&#39;)' title='Ver moras aplicadas y condonarlas'>⚖️ Moras</button>";
     if(c.bloqueado){
       h+="<button class='btn btn-g' style='font-size:.72rem;padding:.4rem .65rem;color:var(--green);border-color:var(--green)' onclick='admDesbloquearCliente("+c.id+")'>✓ Desbloquear</button>";
     } else {
@@ -16908,7 +16982,7 @@ function verClienteFicha(id){
     var _ccModLbl = _ccMod === 'resumen' ? '🔵 Resumen mensual' : '🟢 Crédito + cuotas';
     var _ccDetalle = _ccMod === 'resumen' 
       ? 'Cierre día '+(c.cc_dia_cierre||25)+' · Vence día '+(c.cc_dia_vencimiento||10)+' del mes siguiente'
-      : 'Plazo default: '+(c.cc_plazo_dias||30)+' días por pedido';
+      : 'Plazo: '+(c.cc_plazo_dias||30)+' días · '+(c.cc_frecuencia?c.cc_frecuencia:'sin frecuencia');
     h+="<div style='background:rgba(196,150,90,.05);border:1px solid rgba(196,150,90,.25);border-radius:7px;padding:.5rem .65rem;margin-bottom:.5rem'>";
     h+="<div style='display:flex;justify-content:space-between;align-items:center;gap:.5rem'>";
     h+="<div>";
@@ -17591,8 +17665,18 @@ function _admFIFOActualizarPreview(clienteId){
 }
 
 function _admFIFOConfirmarPago(clienteId){
+  // FIX 2026-05-16: lock para prevenir doble-click
+  window._admFIFOLock = window._admFIFOLock || {};
+  if(window._admFIFOLock[clienteId]){
+    toast('Ya se está procesando un pago para este cliente','twarn');
+    return;
+  }
+  window._admFIFOLock[clienteId] = true;
+  var _admFIFOTimeout = setTimeout(function(){delete window._admFIFOLock[clienteId];},60000);
+  function _liberarFIFOLock(){clearTimeout(_admFIFOTimeout);delete window._admFIFOLock[clienteId];}
+
   var monto = parseFloat((document.getElementById("_admFIFOMonto")||{value:""}).value)||0;
-  if(monto <= 0){ toast("Ingresá un monto","twarn"); return; }
+  if(monto <= 0){ _liberarFIFOLock(); toast("Ingresá un monto","twarn"); return; }
   var forma = (document.getElementById("_admFIFOForma")||{value:"efectivo"}).value;
   var fecha = (document.getElementById("_admFIFOFecha")||{value:""}).value || new Date().toISOString().slice(0,10);
   var nota = (document.getElementById("_admFIFONota")||{value:""}).value.trim() || null;
@@ -17809,6 +17893,7 @@ function _admFIFOConfirmarPago(clienteId){
     }
     return chain;
   }).then(function(){
+    _liberarFIFOLock();
     var resumen = "Pago de "+fmt(monto)+" registrado";
     if(window._admFIFOSaldoFavor > 0.01){ resumen += " · "+fmt(window._admFIFOSaldoFavor)+" a favor"; }
     toast(resumen, "tok");
@@ -17841,9 +17926,929 @@ function _admFIFOConfirmarPago(clienteId){
       if(typeof verClienteFicha === "function") setTimeout(function(){ verClienteFicha(prevId); }, 50);
     }
   }).catch(function(e){
+    _liberarFIFOLock();
     console.error("[belle] _admFIFOConfirmarPago error:",e);
     toast("Error al registrar el pago","terr");
     if(btn){ btn.disabled = false; btn.textContent = "Confirmar pago"; }
+  });
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// FEAT 2026-05-16: CALENDARIO DE COBRANZAS (Mejora b)
+// Vista mensual con todas las cuotas pendientes, agrupadas por día.
+// Útil para que admin planifique la cobranza del mes.
+// ═══════════════════════════════════════════════════════════════════════════
+function abrirCalendarioCobranzas(){
+  var mo = document.createElement('div');
+  mo.className = 'mo open';
+  mo.id = '_moCalendarioCC';
+  mo.style.zIndex = '99999';
+  // Mes/año actual por defecto
+  var hoy = new Date();
+  window._calCcMes = hoy.getMonth();
+  window._calCcAnio = hoy.getFullYear();
+  mo.innerHTML = "<div class='md' style='max-width:760px;width:96%;max-height:92vh;display:flex;flex-direction:column'>"+
+    "<div class='mh'><div class='mtt'>📅 Calendario de Cobranzas</div>"+
+    "<div style='display:flex;gap:.3rem;align-items:center'>"+
+      "<button class='btn btn-g' onclick='_calCcExportCSV()' style='font-size:.68rem;padding:.25rem .55rem' title='Exportar CSV del mes visible'>📥 CSV</button>"+
+      "<button class='btn btn-g xb' onclick='document.getElementById(\"_moCalendarioCC\").remove()'>✕</button>"+
+    "</div></div>"+
+    "<div class='mb' style='overflow-y:auto;flex:1;display:flex;flex-direction:column;gap:.7rem'>"+
+      "<div id='_calCcBody'><div class='loading'><div class='spin'></div></div></div>"+
+    "</div></div>";
+  document.body.appendChild(mo);
+  _calCcRender();
+}
+
+function _calCcRender(){
+  var body = document.getElementById('_calCcBody');
+  if(!body) return;
+  body.innerHTML = "<div class='loading'><div class='spin'></div>Cargando cuotas...</div>";
+  var mes = window._calCcMes;
+  var anio = window._calCcAnio;
+  var primerDia = new Date(anio, mes, 1);
+  var ultimoDia = new Date(anio, mes + 1, 0);
+  var primerStr = primerDia.toISOString().slice(0,10);
+  var ultimoStr = ultimoDia.toISOString().slice(0,10);
+  var nombresMes = ['Enero','Febrero','Marzo','Abril','Mayo','Junio','Julio','Agosto','Septiembre','Octubre','Noviembre','Diciembre'];
+
+  // Cargar cuotas del mes + clientes + pedidos
+  Promise.all([
+    apiGet('cc_cuotas','select=*&fecha_vencimiento=gte.'+primerStr+'&fecha_vencimiento=lte.'+ultimoStr+'&estado=in.(pendiente,parcial,vencida)&order=fecha_vencimiento.asc'),
+    apiGet('pedidos_catalogo','select=id,cliente_id,nro_orden,total,cobrado_total&estado=neq.cancelado')
+  ]).then(function(res){
+    var cuotas = Array.isArray(res[0]) ? res[0] : [];
+    var pedidos = Array.isArray(res[1]) ? res[1] : [];
+    var pedMap = {};
+    pedidos.forEach(function(p){ pedMap[p.id] = p; });
+
+    // Obtener cliente_ids únicos
+    var cliIds = {};
+    cuotas.forEach(function(cu){
+      var p = pedMap[cu.pedido_id];
+      if(p && p.cliente_id) cliIds[p.cliente_id] = true;
+    });
+    var cliIdsArr = Object.keys(cliIds);
+    var cliPromise = cliIdsArr.length
+      ? apiGet('clientes','select=id,nombre,apellido,telefono,vendedor_asignado_id,cc_bloqueo_atraso&id=in.('+cliIdsArr.join(',')+')')
+      : Promise.resolve([]);
+
+    cliPromise.then(function(clis){
+      var cliMap = {};
+      (Array.isArray(clis) ? clis : []).forEach(function(c){ cliMap[c.id] = c; });
+
+      // Agrupar cuotas por día
+      var porDia = {};
+      var totalMes = 0;
+      var cantTotal = 0;
+      cuotas.forEach(function(cu){
+        var dia = cu.fecha_vencimiento;
+        if(!porDia[dia]) porDia[dia] = [];
+        var p = pedMap[cu.pedido_id];
+        var cli = p ? cliMap[p.cliente_id] : null;
+        var pendiente = (parseFloat(cu.monto)||0) - (parseFloat(cu.monto_pagado)||0);
+        totalMes += pendiente;
+        cantTotal++;
+        porDia[dia].push({
+          cu: cu,
+          ped: p,
+          cli: cli,
+          pendiente: pendiente
+        });
+      });
+
+      // Guardar para export
+      window._calCcDataActual = { mes: mes, anio: anio, porDia: porDia, totalMes: totalMes };
+
+      // Render header con navegación mes
+      var h = "";
+      h += "<div style='display:flex;justify-content:space-between;align-items:center;background:var(--sur2);border:1px solid var(--bd);border-radius:8px;padding:.6rem .85rem;margin-bottom:.7rem'>";
+      h += "<button class='btn btn-g' onclick='_calCcCambiarMes(-1)' style='font-size:.72rem;padding:.3rem .55rem'>← Anterior</button>";
+      h += "<div style='text-align:center;flex:1'>";
+      h += "<div style='font-size:.95rem;font-weight:700;color:var(--tx)'>"+nombresMes[mes]+" "+anio+"</div>";
+      h += "<div style='font-size:.7rem;color:var(--tx3);margin-top:.15rem'>"+cantTotal+" cuotas · Total: <b style='color:var(--acc)'>"+fmt(totalMes)+"</b></div>";
+      h += "</div>";
+      h += "<button class='btn btn-g' onclick='_calCcCambiarMes(1)' style='font-size:.72rem;padding:.3rem .55rem'>Siguiente →</button>";
+      h += "</div>";
+
+      // Botón "Volver al mes actual" si no estamos en él
+      var hoyMes = new Date();
+      if(mes !== hoyMes.getMonth() || anio !== hoyMes.getFullYear()){
+        h += "<div style='text-align:center;margin-bottom:.6rem'>";
+        h += "<button class='btn btn-g' onclick='_calCcMesActual()' style='font-size:.7rem;padding:.25rem .55rem;color:var(--acc);border-color:var(--acc)'>📍 Volver al mes actual</button>";
+        h += "</div>";
+      }
+
+      if(cantTotal === 0){
+        h += "<div style='text-align:center;padding:2rem 1rem;color:var(--tx3)'>";
+        h += "<div style='font-size:2.5rem;margin-bottom:.5rem;opacity:.4'>📅</div>";
+        h += "<div style='font-size:.85rem;color:var(--tx2);margin-bottom:.3rem'>Sin cuotas pendientes en este mes</div>";
+        h += "<div style='font-size:.72rem'>No hay cuotas con vencimiento dentro de "+nombresMes[mes]+"</div>";
+        h += "</div>";
+      } else {
+        // Lista por día (ordenado)
+        var diasOrd = Object.keys(porDia).sort();
+        var hoyStr = new Date().toISOString().slice(0,10);
+        diasOrd.forEach(function(dia){
+          var items = porDia[dia];
+          var totalDia = items.reduce(function(s,x){return s+x.pendiente;}, 0);
+          var fecha = new Date(dia+'T00:00:00');
+          var diaSem = ['Dom','Lun','Mar','Mié','Jue','Vie','Sáb'][fecha.getDay()];
+          var diaNum = fecha.getDate();
+          var esVencido = dia < hoyStr;
+          var esHoy = dia === hoyStr;
+          var colorBorde = esVencido ? 'var(--red)' : (esHoy ? 'var(--acc)' : 'var(--bd)');
+          var colorBg = esVencido ? 'rgba(220,80,80,.08)' : (esHoy ? 'rgba(196,150,90,.08)' : 'var(--sur2)');
+
+          h += "<div style='border:1px solid "+colorBorde+";background:"+colorBg+";border-radius:8px;padding:.6rem .8rem;margin-bottom:.45rem'>";
+          h += "<div style='display:flex;justify-content:space-between;align-items:center;margin-bottom:.4rem'>";
+          h += "<div style='display:flex;align-items:center;gap:.55rem'>";
+          h += "<div style='width:42px;height:42px;border-radius:50%;background:"+(esVencido?'var(--red)':(esHoy?'var(--acc)':'var(--sur3)'))+";color:"+(esVencido||esHoy?'#fff':'var(--tx)')+";display:flex;align-items:center;justify-content:center;font-weight:700;font-size:.95rem;flex-shrink:0'>"+diaNum+"</div>";
+          h += "<div>";
+          h += "<div style='font-size:.78rem;font-weight:700;color:var(--tx)'>"+diaSem+" "+diaNum+"</div>";
+          h += "<div style='font-size:.66rem;color:var(--tx3)'>"+items.length+" cuota"+(items.length>1?'s':'')+(esVencido?' · ⚠️ Vencidas':'')+(esHoy?' · 🔔 HOY':'')+"</div>";
+          h += "</div>";
+          h += "</div>";
+          h += "<div style='text-align:right'>";
+          h += "<div style='font-size:.92rem;font-weight:800;color:"+(esVencido?'var(--red)':'var(--acc)')+"'>"+fmt(totalDia)+"</div>";
+          h += "</div>";
+          h += "</div>";
+
+          // Lista de cuotas del día
+          h += "<div style='display:flex;flex-direction:column;gap:.25rem;margin-left:.3rem;border-left:2px solid "+colorBorde+";padding-left:.55rem'>";
+          items.forEach(function(it){
+            var cliNom = it.cli ? ((it.cli.nombre||'')+' '+(it.cli.apellido||'')).trim() : '(cliente eliminado)';
+            var pedNum = it.ped ? (it.ped.nro_orden||'#'+it.ped.id) : '#'+it.cu.pedido_id;
+            var nroCu = it.cu.nro_cuota+'/'+it.cu.total_cuotas;
+            h += "<div style='display:flex;justify-content:space-between;align-items:center;padding:.3rem 0;font-size:.74rem'>";
+            h += "<div style='flex:1;min-width:0'>";
+            h += "<div style='font-weight:600;color:var(--tx)'>"+_esc(cliNom)+"</div>";
+            h += "<div style='font-size:.62rem;color:var(--tx3)'>"+pedNum+" · Cuota "+nroCu+(it.cu.estado==='parcial'?' (parcial)':'')+"</div>";
+            h += "</div>";
+            h += "<div style='display:flex;gap:.3rem;align-items:center;flex-shrink:0'>";
+            h += "<span style='font-weight:700;color:var(--tx)'>"+fmt(it.pendiente)+"</span>";
+            if(it.cli){
+              h += "<button class='btn btn-g' onclick='_adminVerCC("+it.cli.id+",&#39;"+_adminEscNomJS(cliNom)+"&#39;)' style='font-size:.6rem;padding:.2rem .4rem' title='Ver CC del cliente'>💳</button>";
+              if(it.cli.telefono){
+                var msg = 'Hola '+(it.cli.nombre||'')+', te recordamos tu cuota '+nroCu+' de '+fmt(it.pendiente)+' que vence '+_ccFmtFecha(dia)+'. ¿Necesitás ayuda con el pago?';
+                h += "<button class='btn btn-g' onclick='_calCcEnviarWA("+it.cli.id+","+it.cu.pedido_id+","+it.cu.id+",&quot;"+_adminEscNomJS(_admWaNumLimpio(it.cli.telefono))+"&quot;,&quot;"+_adminEscNomJS(msg)+"&quot;)' style='font-size:.6rem;padding:.2rem .4rem;color:#25d366;border-color:#25d366' title='Enviar recordatorio WhatsApp'>💬</button>";
+              }
+            }
+            h += "</div>";
+            h += "</div>";
+          });
+          h += "</div>";
+          h += "</div>";
+        });
+      }
+      body.innerHTML = h;
+    });
+  }).catch(function(e){
+    console.error('[cal cc]', e);
+    body.innerHTML = "<div class='empty'>Error cargando calendario: "+(e.message||'desconocido')+"</div>";
+  });
+}
+
+function _calCcCambiarMes(delta){
+  window._calCcMes += delta;
+  if(window._calCcMes > 11){ window._calCcMes = 0; window._calCcAnio++; }
+  if(window._calCcMes < 0){ window._calCcMes = 11; window._calCcAnio--; }
+  _calCcRender();
+}
+
+function _calCcMesActual(){
+  var hoy = new Date();
+  window._calCcMes = hoy.getMonth();
+  window._calCcAnio = hoy.getFullYear();
+  _calCcRender();
+}
+
+// Helper: limpia teléfono para wa.me (saca espacios, +, -)
+function _admWaNumLimpio(tel){
+  if(!tel) return '';
+  var limpio = String(tel).replace(/[^0-9]/g,'');
+  // Si no empieza con código país, asumir Argentina (54)
+  if(limpio.length === 10) limpio = '549'+limpio; // móvil arg sin código
+  if(limpio.length === 11 && limpio.charAt(0) === '5') limpio = '54'+limpio.substring(1);
+  return limpio;
+}
+
+// Envía WA y registra comunicación (desde calendario)
+function _calCcEnviarWA(cliId, pedId, cuotaId, telLimpio, msg){
+  // 1. Abrir WhatsApp web
+  var url = 'https://wa.me/'+telLimpio+'?text='+encodeURIComponent(msg);
+  window.open(url, '_blank');
+  // 2. Registrar comunicación (non-blocking)
+  _registrarComCobranza({
+    cliente_id: cliId,
+    pedido_id: pedId,
+    cuota_id: cuotaId,
+    canal: 'whatsapp',
+    tipo: 'recordatorio',
+    mensaje: msg
+  });
+}
+
+// Envía WA y registra (desde morosidad)
+function _morosEnviarWA(cliId, telLimpio, msg, tipo){
+  var url = 'https://wa.me/'+telLimpio+'?text='+encodeURIComponent(msg);
+  window.open(url, '_blank');
+  _registrarComCobranza({
+    cliente_id: cliId,
+    canal: 'whatsapp',
+    tipo: tipo || 'intimacion',
+    mensaje: msg
+  });
+}
+
+function _calCcExportCSV(){
+  if(!data || !data.porDia){ toast('No hay datos para exportar','twarn'); return; }
+  var nombresMes = ['enero','febrero','marzo','abril','mayo','junio','julio','agosto','septiembre','octubre','noviembre','diciembre'];
+  var rows = ['Fecha,Cliente,Telefono,Pedido,Cuota,Monto pendiente,Estado'];
+  Object.keys(data.porDia).sort().forEach(function(dia){
+    data.porDia[dia].forEach(function(it){
+      var cliNom = it.cli ? ((it.cli.nombre||'')+' '+(it.cli.apellido||'')).trim() : '(eliminado)';
+      var tel = it.cli ? (it.cli.telefono||'') : '';
+      var pedNum = it.ped ? (it.ped.nro_orden||'#'+it.ped.id) : '#'+it.cu.pedido_id;
+      var nroCu = it.cu.nro_cuota+'/'+it.cu.total_cuotas;
+      rows.push([dia, '"'+cliNom.replace(/"/g,'""')+'"', '"'+tel+'"', '"'+pedNum+'"', nroCu, it.pendiente, it.cu.estado].join(','));
+    });
+  });
+  var csv = rows.join('\n');
+  var blob = new Blob([csv], {type:'text/csv;charset=utf-8'});
+  var url = URL.createObjectURL(blob);
+  var a = document.createElement('a');
+  a.href = url;
+  a.download = 'cobranzas_'+nombresMes[data.mes]+'_'+data.anio+'.csv';
+  a.click();
+  setTimeout(function(){URL.revokeObjectURL(url);}, 100);
+  toast('CSV descargado','tok');
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// FEAT 2026-05-16: REPORTE DE MOROSIDAD (Mejora d)
+// Lista de clientes con cuotas vencidas, ordenada por urgencia (días + monto).
+// Permite priorizar la cobranza.
+// ═══════════════════════════════════════════════════════════════════════════
+function abrirReporteMorosidad(){
+  var mo = document.createElement('div');
+  mo.className = 'mo open';
+  mo.id = '_moMorosidad';
+  mo.style.zIndex = '99999';
+  window._morosOrden = 'urgencia'; // urgencia | monto | dias | cliente
+  window._morosFiltVend = '';
+  mo.innerHTML = "<div class='md' style='max-width:780px;width:96%;max-height:92vh;display:flex;flex-direction:column'>"+
+    "<div class='mh'><div class='mtt'>⚠️ Reporte de Morosidad</div>"+
+    "<div style='display:flex;gap:.3rem;align-items:center'>"+
+      "<button class='btn btn-g' onclick='_morosExportCSV()' style='font-size:.68rem;padding:.25rem .55rem' title='Exportar CSV'>📥 CSV</button>"+
+      "<button class='btn btn-g xb' onclick='document.getElementById(\"_moMorosidad\").remove()'>✕</button>"+
+    "</div></div>"+
+    "<div class='mb' style='overflow-y:auto;flex:1;display:flex;flex-direction:column;gap:.6rem'>"+
+      "<div id='_morosBody'><div class='loading'><div class='spin'></div></div></div>"+
+    "</div></div>";
+  document.body.appendChild(mo);
+  _morosRender();
+}
+
+function _morosRender(){
+  var body = document.getElementById('_morosBody');
+  if(!body) return;
+  body.innerHTML = "<div class='loading'><div class='spin'></div>Calculando morosidad...</div>";
+  var hoy = new Date(); hoy.setHours(0,0,0,0);
+  var hoyStr = hoy.toISOString().slice(0,10);
+
+  Promise.all([
+    apiGet('cc_cuotas','select=*&fecha_vencimiento=lt.'+hoyStr+'&estado=in.(pendiente,parcial,vencida)&order=fecha_vencimiento.asc'),
+    apiGet('pedidos_catalogo','select=id,cliente_id,nro_orden,total,cobrado_total&estado=neq.cancelado'),
+    apiGet('vendedores','select=id,nombre,activo&activo=is.true')
+  ]).then(function(res){
+    var cuotasVencidas = Array.isArray(res[0]) ? res[0] : [];
+    var pedidos = Array.isArray(res[1]) ? res[1] : [];
+    var vendedores = Array.isArray(res[2]) ? res[2] : [];
+    var pedMap = {}; pedidos.forEach(function(p){ pedMap[p.id] = p; });
+    var vendMap = {}; vendedores.forEach(function(v){ vendMap[v.id] = v.nombre; });
+
+    // Filtrar cuotas que pasaron días de gracia
+    var vencidasReales = cuotasVencidas.filter(function(cu){
+      var diasGracia = parseInt(cu.dias_gracia) || 0;
+      var fVenc = new Date(cu.fecha_vencimiento+'T00:00:00');
+      var fLim = new Date(fVenc); fLim.setDate(fLim.getDate()+diasGracia);
+      return fLim < hoy;
+    });
+
+    if(!vencidasReales.length){
+      body.innerHTML = "<div style='text-align:center;padding:2.5rem 1rem;color:var(--tx3)'>"+
+        "<div style='font-size:2.5rem;margin-bottom:.5rem;color:#22c55e'>✅</div>"+
+        "<div style='font-size:.95rem;font-weight:600;color:var(--green);margin-bottom:.3rem'>Sin morosidad</div>"+
+        "<div style='font-size:.78rem'>Ningún cliente tiene cuotas vencidas pasada la fecha de gracia</div>"+
+        "</div>";
+      return;
+    }
+
+    // Agrupar por cliente
+    var cliIds = {};
+    vencidasReales.forEach(function(cu){
+      var p = pedMap[cu.pedido_id];
+      if(p && p.cliente_id) cliIds[p.cliente_id] = true;
+    });
+
+    apiGet('clientes','select=id,nombre,apellido,telefono,email,vendedor_asignado_id,cc_tasa_mora_pct,cc_bloqueo_atraso,bloqueado&id=in.('+Object.keys(cliIds).join(',')+')').then(function(clis){
+      var cliMap = {};
+      (Array.isArray(clis) ? clis : []).forEach(function(c){ cliMap[c.id] = c; });
+
+      var porCliente = {};
+      vencidasReales.forEach(function(cu){
+        var p = pedMap[cu.pedido_id];
+        if(!p || !p.cliente_id) return;
+        var cli = cliMap[p.cliente_id];
+        if(!cli) return;
+        var pendiente = (parseFloat(cu.monto)||0) - (parseFloat(cu.monto_pagado)||0);
+        var diasGracia = parseInt(cu.dias_gracia) || 0;
+        var fVenc = new Date(cu.fecha_vencimiento+'T00:00:00');
+        var fLim = new Date(fVenc); fLim.setDate(fLim.getDate()+diasGracia);
+        var diasAtraso = Math.floor((hoy - fLim) / 86400000);
+
+        if(!porCliente[cli.id]){
+          porCliente[cli.id] = {
+            cli: cli, cuotas: [], totalAtrasado: 0,
+            maxDiasAtraso: 0, mora: 0
+          };
+        }
+        var grupo = porCliente[cli.id];
+        grupo.cuotas.push({cu: cu, ped: p, pendiente: pendiente, diasAtraso: diasAtraso});
+        grupo.totalAtrasado += pendiente;
+        if(diasAtraso > grupo.maxDiasAtraso) grupo.maxDiasAtraso = diasAtraso;
+        // Mora estimada (si configurada)
+        var tasa = parseFloat(cli.cc_tasa_mora_pct) || 0;
+        if(tasa > 0 && diasAtraso > 0){
+          grupo.mora += pendiente * (tasa/100) * (diasAtraso/30);
+        }
+      });
+
+      // Filtrar por vendedor si aplica
+      var arr = Object.values(porCliente);
+      var filtVend = window._morosFiltVend;
+      if(filtVend){
+        if(filtVend === '__sin'){
+          arr = arr.filter(function(g){ return !g.cli.vendedor_asignado_id; });
+        } else {
+          arr = arr.filter(function(g){ return g.cli.vendedor_asignado_id === parseInt(filtVend); });
+        }
+      }
+
+      // Ordenar según selección
+      var orden = window._morosOrden;
+      arr.sort(function(a,b){
+        if(orden === 'urgencia'){
+          // Urgencia = dias_atraso * monto (cuanto más viejo + grande, más urgente)
+          var ua = a.maxDiasAtraso * a.totalAtrasado;
+          var ub = b.maxDiasAtraso * b.totalAtrasado;
+          return ub - ua;
+        }
+        if(orden === 'monto') return b.totalAtrasado - a.totalAtrasado;
+        if(orden === 'dias') return b.maxDiasAtraso - a.maxDiasAtraso;
+        if(orden === 'cliente'){
+          var na = (a.cli.nombre||'')+(a.cli.apellido||'');
+          var nb = (b.cli.nombre||'')+(b.cli.apellido||'');
+          return na.localeCompare(nb);
+        }
+        return 0;
+      });
+
+      // Guardar para CSV
+      window._morosData = arr;
+
+      // Totales globales
+      var totalGlobal = arr.reduce(function(s,g){return s+g.totalAtrasado;}, 0);
+      var moraGlobal = arr.reduce(function(s,g){return s+g.mora;}, 0);
+      var cantClientes = arr.length;
+
+      // Render header
+      var h = "";
+      h += "<div style='display:grid;grid-template-columns:repeat(auto-fit,minmax(120px,1fr));gap:.45rem;margin-bottom:.7rem'>";
+      h += "<div style='background:var(--sur2);border:1px solid var(--red);border-radius:7px;padding:.55rem .7rem'>";
+      h += "<div style='font-size:.62rem;color:var(--tx3);text-transform:uppercase;font-weight:600'>Morosos</div>";
+      h += "<div style='font-size:1.05rem;font-weight:800;color:var(--red)'>"+cantClientes+"</div>";
+      h += "</div>";
+      h += "<div style='background:var(--sur2);border:1px solid var(--red);border-radius:7px;padding:.55rem .7rem'>";
+      h += "<div style='font-size:.62rem;color:var(--tx3);text-transform:uppercase;font-weight:600'>Atrasado</div>";
+      h += "<div style='font-size:1.05rem;font-weight:800;color:var(--red)'>"+fmt(totalGlobal)+"</div>";
+      h += "</div>";
+      if(moraGlobal > 0){
+        h += "<div style='background:var(--sur2);border:1px solid var(--yel);border-radius:7px;padding:.55rem .7rem'>";
+        h += "<div style='font-size:.62rem;color:var(--tx3);text-transform:uppercase;font-weight:600'>+ Mora est.</div>";
+        h += "<div style='font-size:1.05rem;font-weight:800;color:var(--yel)'>"+fmt(moraGlobal)+"</div>";
+        h += "</div>";
+      }
+      h += "</div>";
+
+      // Filtros + orden
+      h += "<div style='display:flex;gap:.4rem;flex-wrap:wrap;margin-bottom:.6rem;align-items:center'>";
+      h += "<select onchange='_morosCambiarOrden(this.value)' style='padding:.35rem .55rem;border:1px solid var(--bd);border-radius:6px;font-size:.7rem;background:var(--sur2);color:var(--tx)'>";
+      var ordenes = [['urgencia','🚨 Urgencia (días × monto)'],['monto','💰 Mayor monto'],['dias','⏰ Más días vencidos'],['cliente','🔤 Por cliente A→Z']];
+      ordenes.forEach(function(o){
+        h += "<option value='"+o[0]+"'"+(orden===o[0]?' selected':'')+">"+o[1]+"</option>";
+      });
+      h += "</select>";
+      h += "<select onchange='_morosCambiarVend(this.value)' style='padding:.35rem .55rem;border:1px solid var(--bd);border-radius:6px;font-size:.7rem;background:var(--sur2);color:var(--tx)'>";
+      h += "<option value=''>Todos los vendedores</option>";
+      h += "<option value='__sin'"+(filtVend==='__sin'?' selected':'')+">Sin asignar</option>";
+      vendedores.forEach(function(v){
+        h += "<option value='"+v.id+"'"+(filtVend===String(v.id)?' selected':'')+">"+_esc(v.nombre)+"</option>";
+      });
+      h += "</select>";
+      h += "</div>";
+
+      // Lista de morosos
+      arr.forEach(function(grupo, i){
+        var cli = grupo.cli;
+        var cliNom = ((cli.nombre||'')+' '+(cli.apellido||'')).trim();
+        var nivelUrg;
+        if(grupo.maxDiasAtraso > 30) nivelUrg = {color:'#b91c1c', label:'CRÍTICO', bg:'rgba(185,28,28,.1)'};
+        else if(grupo.maxDiasAtraso > 14) nivelUrg = {color:'var(--red)', label:'ALTO', bg:'rgba(220,80,80,.08)'};
+        else if(grupo.maxDiasAtraso > 7) nivelUrg = {color:'var(--yel)', label:'MEDIO', bg:'rgba(232,160,40,.08)'};
+        else nivelUrg = {color:'#a06820', label:'BAJO', bg:'rgba(160,104,32,.06)'};
+        var vendNom = cli.vendedor_asignado_id ? (vendMap[cli.vendedor_asignado_id]||'V#'+cli.vendedor_asignado_id) : 'Sin vendedor';
+
+        h += "<div style='background:"+nivelUrg.bg+";border:1px solid "+nivelUrg.color+";border-radius:8px;padding:.65rem .8rem;margin-bottom:.5rem'>";
+        h += "<div style='display:flex;justify-content:space-between;align-items:flex-start;gap:.5rem;margin-bottom:.45rem'>";
+        h += "<div style='flex:1;min-width:0'>";
+        h += "<div style='display:flex;align-items:center;gap:.4rem;margin-bottom:.2rem'>";
+        h += "<span style='background:"+nivelUrg.color+";color:#fff;font-size:.58rem;font-weight:700;padding:.1rem .35rem;border-radius:3px;letter-spacing:.04em'>"+nivelUrg.label+"</span>";
+        h += "<span style='font-size:.85rem;font-weight:700;color:var(--tx)'>"+_esc(cliNom)+"</span>";
+        if(cli.bloqueado) h += "<span style='font-size:.6rem;background:var(--red);color:#fff;padding:.1rem .3rem;border-radius:3px'>🚫 BLOQ</span>";
+        h += "</div>";
+        h += "<div style='font-size:.65rem;color:var(--tx3)'>Vendedor: "+_esc(vendNom)+" · "+grupo.cuotas.length+" cuota"+(grupo.cuotas.length>1?'s':'')+" vencida"+(grupo.cuotas.length>1?'s':'')+"</div>";
+        h += "</div>";
+        h += "<div style='text-align:right;flex-shrink:0'>";
+        h += "<div style='font-size:1rem;font-weight:800;color:"+nivelUrg.color+"'>"+fmt(grupo.totalAtrasado)+"</div>";
+        h += "<div style='font-size:.62rem;color:var(--tx3)'>"+grupo.maxDiasAtraso+" día"+(grupo.maxDiasAtraso>1?'s':'')+" atraso</div>";
+        if(grupo.mora > 0){
+          h += "<div style='font-size:.62rem;color:var(--yel);margin-top:.1rem'>+ mora: "+fmt(grupo.mora)+"</div>";
+        }
+        h += "</div>";
+        h += "</div>";
+
+        // Botones de acción
+        h += "<div style='display:flex;gap:.3rem;flex-wrap:wrap;padding-top:.4rem;border-top:1px solid rgba(255,255,255,.06)'>";
+        h += "<button class='btn btn-g' onclick='_adminVerCC("+cli.id+",&#39;"+_adminEscNomJS(cliNom)+"&#39;)' style='font-size:.66rem;padding:.25rem .5rem;color:var(--acc);border-color:var(--acc)'>💳 Ver CC</button>";
+        h += "<button class='btn btn-g' onclick='admAbrirRegistrarPagoFIFO("+cli.id+",&#39;"+_adminEscNomJS(cliNom)+"&#39;)' style='font-size:.66rem;padding:.25rem .5rem;color:var(--green);border-color:var(--green)'>💰 Cobrar</button>";
+        if(cli.telefono){
+          var msg = 'Hola '+(cli.nombre||'')+', te recordamos que tenés '+grupo.cuotas.length+' cuota'+(grupo.cuotas.length>1?'s':'')+' vencida'+(grupo.cuotas.length>1?'s':'')+' por '+fmt(grupo.totalAtrasado)+'. ¿Podemos coordinar el pago? Gracias!';
+          h += "<button class='btn btn-g' onclick='_morosEnviarWA("+cli.id+",&quot;"+_adminEscNomJS(_admWaNumLimpio(cli.telefono))+"&quot;,&quot;"+_adminEscNomJS(msg)+"&quot;,&quot;intimacion&quot;)' style='font-size:.66rem;padding:.25rem .5rem;color:#25d366;border-color:#25d366'>💬 WhatsApp</button>";
+        }
+        h += "<button class='btn btn-g' onclick='_morosVerDetalle("+cli.id+")' style='font-size:.66rem;padding:.25rem .5rem'>📋 Detalle</button>";
+        h += "<button class='btn btn-g' onclick='abrirHistorialComCobranza("+cli.id+",&#39;"+_adminEscNomJS(cliNom)+"&#39;)' style='font-size:.66rem;padding:.25rem .5rem' title='Ver comunicaciones previas'>📞 Historial</button>";
+        h += "</div>";
+        h += "</div>";
+      });
+
+      body.innerHTML = h;
+    });
+  }).catch(function(e){
+    console.error('[morosidad]',e);
+    body.innerHTML = "<div class='empty'>Error: "+(e.message||'desconocido')+"</div>";
+  });
+}
+
+function _morosCambiarOrden(o){ window._morosOrden = o; _morosRender(); }
+function _morosCambiarVend(v){ window._morosFiltVend = v; _morosRender(); }
+
+function _morosVerDetalle(cliId){
+  var grupo = (window._morosData||[]).find(function(g){return g.cli.id===cliId;});
+  if(!grupo){toast('No encontrado','terr');return;}
+  var cliNom = ((grupo.cli.nombre||'')+' '+(grupo.cli.apellido||'')).trim();
+  var h = "<div style='max-width:480px'>";
+  h += "<div style='font-size:.85rem;font-weight:700;margin-bottom:.5rem'>Cuotas vencidas de "+_esc(cliNom)+"</div>";
+  grupo.cuotas.forEach(function(it){
+    var pedNum = it.ped ? (it.ped.nro_orden||'#'+it.ped.id) : '#'+it.cu.pedido_id;
+    h += "<div style='background:var(--sur2);border:1px solid var(--bd);border-radius:6px;padding:.45rem .65rem;margin-bottom:.3rem;display:flex;justify-content:space-between;align-items:center;gap:.4rem'>";
+    h += "<div style='flex:1;min-width:0'>";
+    h += "<div style='font-size:.78rem;font-weight:600;color:var(--tx)'>"+pedNum+" — Cuota "+it.cu.nro_cuota+"/"+it.cu.total_cuotas+"</div>";
+    h += "<div style='font-size:.65rem;color:var(--tx3)'>Venc: "+_ccFmtFecha(it.cu.fecha_vencimiento)+" · "+it.diasAtraso+"d atraso</div>";
+    h += "</div>";
+    h += "<div style='font-size:.85rem;font-weight:700;color:var(--red)'>"+fmt(it.pendiente)+"</div>";
+    h += "</div>";
+  });
+  h += "</div>";
+  // Mostrar en un modal simple sobre el actual
+  var modet = document.createElement('div');
+  modet.className = 'mo open';
+  modet.style.zIndex = '999999';
+  modet.innerHTML = "<div class='md' style='max-width:500px;width:95%'>"+
+    "<div class='mh'><div class='mtt'>Detalle morosidad</div>"+
+    "<button class='btn btn-g xb' onclick='this.closest(\".mo\").remove()'>✕</button></div>"+
+    "<div class='mb'>"+h+"</div></div>";
+  document.body.appendChild(modet);
+}
+
+function _morosExportCSV(){
+  var arr = window._morosData || [];
+  if(!arr.length){ toast('No hay morosos para exportar','twarn'); return; }
+  var rows = ['Cliente,Telefono,Email,Vendedor,Cuotas vencidas,Total atrasado,Dias max atraso,Mora estimada'];
+  arr.forEach(function(g){
+    var cliNom = ((g.cli.nombre||'')+' '+(g.cli.apellido||'')).trim();
+    var vendId = g.cli.vendedor_asignado_id || '';
+    rows.push([
+      '"'+cliNom.replace(/"/g,'""')+'"',
+      '"'+(g.cli.telefono||'')+'"',
+      '"'+(g.cli.email||'')+'"',
+      '"'+vendId+'"',
+      g.cuotas.length,
+      g.totalAtrasado,
+      g.maxDiasAtraso,
+      Math.round(g.mora*100)/100
+    ].join(','));
+  });
+  var csv = rows.join('\n');
+  var blob = new Blob([csv], {type:'text/csv;charset=utf-8'});
+  var url = URL.createObjectURL(blob);
+  var a = document.createElement('a');
+  a.href = url;
+  a.download = 'morosidad_'+new Date().toISOString().slice(0,10)+'.csv';
+  a.click();
+  setTimeout(function(){URL.revokeObjectURL(url);}, 100);
+  toast('CSV descargado','tok');
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// FEAT 2026-05-16: HISTORIAL DE COMUNICACIONES DE COBRANZA (Mejora f)
+// Registra cada contacto con cliente sobre su deuda.
+// Por ahora: WhatsApp manual + Email + nota interna.
+// ═══════════════════════════════════════════════════════════════════════════
+
+// Función helper: registrar una comunicación de cobranza
+// Es non-blocking — no espera respuesta, no bloquea UI si falla.
+function _registrarComCobranza(opts){
+  // opts: {cliente_id, pedido_id?, cuota_id?, canal, tipo, mensaje?, vendedor_id?}
+  if(!opts || !opts.cliente_id || !opts.canal || !opts.tipo) return Promise.resolve();
+  var payload = {
+    cliente_id: opts.cliente_id,
+    pedido_id: opts.pedido_id || null,
+    cuota_id: opts.cuota_id || null,
+    canal: opts.canal,
+    tipo: opts.tipo,
+    mensaje: opts.mensaje || null,
+    estado: opts.estado || 'enviado',
+    usuario: opts.usuario || (typeof curUser !== 'undefined' ? curUser : 'admin'),
+    vendedor_id: opts.vendedor_id || null
+  };
+  return apiPost('cobranza_comunicaciones', payload).catch(function(e){
+    // No bloquear si la tabla no existe todavía
+    console.warn('[com cobranza] no se pudo registrar:', e.message||e);
+  });
+}
+
+// Modal: ver historial de comunicaciones de un cliente
+function abrirHistorialComCobranza(clienteId, clienteNombre){
+  var mo = document.createElement('div');
+  mo.className = 'mo open';
+  mo.id = '_moHistComCob';
+  mo.style.zIndex = '999999';
+  mo.innerHTML = "<div class='md' style='max-width:620px;width:96%;max-height:92vh;display:flex;flex-direction:column'>"+
+    "<div class='mh'><div class='mtt'>📋 Historial de cobranza — "+_esc(clienteNombre||"Cliente")+"</div>"+
+    "<div style='display:flex;gap:.3rem;align-items:center'>"+
+      "<button class='btn btn-a' onclick='_abrirRegistrarComManual("+clienteId+",&#39;"+_adminEscNomJS(clienteNombre||'')+"&#39;)' style='font-size:.68rem;padding:.25rem .55rem' title='Registrar contacto manual'>+ Registrar</button>"+
+      "<button class='btn btn-g xb' onclick='document.getElementById(\"_moHistComCob\").remove()'>✕</button>"+
+    "</div></div>"+
+    "<div class='mb' style='overflow-y:auto;flex:1'>"+
+      "<div id='_histComCobBody'><div class='loading'><div class='spin'></div></div></div>"+
+    "</div></div>";
+  document.body.appendChild(mo);
+  _histComCobRender(clienteId);
+}
+
+function _histComCobRender(clienteId){
+  var body = document.getElementById('_histComCobBody');
+  if(!body) return;
+  body.innerHTML = "<div class='loading'><div class='spin'></div>Cargando historial...</div>";
+  apiGet('cobranza_comunicaciones','select=*&cliente_id=eq.'+clienteId+'&order=created_at.desc&limit=100').then(function(rows){
+    rows = Array.isArray(rows) ? rows : [];
+    if(!rows.length){
+      body.innerHTML = "<div style='text-align:center;padding:2.5rem 1rem;color:var(--tx3)'>"+
+        "<div style='font-size:2.5rem;margin-bottom:.5rem;opacity:.5'>📭</div>"+
+        "<div style='font-size:.85rem;font-weight:600;color:var(--tx2);margin-bottom:.3rem'>Sin comunicaciones</div>"+
+        "<div style='font-size:.72rem'>Cuando contactes al cliente por su deuda, queda registrado acá</div>"+
+        "</div>";
+      return;
+    }
+    // Stats
+    var porCanal = {};
+    rows.forEach(function(r){
+      porCanal[r.canal] = (porCanal[r.canal]||0) + 1;
+    });
+    var canalLabels = {whatsapp:'WhatsApp', email:'Email', llamada:'Llamada', nota_interna:'Nota interna', sms:'SMS', presencial:'Presencial'};
+    var canalIcons = {whatsapp:'💬', email:'📧', llamada:'📞', nota_interna:'📝', sms:'✉️', presencial:'🤝'};
+    var tipoLabels = {recordatorio:'Recordatorio', intimacion:'Intimación', acuerdo:'Acuerdo', respuesta_cliente:'Respuesta cliente', seguimiento:'Seguimiento', otro:'Otro'};
+
+    var h = "";
+    h += "<div style='display:flex;gap:.4rem;flex-wrap:wrap;margin-bottom:.7rem'>";
+    Object.keys(porCanal).forEach(function(canal){
+      h += "<div style='background:var(--sur2);border:1px solid var(--bd);border-radius:6px;padding:.3rem .55rem;font-size:.68rem'>";
+      h += (canalIcons[canal]||'')+" "+canalLabels[canal]+": <b>"+porCanal[canal]+"</b>";
+      h += "</div>";
+    });
+    h += "</div>";
+
+    rows.forEach(function(r){
+      var ic = canalIcons[r.canal] || '•';
+      var canalLbl = canalLabels[r.canal] || r.canal;
+      var tipoLbl = tipoLabels[r.tipo] || r.tipo;
+      var fecha = new Date(r.created_at).toLocaleString('es-AR',{day:'2-digit',month:'2-digit',year:'2-digit',hour:'2-digit',minute:'2-digit'});
+
+      h += "<div style='background:var(--sur2);border:1px solid var(--bd);border-radius:7px;padding:.55rem .7rem;margin-bottom:.4rem'>";
+      h += "<div style='display:flex;justify-content:space-between;align-items:flex-start;gap:.5rem;margin-bottom:.3rem'>";
+      h += "<div style='flex:1;min-width:0'>";
+      h += "<div style='display:flex;align-items:center;gap:.4rem'>";
+      h += "<span style='font-size:1rem'>"+ic+"</span>";
+      h += "<span style='font-size:.78rem;font-weight:700;color:var(--tx)'>"+canalLbl+"</span>";
+      h += "<span style='font-size:.6rem;background:var(--sur3);color:var(--tx2);padding:.1rem .35rem;border-radius:3px;text-transform:uppercase;letter-spacing:.03em'>"+tipoLbl+"</span>";
+      h += "</div>";
+      h += "<div style='font-size:.65rem;color:var(--tx3);margin-top:.15rem'>"+fecha+(r.usuario?' · '+_esc(r.usuario):'')+"</div>";
+      h += "</div>";
+      h += "<button class='btn btn-g' onclick='_borrarComCobranza("+r.id+","+clienteId+")' style='font-size:.6rem;padding:.15rem .35rem;color:var(--red);border-color:var(--red)' title='Borrar registro'>🗑</button>";
+      h += "</div>";
+      if(r.mensaje){
+        h += "<div style='font-size:.74rem;color:var(--tx);background:var(--sur);padding:.4rem .55rem;border-radius:5px;white-space:pre-wrap;word-wrap:break-word'>"+_esc(r.mensaje)+"</div>";
+      }
+      if(r.respuesta){
+        h += "<div style='font-size:.7rem;color:var(--tx2);background:var(--sur);padding:.35rem .55rem;border-radius:5px;margin-top:.25rem;border-left:3px solid var(--acc)'>";
+        h += "<div style='font-size:.6rem;color:var(--acc);font-weight:600;margin-bottom:.1rem'>💬 RESPUESTA</div>";
+        h += _esc(r.respuesta);
+        h += "</div>";
+      }
+      h += "</div>";
+    });
+    body.innerHTML = h;
+  }).catch(function(e){
+    console.error('[hist com]', e);
+    body.innerHTML = "<div class='empty'>Error cargando historial. Tal vez la tabla aún no existe. <br><br>Ejecutá <code>sql_cobranza_comunicaciones.sql</code> en Supabase.</div>";
+  });
+}
+
+function _abrirRegistrarComManual(clienteId, clienteNombre){
+  var mo = document.createElement('div');
+  mo.className = 'mo open';
+  mo.id = '_moRegCom';
+  mo.style.zIndex = '9999999';
+  mo.innerHTML = "<div class='md' style='max-width:480px;width:95%'>"+
+    "<div class='mh'><div class='mtt'>+ Registrar contacto</div>"+
+    "<button class='btn btn-g xb' onclick='document.getElementById(\"_moRegCom\").remove()'>✕</button></div>"+
+    "<div class='mb' style='display:flex;flex-direction:column;gap:.55rem'>"+
+      "<div><label style='font-size:.65rem;color:var(--tx3);text-transform:uppercase;font-weight:600'>Canal</label>"+
+      "<select id='_regComCanal' style='width:100%;padding:.5rem .7rem;border:1px solid var(--bd);border-radius:6px;font-size:.85rem;background:var(--sur2);color:var(--tx);margin-top:.2rem'>"+
+        "<option value='whatsapp'>💬 WhatsApp</option>"+
+        "<option value='email'>📧 Email</option>"+
+        "<option value='llamada'>📞 Llamada</option>"+
+        "<option value='nota_interna'>📝 Nota interna</option>"+
+        "<option value='presencial'>🤝 Presencial</option>"+
+        "<option value='sms'>✉️ SMS</option>"+
+      "</select></div>"+
+      "<div><label style='font-size:.65rem;color:var(--tx3);text-transform:uppercase;font-weight:600'>Tipo</label>"+
+      "<select id='_regComTipo' style='width:100%;padding:.5rem .7rem;border:1px solid var(--bd);border-radius:6px;font-size:.85rem;background:var(--sur2);color:var(--tx);margin-top:.2rem'>"+
+        "<option value='recordatorio'>Recordatorio</option>"+
+        "<option value='intimacion'>Intimación</option>"+
+        "<option value='acuerdo'>Acuerdo de pago</option>"+
+        "<option value='respuesta_cliente'>Respuesta del cliente</option>"+
+        "<option value='seguimiento'>Seguimiento</option>"+
+        "<option value='otro'>Otro</option>"+
+      "</select></div>"+
+      "<div><label style='font-size:.65rem;color:var(--tx3);text-transform:uppercase;font-weight:600'>Mensaje / Detalle</label>"+
+      "<textarea id='_regComMsg' rows='3' style='width:100%;padding:.5rem .7rem;border:1px solid var(--bd);border-radius:6px;font-size:.82rem;background:var(--sur2);color:var(--tx);margin-top:.2rem;resize:vertical;font-family:inherit' placeholder='Qué se conversó/envió...'></textarea></div>"+
+      "<div><label style='font-size:.65rem;color:var(--tx3);text-transform:uppercase;font-weight:600'>Respuesta del cliente (opcional)</label>"+
+      "<textarea id='_regComResp' rows='2' style='width:100%;padding:.5rem .7rem;border:1px solid var(--bd);border-radius:6px;font-size:.82rem;background:var(--sur2);color:var(--tx);margin-top:.2rem;resize:vertical;font-family:inherit' placeholder='Si ya respondió, anotalo acá...'></textarea></div>"+
+      "<div style='display:flex;gap:.4rem;justify-content:flex-end;padding-top:.3rem'>"+
+        "<button class='btn btn-g' onclick='document.getElementById(\"_moRegCom\").remove()'>Cancelar</button>"+
+        "<button class='btn btn-a' onclick='_guardarComManual("+clienteId+")'>Guardar</button>"+
+      "</div>"+
+    "</div></div>";
+  document.body.appendChild(mo);
+}
+
+function _guardarComManual(clienteId){
+  var canal = (document.getElementById('_regComCanal')||{}).value || 'nota_interna';
+  var tipo = (document.getElementById('_regComTipo')||{}).value || 'otro';
+  var msg = ((document.getElementById('_regComMsg')||{}).value||'').trim();
+  var resp = ((document.getElementById('_regComResp')||{}).value||'').trim();
+  if(!msg && !resp){ toast('Escribí al menos un mensaje o respuesta','twarn'); return; }
+  var payload = {
+    cliente_id: clienteId,
+    canal: canal,
+    tipo: tipo,
+    mensaje: msg || null,
+    respuesta: resp || null,
+    estado: resp ? 'respondido' : 'enviado',
+    usuario: typeof curUser !== 'undefined' ? curUser : 'admin'
+  };
+  apiPost('cobranza_comunicaciones', payload).then(function(){
+    toast('Contacto registrado ✅','tok');
+    var m = document.getElementById('_moRegCom'); if(m) m.remove();
+    _histComCobRender(clienteId);
+  }).catch(function(e){
+    toast('Error: '+(e.message||'la tabla aún no existe'),'terr');
+  });
+}
+
+function _borrarComCobranza(id, clienteId){
+  if(!confirm('Borrar este registro de comunicación?'))return;
+  apiDelete('cobranza_comunicaciones','id=eq.'+id).then(function(){
+    toast('Borrado','tok');
+    _histComCobRender(clienteId);
+  }).catch(function(e){toast('Error: '+e.message,'terr');});
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// FEAT 2026-05-16: APLICACIÓN MANUAL DE MORA (Mejora e — modo manual)
+// Admin decide caso por caso aplicar la mora calculada a una cuota.
+// Crea registro en cc_aplicaciones_mora y suma a monto de la cuota.
+// ═══════════════════════════════════════════════════════════════════════════
+
+function abrirAplicarMoraCuota(cuotaId, clienteId, montoCuotaActual, diasAtraso, moraCalculada){
+  var mo = document.createElement('div');
+  mo.className = 'mo open';
+  mo.id = '_moAplMora';
+  mo.style.zIndex = '9999999';
+  mo.innerHTML = "<div class='md' style='max-width:480px;width:95%'>"+
+    "<div class='mh'><div class='mtt'>⚖️ Aplicar mora a cuota</div>"+
+    "<button class='btn btn-g xb' onclick='document.getElementById(\"_moAplMora\").remove()'>✕</button></div>"+
+    "<div class='mb' style='display:flex;flex-direction:column;gap:.6rem'>"+
+      "<div style='background:rgba(232,160,40,.08);border:1px solid var(--yel);border-radius:7px;padding:.55rem .7rem;font-size:.74rem;color:var(--tx2)'>"+
+        "<div style='margin-bottom:.25rem'><b>Días de atraso:</b> "+diasAtraso+"</div>"+
+        "<div style='margin-bottom:.25rem'><b>Monto cuota actual:</b> "+fmt(montoCuotaActual)+"</div>"+
+        "<div><b>Mora calculada:</b> <span style='color:var(--yel);font-weight:700'>"+fmt(moraCalculada)+"</span></div>"+
+      "</div>"+
+      "<div><label style='font-size:.65rem;color:var(--tx3);text-transform:uppercase;font-weight:600'>Monto a aplicar ($)</label>"+
+      "<input type='number' id='_aplMoraMonto' value='"+Math.round(moraCalculada*100)/100+"' min='0' step='0.01' style='width:100%;padding:.5rem .7rem;border:1px solid var(--bd);border-radius:6px;font-size:.95rem;font-weight:700;background:var(--sur2);color:var(--tx);margin-top:.2rem'>"+
+      "<div style='font-size:.6rem;color:var(--tx3);margin-top:.1rem'>Podés ajustar el monto si querés cobrar menos</div></div>"+
+      "<div><label style='font-size:.65rem;color:var(--tx3);text-transform:uppercase;font-weight:600'>Motivo / observación</label>"+
+      "<input type='text' id='_aplMoraMotivo' placeholder='Ej: cliente no respondió WhatsApp por 5 días' style='width:100%;padding:.5rem .7rem;border:1px solid var(--bd);border-radius:6px;font-size:.82rem;background:var(--sur2);color:var(--tx);margin-top:.2rem'></div>"+
+      "<div style='display:flex;gap:.4rem;justify-content:flex-end;padding-top:.3rem'>"+
+        "<button class='btn btn-g' onclick='document.getElementById(\"_moAplMora\").remove()'>Cancelar</button>"+
+        "<button class='btn btn-a' style='background:var(--yel)' onclick='_confirmarAplicarMora("+cuotaId+","+clienteId+","+diasAtraso+")'>⚖️ Aplicar mora</button>"+
+      "</div>"+
+    "</div></div>";
+  document.body.appendChild(mo);
+}
+
+function _confirmarAplicarMora(cuotaId, clienteId, diasAtraso){
+  var monto = parseFloat((document.getElementById('_aplMoraMonto')||{value:0}).value) || 0;
+  var motivo = ((document.getElementById('_aplMoraMotivo')||{value:''}).value||'').trim();
+  if(monto <= 0){ toast('Monto inválido','twarn'); return; }
+  if(!confirm('Aplicar mora de '+fmt(monto)+' a esta cuota?\nEl monto se sumará al saldo pendiente.'))return;
+
+  // 1. Leer cuota actual
+  apiGet('cc_cuotas','select=monto,monto_pagado&id=eq.'+cuotaId+'&limit=1').then(function(rows){
+    var cuota = rows && rows[0];
+    if(!cuota){throw new Error('Cuota no encontrada');}
+    var montoAntes = parseFloat(cuota.monto)||0;
+    var montoDespues = montoAntes + monto;
+    var tasaTexto = '';
+    // 2. Obtener tasa cliente
+    return apiGet('clientes','select=cc_tasa_mora_pct&id=eq.'+clienteId+'&limit=1').then(function(rc){
+      var tasa = (rc && rc[0]) ? parseFloat(rc[0].cc_tasa_mora_pct)||0 : 0;
+      // 3. Crear registro
+      return apiPost('cc_aplicaciones_mora', {
+        cuota_id: cuotaId,
+        cliente_id: clienteId,
+        monto_mora: monto,
+        dias_atraso: diasAtraso,
+        tasa_aplicada: tasa,
+        monto_cuota_antes: montoAntes,
+        monto_cuota_despues: montoDespues,
+        motivo: motivo || null,
+        aplicado_por: typeof curUser !== 'undefined' ? curUser : 'admin'
+      });
+    }).then(function(){
+      // 4. Actualizar monto de la cuota
+      return apiPatch('cc_cuotas', {monto: montoDespues}, 'id=eq.'+cuotaId);
+    });
+  }).then(function(){
+    toast('Mora aplicada: '+fmt(monto)+' ✅','tok');
+    var m = document.getElementById('_moAplMora'); if(m) m.remove();
+    // Si el modal CC del cliente está abierto, refrescarlo
+    var moCC = document.getElementById('_moAdminCC');
+    if(moCC){
+      var titEl = moCC.querySelector('.mtt');
+      var nombrePrev = '';
+      if(titEl){
+        var txt = titEl.textContent||'';
+        var idx = txt.indexOf('—');
+        if(idx>=0) nombrePrev = txt.substring(idx+1).trim();
+      }
+      moCC.remove();
+      setTimeout(function(){_adminVerCC(clienteId, nombrePrev);}, 100);
+    }
+    if(typeof _morosRender === 'function' && document.getElementById('_moMorosidad')) _morosRender();
+  }).catch(function(e){
+    console.error('[apl mora]',e);
+    toast('Error: '+(e.message||'tabla cc_aplicaciones_mora puede no existir. Ejecutá el SQL.'),'terr');
+  });
+}
+
+// Modal: ver/condonar moras aplicadas a un cliente
+function abrirHistorialMoras(clienteId, clienteNombre){
+  var mo = document.createElement('div');
+  mo.className = 'mo open';
+  mo.id = '_moHistMora';
+  mo.style.zIndex = '999999';
+  mo.innerHTML = "<div class='md' style='max-width:600px;width:96%;max-height:90vh;display:flex;flex-direction:column'>"+
+    "<div class='mh'><div class='mtt'>⚖️ Moras aplicadas — "+_esc(clienteNombre||"Cliente")+"</div>"+
+    "<button class='btn btn-g xb' onclick='document.getElementById(\"_moHistMora\").remove()'>✕</button></div>"+
+    "<div class='mb' style='overflow-y:auto;flex:1'>"+
+      "<div id='_histMoraBody'><div class='loading'><div class='spin'></div></div></div>"+
+    "</div></div>";
+  document.body.appendChild(mo);
+  _histMoraRender(clienteId);
+}
+
+function _histMoraRender(clienteId){
+  var body = document.getElementById('_histMoraBody');
+  if(!body) return;
+  body.innerHTML = "<div class='loading'><div class='spin'></div>Cargando...</div>";
+  apiGet('cc_aplicaciones_mora','select=*&cliente_id=eq.'+clienteId+'&order=created_at.desc').then(function(rows){
+    rows = Array.isArray(rows) ? rows : [];
+    if(!rows.length){
+      body.innerHTML = "<div style='text-align:center;padding:2rem 1rem;color:var(--tx3);font-size:.85rem'>Sin moras aplicadas a este cliente</div>";
+      return;
+    }
+    var totalAplicado = 0;
+    var totalCondonado = 0;
+    rows.forEach(function(r){
+      var monto = parseFloat(r.monto_mora)||0;
+      if(r.condonada) totalCondonado += monto;
+      else totalAplicado += monto;
+    });
+
+    var h = "";
+    h += "<div style='display:grid;grid-template-columns:1fr 1fr;gap:.4rem;margin-bottom:.7rem'>";
+    h += "<div style='background:var(--sur2);border:1px solid var(--yel);border-radius:6px;padding:.4rem .55rem'>";
+    h += "<div style='font-size:.6rem;color:var(--tx3);text-transform:uppercase'>Mora activa</div>";
+    h += "<div style='font-size:.95rem;font-weight:700;color:var(--yel)'>"+fmt(totalAplicado)+"</div>";
+    h += "</div>";
+    h += "<div style='background:var(--sur2);border:1px solid var(--green);border-radius:6px;padding:.4rem .55rem'>";
+    h += "<div style='font-size:.6rem;color:var(--tx3);text-transform:uppercase'>Condonado</div>";
+    h += "<div style='font-size:.95rem;font-weight:700;color:var(--green)'>"+fmt(totalCondonado)+"</div>";
+    h += "</div>";
+    h += "</div>";
+
+    rows.forEach(function(r){
+      var fecha = new Date(r.created_at).toLocaleString('es-AR',{day:'2-digit',month:'2-digit',year:'2-digit',hour:'2-digit',minute:'2-digit'});
+      var bgColor = r.condonada ? 'rgba(76,175,130,.08)' : 'rgba(232,160,40,.08)';
+      var borderColor = r.condonada ? 'var(--green)' : 'var(--yel)';
+      h += "<div style='background:"+bgColor+";border:1px solid "+borderColor+";border-radius:7px;padding:.55rem .7rem;margin-bottom:.4rem'>";
+      h += "<div style='display:flex;justify-content:space-between;align-items:flex-start;gap:.5rem'>";
+      h += "<div style='flex:1;min-width:0'>";
+      h += "<div style='font-size:.78rem;font-weight:700;color:var(--tx)'>Cuota #"+r.cuota_id+" · "+r.dias_atraso+"d atraso · "+(r.tasa_aplicada||0)+"%/mes</div>";
+      h += "<div style='font-size:.62rem;color:var(--tx3);margin-top:.1rem'>"+fecha+(r.aplicado_por?' · '+_esc(r.aplicado_por):'')+"</div>";
+      if(r.motivo) h += "<div style='font-size:.7rem;color:var(--tx2);margin-top:.2rem;font-style:italic'>"+_esc(r.motivo)+"</div>";
+      if(r.condonada){
+        h += "<div style='font-size:.65rem;color:var(--green);margin-top:.2rem;font-weight:600'>✓ CONDONADA"+(r.condonada_por?' por '+_esc(r.condonada_por):'')+(r.condonada_motivo?' — '+_esc(r.condonada_motivo):'')+"</div>";
+      }
+      h += "</div>";
+      h += "<div style='text-align:right;flex-shrink:0'>";
+      h += "<div style='font-size:1rem;font-weight:800;color:"+borderColor+";text-decoration:"+(r.condonada?'line-through':'none')+"'>"+fmt(r.monto_mora)+"</div>";
+      if(!r.condonada){
+        h += "<button class='btn btn-g' onclick='_condonarMora("+r.id+","+clienteId+")' style='font-size:.6rem;padding:.2rem .4rem;margin-top:.2rem;color:var(--green);border-color:var(--green)' title='Condonar esta mora'>↶ Condonar</button>";
+      }
+      h += "</div>";
+      h += "</div>";
+      h += "</div>";
+    });
+    body.innerHTML = h;
+  }).catch(function(e){
+    body.innerHTML = "<div class='empty'>Error: "+(e.message||'tabla no existe — ejecutá el SQL')+"</div>";
+  });
+}
+
+function _condonarMora(moraId, clienteId){
+  var motivo = prompt('Motivo de la condonación:');
+  if(motivo === null) return;
+  // 1. Leer mora
+  apiGet('cc_aplicaciones_mora','select=*&id=eq.'+moraId+'&limit=1').then(function(rows){
+    var m = rows && rows[0];
+    if(!m){throw new Error('No encontrada');}
+    if(m.condonada){toast('Ya estaba condonada','twarn');return;}
+    var montoMora = parseFloat(m.monto_mora)||0;
+    // 2. Marcar condonada + restar del monto de la cuota
+    return Promise.all([
+      apiPatch('cc_aplicaciones_mora',{
+        condonada: true,
+        condonada_at: new Date().toISOString(),
+        condonada_por: typeof curUser !== 'undefined' ? curUser : 'admin',
+        condonada_motivo: motivo || null
+      },'id=eq.'+moraId),
+      apiGet('cc_cuotas','select=monto&id=eq.'+m.cuota_id+'&limit=1').then(function(rc){
+        var c = rc && rc[0];
+        if(!c) return;
+        var nuevoMonto = Math.max(0, (parseFloat(c.monto)||0) - montoMora);
+        return apiPatch('cc_cuotas',{monto:nuevoMonto},'id=eq.'+m.cuota_id);
+      })
+    ]);
+  }).then(function(){
+    toast('Mora condonada ✅','tok');
+    _histMoraRender(clienteId);
+  }).catch(function(e){
+    toast('Error: '+e.message,'terr');
   });
 }
 
