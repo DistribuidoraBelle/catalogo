@@ -12140,7 +12140,12 @@ function _rtMostrarMarkersSimples(){
     var peds = (_rt.pedidosTodos||[]).filter(function(p){return ids.indexOf(p.id)>=0;});
     peds.forEach(function(p){
       var lat, lng;
-      if(p.direccion_entrega_lat && p.direccion_entrega_lng){
+      // FIX 2026-05-17: priorizar _dir si hay direccion_entrega_id (dirección actual del cliente)
+      // sobre direccion_entrega_lat/lng del pedido (puede estar desactualizada).
+      if(p.direccion_entrega_id && p._dir && p._dir.lat!=null && p._dir.lng!=null){
+        lat = parseFloat(p._dir.lat);
+        lng = parseFloat(p._dir.lng);
+      } else if(p.direccion_entrega_lat && p.direccion_entrega_lng){
         lat = parseFloat(p.direccion_entrega_lat);
         lng = parseFloat(p.direccion_entrega_lng);
       } else if(p._dir && p._dir.lat){
@@ -12462,7 +12467,8 @@ function _rtRenderTarjetaParada(p, estado, est, ordenIdx, enReparto, esPendiente
   h += "<div style='display:flex;gap:.3rem;flex-wrap:wrap;margin-top:.4rem'>";
   if(estado === 'pendiente' || estado === 'activo'){
     if(enReparto){
-      h += "<button class='btn btn-a' onclick='_rbMarcarEntregado("+p.id+")' style='font-size:.65rem;padding:.25rem .55rem;background:#5a8a4a;border-color:#5a8a4a' title='Marcar entregado'>✓ Entregado</button>";
+      h += "<button class='btn btn-a' onclick='_rbEntregarModal("+p.id+")' style='font-size:.65rem;padding:.25rem .55rem;background:#5a8a4a;border-color:#5a8a4a' title='Marcar entregado (sin cobrar)'>✓ Entregado</button>";
+      h += "<button class='btn btn-a' onclick='_rbEntregarYCobrarModal("+p.id+")' style='font-size:.65rem;padding:.25rem .55rem;background:#3fa9c9;border-color:#3fa9c9' title='Marcar entregado Y cobrar pedido'>💰 Entregado + Cobrado</button>";
       h += "<button class='btn btn-g' onclick='_rbPausarParada("+p.id+")' style='font-size:.65rem;padding:.25rem .5rem' title='Pausar'>⏸</button>";
       h += "<button class='btn btn-red' onclick='_rbCancelarParadaModal("+p.id+")' style='font-size:.65rem;padding:.25rem .5rem' title='Cancelar / mover'>✕</button>";
     }
@@ -12506,11 +12512,46 @@ function _rtGenerarRutaOptima(){
       return s === 'activo';
     });
   }
+
+  // FIX 2026-05-17: precargar _dir de pedidos con direccion_entrega_id pero sin _dir cargado
+  // Esto previene que la ruta use coords viejas o falle por no tener _dir todavía cargado.
+  var pedSinDir = peds.filter(function(p){
+    return p.direccion_entrega_id && (!p._dir || p._dir.lat==null || p._dir.lng==null);
+  });
+  var precargaP = Promise.resolve();
+  if(pedSinDir.length){
+    var dirIdsNec = pedSinDir.map(function(p){return p.direccion_entrega_id;}).filter(function(v,i,a){return a.indexOf(v)===i;});
+    precargaP = apiGet("clientes_direcciones","select=id,etiqueta,direccion_completa,referencias,lat,lng&id=in.("+dirIdsNec.join(",")+")").then(function(dirs){
+      var dMap = {};
+      (Array.isArray(dirs)?dirs:[]).forEach(function(d){dMap[d.id]=d;});
+      pedSinDir.forEach(function(p){
+        if(dMap[p.direccion_entrega_id]) p._dir = dMap[p.direccion_entrega_id];
+      });
+    }).catch(function(e){console.warn("[belle] precarga dirs:",e);});
+  }
+
+  precargaP.then(function(){ _rtGenerarRutaOptimaConDirs(peds, br); });
+}
+
+function _rtGenerarRutaOptimaConDirs(peds, br){
   // Solo con coordenadas
+  // FIX 2026-05-17: priorizar _dir (dirección actual del cliente vía direccion_entrega_id)
+  // SOBRE direccion_entrega_lat/_lng del pedido. Antes era al revés y si el vendedor cambiaba
+  // la dirección, la ruta se generaba con las coords VIEJAS del pedido.
   var pedidosOK = peds.filter(function(p){
+    // Si hay direccion_entrega_id Y _dir cargado, usar _dir (la más actualizada)
+    if(p.direccion_entrega_id && p._dir && p._dir.lat!=null && p._dir.lng!=null){
+      var dlat = parseFloat(p._dir.lat);
+      var dlng = parseFloat(p._dir.lng);
+      if(!isNaN(dlat) && !isNaN(dlng)){
+        p._dir.lat = dlat;
+        p._dir.lng = dlng;
+        return true;
+      }
+    }
+    // Fallback: coords directas del pedido (caso pedidos viejos o sin cliente)
     var lp = parseFloat(p.direccion_entrega_lat);
     if(!isNaN(lp) && p.direccion_entrega_lng){
-      // Usar coords directas
       p._dir = p._dir || {};
       p._dir.lat = lp;
       p._dir.lng = parseFloat(p.direccion_entrega_lng);
@@ -13541,7 +13582,8 @@ function _rtRenderEnReparto(b){
     h += "<div style='font-size:.85rem;font-weight:700;color:var(--acc)'>"+fmt(p.total||0)+"</div>";
     h += "</div>";
     h += "<div style='display:flex;gap:.4rem;margin-top:.4rem;flex-wrap:wrap'>";
-    h += "<button class='btn btn-a' style='font-size:.74rem;padding:.35rem .7rem;background:#5a8a4a;border-color:#5a8a4a' onclick='_rtMarcarEntregado("+p.id+")'>✓ Marcar entregado</button>";
+    h += "<button class='btn btn-a' style='font-size:.74rem;padding:.35rem .7rem;background:#5a8a4a;border-color:#5a8a4a' onclick='_rbEntregarModal("+p.id+")' title='Marcar entregado (sin cobrar)'>✓ Entregado</button>";
+    h += "<button class='btn btn-a' style='font-size:.74rem;padding:.35rem .7rem;background:#3fa9c9;border-color:#3fa9c9' onclick='_rbEntregarYCobrarModal("+p.id+")' title='Marcar entregado Y cobrar'>💰 Entregado + Cobrado</button>";
     h += "<button class='btn btn-g' style='font-size:.74rem;padding:.35rem .7rem' onclick='_gestionarPedido(\"web\","+p.id+")'>Gestionar</button>";
     h += "</div>";
     h += "</div>";
@@ -14029,10 +14071,34 @@ function _rbConfirmarDir(){
     var dir = (_rbAsigDir.direccionesExistentes||[]).find(function(d){return d.id === _rbAsigDir.dirSeleccionadaId;});
     if(!dir){toast("Dirección no encontrada","terr");return;}
     var pedIdSel = _rbAsigDir.pedidoId;
-    apiPatch("pedidos_catalogo", {direccion_entrega_id: dir.id, estado_envio: "en_preparacion"}, "id=eq."+pedIdSel).then(function(){
+    // FIX 2026-05-17: sincronizar lat/lng/texto del pedido con la dirección elegida
+    // Antes solo se patcheaba direccion_entrega_id → el pedido quedaba con coords VIEJAS
+    // y la ruta de Google Maps se generaba mal (con la dirección original, no la nueva).
+    var textoDir = (function(){
+      var calle = (dir.calle || "").trim();
+      var numero = (dir.numero || "").trim();
+      var localidad = (dir.localidad || "").trim();
+      var partes = [];
+      if(calle) partes.push(calle + (numero ? " "+numero : ""));
+      if(localidad) partes.push(localidad);
+      return partes.join(", ") || dir.direccion_completa || dir.etiqueta || "";
+    })();
+    var patchPed = {
+      direccion_entrega_id: dir.id,
+      direccion_entrega_lat: dir.lat || null,
+      direccion_entrega_lng: dir.lng || null,
+      direccion_entrega_texto: textoDir || null,
+      direccion_entrega_referencias: dir.referencias || null,
+      estado_envio: "en_preparacion"
+    };
+    apiPatch("pedidos_catalogo", patchPed, "id=eq."+pedIdSel).then(function(){
       var pCache = (_rt.pedidosTodos||[]).find(function(x){return x.id===pedIdSel;});
       if(pCache){
         pCache.direccion_entrega_id = dir.id;
+        pCache.direccion_entrega_lat = dir.lat || null;
+        pCache.direccion_entrega_lng = dir.lng || null;
+        pCache.direccion_entrega_texto = textoDir || null;
+        pCache.direccion_entrega_referencias = dir.referencias || null;
         pCache._dir = dir;
       }
       var mo = document.getElementById("_moRbDir"); if(mo) mo.remove();
@@ -14098,10 +14164,33 @@ function _rbConfirmarDir(){
     apiPost("clientes_direcciones", dirData).then(function(rows){
       var nuevaDir = Array.isArray(rows) && rows[0];
       if(!nuevaDir){toast("Error guardando dirección","terr");return;}
-      apiPatch("pedidos_catalogo", {direccion_entrega_id: nuevaDir.id, estado_envio: "en_preparacion"}, "id=eq."+pedId).then(function(){
+      // FIX 2026-05-17: sincronizar lat/lng/texto del pedido con la nueva dirección
+      // (antes solo patcheaba direccion_entrega_id → ruta de Maps salía con coords viejas)
+      var textoDir = (function(){
+        var calle = (nuevaDir.calle || "").trim();
+        var numero = (nuevaDir.numero || "").trim();
+        var localidad = (nuevaDir.localidad || "").trim();
+        var partes = [];
+        if(calle) partes.push(calle + (numero ? " "+numero : ""));
+        if(localidad) partes.push(localidad);
+        return partes.join(", ") || nuevaDir.direccion_completa || completa || "";
+      })();
+      var patchPed = {
+        direccion_entrega_id: nuevaDir.id,
+        direccion_entrega_lat: nuevaDir.lat || pos.lat,
+        direccion_entrega_lng: nuevaDir.lng || pos.lng,
+        direccion_entrega_texto: textoDir,
+        direccion_entrega_referencias: referencias || null,
+        estado_envio: "en_preparacion"
+      };
+      apiPatch("pedidos_catalogo", patchPed, "id=eq."+pedId).then(function(){
         var pCache = (_rt.pedidosTodos||[]).find(function(x){return x.id===pedId;});
         if(pCache){
           pCache.direccion_entrega_id = nuevaDir.id;
+          pCache.direccion_entrega_lat = nuevaDir.lat || pos.lat;
+          pCache.direccion_entrega_lng = nuevaDir.lng || pos.lng;
+          pCache.direccion_entrega_texto = textoDir;
+          pCache.direccion_entrega_referencias = referencias || null;
           pCache._dir = nuevaDir; // cache de la dirección para render
         }
         var mo = document.getElementById("_moRbDir"); if(mo) mo.remove();
@@ -14159,6 +14248,280 @@ function _rbAbrirEnReparto(borradorId){
 // _rbRenderEnReparto y _rbRenderParada eliminadas — la pantalla unificada (_rtRenderArmar) maneja todo
 
 // Marcar como entregado
+// ════════════════════════════════════════════════════════════════════
+// FEAT 2026-05-17: 2 botones de entrega — verde (entregado) + celeste (entregado+cobrado)
+// ════════════════════════════════════════════════════════════════════
+
+// MODAL 1: Marcar entregado (sin cobrar)
+function _rbEntregarModal(pedId){
+  var old = document.getElementById('_moEntregar'); if(old) old.remove();
+  var ov = document.createElement('div');
+  ov.id = '_moEntregar';
+  ov.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,.7);z-index:99999;display:flex;align-items:center;justify-content:center;padding:1rem';
+  // Buscar info del pedido
+  var p = (_rt.pedidosTodos||[]).find(function(x){return x.id===pedId;}) || {};
+  var nroOrden = p.nro_orden || ('#'+pedId);
+  var total = parseFloat(p.total||0);
+  var cobradoYa = Math.max(parseFloat(p.cobrado_parcial)||0, parseFloat(p.cobrado_total)||0);
+  ov.innerHTML = "<div style='background:var(--sur);max-width:420px;width:100%;border-radius:12px;padding:1.2rem;box-shadow:0 8px 40px rgba(0,0,0,.5)'>"+
+    "<div style='font-size:1.4rem;font-weight:700;color:#5a8a4a;margin-bottom:.4rem'>✓ Marcar como entregado</div>"+
+    "<div style='font-size:.85rem;color:var(--tx);margin-bottom:.3rem'>Pedido <b>"+nroOrden+"</b> · "+fmt(total)+"</div>"+
+    "<div style='font-size:.72rem;color:var(--tx3);font-style:italic;margin-bottom:1rem;padding:.5rem .65rem;background:rgba(245,166,35,.08);border-left:3px solid var(--yel);border-radius:4px'>(no se registra ingreso de dinero)</div>"+
+    (cobradoYa>0 ? "<div style='font-size:.72rem;color:var(--green);margin-bottom:.8rem'>Ya cobrado: "+fmt(cobradoYa)+(cobradoYa>=total-0.01?" — pedido saldado ✓":"")+"</div>" : "")+
+    "<div style='display:flex;gap:.5rem;justify-content:flex-end'>"+
+      "<button class='btn btn-g' onclick='document.getElementById(\"_moEntregar\").remove()' style='padding:.5rem 1rem'>Cancelar</button>"+
+      "<button class='btn btn-a' onclick='_rbEntregarEjecutar("+pedId+")' style='padding:.5rem 1rem;background:#5a8a4a;border-color:#5a8a4a;font-weight:600'>✓ Confirmar entrega</button>"+
+    "</div></div>";
+  ov.addEventListener('click', function(e){if(e.target===ov) ov.remove();});
+  document.body.appendChild(ov);
+}
+
+function _rbEntregarEjecutar(pedId){
+  var btn = document.querySelector('#_moEntregar button.btn-a');
+  if(btn){btn.disabled=true; btn.textContent='Procesando...';}
+  // Marcar entregado en BD
+  var prom1 = apiPatch("pedidos_catalogo",{estado_envio:"entregado",entregado_at:new Date().toISOString()},"id=eq."+pedId);
+  // Actualizar estado dentro del borrador (si hay)
+  var prom2 = (typeof _rbActualizarEstadoPedido==='function' && _rt.borradorActivo)
+    ? _rbActualizarEstadoPedido(pedId, 'entregado')
+    : Promise.resolve();
+  Promise.all([prom1, prom2]).then(function(){
+    apiPost("pedidos_estados_log",{pedido_id:pedId,pedido_tabla:"pedidos_catalogo",estado:"entregado",nota:"Entregado por "+VENDEDOR_NOMBRE+" (sin cobro)",usuario:VENDEDOR_NOMBRE}).catch(function(e){console.error("[belle] log:",e);});
+    toast("Pedido entregado ✓","tok");
+    var mo = document.getElementById('_moEntregar'); if(mo) mo.remove();
+    if(typeof _rtRenderSubTab === 'function') _rtRenderSubTab();
+    if(typeof loadRutas === 'function') loadRutas();
+    if(typeof _rbVerificarAutoCompletar === 'function' && _rt.borradorActivo) _rbVerificarAutoCompletar();
+  }).catch(function(e){
+    console.error("[belle] _rbEntregarEjecutar:",e);
+    toast("Error al marcar entregado","terr");
+    if(btn){btn.disabled=false; btn.textContent='✓ Confirmar entrega';}
+  });
+}
+
+// MODAL 2: Marcar entregado + cobrar
+// Paso 1: elegir método de pago
+function _rbEntregarYCobrarModal(pedId){
+  var old = document.getElementById('_moEntregarCobrar'); if(old) old.remove();
+  // Cargar pedido fresco para tener saldo actualizado + datos cliente
+  apiGet('pedidos_catalogo','select=*&id=eq.'+pedId+'&limit=1').then(function(rows){
+    var rec = rows && rows[0];
+    if(!rec){toast('Pedido no encontrado','terr');return;}
+    var total = parseFloat(rec.total||0);
+    var cobradoYa = Math.max(parseFloat(rec.cobrado_parcial)||0, parseFloat(rec.cobrado_total)||0);
+    var saldo = Math.max(0, total - cobradoYa);
+    var nroOrden = rec.nro_orden || ('#'+pedId);
+    if(saldo <= 0.01){
+      // Ya está saldado — preguntar si solo quiere marcar entregado
+      if(confirm('Este pedido ya está saldado completamente ('+fmt(cobradoYa)+'/'+fmt(total)+'). ¿Marcar solo como entregado?')){
+        _rbEntregarEjecutar(pedId);
+      }
+      return;
+    }
+
+    // Construir modal paso 1: elegir método
+    var ov = document.createElement('div');
+    ov.id = '_moEntregarCobrar';
+    ov.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,.7);z-index:99999;display:flex;align-items:center;justify-content:center;padding:1rem';
+    window._ecPedidoActual = rec; // guardo para paso 2
+    var esCC = !!rec.es_cc;
+    ov.innerHTML = "<div style='background:var(--sur);max-width:460px;width:100%;border-radius:12px;padding:1.2rem;box-shadow:0 8px 40px rgba(0,0,0,.5);max-height:92vh;overflow-y:auto'>"+
+      "<div style='font-size:1.3rem;font-weight:700;color:#3fa9c9;margin-bottom:.4rem'>💰 Entregar + Cobrar</div>"+
+      "<div style='font-size:.85rem;color:var(--tx);margin-bottom:.6rem'>Pedido <b>"+nroOrden+"</b></div>"+
+      "<div style='background:var(--sur3);border-radius:8px;padding:.6rem .8rem;margin-bottom:.9rem;font-size:.8rem'>"+
+        "<div style='display:flex;justify-content:space-between;margin-bottom:.2rem'><span style='color:var(--tx3)'>Total pedido</span><b>"+fmt(total)+"</b></div>"+
+        (cobradoYa>0?"<div style='display:flex;justify-content:space-between;margin-bottom:.2rem'><span style='color:var(--tx3)'>Ya cobrado</span><b style='color:var(--green)'>"+fmt(cobradoYa)+"</b></div>":"")+
+        "<div style='display:flex;justify-content:space-between;padding-top:.3rem;border-top:1px solid var(--bd)'><span style='color:var(--tx2);font-weight:700'>A cobrar ahora</span><b style='color:var(--acc);font-size:1rem'>"+fmt(saldo)+"</b></div>"+
+      "</div>"+
+      (esCC ? "<div style='background:rgba(196,150,90,.12);border:1px solid var(--acc);border-radius:6px;padding:.5rem .7rem;margin-bottom:.8rem;font-size:.72rem;color:var(--acc)'>💳 Este pedido es CC — el cobro se aplica a las cuotas pendientes (FIFO)</div>" : "")+
+      "<div style='font-size:.72rem;font-weight:700;color:var(--tx3);text-transform:uppercase;margin-bottom:.4rem'>Método de pago</div>"+
+      "<div style='display:grid;grid-template-columns:1fr 1fr;gap:.4rem;margin-bottom:1rem'>"+
+        "<button class='_ecBtnPago' data-forma='efectivo' onclick='_ecSeleccionarForma(this)' style='padding:.7rem .5rem;border:2px solid var(--bd);background:var(--sur2);color:var(--tx);border-radius:8px;cursor:pointer;font-size:.85rem;font-weight:600;display:flex;flex-direction:column;align-items:center;gap:.2rem'>"+
+          "<span style='font-size:1.3rem'>💵</span><span>Efectivo</span>"+
+        "</button>"+
+        "<button class='_ecBtnPago' data-forma='transferencia' onclick='_ecSeleccionarForma(this)' style='padding:.7rem .5rem;border:2px solid var(--bd);background:var(--sur2);color:var(--tx);border-radius:8px;cursor:pointer;font-size:.85rem;font-weight:600;display:flex;flex-direction:column;align-items:center;gap:.2rem'>"+
+          "<span style='font-size:1.3rem'>🏦</span><span>Transferencia</span>"+
+        "</button>"+
+        "<button class='_ecBtnPago' data-forma='debito' onclick='_ecSeleccionarForma(this)' style='padding:.7rem .5rem;border:2px solid var(--bd);background:var(--sur2);color:var(--tx);border-radius:8px;cursor:pointer;font-size:.85rem;font-weight:600;display:flex;flex-direction:column;align-items:center;gap:.2rem'>"+
+          "<span style='font-size:1.3rem'>💳</span><span>Débito</span>"+
+        "</button>"+
+        "<button class='_ecBtnPago' data-forma='credito' onclick='_ecSeleccionarForma(this)' style='padding:.7rem .5rem;border:2px solid var(--bd);background:var(--sur2);color:var(--tx);border-radius:8px;cursor:pointer;font-size:.85rem;font-weight:600;display:flex;flex-direction:column;align-items:center;gap:.2rem'>"+
+          "<span style='font-size:1.3rem'>💳</span><span>Crédito</span>"+
+        "</button>"+
+      "</div>"+
+      "<div style='display:flex;gap:.5rem;justify-content:flex-end'>"+
+        "<button class='btn btn-g' onclick='document.getElementById(\"_moEntregarCobrar\").remove();window._ecPedidoActual=null;window._ecFormaSel=null;' style='padding:.5rem 1rem'>Cancelar</button>"+
+        "<button id='_ecBtnSiguiente' class='btn btn-a' onclick='_ecPasoConfirmar()' style='padding:.5rem 1rem;background:#3fa9c9;border-color:#3fa9c9;font-weight:600;opacity:.4;cursor:not-allowed' disabled>Siguiente →</button>"+
+      "</div></div>";
+    ov.addEventListener('click', function(e){if(e.target===ov){ov.remove();window._ecPedidoActual=null;window._ecFormaSel=null;}});
+    document.body.appendChild(ov);
+  }).catch(function(e){
+    console.error('[belle] _rbEntregarYCobrarModal:',e);
+    toast('Error cargando pedido','terr');
+  });
+}
+
+// Click en un método → resaltar + habilitar botón siguiente
+function _ecSeleccionarForma(btn){
+  var forma = btn.dataset.forma;
+  window._ecFormaSel = forma;
+  // Resetear estilos de todos
+  document.querySelectorAll('._ecBtnPago').forEach(function(b){
+    b.style.borderColor = 'var(--bd)';
+    b.style.background = 'var(--sur2)';
+    b.style.color = 'var(--tx)';
+  });
+  // Resaltar el seleccionado
+  btn.style.borderColor = '#3fa9c9';
+  btn.style.background = 'rgba(63,169,201,.15)';
+  btn.style.color = '#3fa9c9';
+  // Habilitar botón siguiente
+  var btnNext = document.getElementById('_ecBtnSiguiente');
+  if(btnNext){
+    btnNext.disabled = false;
+    btnNext.style.opacity = '1';
+    btnNext.style.cursor = 'pointer';
+  }
+}
+
+// Paso 2: confirmar
+function _ecPasoConfirmar(){
+  if(!window._ecFormaSel){toast('Elegí un método de pago','twarn');return;}
+  var rec = window._ecPedidoActual;
+  if(!rec){toast('Sin pedido','terr');return;}
+  var total = parseFloat(rec.total||0);
+  var cobradoYa = Math.max(parseFloat(rec.cobrado_parcial)||0, parseFloat(rec.cobrado_total)||0);
+  var saldo = Math.max(0, total - cobradoYa);
+  var nroOrden = rec.nro_orden || ('#'+rec.id);
+  var formaLbl = {efectivo:'💵 Efectivo', transferencia:'🏦 Transferencia', debito:'💳 Débito', credito:'💳 Crédito'}[window._ecFormaSel] || window._ecFormaSel;
+  var esCC = !!rec.es_cc;
+
+  // Reemplazar contenido del modal con el paso de confirmación
+  var modal = document.querySelector('#_moEntregarCobrar > div');
+  if(!modal) return;
+  modal.innerHTML = "<div style='font-size:1.3rem;font-weight:700;color:#3fa9c9;margin-bottom:.4rem'>📋 Confirmar</div>"+
+    "<div style='font-size:.85rem;color:var(--tx);margin-bottom:.9rem'>Pedido <b>"+nroOrden+"</b></div>"+
+    "<div style='background:rgba(63,169,201,.08);border:1px solid #3fa9c9;border-radius:8px;padding:.7rem .9rem;margin-bottom:1rem'>"+
+      "<div style='font-size:.72rem;color:var(--tx3);text-transform:uppercase;font-weight:600;margin-bottom:.5rem'>Se va a registrar:</div>"+
+      "<div style='display:flex;justify-content:space-between;margin-bottom:.45rem;font-size:.85rem'><span style='color:#5a8a4a'>✓ Entregado</span><b style='color:#5a8a4a'>"+VENDEDOR_NOMBRE+"</b></div>"+
+      "<div style='display:flex;justify-content:space-between;margin-bottom:.45rem;font-size:.85rem'><span style='color:#3fa9c9'>💰 Cobro</span><b style='color:#3fa9c9'>"+formaLbl+"</b></div>"+
+      "<div style='display:flex;justify-content:space-between;padding-top:.45rem;border-top:1px solid rgba(63,169,201,.3);font-size:1rem'><span style='color:var(--tx2);font-weight:700'>Monto</span><b style='color:var(--acc);font-size:1.1rem'>"+fmt(saldo)+"</b></div>"+
+      (esCC ? "<div style='font-size:.66rem;color:var(--acc);margin-top:.4rem;font-style:italic'>El cobro se aplicará a las cuotas pendientes del cliente (FIFO)</div>" : "")+
+    "</div>"+
+    "<div style='display:flex;gap:.5rem;justify-content:flex-end'>"+
+      "<button class='btn btn-g' onclick='_ecVolverAPaso1()' style='padding:.5rem 1rem'>← Volver</button>"+
+      "<button id='_ecBtnConfirmar' class='btn btn-a' onclick='_ecEjecutar()' style='padding:.5rem 1rem;background:#3fa9c9;border-color:#3fa9c9;font-weight:600'>✓ Confirmar cobro</button>"+
+    "</div>";
+}
+
+function _ecVolverAPaso1(){
+  // Re-abrir el modal paso 1 con el mismo pedido
+  var rec = window._ecPedidoActual;
+  if(!rec) return;
+  var formaPrev = window._ecFormaSel;
+  document.getElementById('_moEntregarCobrar').remove();
+  _rbEntregarYCobrarModal(rec.id);
+  // Re-seleccionar la forma previa después de un tick
+  setTimeout(function(){
+    var btnPrev = document.querySelector('._ecBtnPago[data-forma="'+formaPrev+'"]');
+    if(btnPrev) _ecSeleccionarForma(btnPrev);
+  }, 50);
+}
+
+// Ejecutar: marcar entregado + crear cobro + aplicar a CC si corresponde
+function _ecEjecutar(){
+  var rec = window._ecPedidoActual;
+  var forma = window._ecFormaSel;
+  if(!rec || !forma){toast('Datos incompletos','terr');return;}
+  var btn = document.getElementById('_ecBtnConfirmar');
+  if(btn){btn.disabled=true; btn.textContent='Procesando...'; btn.style.opacity='.6';}
+
+  var total = parseFloat(rec.total||0);
+  var cobradoYa = Math.max(parseFloat(rec.cobrado_parcial)||0, parseFloat(rec.cobrado_total)||0);
+  var saldo = Math.max(0, total - cobradoYa);
+  var pedId = rec.id;
+  var nroOrden = rec.nro_orden || ('#'+pedId);
+  var esCC = !!rec.es_cc;
+  var nuevoCobradoTotal = cobradoYa + saldo;
+  var esSaldado = nuevoCobradoTotal >= total - 0.01;
+
+  // 1) Patch del pedido: estado_envio=entregado + cobrado
+  var patchPed = {
+    estado_envio: 'entregado',
+    entregado_at: new Date().toISOString(),
+    cobrado_total: nuevoCobradoTotal,
+    cobrado_parcial: nuevoCobradoTotal,
+    forma_pago: forma
+  };
+  if(esSaldado){
+    patchPed.estado = 'cobrado';
+    patchPed.cobrado_at = new Date().toISOString();
+  }
+
+  var proms = [
+    apiPatch('pedidos_catalogo', patchPed, 'id=eq.'+pedId)
+  ];
+
+  // 2) Si es CC: crear cc_pago + aplicar a cuotas
+  if(esCC && rec.cliente_id){
+    var ccProm = apiPost('cc_pagos', {
+      cliente_id: rec.cliente_id,
+      monto: saldo,
+      forma_pago: forma,
+      fecha: new Date().toISOString().split('T')[0],
+      vendedor_id: VENDEDOR_ID,
+      registrado_por: VENDEDOR_NOMBRE+' (ruta — entregado+cobrado)',
+      nota: 'Cobro en ruta — pedido '+nroOrden,
+      saldo_a_favor: 0
+    }).then(function(rowsP){
+      var pago = Array.isArray(rowsP) && rowsP.length ? rowsP[0] : null;
+      if(pago && pago.id){
+        // Aplicar a cuotas (FIFO interno) si existe el helper
+        var aplicarProm = (typeof _ccAplicarPagoACuotasPedido === 'function')
+          ? _ccAplicarPagoACuotasPedido(pedId, saldo).catch(function(e){console.error('[cc cuotas]',e);})
+          : Promise.resolve();
+        return aplicarProm.then(function(){
+          return apiPost('cc_pagos_aplicaciones', {
+            pago_id: pago.id,
+            pedido_id: pedId,
+            monto_aplicado: saldo,
+            cubrio_pedido_completo: !!esSaldado
+          });
+        });
+      }
+    }).catch(function(e){console.error('[belle] cc_pago:',e);});
+    proms.push(ccProm);
+  }
+
+  // 3) Log de estados
+  proms.push(apiPost('pedidos_estados_log', {
+    pedido_id: pedId,
+    pedido_tabla: 'pedidos_catalogo',
+    estado: 'entregado',
+    nota: 'Entregado y cobrado ('+forma+', '+fmt(saldo)+') por '+VENDEDOR_NOMBRE,
+    usuario: VENDEDOR_NOMBRE
+  }).catch(function(e){console.error('[belle] log:',e);}));
+
+  // 4) Actualizar estado en borrador
+  if(typeof _rbActualizarEstadoPedido === 'function' && _rt.borradorActivo){
+    proms.push(_rbActualizarEstadoPedido(pedId, 'entregado'));
+  }
+
+  Promise.all(proms).then(function(){
+    toast('Pedido entregado y cobrado '+fmt(saldo)+' ✓','tok');
+    var mo = document.getElementById('_moEntregarCobrar'); if(mo) mo.remove();
+    window._ecPedidoActual = null;
+    window._ecFormaSel = null;
+    if(typeof _rtRenderSubTab === 'function') _rtRenderSubTab();
+    if(typeof loadRutas === 'function') loadRutas();
+    if(typeof _rbVerificarAutoCompletar === 'function' && _rt.borradorActivo) _rbVerificarAutoCompletar();
+  }).catch(function(e){
+    console.error('[belle] _ecEjecutar:',e);
+    toast('Error: '+(e&&e.message||'al procesar'),'terr');
+    if(btn){btn.disabled=false; btn.textContent='✓ Confirmar cobro'; btn.style.opacity='1';}
+  });
+}
+
 function _rbMarcarEntregado(pedId){
   if(!confirm("¿Marcar pedido #"+pedId+" como entregado?")) return;
   // Cambiar estado del pedido en BD (estado_envio=entregado)
