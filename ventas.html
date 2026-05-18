@@ -14696,14 +14696,112 @@ function _ecEjecutar(){
     if(esSaldado){
       patchPed.estado = 'cobrado';
       patchPed.cobrado_at = new Date().toISOString();
+      // FIX 2026-05-18: si NO es CC y se saldó, marcar confirmado_cobro=true
+      // (este flag lo usan otros lugares para saber que el cobro está completo)
+      if(!esCC){
+        patchPed.confirmado_cobro = true;
+        patchPed.confirmado_at = new Date().toISOString();
+      }
     }
   }
   // Modo a_cuenta: NO se toca cobrado_total del pedido (el monto va a la CC del cliente)
   // El pedido solo se marca entregado.
 
+  // FIX 2026-05-18: si no tiene vendedor asignado, auto-asignar al que entrega
+  if(!rec.vendedor_id){
+    patchPed.vendedor_id = VENDEDOR_ID;
+  }
+
+  // ─────────────────────────────────────────────────────────────────────
+  // FIX 2026-05-18 CRÍTICO: descontar stock + registrar venta en "mi dinero"
+  // Antes faltaba esto — el dinero no se sumaba y el stock seguía reservado.
+  //
+  // Reglas:
+  // - No CC + cobro: registrar ventas + mover stock (reserva → vendido_david)
+  // - CC modo "pedido": si el pedido quedó saldado, mover stock
+  //   (las ventas en CC se registran cuando se paga cuota a cuota, no acá)
+  // - CC modo "a_cuenta": NO descontar stock (el pedido sigue debiendo,
+  //   el stock se moverá cuando se complete su cobro)
+  // ─────────────────────────────────────────────────────────────────────
+  var debeDescontarStock = false;
+  var debeRegistrarVentas = false;
+  if(!esCC && modo === 'pedido' && montoCobrar > 0 && esSaldado){
+    // Cliente común que paga el pedido completo
+    debeDescontarStock = true;
+    debeRegistrarVentas = true;
+  } else if(esCC && modo === 'pedido' && esSaldado){
+    // CC que terminó de pagar el pedido
+    debeDescontarStock = true;
+    // En CC las "ventas" se registran cuota a cuota, no acá
+  }
+
+  // Parsear items del pedido
+  var items = [];
+  try {
+    items = (typeof rec.items === 'string') ? JSON.parse(rec.items) : (rec.items || []);
+  } catch(e){ items = []; }
+
   var proms = [
     apiPatch('pedidos_catalogo', patchPed, 'id=eq.'+pedId)
   ];
+
+  // ─── Descuento de stock + ventas (si corresponde) ───
+  if((debeDescontarStock || debeRegistrarVentas) && Array.isArray(items)){
+    items.forEach(function(it){
+      // Registrar venta (suma a "mi dinero")
+      if(debeRegistrarVentas){
+        proms.push(apiPost('ventas', {
+          vendedor_id: VENDEDOR_ID,
+          producto_id: it.producto_id || null,
+          producto_nombre: it.nombre,
+          cantidad: it.qty || 1,
+          precio_unitario: it.precio || 0,
+          segmento: it.segmento || 'x1',
+          total: it.total || 0,
+          periodo: periodoActual,
+          estado: 'confirmada',
+          origen: 'catalogo',
+          nro_orden: nroOrden,
+          forma_cobro: forma,
+          descuento: 0,
+          descuento_motivo: 'Entrega+cobro en ruta'
+        }).catch(function(e){console.error('[ec ventas]',e);}));
+      }
+
+      // Descontar stock (reserva → vendido_david)
+      if(debeDescontarStock){
+        // Si es combo, descontar cada producto del combo
+        if(it.isCombo && it.combo_id){
+          proms.push(apiGet('combo_items','select=producto_id,cantidad&combo_id=eq.'+it.combo_id).then(function(ci){
+            if(!Array.isArray(ci)) return;
+            return Promise.all(ci.filter(function(cit){return cit.producto_id;}).map(function(cit){
+              var cantTotal = (cit.cantidad||1)*(it.qty||1);
+              return patchStockFresco(cit.producto_id,{reserva:-cantTotal, vendido_david:+cantTotal},'Cobro combo en ruta '+nroOrden);
+            }));
+          }).catch(function(e){console.error('[ec stock combo]',e);}));
+          return;
+        }
+        // Producto normal (no decant, con producto_id)
+        var pid = it.producto_id;
+        if(!pid || it.isDecan) return;
+        proms.push(patchStockFresco(pid,{reserva:-(it.qty||1), vendido_david:+(it.qty||1)},'Cobro pedido en ruta '+nroOrden)
+          .then(function(r){
+            if(!r && typeof _alertaStock === 'function') _alertaStock('Stock de '+it.nombre+' no se actualizó al cobrar '+nroOrden);
+          })
+          .catch(function(e){console.error('[ec stock]',e);}));
+        // Registrar movimiento_stock para trazabilidad
+        proms.push(apiPost('movimientos_stock', {
+          producto_id: pid,
+          producto_nombre: it.nombre,
+          tipo: 'venta',
+          cantidad: it.qty||1,
+          motivo: 'Venta pedido '+nroOrden+' (entrega+cobro en ruta)',
+          usuario: VENDEDOR_NOMBRE || 'vendedor',
+          periodo: periodoActual
+        }).catch(function(e){console.error('[ec mov_stock]',e);}));
+      }
+    });
+  }
 
   // 2) Si es CC y hay monto a cobrar → crear cc_pago + aplicar a cuotas
   var cuotasAfectadasInfo = null;
@@ -14806,6 +14904,9 @@ function _ecEjecutar(){
     window._ecMontoACuenta = 0;
     if(typeof _rtRenderSubTab === 'function') _rtRenderSubTab();
     if(typeof loadRutas === 'function') loadRutas();
+    if(typeof loadDineroData === 'function') loadDineroData();
+    if(typeof loadPedidosWeb === 'function') loadPedidosWeb();
+    if(typeof renderCat === 'function') renderCat();
     if(typeof _rbVerificarAutoCompletar === 'function' && _rt.borradorActivo) _rbVerificarAutoCompletar();
   }).catch(function(e){
     console.error('[belle] _ecEjecutar:',e);

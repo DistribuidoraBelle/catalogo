@@ -536,7 +536,7 @@ footer>div{flex-direction:column;text-align:center;}footer>div>div{text-align:ce
   <div id="catTabsDrawerLista" style="padding:.5rem 0"></div>
 </div>
 <div class="filters" id="catFilters">
-  <div class="sw" id="catSearchWrap"><span class="sw-i">&#128269;</span><input type="text" id="srch" placeholder="Buscar perfume..." oninput="applyFilters()"></div>
+  <div class="sw" id="catSearchWrap"><span class="sw-i">&#128269;</span><input type="text" id="srch" placeholder="Buscar perfume..." autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false" oninput="applyFilters()"></div>
   <!-- Fila de botones de acción (en mobile aparecen abajo del buscador, en desktop al lado) -->
   <div id="catBotonesFila" style="display:contents">
     <button id="btnFiltrosMobile" onclick="toggleFiltrosMobile()" style="display:none;align-items:center;gap:.4rem;background:transparent;border:1.5px solid var(--accent);color:var(--accent);border-radius:20px;padding:.3rem .85rem;font-size:.72rem;cursor:pointer;white-space:nowrap">🔧 Filtros<span id="filtrosBadge" style="display:none;background:var(--accent);color:#fff;border-radius:10px;padding:.05rem .35rem;font-size:.62rem;font-weight:700;min-width:16px;text-align:center"></span></button>
@@ -1893,6 +1893,8 @@ function switchTab(tab,el){
     if(contactoEl)contactoEl.style.display="none";
   }
   document.getElementById("srch").value="";
+  // FIX 2026-05-18: disparar input para que la X de limpieza se oculte
+  try { document.getElementById("srch").dispatchEvent(new Event('input',{bubbles:true})); } catch(e){}
   document.getElementById("brandFilter").value="";
   genF="";
   document.querySelectorAll(".pills .pill").forEach(function(p,i){p.classList.toggle("act",i===0);});
@@ -4891,84 +4893,116 @@ function _catGenerarCuotasCliente(pedidoId, clienteId, planId, totalPedido){
   if(!pedidoId || !clienteId || !planId){
     return Promise.reject(new Error('Datos incompletos para generar cuotas'));
   }
-  return Promise.all([
-    apiGet('clientes','select=*&id=eq.'+clienteId+'&limit=1'),
-    apiGet('cc_planes_cliente','select=*&id=eq.'+planId+'&limit=1')
-  ]).then(function(res){
-    var cli = (res[0] && res[0][0]) || null;
-    var plan = (res[1] && res[1][0]) || null;
-    if(!cli || !plan){ throw new Error('Cliente o plan no encontrado'); }
+  // FIX 2026-05-16: guard de idempotencia — chequear si ya hay cuotas creadas para este pedido
+  // Si las hay, abortar y reportar (previene duplicación por reintentos/doble-click)
+  return apiGet('cc_cuotas','select=id&pedido_id=eq.'+pedidoId+'&limit=1').then(function(yaHay){
+    if(Array.isArray(yaHay) && yaHay.length){
+      console.warn('[catalogo cc] cuotas ya existían para pedido '+pedidoId+' — saltando creación');
+      return { cuotas: 0, ya_existian: true };
+    }
+    return Promise.all([
+      apiGet('clientes','select=*&id=eq.'+clienteId+'&limit=1'),
+      apiGet('cc_planes_cliente','select=*&id=eq.'+planId+'&limit=1')
+    ]).then(function(res){
+      var cli = (res[0] && res[0][0]) || null;
+      var plan = (res[1] && res[1][0]) || null;
+      if(!cli || !plan){ throw new Error('Cliente o plan no encontrado'); }
 
-    var nroCuotas = parseInt(plan.nro_cuotas);
-    var recargoPct = parseFloat(plan.recargo_pct) || 0;
-    var totalConRecargo = totalPedido * (1 + recargoPct/100);
-    var modo = cli.cc_modo_cuotas || 'iguales';
-    var entregaPct = parseFloat(cli.cc_entrega_inicial_pct) || 0;
-    var diasGracia = 3;
+      var nroCuotas = parseInt(plan.nro_cuotas);
+      var recargoPct = parseFloat(plan.recargo_pct) || 0;
+      var totalConRecargo = totalPedido * (1 + recargoPct/100);
+      var modo = cli.cc_modo_cuotas || 'iguales';
+      var entregaPct = parseFloat(cli.cc_entrega_inicial_pct) || 0;
+      var diasGracia = 3;
 
-    // 1) Calcular montos
-    var montos = [];
-    if(modo === 'entrega_inicial' && nroCuotas > 1 && entregaPct > 0){
-      var primera = Math.round(totalConRecargo * (entregaPct/100) * 100) / 100;
-      var restoTotal = totalConRecargo - primera;
-      var resto = Math.floor((restoTotal / (nroCuotas - 1)) * 100) / 100;
-      montos.push(primera);
-      for(var i = 1; i < nroCuotas - 1; i++) montos.push(resto);
-      if(nroCuotas > 1){
-        var ultima = totalConRecargo - primera - (resto * (nroCuotas - 2));
-        montos.push(Math.round(ultima*100)/100);
+      // 1) Calcular montos
+      var montos = [];
+      if(modo === 'entrega_inicial' && nroCuotas > 1 && entregaPct > 0){
+        var primera = Math.round(totalConRecargo * (entregaPct/100) * 100) / 100;
+        var restoTotal = totalConRecargo - primera;
+        var resto = Math.floor((restoTotal / (nroCuotas - 1)) * 100) / 100;
+        montos.push(primera);
+        for(var i = 1; i < nroCuotas - 1; i++) montos.push(resto);
+        if(nroCuotas > 1){
+          var ultima = totalConRecargo - primera - (resto * (nroCuotas - 2));
+          montos.push(Math.round(ultima*100)/100);
+        }
+      } else {
+        var base = Math.floor((totalConRecargo / nroCuotas) * 100) / 100;
+        for(var j = 0; j < nroCuotas - 1; j++) montos.push(base);
+        montos.push(Math.round((totalConRecargo - base * (nroCuotas - 1)) * 100) / 100);
       }
-    } else {
-      var base = Math.floor((totalConRecargo / nroCuotas) * 100) / 100;
-      for(var j = 0; j < nroCuotas - 1; j++) montos.push(base);
-      montos.push(Math.round((totalConRecargo - base * (nroCuotas - 1)) * 100) / 100);
-    }
 
-    // 2) Calcular fechas
-    var fechas = [];
-    var primeraFecha = _catCcProximaFecha(cli, new Date());
-    var salto = _catCcSalto(cli);
-    for(var k = 0; k < nroCuotas; k++){
-      var f = new Date(primeraFecha);
-      f.setDate(f.getDate() + (k * salto));
-      fechas.push(f.toISOString().slice(0,10));
-    }
+      // 2) Calcular fechas
+      var fechas = [];
+      var primeraFecha = _catCcProximaFecha(cli, new Date());
+      var salto = _catCcSalto(cli);
+      for(var k = 0; k < nroCuotas; k++){
+        var f = new Date(primeraFecha);
+        f.setDate(f.getDate() + (k * salto));
+        fechas.push(f.toISOString().slice(0,10));
+      }
 
-    // 3) Crear cuotas en paralelo
-    var promesas = [];
-    for(var i2 = 0; i2 < nroCuotas; i2++){
-      promesas.push(apiPost('cc_cuotas', {
-        pedido_id: pedidoId,
-        nro_cuota: i2 + 1,
-        total_cuotas: nroCuotas,
-        monto: montos[i2],
-        fecha_vencimiento: fechas[i2],
-        estado: 'pendiente',
-        dias_gracia: diasGracia,
-        porcentaje: nroCuotas > 0 ? Math.round((montos[i2] / totalConRecargo) * 10000) / 100 : null
-      }));
-    }
+      // 3) FIX 2026-05-16: crear cuotas EN SERIE (no paralelo) para poder hacer rollback si una falla
+      // Antes: Promise.all paralelo → si una falla quedaban cuotas parciales sin manera de detectarlo
+      var cuotasCreadas = [];
+      var chain = Promise.resolve();
+      for(var i2 = 0; i2 < nroCuotas; i2++){
+        (function(idx){
+          chain = chain.then(function(){
+            return apiPost('cc_cuotas', {
+              pedido_id: pedidoId,
+              nro_cuota: idx + 1,
+              total_cuotas: nroCuotas,
+              monto: montos[idx],
+              fecha_vencimiento: fechas[idx],
+              estado: 'pendiente',
+              dias_gracia: diasGracia,
+              porcentaje: nroCuotas > 0 ? Math.round((montos[idx] / totalConRecargo) * 10000) / 100 : null
+            }).then(function(rowsCu){
+              // Guardar ID para posible rollback
+              if(Array.isArray(rowsCu) && rowsCu[0] && rowsCu[0].id){
+                cuotasCreadas.push(rowsCu[0].id);
+              }
+            });
+          });
+        })(i2);
+      }
 
-    // 4) Actualizar pedido con plan + recargo + fecha vencimiento
-    var fechaVencFinal = fechas[fechas.length - 1];
-    var pedidoPatch = {
-      cc_plan_id: planId,
-      cc_recargo_pct: recargoPct,
-      total_sin_recargo: totalPedido,
-      cc_nro_cuotas_real: nroCuotas,
-      cc_fecha_vencimiento: fechaVencFinal,
-      es_cc: true
-    };
-    if(recargoPct > 0){
-      pedidoPatch.total = Math.round(totalConRecargo * 100) / 100;
-      pedidoPatch.total_con_envio = pedidoPatch.total;
-    }
-    // Usar apiPatch nativo del catálogo (respeta token de cliente para RLS futuro)
-    promesas.push(apiPatch('pedidos_catalogo', pedidoPatch, 'id=eq.'+pedidoId));
-
-    return Promise.all(promesas).then(function(){
-      console.log('[catalogo cc] '+nroCuotas+' cuotas generadas para pedido '+pedidoId);
-      return { cuotas: montos.length, totalConRecargo: totalConRecargo };
+      return chain.then(function(){
+        // 4) Solo si TODAS las cuotas se crearon, actualizar el pedido
+        var fechaVencFinal = fechas[fechas.length - 1];
+        var pedidoPatch = {
+          cc_plan_id: planId,
+          cc_recargo_pct: recargoPct,
+          total_sin_recargo: totalPedido,
+          cc_nro_cuotas_real: nroCuotas,
+          cc_fecha_vencimiento: fechaVencFinal,
+          es_cc: true
+        };
+        if(recargoPct > 0){
+          pedidoPatch.total = Math.round(totalConRecargo * 100) / 100;
+          pedidoPatch.total_con_envio = pedidoPatch.total;
+        }
+        return apiPatch('pedidos_catalogo', pedidoPatch, 'id=eq.'+pedidoId);
+      }).then(function(){
+        console.log('[catalogo cc] '+nroCuotas+' cuotas generadas para pedido '+pedidoId);
+        return { cuotas: montos.length, totalConRecargo: totalConRecargo };
+      }).catch(function(err){
+        // ROLLBACK: si algo falló a mitad de camino, eliminar las cuotas creadas
+        console.error('[catalogo cc] error generando cuotas — haciendo rollback de '+cuotasCreadas.length+' cuotas:', err);
+        if(cuotasCreadas.length > 0){
+          var rollbackProms = cuotasCreadas.map(function(cuId){
+            return apiDelete('cc_cuotas','id=eq.'+cuId).catch(function(e){
+              console.error('[rollback] no se pudo eliminar cuota '+cuId, e);
+            });
+          });
+          return Promise.all(rollbackProms).then(function(){
+            throw err; // re-lanzar el error original
+          });
+        }
+        throw err;
+      });
     });
   });
 }
@@ -9519,6 +9553,16 @@ function _catVerPedido(pedId){
     }
     h += "</div>";
 
+    // FIX 2026-05-16: si el pedido es CC con cuotas, mostrar el cronograma al cliente
+    // Antes el cliente no veía sus cuotas individuales — solo el total. Ahora ve cuándo
+    // vence cada cuota, cuánto debe, y cuáles ya pagó.
+    if(ped.es_cc && ped.cc_nro_cuotas_real && ped.cc_nro_cuotas_real > 0){
+      h += "<div id='_catPedCuotasBox' style='margin-bottom:1.2rem'>";
+      h += "<div style='font-size:.7rem;color:var(--mid);text-transform:uppercase;font-weight:600;margin-bottom:.4rem'>Cuotas</div>";
+      h += "<div style='text-align:center;padding:.7rem;color:var(--mid);font-size:.78rem'><div class='cat-spin' style='display:inline-block;margin-right:.3rem'></div>Cargando cuotas...</div>";
+      h += "</div>";
+    }
+
     // Notas del pedido (si las hay)
     if(ped.notas){
       h += "<div style='font-size:.7rem;color:var(--mid);text-transform:uppercase;font-weight:600;margin-bottom:.3rem'>Notas</div>";
@@ -9542,6 +9586,11 @@ function _catVerPedido(pedId){
     }
 
     body.innerHTML = h;
+
+    // FIX 2026-05-16: cargar cuotas async si el pedido es CC
+    if(ped.es_cc && ped.cc_nro_cuotas_real && ped.cc_nro_cuotas_real > 0){
+      _catCargarCuotasPedido(pedId);
+    }
   }).catch(function(e){
     console.error("[belle-cat] _catVerPedido error:",e);
     var body = document.getElementById("_catMoPedidoBody");
@@ -9554,6 +9603,79 @@ function _catCerrarPedido(){
   if(mo) mo.remove();
   // FIX 2026-05-15: desregistrar del back button
   _catModalBackDesregistrar('_catMoPedido');
+}
+
+// FIX 2026-05-16: cargar cuotas individuales de un pedido del cliente y mostrarlas
+function _catCargarCuotasPedido(pedId){
+  apiGet('cc_cuotas','select=*&pedido_id=eq.'+pedId+'&estado=neq.cancelada&order=nro_cuota.asc').then(function(cuotas){
+    var box = document.getElementById('_catPedCuotasBox');
+    if(!box) return;
+    cuotas = Array.isArray(cuotas) ? cuotas : [];
+    if(!cuotas.length){
+      box.innerHTML = "<div style='font-size:.7rem;color:var(--mid);text-transform:uppercase;font-weight:600;margin-bottom:.4rem'>Cuotas</div>"+
+        "<div style='background:#fef9f0;border:1px solid #f4e3c1;border-radius:7px;padding:.6rem .75rem;font-size:.75rem;color:#7a5a1a'>"+
+        "Las cuotas se generan cuando admin/vendedor confirme tu pedido."+
+        "</div>";
+      return;
+    }
+    var h = "<div style='font-size:.7rem;color:var(--mid);text-transform:uppercase;font-weight:600;margin-bottom:.4rem'>Cuotas ("+cuotas.length+")</div>";
+    var totalCuotas = 0;
+    var pagadoCuotas = 0;
+    cuotas.forEach(function(cu){ totalCuotas += parseFloat(cu.monto)||0; pagadoCuotas += parseFloat(cu.monto_pagado)||0; });
+    h += "<div style='background:linear-gradient(135deg,#fdf8f0,#faf5ec);border:1px solid #e8d9bf;border-radius:9px;padding:.5rem .65rem'>";
+    cuotas.forEach(function(cu){
+      var pagado = parseFloat(cu.monto_pagado)||0;
+      var monto = parseFloat(cu.monto)||0;
+      var pendiente = monto - pagado;
+      var hoy = new Date(); hoy.setHours(0,0,0,0);
+      var fVenc = new Date(cu.fecha_vencimiento+"T00:00:00");
+      var diasGracia = parseInt(cu.dias_gracia)||0;
+      var fLimite = new Date(fVenc); fLimite.setDate(fLimite.getDate()+diasGracia);
+      var dias = Math.floor((fLimite-hoy)/86400000);
+      var ic, col, lbl;
+      if(cu.estado === 'pagada'){
+        ic='✓'; col='#3a6f2a'; lbl='Pagada';
+      } else if(cu.estado === 'parcial'){
+        ic='◑'; col='#a06820'; lbl='Parcial';
+      } else if(dias < 0){
+        ic='⚠'; col='#b53939'; lbl='Vencida hace '+(-dias)+'d';
+      } else if(dias === 0){
+        ic='🔔'; col='#a06820'; lbl='Vence hoy';
+      } else if(dias <= 3){
+        ic='⏰'; col='#a06820'; lbl='Vence en '+dias+'d';
+      } else {
+        ic='⏳'; col='var(--mid)'; lbl='En '+dias+'d';
+      }
+      h += "<div style='display:flex;justify-content:space-between;align-items:center;padding:.4rem 0;border-bottom:1px solid rgba(196,150,90,.18);font-size:.78rem'>";
+      h += "<div style='flex:1;min-width:0'>";
+      h += "<div style='color:"+col+";font-weight:600'>"+ic+" Cuota "+cu.nro_cuota+"/"+cu.total_cuotas+"</div>";
+      h += "<div style='font-size:.65rem;color:var(--mid);margin-top:.05rem'>"+_catFmtFechaCorta(cu.fecha_vencimiento)+" · "+lbl+"</div>";
+      h += "</div>";
+      h += "<div style='text-align:right;flex-shrink:0'>";
+      if(cu.estado === 'pagada'){
+        h += "<div style='font-size:.75rem;font-weight:700;color:#3a6f2a'>"+_catFmtMoney(monto)+"</div>";
+        h += "<div style='font-size:.62rem;color:var(--mid)'>pagada</div>";
+      } else {
+        h += "<div style='font-size:.85rem;font-weight:700;color:"+col+"'>"+_catFmtMoney(pendiente)+"</div>";
+        if(pagado>0){
+          h += "<div style='font-size:.62rem;color:var(--mid)'>de "+_catFmtMoney(monto)+"</div>";
+        }
+      }
+      h += "</div>";
+      h += "</div>";
+    });
+    var pendienteTotal = totalCuotas - pagadoCuotas;
+    h += "<div style='display:flex;justify-content:space-between;padding-top:.45rem;margin-top:.2rem;font-size:.75rem;font-weight:700'>";
+    h += "<span style='color:var(--dark)'>Pendiente total:</span>";
+    h += "<span style='color:"+(pendienteTotal>0?'#b53939':'#3a6f2a')+"'>"+_catFmtMoney(pendienteTotal)+"</span>";
+    h += "</div>";
+    h += "</div>";
+    box.innerHTML = h;
+  }).catch(function(e){
+    console.error('[cat cuotas pedido]',e);
+    var box = document.getElementById('_catPedCuotasBox');
+    if(box) box.innerHTML = "<div style='font-size:.72rem;color:#b53939'>Error cargando cuotas</div>";
+  });
 }
 
 // Timeline visual del pedido — etapas FIJAS según estado real
@@ -10709,14 +10831,28 @@ function _catScrollHighlight(card){
 .belle-clearx-btn:hover{background:rgba(0,0,0,.25)}
 .belle-clearx-btn.visible{display:flex}
 
-/* Ocultar X nativa del navegador (Safari, iOS, Edge) que aparece en inputs */
+/* Ocultar X nativa del navegador (Safari, iOS, Edge, Chrome) que aparece en inputs */
 input[data-bclx="1"]::-webkit-search-decoration,
 input[data-bclx="1"]::-webkit-search-cancel-button,
 input[data-bclx="1"]::-webkit-search-results-button,
-input[data-bclx="1"]::-webkit-search-results-decoration{
-  -webkit-appearance:none;
-  appearance:none;
+input[data-bclx="1"]::-webkit-search-results-decoration,
+input[data-bclx="1"]::-webkit-clear-button,
+input[data-bclx="1"]::-webkit-inner-spin-button,
+input[data-bclx="1"]::-webkit-outer-spin-button,
+input[data-bclx="1"]::-webkit-contacts-auto-fill-button,
+input[data-bclx="1"]::-webkit-credentials-auto-fill-button,
+input[data-bclx="1"]::-webkit-strong-password-auto-fill-button,
+input[data-bclx="1"]::-webkit-caps-lock-indicator,
+input[data-bclx="1"]::-webkit-textfield-decoration-container{
+  -webkit-appearance:none !important;
+  appearance:none !important;
   display:none !important;
+  width:0 !important;
+  height:0 !important;
+  visibility:hidden !important;
+  pointer-events:none !important;
+  position:absolute !important;
+  right:-9999px !important;
 }
 input[data-bclx="1"]::-ms-clear,
 input[data-bclx="1"]::-ms-reveal{
@@ -10726,6 +10862,19 @@ input[data-bclx="1"]::-ms-reveal{
 }
 /* También por si el browser usa type="search" */
 input[type="search"][data-bclx="1"]{-webkit-appearance:textfield;appearance:textfield}
+
+/* FIX 2026-05-18: aplicar TAMBIÉN a inputs comunes de búsqueda aunque no tengan data-bclx
+   todavía — cubre el caso de carga inicial mientras el JS los procesa */
+input[type="text"]::-webkit-search-decoration,
+input[type="text"]::-webkit-search-cancel-button,
+input[type="text"]::-webkit-clear-button,
+input[type="search"]::-webkit-search-decoration,
+input[type="search"]::-webkit-search-cancel-button,
+input[type="search"]::-webkit-clear-button{
+  -webkit-appearance:none !important;
+  appearance:none !important;
+  display:none !important;
+}
 </style>
 <script id="belleClearXScript">
 (function(){
@@ -10771,16 +10920,27 @@ input[type="search"][data-bclx="1"]{-webkit-appearance:textfield;appearance:text
     function positionBtn(){
       var inpRect = inp.getBoundingClientRect();
       var parentRect = parent.getBoundingClientRect();
+      // Si el parent no tiene tamaño todavía (display:none, no en DOM, etc), abortar
+      if(parentRect.width === 0 || inpRect.width === 0) return false;
       var rightOffset = parentRect.right - inpRect.right + 8;
       var topOffset = (inpRect.top + inpRect.height/2 - parentRect.top);
       btn.style.right = rightOffset + 'px';
       btn.style.top = topOffset + 'px';
       btn.style.transform = 'translateY(-50%)';
+      return true;
     }
     function updateVisibility(){
-      if(inp.value && inp.value.length > 0){
-        positionBtn();
-        btn.classList.add('visible');
+      // FIX 2026-05-18: solo mostrar si hay texto Y el input es visible
+      var hasValue = inp.value && inp.value.length > 0;
+      var inpRect = inp.getBoundingClientRect();
+      var inpVisible = inpRect.width > 0 && inpRect.height > 0;
+      if(hasValue && inpVisible){
+        var ok = positionBtn();
+        if(ok){
+          btn.classList.add('visible');
+        } else {
+          btn.classList.remove('visible');
+        }
       } else {
         btn.classList.remove('visible');
       }
@@ -10789,7 +10949,27 @@ input[type="search"][data-bclx="1"]{-webkit-appearance:textfield;appearance:text
     inp.addEventListener('input', updateVisibility);
     inp.addEventListener('change', updateVisibility);
     inp.addEventListener('focus', updateVisibility);
+    inp.addEventListener('blur', function(){
+      // Recalcular después de un tick para esperar otros handlers
+      setTimeout(updateVisibility, 50);
+    });
+    // FIX 2026-05-18: poll defensivo cada 400ms — detecta cambios programáticos
+    // que no disparan evento 'input' (ej. element.value = "" desde código).
+    setInterval(function(){
+      var hasValue = inp.value && inp.value.length > 0;
+      var isVisible = btn.classList.contains('visible');
+      if(!hasValue && isVisible){
+        btn.classList.remove('visible');
+      } else if(hasValue && !isVisible){
+        var inpRect = inp.getBoundingClientRect();
+        if(inpRect.width > 0 && inpRect.height > 0){
+          positionBtn();
+          btn.classList.add('visible');
+        }
+      }
+    }, 400);
     window.addEventListener('resize', function(){if(btn.classList.contains('visible')) positionBtn();});
+    window.addEventListener('scroll', function(){if(btn.classList.contains('visible')) positionBtn();}, {passive:true, capture:true});
     btn.addEventListener('click', function(e){
       e.preventDefault();
       e.stopPropagation();
