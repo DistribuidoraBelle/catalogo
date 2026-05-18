@@ -6373,32 +6373,46 @@ function confirmarCobro(pedId,btn){
 }
 
 function cancelarPedidoWeb(pedId,btn){
-  bellConfirm("Cancelar pedido? El stock reservado vuelve al inventario.",function(){
+  bellConfirm("Cancelar pedido? El stock se devuelve al inventario. Si ya estaba cobrado, también se borran las ventas y el pago CC.",function(){
   if(btn)btn.disabled=true;
   apiGet("pedidos_catalogo","select=*&id=eq."+pedId).then(function(data){
     if(!Array.isArray(data)||!data.length)return;
     var ped=data[0];var items=[];
     try{items=typeof ped.items==="string"?JSON.parse(ped.items):ped.items;}catch(ex){}
+    var nroOrden = ped.nro_orden || ("WEB-"+pedId);
+    // FIX 2026-05-18 BUG #6: detectar si tenía cobro (parcial o total)
+    var teniaCobro = (ped.estado==='cobrado' || ped.estado==='cobrado_parcial' || ped.confirmado_cobro || (parseFloat(ped.cobrado_total)||0) > 0);
+    // Detectar columna vendido según vendedor del pedido
+    var colVendido = 'vendido_david';
+    var vendPed = ped.vendedor_id;
+    if(vendPed === 2) colVendido = 'vendido_facu';
+    else if(vendPed === 3) colVendido = 'vendido_marcela';
+
     var promises=[apiPatch("pedidos_catalogo",{estado:"cancelado"},"id=eq."+pedId)];
-    // FEAT CC v2 (2026-05-14): cancelar cuotas asociadas (regla ORO)
+    // FEAT CC v2: cancelar cuotas asociadas
     promises.push(apiPatch('cc_cuotas',{estado:'cancelada',updated_at:new Date().toISOString()},'pedido_id=eq.'+pedId+'&estado=in.(pendiente,parcial,vencida)').catch(function(){}));
-    var estadoPed=ped.estado;
-    if(Array.isArray(items))items.forEach(function(it){
-      if(it.isCombo){
-        // Devolver combos si el pedido estaba reservado O pendiente
-        if(estadoPed!=="reservado"&&estadoPed!=="pendiente")return;
-        // Siempre leer combo_items fresco de BD — nunca usar cache
+
+    if(Array.isArray(items)) items.forEach(function(it){
+      // Combos
+      if(it.isCombo && it.combo_id){
+        if(!teniaCobro && ped.estado!=="reservado" && ped.estado!=="pendiente") return;
         promises.push(
           apiGet("combo_items","select=producto_id,cantidad&combo_id=eq."+it.combo_id).then(function(ci){
             if(!Array.isArray(ci))return;
             return Promise.all(ci.filter(function(cit){return cit.producto_id;}).map(function(cit){
               var cantTotal=(cit.cantidad||1)*(it.qty||1);
-              // FIX 1 (2026-05-11): loguear cancelación de combo. Leer producto para stock_antes.
               return apiGet("productos","select=id,nombre,stock_actual&id=eq."+cit.producto_id).then(function(rows2){
                 var fp2=rows2&&rows2[0];
                 var stockAntes2=fp2?(fp2.stock_actual||0):0;
                 var nombreProd2=fp2?fp2.nombre:("Prod #"+cit.producto_id);
-                return patchStockFresco(cit.producto_id,{stock_actual:+cantTotal,reserva:-cantTotal},'Cancelación combo web')
+                // FIX 2026-05-18: devolver desde vendido si estaba cobrado, sino desde reserva
+                var deltaCombo = {stock_actual:+cantTotal};
+                if(teniaCobro){
+                  deltaCombo[colVendido] = -cantTotal;
+                } else {
+                  deltaCombo.reserva = -cantTotal;
+                }
+                return patchStockFresco(cit.producto_id, deltaCombo, 'Cancelación combo web '+(teniaCobro?'cobrado ':'')+nroOrden)
                   .then(function(){
                     return apiPost("movimientos_stock",{
                       producto_id:cit.producto_id,
@@ -6407,7 +6421,7 @@ function cancelarPedidoWeb(pedId,btn){
                       cantidad:cantTotal,
                       stock_antes:stockAntes2,
                       stock_despues:stockAntes2+cantTotal,
-                      motivo:"Cancelación combo web "+(ped.nro_orden||"#"+pedId)+" — "+(it.nombre||("Combo #"+it.combo_id)),
+                      motivo:"Cancelación combo "+(teniaCobro?'cobrado ':'')+(ped.nro_orden||"#"+pedId)+" — "+(it.nombre||("Combo #"+it.combo_id)),
                       usuario:VENDEDOR_NOMBRE,
                       created_at:new Date().toISOString()
                     }).catch(function(e){console.error("[belle] mov no registrado:",e);});
@@ -6418,28 +6432,25 @@ function cancelarPedidoWeb(pedId,btn){
         );
         return;
       }
+      // Decants/sin producto_id: skip
       var pid=it.producto_id;
       if(!pid||it.isDecan)return;
       var qty=it.qty||1;
-      // Devolver si estaba reservado O pendiente (pendiente también reserva stock desde el fix de combos)
-      if(estadoPed!=="reservado"&&estadoPed!=="pendiente")return;
-      // FIX 1 (2026-05-11): devolver exactamente qty (Opción A — siempre lo que reservó el pedido).
-      // patchStockFresco usa Math.max(0,...) en reserva, así que si reserva está corrupta queda en 0.
-      // El movimiento_stock se crea SOLO si patchStockFresco corre exitosamente.
+      // FIX 2026-05-18: si estaba cobrado, devolver desde vendido_X; sino desde reserva
+      if(!teniaCobro && ped.estado!=="reservado" && ped.estado!=="pendiente") return;
       promises.push(
         apiGet("productos","select=id,nombre,stock_actual,reserva&id=eq."+pid).then(function(rows){
           var fp=rows&&rows[0];
           if(!fp){console.warn('[cancelar] producto no encontrado pid='+pid);return;}
           var stockAntes=fp.stock_actual||0;
-          var reservaAntes=fp.reserva||0;
-          // Detectar inconsistencias y dejar log
-          if(reservaAntes < qty){
-            console.warn('[cancelar] desync reserva='+reservaAntes+' < qty='+qty+' pid='+pid+' — devolviendo qty completo igual');
+          var delta = {stock_actual:+qty};
+          if(teniaCobro){
+            delta[colVendido] = -qty;
+          } else {
+            delta.reserva = -qty;
           }
-          // Opción A: devolver siempre qty. patchStockFresco protege con Math.max(0,...).
-          return patchStockFresco(pid,{stock_actual:+qty,reserva:-qty},'Cancelación pedido web')
+          return patchStockFresco(pid, delta, 'Cancelación pedido web '+(teniaCobro?'cobrado ':'')+nroOrden)
             .then(function(){
-              // Solo loggear si el patch corrió exitosamente
               return apiPost("movimientos_stock",{
                 producto_id:pid,
                 producto_nombre:it.nombre||fp.nombre||("Prod #"+pid),
@@ -6447,18 +6458,47 @@ function cancelarPedidoWeb(pedId,btn){
                 cantidad:qty,
                 stock_antes:stockAntes,
                 stock_despues:stockAntes+qty,
-                motivo:"Cancelación pedido web "+(ped.nro_orden||"#"+pedId),
+                motivo:"Cancelación pedido "+(teniaCobro?'cobrado ':'')+(ped.nro_orden||"#"+pedId),
                 usuario:VENDEDOR_NOMBRE,
                 created_at:new Date().toISOString()
               }).catch(function(e){console.error("[belle] mov no registrado:",e);});
             });
         })
       );
-
     });
+
+    // FIX 2026-05-18 BUG #6: si tenía cobro, borrar ventas asociadas + limpiar cc_pagos
+    if(teniaCobro){
+      promises.push(apiDelete('ventas','nro_orden=eq.'+encodeURIComponent(nroOrden)).catch(function(e){console.error('[cancelar] borrar ventas:',e);}));
+      promises.push(apiGet('cc_pagos_aplicaciones','select=id,pago_id&pedido_id=eq.'+pedId).then(function(apps){
+        if(!Array.isArray(apps)||!apps.length)return;
+        var pagoIds = Array.from(new Set(apps.map(function(a){return a.pago_id;}).filter(function(x){return x;})));
+        var p1 = apiDelete('cc_pagos_aplicaciones','pedido_id=eq.'+pedId);
+        var p2 = Promise.all(pagoIds.map(function(pid){
+          return apiGet('cc_pagos_aplicaciones','select=id&pago_id=eq.'+pid).then(function(rest){
+            if(!Array.isArray(rest)||!rest.length){
+              return apiDelete('cc_pagos','id=eq.'+pid);
+            }
+          });
+        }));
+        return Promise.all([p1, p2]);
+      }).catch(function(e){console.error('[cancelar] cc_pagos cleanup',e);}));
+    }
+
+    // Log
+    promises.push(apiPost('pedidos_estados_log',{
+      pedido_id: pedId,
+      pedido_tabla: 'pedidos_catalogo',
+      estado: 'cancelado',
+      nota: 'Cancelado por ' + VENDEDOR_NOMBRE + (teniaCobro ? ' (estaba cobrado — ventas y cc_pagos borrados, stock devuelto desde '+colVendido+')' : ' (stock devuelto desde reserva)'),
+      usuario: VENDEDOR_NOMBRE
+    }).catch(function(){}));
+
     Promise.all(promises).then(function(){
       if(ped.cliente_id)_logEstadoPedidoV(pedId,'cancelado','Pedido cancelado');
-      toast("Pedido cancelado - stock devuelto","twarn");loadPedidosWeb();renderCat();
+      toast("Pedido cancelado — stock devuelto"+(teniaCobro?" + ventas/CC limpiados":""),"twarn");
+      loadPedidosWeb();renderCat();
+      if(typeof loadDineroData==='function') loadDineroData();
     }).catch(function(){if(btn)btn.disabled=false;});
   });  });
 }
@@ -6477,6 +6517,20 @@ function editarPedido(pedId){
   apiGet("pedidos_catalogo","select=*&id=eq."+pedId).then(function(data){
     if(!Array.isArray(data)||!data.length)return;
     var ped=data[0];
+    // FIX 2026-05-18 BUG #9: bloquear edición de pedidos cobrados/cobrados parciales
+    // Solo admin puede editar pedidos que ya tuvieron movimiento de dinero/stock.
+    // Si quiere modificar, el vendedor debe pedirle al admin, o cancelar y rehacer.
+    var teniaCobro = (ped.estado==='cobrado' || ped.estado==='cobrado_parcial' || ped.confirmado_cobro || (parseFloat(ped.cobrado_total)||0) > 0);
+    if(teniaCobro){
+      var nroOrden = ped.nro_orden || ('#'+pedId);
+      toast('No podés editar ' + nroOrden + ' — ya está cobrado. Pedile al admin o cancelá y rehacé el pedido.', 'twarn', 5000);
+      return;
+    }
+    // Si está cancelado, tampoco tiene sentido editarlo
+    if(ped.estado === 'cancelado'){
+      toast('No podés editar un pedido cancelado','twarn');
+      return;
+    }
     var items=[];try{items=typeof ped.items==="string"?JSON.parse(ped.items):ped.items;}catch(ex){}
     // Cargar items en el carrito real
     cart={};cstate={};decanState={};
@@ -7714,24 +7768,60 @@ function confirmarCancelPed(){
     var ped=data[0];var items=[];
     try{items=typeof ped.items==="string"?JSON.parse(ped.items):ped.items||[];}catch(ex){}
     var periodo=document.getElementById("hPeriodo")?document.getElementById("hPeriodo").textContent||"general":"general";
+    var nroOrden = ped.nro_orden || ("CAN-"+pedId);
+    // FIX 2026-05-18 BUG #7: detectar si tenía cobro (parcial/total)
+    var teniaCobro = (ped.estado==='cobrado' || ped.estado==='cobrado_parcial' || ped.confirmado_cobro || (parseFloat(ped.cobrado_total)||0) > 0);
+    var colVendido = 'vendido_david';
+    if(ped.vendedor_id === 2) colVendido = 'vendido_facu';
+    else if(ped.vendedor_id === 3) colVendido = 'vendido_marcela';
+
     var promises=[
       apiPatch("pedidos_catalogo",{estado:"cancelado",notas:(ped.notas||"")+" | CANCELADO: "+motivo},"id=eq."+pedId)
     ];
-    // FEAT CC v2 (2026-05-14): cancelar cuotas asociadas
     promises.push(apiPatch('cc_cuotas',{estado:'cancelada',updated_at:new Date().toISOString()},'pedido_id=eq.'+pedId+'&estado=in.(pendiente,parcial,vencida)').catch(function(){}));
-    if(items.length){
+
+    // FIX 2026-05-18 BUG #7: si tenía cobro → borrar ventas asociadas (en lugar de crear una negativa)
+    // Si NO tenía cobro pero queremos rastro contable, crear una venta negativa "cancelada"
+    if(teniaCobro){
+      // Borrar ventas asociadas — más limpio que dejar venta + contra-venta
+      promises.push(apiDelete('ventas','nro_orden=eq.'+encodeURIComponent(nroOrden)).catch(function(e){console.error('[cancelPed] borrar ventas:',e);}));
+      // Limpiar cc_pagos
+      promises.push(apiGet('cc_pagos_aplicaciones','select=id,pago_id&pedido_id=eq.'+pedId).then(function(apps){
+        if(!Array.isArray(apps)||!apps.length)return;
+        var pagoIds = Array.from(new Set(apps.map(function(a){return a.pago_id;}).filter(function(x){return x;})));
+        var p1 = apiDelete('cc_pagos_aplicaciones','pedido_id=eq.'+pedId);
+        var p2 = Promise.all(pagoIds.map(function(pid){
+          return apiGet('cc_pagos_aplicaciones','select=id&pago_id=eq.'+pid).then(function(rest){
+            if(!Array.isArray(rest)||!rest.length){
+              return apiDelete('cc_pagos','id=eq.'+pid);
+            }
+          });
+        }));
+        return Promise.all([p1, p2]);
+      }).catch(function(e){console.error('[cancelPed] cc_pagos cleanup',e);}));
+    } else if(items.length){
+      // No tenía cobro: crear registro negativo en ventas (rastro de cancelación)
+      // Usa el vendedor del pedido (no quien cancela) y monto = lo cancelado
       promises.push(apiPost("ventas",{
-        vendedor_id:VENDEDOR_ID,producto_id:null,
+        vendedor_id: ped.vendedor_id || VENDEDOR_ID,
+        producto_id:null,
         producto_nombre:"CANCELADO #"+(ped.nro_orden||pedId)+": "+items.map(function(it){return it.nombre+" x"+(it.qty||1);}).join(", "),
-        cantidad:1,precio_unitario:-(ped.total||0),segmento:"cancelado",
-        total:-(ped.total||0),periodo:periodo,estado:"cancelada",origen:"vendedor",
-        nro_orden:ped.nro_orden||("CAN-"+pedId),descuento_motivo:"Cancelacion: "+motivo
+        cantidad:1,
+        precio_unitario:-(ped.total||0),
+        segmento:"cancelado",
+        total:-(ped.total||0),
+        periodo:periodo,
+        estado:"cancelada",
+        origen:"vendedor",
+        nro_orden:ped.nro_orden||("CAN-"+pedId),
+        descuento_motivo:"Cancelacion: "+motivo
       }));
     }
+
     if(devolverStock){
       items.forEach(function(it){
         if(it.isCombo&&it.combo_id){
-          // Devolver stock de cada producto del combo desde BD
+          // FIX 2026-05-18: devolver combo según si estaba cobrado o no
           promises.push(
             apiGet("combo_items","select=*&combo_id=eq."+it.combo_id).then(function(ci){
               if(!Array.isArray(ci))return;
@@ -7739,7 +7829,10 @@ function confirmarCancelPed(){
               ci.forEach(function(cit){
                 var cant=(cit.cantidad||1)*(it.qty||1);
                 chain=chain.then(function(){
-                  return patchStockFresco(cit.producto_id,{stock_actual:+cant,reserva:-cant},'Cancelar combo');
+                  var delta = {stock_actual:+cant};
+                  if(teniaCobro){ delta[colVendido] = -cant; }
+                  else { delta.reserva = -cant; }
+                  return patchStockFresco(cit.producto_id, delta, 'Cancelar combo '+(teniaCobro?'cobrado ':'')+nroOrden);
                 });
               });
               return chain;
@@ -7749,18 +7842,24 @@ function confirmarCancelPed(){
         }
         if(!it.producto_id||it.isDecan||it.segmento==='decan')return;
         var _cpid=it.producto_id;var _cqty=it.qty||1;
-        // Verificar reserva real antes de devolver — evita inflar stock si estaba inconsistente
-        promises.push(
-          apiGet("productos","select=id,stock_actual,reserva&id=eq."+_cpid).then(function(rows){
-            var fp=rows&&rows[0];if(!fp)return;
-            var reservaReal=fp.reserva||0;
-            if(reservaReal<=0)return; // no tenía reserva registrada — no tocar
-            var devQty=Math.min(_cqty,reservaReal);
-            return patchStockFresco(_cpid,{stock_actual:+devQty,reserva:-devQty},'Cancelar pedido');
-          })
-        );
+        // FIX 2026-05-18: si tenía cobro, devolver desde vendido_X. Si no, desde reserva
+        if(teniaCobro){
+          promises.push(patchStockFresco(_cpid, (function(){var d={stock_actual:+_cqty}; d[colVendido]=-_cqty; return d;})(), 'Cancelar pedido cobrado '+nroOrden));
+        } else {
+          // Verificar reserva real antes de devolver — evita inflar stock si estaba inconsistente
+          promises.push(
+            apiGet("productos","select=id,stock_actual,reserva&id=eq."+_cpid).then(function(rows){
+              var fp=rows&&rows[0];if(!fp)return;
+              var reservaReal=fp.reserva||0;
+              if(reservaReal<=0)return;
+              var devQty=Math.min(_cqty,reservaReal);
+              return patchStockFresco(_cpid,{stock_actual:+devQty,reserva:-devQty},'Cancelar pedido '+nroOrden);
+            })
+          );
+        }
       });
     } else {
+      // NO devolver al stock (producto roto/perdido)
       items.forEach(function(it){
         if(it.isCombo&&it.combo_id){
           promises.push(
@@ -7770,7 +7869,11 @@ function confirmarCancelPed(){
               ci.forEach(function(cit){
                 var cant=(cit.cantidad||1)*(it.qty||1);
                 chain=chain.then(function(){
-                  return patchStockFresco(cit.producto_id,{reserva:-cant},'Cancelar reserva combo');
+                  // Sacar de reserva O vendido_X SIN devolver al stock_actual
+                  var delta = {};
+                  if(teniaCobro){ delta[colVendido] = -cant; }
+                  else { delta.reserva = -cant; }
+                  return patchStockFresco(cit.producto_id, delta, 'Cancelar combo sin devolver '+nroOrden);
                 });
               });
               return chain;
@@ -7778,13 +7881,27 @@ function confirmarCancelPed(){
           );
           return;
         }
-        if(!it.producto_id)return;
-        promises.push(patchStockFresco(it.producto_id,{reserva:-(it.qty||1)},'Cancelar pedido reserva'));
+        if(!it.producto_id||it.isDecan||it.segmento==='decan')return;
+        var deltaSin = {};
+        if(teniaCobro){ deltaSin[colVendido] = -(it.qty||1); }
+        else { deltaSin.reserva = -(it.qty||1); }
+        promises.push(patchStockFresco(it.producto_id, deltaSin, 'Cancelar pedido sin devolver '+nroOrden));
       });
     }
+
+    // Log
+    promises.push(apiPost('pedidos_estados_log',{
+      pedido_id: pedId,
+      pedido_tabla: 'pedidos_catalogo',
+      estado: 'cancelado',
+      nota: 'Cancelado reservado por '+VENDEDOR_NOMBRE+': '+motivo+' ('+(devolverStock?'stock devuelto':'sin devolver stock')+(teniaCobro?', ventas/CC borrados':'')+')',
+      usuario: VENDEDOR_NOMBRE
+    }).catch(function(){}));
+
     Promise.all(promises).then(function(){
       toast(devolverStock?"Cancelado - stock devuelto":"Cancelado - sin devolucion de stock","twarn");
       loadPedidosWeb();renderCat();
+      if(typeof loadDineroData==='function') loadDineroData();
     }).catch(function(){if(btn)btn.disabled=false;});
   });
 }
@@ -9647,16 +9764,21 @@ function confirmarDevolucion(){
     "• Vuelve al stock: "+(volverAlStock?"SI":"NO (roto/fallado)")
   ))return;
 
+  // FIX 2026-05-18 BUG #8: determinar columna vendido_X según vendedor de la venta original
+  var vendVenta = v.vendedor_id || VENDEDOR_ID;
+  var colVendido = 'vendido_david';
+  if(vendVenta === 2) colVendido = 'vendido_facu';
+  else if(vendVenta === 3) colVendido = 'vendido_marcela';
+
   var promises=[];
 
   // 1. Mark original venta as returned (partially or fully)
-  // If all units returned -> mark as devuelta
   var estadoVenta=_devCant>=v.cantidad?"devuelta":"dev_parcial";
   promises.push(apiPatch("ventas",{estado:estadoVenta},"id=eq."+v.id));
 
   // 2. Register devolucion record as a negative venta entry
   promises.push(apiPost("ventas",{
-    vendedor_id:VENDEDOR_ID,
+    vendedor_id: vendVenta,  // FIX 2026-05-18: usar vendedor de la venta original, no quien procesa la devolución
     producto_id:v.producto_id||null,
     producto_nombre:v.producto_nombre,
     cantidad:_devCant,
@@ -9671,13 +9793,68 @@ function confirmarDevolucion(){
     venta_original_id:v.id
   }));
 
-  // 3. If product OK -> return to stock
-  if(volverAlStock&&v.producto_id&&v.segmento!=='decan'&&v.segmento!=='combo'){
-    promises.push(patchStockFresco(v.producto_id,{stock_actual:+_devCant,vendido_david:-_devCant},'Devolucion')
+  // 3. Si vuelve al stock: devolver desde vendido_X (no david siempre)
+  if(volverAlStock && v.producto_id && v.segmento!=='decan' && v.segmento!=='combo'){
+    var delta = {stock_actual:+_devCant};
+    delta[colVendido] = -_devCant;
+    promises.push(patchStockFresco(v.producto_id, delta, 'Devolucion ('+colVendido+')')
       .then(function(){
-        apiPost("movimientos_stock",{producto_id:v.producto_id,producto_nombre:v.producto_nombre,tipo:"devolucion",cantidad:_devCant,motivo:"Devolución. Motivo: "+motivo+(obs?" — "+obs:""),created_at:new Date().toISOString(),usuario:VENDEDOR_NOMBRE}).catch(function(e){console.error("[belle] error silencioso:",e);});
+        apiPost("movimientos_stock",{
+          producto_id:v.producto_id,
+          producto_nombre:v.producto_nombre,
+          tipo:"devolucion",
+          cantidad:_devCant,
+          motivo:"Devolución. Motivo: "+motivo+(obs?" — "+obs:""),
+          created_at:new Date().toISOString(),
+          usuario:VENDEDOR_NOMBRE
+        }).catch(function(e){console.error("[belle] error silencioso:",e);});
       })
     );
+  } else if(!volverAlStock && v.producto_id && v.segmento!=='decan' && v.segmento!=='combo'){
+    // FIX 2026-05-18: cuando NO vuelve al stock (roto), descontar de vendido_X sin sumar a stock_actual
+    var deltaRoto = {};
+    deltaRoto[colVendido] = -_devCant;
+    promises.push(patchStockFresco(v.producto_id, deltaRoto, 'Devolución roto/fallado ('+colVendido+')')
+      .then(function(){
+        apiPost("movimientos_stock",{
+          producto_id:v.producto_id,
+          producto_nombre:v.producto_nombre,
+          tipo:"ajuste",
+          cantidad:-_devCant,
+          motivo:"Devolución producto roto/fallado. Motivo: "+motivo+(obs?" — "+obs:""),
+          created_at:new Date().toISOString(),
+          usuario:VENDEDOR_NOMBRE
+        }).catch(function(e){console.error("[belle] error silencioso:",e);});
+      })
+    );
+  }
+
+  // FIX 2026-05-18 BUG #8: si la venta venía de un pedido CC, registrar nota de la devolución
+  // pero NO revertir cc_pagos automáticamente — el cliente queda con saldo a favor
+  // (decisión de negocio: la devolución no obliga a devolverle plata, queda como crédito)
+  if(v.nro_orden){
+    // Buscar el pedido al que pertenece esta venta
+    promises.push(apiGet('pedidos_catalogo','select=id,es_cc,cliente_id,saldo_cc&nro_orden=eq.'+encodeURIComponent(v.nro_orden)+'&limit=1').then(function(rows){
+      var p = rows && rows[0];
+      if(!p) return;
+      // Log en el pedido (para trazabilidad)
+      apiPost('pedidos_estados_log', {
+        pedido_id: p.id,
+        pedido_tabla: 'pedidos_catalogo',
+        estado: 'devolucion_parcial',
+        nota: 'Devolución de '+_devCant+' u. de "'+v.producto_nombre+'" ('+fmt(montoReintegro)+') por '+VENDEDOR_NOMBRE+(p.es_cc?' — generar saldo a favor del cliente':' — reintegro directo'),
+        usuario: VENDEDOR_NOMBRE
+      }).catch(function(e){console.error('[devolucion log]',e);});
+      // Si era CC, sumar el reintegro al saldo a favor del cliente
+      if(p.es_cc && p.cliente_id){
+        return apiGet('clientes','select=saldo_cc&id=eq.'+p.cliente_id+'&limit=1').then(function(rc){
+          var saldoActual = (rc && rc[0]) ? (parseFloat(rc[0].saldo_cc)||0) : 0;
+          return apiPatch('clientes', {
+            saldo_cc: saldoActual + montoReintegro
+          }, 'id=eq.'+p.cliente_id);
+        });
+      }
+    }).catch(function(e){console.error('[devolucion pedido]',e);}));
   }
 
   Promise.all(promises).then(function(){

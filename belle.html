@@ -7513,42 +7513,71 @@ function _adminGuardarEditItems(){
     var prec=parseFloat(it.precio)||parseFloat(it.precio_unitario)||0;
     return s+(prec*qty);
   },0);
-  // FEAT CC v2 (auditoría 2026-05-14): chequear si tiene cuotas que ajustar
-  apiGet('cc_cuotas','select=id,monto,monto_pagado,estado,pedido_id&pedido_id=eq.'+id+'&estado=neq.cancelada').then(function(cuotas){
-    var tieneCuotas = Array.isArray(cuotas) && cuotas.length > 0;
-    var tienePagos = tieneCuotas && cuotas.some(function(cu){return (parseFloat(cu.monto_pagado)||0) > 0;});
+  // FIX 2026-05-18 BUG #9: chequear si pedido está cobrado (para avisar al admin)
+  apiGet('pedidos_catalogo','select=estado,confirmado_cobro,cobrado_total,total,nro_orden&id=eq.'+id).then(function(pedRows){
+    var pedActual = (pedRows && pedRows[0]) || {};
+    var teniaCobro = (pedActual.estado==='cobrado' || pedActual.estado==='cobrado_parcial' || pedActual.confirmado_cobro || (parseFloat(pedActual.cobrado_total)||0) > 0);
+    var totalAnt = parseFloat(pedActual.total) || 0;
+    var cobradoAnt = parseFloat(pedActual.cobrado_total) || 0;
+    var diffTotal = totalNuevo - totalAnt;
+    var nroOrd = pedActual.nro_orden || ('#'+id);
 
-    var msgConfirm = 'Guardar cambios?\n\nNuevo total: '+fmt(totalNuevo)+'\n'+items.length+' items';
-    msgConfirm += '\n\n⚠️ Atención: el stock NO se ajusta automáticamente al editar items.';
-    if(tieneCuotas){
-      if(tienePagos){
-        msgConfirm += '\n\n⚠️⚠️ Este pedido CC tiene '+cuotas.length+' cuotas y YA tiene pagos parciales aplicados. NO se pueden regenerar automáticamente.\n\nSi cambia el total, ajustá las cuotas manualmente desde el panel CC.';
-      } else {
-        msgConfirm += '\n\n💳 Este pedido CC tiene '+cuotas.length+' cuotas pendientes sin pagos. Tras guardar, podés regenerarlas desde el panel CC (botón "🎫 Generar plan de cuotas").';
+    // FEAT CC v2: chequear cuotas
+    return apiGet('cc_cuotas','select=id,monto,monto_pagado,estado,pedido_id&pedido_id=eq.'+id+'&estado=neq.cancelada').then(function(cuotas){
+      var tieneCuotas = Array.isArray(cuotas) && cuotas.length > 0;
+      var tienePagos = tieneCuotas && cuotas.some(function(cu){return (parseFloat(cu.monto_pagado)||0) > 0;});
+
+      var msgConfirm = 'Guardar cambios en ' + nroOrd + '?\n\nTotal anterior: '+fmt(totalAnt)+'\nTotal nuevo: '+fmt(totalNuevo);
+      if(diffTotal !== 0){
+        msgConfirm += '\nDiferencia: ' + (diffTotal > 0 ? '+' : '') + fmt(diffTotal);
       }
-    }
-    if(!confirm(msgConfirm)) return;
+      msgConfirm += '\n\n⚠️ Atención: el stock NO se ajusta automáticamente al editar items.';
 
-    var promesas = [apiPatch('pedidos_catalogo',{
-      items:JSON.stringify(items),
-      total:totalNuevo
-    },'id=eq.'+id)];
+      // FIX 2026-05-18 BUG #9: avisos específicos si está cobrado
+      if(teniaCobro){
+        msgConfirm += '\n\n🚨 PEDIDO YA COBRADO ($'+fmt(cobradoAnt)+'):';
+        msgConfirm += '\n• Las ventas YA registradas no se modifican (siguen reflejando items viejos).';
+        if(diffTotal > 0){
+          msgConfirm += '\n• El nuevo total es MAYOR — el pedido quedará con saldo deudor de '+fmt(diffTotal)+' (cliente queda debiendo).';
+        } else if(diffTotal < 0){
+          msgConfirm += '\n• El nuevo total es MENOR — el pedido quedará SOBRECOBRADO por '+fmt(-diffTotal)+' (cliente tiene saldo a favor).';
+        }
+        msgConfirm += '\n• Si el cambio es importante, considerá CANCELAR + REHACER el pedido.';
+      }
 
-    // Si tiene cuotas pendientes SIN pagos: borrar para que admin regenere
-    if(tieneCuotas && !tienePagos){
-      promesas.push(apiDelete('cc_cuotas','pedido_id=eq.'+id+'&estado=eq.pendiente').catch(function(e){console.error('[cc] borrar cuotas:',e);}));
-    }
+      if(tieneCuotas){
+        if(tienePagos){
+          msgConfirm += '\n\n⚠️⚠️ Este pedido CC tiene '+cuotas.length+' cuotas y YA tiene pagos parciales aplicados. NO se pueden regenerar automáticamente.\n\nSi cambia el total, ajustá las cuotas manualmente desde el panel CC.';
+        } else {
+          msgConfirm += '\n\n💳 Este pedido CC tiene '+cuotas.length+' cuotas pendientes sin pagos. Tras guardar, podés regenerarlas desde el panel CC (botón "🎫 Generar plan de cuotas").';
+        }
+      }
+      if(!confirm(msgConfirm)) return;
 
-    Promise.all(promesas).then(function(){
-      apiPost('pedidos_estados_log',{pedido_id:id,pedido_tabla:'pedidos_catalogo',estado:'editado',nota:'Items editados por admin (nuevo total '+fmt(totalNuevo)+')'+(tieneCuotas&&!tienePagos?' — cuotas borradas para regenerar':''),usuario:curUser||'admin'}).catch(function(){});
-      toast('Pedido actualizado ✅'+(tieneCuotas&&!tienePagos?' (cuotas borradas, regenerá)':''),'tok');
-      var _m=document.getElementById('_moEditItems');if(_m)_m.remove();
-      var _md=document.getElementById('_moDetallePed');if(_md)_md.remove();
-      loadPedidos();
-    }).catch(function(e){toast('Error: '+(e.message||''),'terr');});
+      var promesas = [apiPatch('pedidos_catalogo',{
+        items:JSON.stringify(items),
+        total:totalNuevo
+      },'id=eq.'+id)];
+
+      // Si tiene cuotas pendientes SIN pagos: borrar para que admin regenere
+      if(tieneCuotas && !tienePagos){
+        promesas.push(apiDelete('cc_cuotas','pedido_id=eq.'+id+'&estado=eq.pendiente').catch(function(e){console.error('[cc] borrar cuotas:',e);}));
+      }
+
+      return Promise.all(promesas).then(function(){
+        var notaLog = 'Items editados por admin (nuevo total '+fmt(totalNuevo)+')';
+        if(teniaCobro) notaLog += ' — PEDIDO YA COBRADO: ventas viejas no se modifican' + (diffTotal !== 0 ? ', diff ' + (diffTotal > 0 ? '+' : '') + fmt(diffTotal) : '');
+        if(tieneCuotas && !tienePagos) notaLog += ' — cuotas borradas para regenerar';
+        apiPost('pedidos_estados_log',{pedido_id:id,pedido_tabla:'pedidos_catalogo',estado:'editado',nota:notaLog,usuario:curUser||'admin'}).catch(function(){});
+        toast('Pedido actualizado ✅'+(tieneCuotas&&!tienePagos?' (cuotas borradas, regenerá)':''),'tok');
+        var _m=document.getElementById('_moEditItems');if(_m)_m.remove();
+        var _md=document.getElementById('_moDetallePed');if(_md)_md.remove();
+        loadPedidos();
+      }).catch(function(e){toast('Error: '+(e.message||''),'terr');});
+    });
   }).catch(function(e){
-    console.error('[cc] check cuotas:', e);
-    // Fallback: editar sin chequear cuotas
+    console.error('[admin edit] error:', e);
+    // Fallback: editar sin chequear cuotas/cobros
     if(!confirm('Guardar cambios?\nNuevo total: '+fmt(totalNuevo))) return;
     apiPatch('pedidos_catalogo',{items:JSON.stringify(items),total:totalNuevo},'id=eq.'+id).then(function(){
       toast('Pedido actualizado ✅','tok');
