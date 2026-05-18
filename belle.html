@@ -16463,9 +16463,127 @@ window._ccAplicarPagoACuotasPedido = function(pedidoId, monto){
       promesas.push(apiPatch('cc_cuotas', patch, 'id=eq.'+cu.id));
       restante -= aplicar;
     });
-    return Promise.all(promesas);
+    return Promise.all(promesas).then(function(){
+      // FIX 2026-05-18 CRÍTICO BUG #1 (replicado en belle.html por REGLA ORO):
+      // Cuando un pedido CC queda totalmente saldado, descontar stock + crear ventas
+      return _ccVerificarYConsolidarPedidoCC(pedidoId);
+    });
   }).catch(function(e){
     console.error('[cc] aplicar pago cuotas error', e);
+  });
+};
+
+// FIX 2026-05-18: consolidar pedido CC saldado — espejo del de ventas.html
+window._ccVerificarYConsolidarPedidoCC = function(pedidoId){
+  if(!pedidoId) return Promise.resolve();
+  return Promise.all([
+    apiGet('pedidos_catalogo','select=*&id=eq.'+pedidoId+'&limit=1'),
+    apiGet('cc_cuotas','select=estado,monto,monto_pagado&pedido_id=eq.'+pedidoId+'&estado=neq.cancelada')
+  ]).then(function(res){
+    var ped = (res[0] && res[0][0]);
+    var cuotas = Array.isArray(res[1]) ? res[1] : [];
+    if(!ped) return;
+    if(ped.confirmado_cobro === true) return; // idempotente
+    if(!ped.es_cc) return;
+    if(!cuotas.length) return;
+    var todasPagadas = cuotas.every(function(c){
+      if(c.estado === 'pagada') return true;
+      return (parseFloat(c.monto_pagado)||0) >= (parseFloat(c.monto)||0) - 0.01;
+    });
+    if(!todasPagadas) return;
+
+    var nroOrden = ped.nro_orden || ('CC-'+pedidoId);
+    var items = [];
+    try { items = (typeof ped.items === 'string') ? JSON.parse(ped.items) : (ped.items || []); } catch(e){ items = []; }
+    var vendId = ped.vendedor_id || null;
+    if(!vendId) console.warn('[cc consolidar admin] no hay vendedor_id, pedido', pedidoId);
+    var proms = [];
+    var periodoCC = (typeof periodoActual !== 'undefined' ? periodoActual : 'general');
+    var userActor = (typeof curUser !== 'undefined' ? curUser : 'admin');
+
+    proms.push(apiPatch('pedidos_catalogo', {
+      confirmado_cobro: true,
+      confirmado_at: new Date().toISOString(),
+      estado: 'cobrado',
+      cobrado_total: parseFloat(ped.total) || 0
+    }, 'id=eq.'+pedidoId));
+
+    items.forEach(function(it){
+      var colVendido = 'vendido_david';
+      if(vendId === 2) colVendido = 'vendido_facu';
+      else if(vendId === 3) colVendido = 'vendido_marcela';
+
+      if(it.isCombo && it.combo_id){
+        proms.push(apiGet('combo_items','select=producto_id,cantidad&combo_id=eq.'+it.combo_id).then(function(ci){
+          if(!Array.isArray(ci)) return;
+          return Promise.all(ci.filter(function(cit){return cit.producto_id;}).map(function(cit){
+            var cantTotal = (cit.cantidad||1)*(it.qty||1);
+            var delta = {reserva:-cantTotal};
+            delta[colVendido] = +cantTotal;
+            return patchStockFresco(cit.producto_id, delta, 'CC saldado combo '+nroOrden);
+          }));
+        }).catch(function(e){console.error('[cc consolidar combo]',e);}));
+        if(vendId){
+          proms.push(apiPost('ventas', {
+            vendedor_id: vendId, producto_id: null, producto_nombre: it.nombre,
+            cantidad: it.qty || 1, precio_unitario: it.precio || 0, segmento: 'combo',
+            total: it.total || 0, periodo: periodoCC, estado: 'confirmada',
+            origen: 'catalogo', nro_orden: nroOrden,
+            forma_cobro: ped.forma_pago || 'cuenta_corriente',
+            descuento: it.descuento || 0,
+            descuento_motivo: 'Venta CC (consolidación al saldar)'
+          }).catch(function(e){console.error('[cc consolidar venta combo]',e);}));
+        }
+        return;
+      }
+      if(it.isDecan || !it.producto_id){
+        if(vendId && it.isDecan){
+          proms.push(apiPost('ventas', {
+            vendedor_id: vendId, producto_id: it.producto_id || null, producto_nombre: it.nombre,
+            cantidad: it.qty || 1, precio_unitario: it.precio || 0, segmento: 'decan',
+            total: it.total || 0, periodo: periodoCC, estado: 'confirmada',
+            origen: 'catalogo', nro_orden: nroOrden,
+            forma_cobro: ped.forma_pago || 'cuenta_corriente',
+            descuento: it.descuento || 0,
+            descuento_motivo: 'Venta CC (consolidación al saldar)'
+          }).catch(function(e){console.error('[cc consolidar venta decan]',e);}));
+        }
+        return;
+      }
+      var pid = it.producto_id;
+      var deltaStock = {reserva:-(it.qty||1)};
+      deltaStock[colVendido] = +(it.qty||1);
+      proms.push(patchStockFresco(pid, deltaStock, 'CC saldado '+nroOrden).catch(function(e){console.error('[cc consolidar stock]',e);}));
+      proms.push(apiPost('movimientos_stock', {
+        producto_id: pid, producto_nombre: it.nombre, tipo: 'venta',
+        cantidad: it.qty || 1,
+        motivo: 'Venta CC saldada '+nroOrden+' (consolidación)',
+        usuario: userActor, periodo: periodoCC
+      }).catch(function(e){console.error('[cc consolidar mov_stock]',e);}));
+      if(vendId){
+        proms.push(apiPost('ventas', {
+          vendedor_id: vendId, producto_id: pid, producto_nombre: it.nombre,
+          cantidad: it.qty || 1, precio_unitario: it.precio || 0,
+          segmento: it.segmento || 'pi', total: it.total || 0,
+          periodo: periodoCC, estado: 'confirmada', origen: 'catalogo',
+          nro_orden: nroOrden, forma_cobro: ped.forma_pago || 'cuenta_corriente',
+          descuento: it.descuento || 0,
+          descuento_motivo: 'Venta CC (consolidación al saldar)'
+        }).catch(function(e){console.error('[cc consolidar venta]',e);}));
+      }
+    });
+
+    proms.push(apiPost('pedidos_estados_log', {
+      pedido_id: pedidoId,
+      pedido_tabla: 'pedidos_catalogo',
+      estado: 'cobrado',
+      nota: 'Pedido CC saldado completo — stock descontado y ventas registradas (consolidación automática desde admin)',
+      usuario: userActor
+    }).catch(function(e){console.error('[cc consolidar log]',e);}));
+
+    return Promise.all(proms);
+  }).catch(function(e){
+    console.error('[cc consolidar admin] error general:', e);
   });
 };
 

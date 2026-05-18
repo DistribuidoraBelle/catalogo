@@ -3734,9 +3734,175 @@ window._ccAplicarPagoACuotasPedido = function(pedidoId, monto){
       promesas.push(apiPatch('cc_cuotas', patch, 'id=eq.'+cu.id));
       restante -= aplicar;
     });
-    return Promise.all(promesas);
+    return Promise.all(promesas).then(function(){
+      // FIX 2026-05-18 CRÍTICO BUG #1: Verificar si el pedido CC quedó completamente saldado.
+      // Si TODAS las cuotas están pagadas, entonces:
+      //  1. Marcar pedido como confirmado_cobro=true / estado=cobrado
+      //  2. Descontar stock (reserva → vendido_{vendedor})
+      //  3. Crear registros en ventas (suma a "Mi dinero" del vendedor)
+      // ANTES NO SE HACÍA: el pedido CC saldado quedaba con stock en reserva y sin venta registrada.
+      return _ccVerificarYConsolidarPedidoCC(pedidoId);
+    });
   }).catch(function(e){
     console.error('[cc] aplicar pago cuotas error', e);
+  });
+};
+
+// FIX 2026-05-18: cuando un pedido CC queda completamente saldado, consolidarlo:
+// descontar stock + crear ventas + marcar confirmado. Idempotente — si ya está
+// confirmado, no hace nada.
+window._ccVerificarYConsolidarPedidoCC = function(pedidoId){
+  if(!pedidoId) return Promise.resolve();
+  return Promise.all([
+    apiGet('pedidos_catalogo','select=*&id=eq.'+pedidoId+'&limit=1'),
+    apiGet('cc_cuotas','select=estado,monto,monto_pagado&pedido_id=eq.'+pedidoId+'&estado=neq.cancelada')
+  ]).then(function(res){
+    var ped = (res[0] && res[0][0]);
+    var cuotas = Array.isArray(res[1]) ? res[1] : [];
+    if(!ped) return;
+    // Si ya está confirmado, no hacer nada (idempotente)
+    if(ped.confirmado_cobro === true) return;
+    // Si no es CC, no aplica
+    if(!ped.es_cc) return;
+    if(!cuotas.length) return;
+    // Verificar que TODAS las cuotas estén pagadas
+    var todasPagadas = cuotas.every(function(c){
+      if(c.estado === 'pagada') return true;
+      // O estado parcial pero monto_pagado >= monto (caso borde)
+      return (parseFloat(c.monto_pagado)||0) >= (parseFloat(c.monto)||0) - 0.01;
+    });
+    if(!todasPagadas) return;
+
+    // Pedido CC saldado → consolidar
+    var nroOrden = ped.nro_orden || ('CC-'+pedidoId);
+    var items = [];
+    try { items = (typeof ped.items === 'string') ? JSON.parse(ped.items) : (ped.items || []); } catch(e){ items = []; }
+    // El vendedor que cobra es el que hizo el último pago (lo más reciente en cc_pagos)
+    // Pero para registrar la venta usamos el vendedor_id del pedido (que ya fue actualizado
+    // a quien lo cobró por la lógica de auto-transferencia FIFO)
+    var vendId = ped.vendedor_id || VENDEDOR_ID || null;
+    if(!vendId) {
+      console.warn('[cc consolidar] no hay vendedor_id, omitiendo registro de ventas para pedido', pedidoId);
+    }
+    var proms = [];
+
+    // 1) Marcar pedido como confirmado
+    proms.push(apiPatch('pedidos_catalogo', {
+      confirmado_cobro: true,
+      confirmado_at: new Date().toISOString(),
+      estado: 'cobrado',
+      cobrado_total: parseFloat(ped.total) || 0
+    }, 'id=eq.'+pedidoId));
+
+    // 2) Para cada item: descontar stock (reserva → vendido) + crear venta
+    items.forEach(function(it){
+      // Determinar columna vendido según vendedor (David=1, Facu=2, Marcela=3)
+      // Por defecto vendido_david (legacy). Si vendedor es Facu/Marcela usar columna correspondiente
+      var colVendido = 'vendido_david';
+      if(vendId === 2) colVendido = 'vendido_facu';
+      else if(vendId === 3) colVendido = 'vendido_marcela';
+
+      // Combos
+      if(it.isCombo && it.combo_id){
+        proms.push(apiGet('combo_items','select=producto_id,cantidad&combo_id=eq.'+it.combo_id).then(function(ci){
+          if(!Array.isArray(ci)) return;
+          var stockDelta = {};
+          return Promise.all(ci.filter(function(cit){return cit.producto_id;}).map(function(cit){
+            var cantTotal = (cit.cantidad||1)*(it.qty||1);
+            var delta = {reserva:-cantTotal};
+            delta[colVendido] = +cantTotal;
+            return patchStockFresco(cit.producto_id, delta, 'CC saldado combo '+nroOrden);
+          }));
+        }).catch(function(e){console.error('[cc consolidar combo]',e);}));
+        // Venta del combo
+        if(vendId){
+          proms.push(apiPost('ventas', {
+            vendedor_id: vendId,
+            producto_id: null,
+            producto_nombre: it.nombre,
+            cantidad: it.qty || 1,
+            precio_unitario: it.precio || 0,
+            segmento: 'combo',
+            total: it.total || 0,
+            periodo: (typeof periodoActual !== 'undefined' ? periodoActual : 'general'),
+            estado: 'confirmada',
+            origen: 'catalogo',
+            nro_orden: nroOrden,
+            forma_cobro: ped.forma_pago || 'cuenta_corriente',
+            descuento: it.descuento || 0,
+            descuento_motivo: 'Venta CC (consolidación al saldar)'
+          }).catch(function(e){console.error('[cc consolidar venta combo]',e);}));
+        }
+        return;
+      }
+      // Decants o sin producto_id: solo crear venta, no tocar stock
+      if(it.isDecan || !it.producto_id){
+        if(vendId && it.isDecan){
+          proms.push(apiPost('ventas', {
+            vendedor_id: vendId,
+            producto_id: it.producto_id || null,
+            producto_nombre: it.nombre,
+            cantidad: it.qty || 1,
+            precio_unitario: it.precio || 0,
+            segmento: 'decan',
+            total: it.total || 0,
+            periodo: (typeof periodoActual !== 'undefined' ? periodoActual : 'general'),
+            estado: 'confirmada',
+            origen: 'catalogo',
+            nro_orden: nroOrden,
+            forma_cobro: ped.forma_pago || 'cuenta_corriente',
+            descuento: it.descuento || 0,
+            descuento_motivo: 'Venta CC (consolidación al saldar)'
+          }).catch(function(e){console.error('[cc consolidar venta decan]',e);}));
+        }
+        return;
+      }
+      // Producto normal: stock + venta
+      var pid = it.producto_id;
+      var deltaStock = {reserva:-(it.qty||1)};
+      deltaStock[colVendido] = +(it.qty||1);
+      proms.push(patchStockFresco(pid, deltaStock, 'CC saldado '+nroOrden).catch(function(e){console.error('[cc consolidar stock]',e);}));
+      proms.push(apiPost('movimientos_stock', {
+        producto_id: pid,
+        producto_nombre: it.nombre,
+        tipo: 'venta',
+        cantidad: it.qty || 1,
+        motivo: 'Venta CC saldada '+nroOrden+' (consolidación)',
+        usuario: (typeof VENDEDOR_NOMBRE !== 'undefined' ? VENDEDOR_NOMBRE : 'sistema'),
+        periodo: (typeof periodoActual !== 'undefined' ? periodoActual : 'general')
+      }).catch(function(e){console.error('[cc consolidar mov_stock]',e);}));
+      if(vendId){
+        proms.push(apiPost('ventas', {
+          vendedor_id: vendId,
+          producto_id: pid,
+          producto_nombre: it.nombre,
+          cantidad: it.qty || 1,
+          precio_unitario: it.precio || 0,
+          segmento: it.segmento || 'pi',
+          total: it.total || 0,
+          periodo: (typeof periodoActual !== 'undefined' ? periodoActual : 'general'),
+          estado: 'confirmada',
+          origen: 'catalogo',
+          nro_orden: nroOrden,
+          forma_cobro: ped.forma_pago || 'cuenta_corriente',
+          descuento: it.descuento || 0,
+          descuento_motivo: 'Venta CC (consolidación al saldar)'
+        }).catch(function(e){console.error('[cc consolidar venta]',e);}));
+      }
+    });
+
+    // 3) Log de consolidación
+    proms.push(apiPost('pedidos_estados_log', {
+      pedido_id: pedidoId,
+      pedido_tabla: 'pedidos_catalogo',
+      estado: 'cobrado',
+      nota: 'Pedido CC saldado completo — stock descontado y ventas registradas (consolidación automática)',
+      usuario: (typeof VENDEDOR_NOMBRE !== 'undefined' ? VENDEDOR_NOMBRE : 'sistema')
+    }).catch(function(e){console.error('[cc consolidar log]',e);}));
+
+    return Promise.all(proms);
+  }).catch(function(e){
+    console.error('[cc consolidar] error general:', e);
   });
 };
 
@@ -6176,13 +6342,31 @@ function confirmarCobro(pedId,btn){
     });
     Promise.all(stockProms).then(function(){
       // Bug 4 fix: si el pedido NO tenía vendedor asignado, auto-asignarlo al que cobra
-      var patchFinal={confirmado_cobro:true,confirmado_at:new Date().toISOString(),estado:"cobrado",periodo:periodoActual};
+      // FIX 2026-05-18: agregar cobrado_total para consistencia
+      var totalPed = parseFloat(ped.total) || 0;
+      var patchFinal={
+        confirmado_cobro:true,
+        confirmado_at:new Date().toISOString(),
+        estado:"cobrado",
+        cobrado_total: totalPed,
+        cobrado_parcial: totalPed,
+        forma_pago: forma,
+        periodo:periodoActual
+      };
       if(!ped.vendedor_id){
         patchFinal.vendedor_id=VENDEDOR_ID;
         _logEstadoPedidoV(pedId,"asignado","Auto-asignado al cobrar por "+VENDEDOR_NOMBRE);
       }
       return apiPatch("pedidos_catalogo",patchFinal,"id=eq."+pedId);
     }).then(function(){
+      // FIX 2026-05-18: log de estado para confirmarCobro
+      apiPost("pedidos_estados_log",{
+        pedido_id: pedId,
+        pedido_tabla: "pedidos_catalogo",
+        estado: "cobrado",
+        nota: "Cobro confirmado por " + VENDEDOR_NOMBRE + " (" + forma + ")",
+        usuario: VENDEDOR_NOMBRE || ("Vendedor " + VENDEDOR_ID)
+      }).catch(function(e){console.error('[confirmarCobro log]',e);});
       toast("Cobro confirmado!","tok");loadPedidosWeb();loadDineroData();renderCat();
     }).catch(function(){if(btn)btn.disabled=false;toast("Error al confirmar","terr");});
   });
@@ -7401,17 +7585,83 @@ function _ejecutarCobrarReservado(pedId,btn,formaCobro){
     var ped=data[0];var items=[];
     try{items=typeof ped.items==="string"?JSON.parse(ped.items):ped.items;}catch(ex){}
     var nroOrden=ped.nro_orden||("RES-"+pedId);
-    var promises=[apiPatch("pedidos_catalogo",{confirmado_cobro:true,estado:"cobrado"},"id=eq."+pedId)];
-    if(Array.isArray(items))items.forEach(function(it){
-      if(!it.producto_id||it.isDecan||it.segmento==='decan')return;
-      promises.push(patchStockFresco(it.producto_id,{reserva:-(it.qty||1),vendido_david:+(it.qty||1)},'Cobrar reservado'));
+    var totalPed = parseFloat(ped.total) || 0;
+    // FIX 2026-05-18 BUG #3: patch completo (cobrado_total, confirmado_at, vendedor_id)
+    var patchPed = {
+      confirmado_cobro: true,
+      confirmado_at: new Date().toISOString(),
+      estado: "cobrado",
+      cobrado_total: totalPed,
+      cobrado_parcial: totalPed,
+      forma_pago: formaCobro
+    };
+    // Auto-asignar vendedor si falta
+    if(!ped.vendedor_id){
+      patchPed.vendedor_id = VENDEDOR_ID;
+    }
+    var promises = [apiPatch("pedidos_catalogo", patchPed, "id=eq."+pedId)];
+
+    if(Array.isArray(items)) items.forEach(function(it){
+      // FIX 2026-05-18: manejar combos
+      if(it.isCombo && it.combo_id){
+        promises.push(apiGet('combo_items','select=producto_id,cantidad&combo_id=eq.'+it.combo_id).then(function(ci){
+          if(!Array.isArray(ci)) return;
+          return Promise.all(ci.filter(function(cit){return cit.producto_id;}).map(function(cit){
+            var cantTotal = (cit.cantidad||1)*(it.qty||1);
+            return patchStockFresco(cit.producto_id, {reserva:-cantTotal, vendido_david:+cantTotal}, 'Cobrar reservado combo '+nroOrden);
+          }));
+        }).catch(function(e){console.error('[reservado combo]',e);}));
+        // Venta del combo
+        promises.push(apiPost("ventas",{
+          vendedor_id:VENDEDOR_ID, producto_id:null, producto_nombre:it.nombre,
+          cantidad:it.qty||1, precio_unitario:it.precio||0, segmento:'combo',
+          total:it.total||0, periodo:periodoActual, estado:"confirmada",
+          origen:"reserva", nro_orden:nroOrden, forma_cobro:formaCobro,
+          descuento:it.descuento||0, descuento_motivo:it.descuento_motivo||""
+        }).catch(function(e){console.error('[reservado venta combo]',e);}));
+        return;
+      }
+      // Decants: solo crear venta sin tocar stock
+      if(it.isDecan || it.segmento === 'decan'){
+        promises.push(apiPost("ventas",{
+          vendedor_id:VENDEDOR_ID, producto_id:null, producto_nombre:it.nombre,
+          cantidad:it.qty||1, precio_unitario:it.precio||0, segmento:'decan',
+          total:it.total||0, periodo:periodoActual, estado:"confirmada",
+          origen:"reserva", nro_orden:nroOrden, forma_cobro:formaCobro,
+          descuento:it.descuento||0, descuento_motivo:it.descuento_motivo||""
+        }).catch(function(e){console.error('[reservado venta decan]',e);}));
+        return;
+      }
+      // Producto normal
+      if(!it.producto_id) return;
+      promises.push(patchStockFresco(it.producto_id,{reserva:-(it.qty||1),vendido_david:+(it.qty||1)},'Cobrar reservado '+nroOrden));
       promises.push(apiPost("ventas",{
         vendedor_id:VENDEDOR_ID,producto_id:it.producto_id,producto_nombre:it.nombre,
         cantidad:it.qty||1,precio_unitario:it.precio||0,segmento:it.segmento||"x1",
         total:it.total||0,periodo:periodoActual,estado:"confirmada",origen:"reserva",
-        nro_orden:nroOrden,forma_cobro:formaCobro,descuento:0,descuento_motivo:""
+        nro_orden:nroOrden,forma_cobro:formaCobro,descuento:it.descuento||0,descuento_motivo:""
       }));
+      // FIX 2026-05-18: agregar movimientos_stock para trazabilidad
+      promises.push(apiPost("movimientos_stock",{
+        producto_id: it.producto_id,
+        producto_nombre: it.nombre,
+        tipo: "venta",
+        cantidad: it.qty||1,
+        motivo: "Venta reserva " + nroOrden + " (cobrar reservado)",
+        usuario: VENDEDOR_NOMBRE || "vendedor",
+        periodo: periodoActual
+      }).catch(function(e){console.error('[reservado mov_stock]',e);}));
     });
+
+    // FIX 2026-05-18: log de estado
+    promises.push(apiPost("pedidos_estados_log",{
+      pedido_id: pedId,
+      pedido_tabla: "pedidos_catalogo",
+      estado: "cobrado",
+      nota: "Cobrar reservado por " + VENDEDOR_NOMBRE + " (" + formaCobro + ", " + fmt(totalPed) + ")",
+      usuario: VENDEDOR_NOMBRE || ("Vendedor " + VENDEDOR_ID)
+    }).catch(function(e){console.error('[reservado log]',e);}));
+
     Promise.all(promises).then(function(){
       toast("Pedido confirmado! ("+formaCobro+")","tok");loadPedidosWeb();loadDineroData();renderCat();
     }).catch(function(){_restoreBtn();});
@@ -10614,25 +10864,60 @@ function cpConfirmar(pedId,cobradoYa,totalPed,pedItems){
   });
   if(!montoCob){toast("Seleccioná al menos un producto","twarn");return;}
 
-  // Merge with already-cobrados
-  apiGet("pedidos_catalogo","select=items_cobrados,cobrado_parcial&id=eq."+pedId).then(function(data){
+  // Merge with already-cobrados — además leer es_cc y cliente_id para CC
+  apiGet("pedidos_catalogo","select=items_cobrados,cobrado_parcial,es_cc,cliente_id,vendedor_id&id=eq."+pedId).then(function(data){
     var existing=[];
     try{
       var raw=data&&data[0]?data[0].items_cobrados:null;
       existing=Array.isArray(raw)?raw:(raw?JSON.parse(raw):[]);
     }catch(ex){}
+    var pedFull = (data && data[0]) || {};
+    var esCC = !!pedFull.es_cc;
+    var clienteId = pedFull.cliente_id;
+
     var merged=existing.concat(idxsCobrados.filter(function(i){return existing.indexOf(i)<0;}));
     var nuevoCobrado=cobradoYa+montoCob;
-    var esSaldado=nuevoCobrado>=totalPed;
+    var esSaldado=nuevoCobrado>=totalPed - 0.01;
     var periodo=document.getElementById("hPeriodo")?document.getElementById("hPeriodo").textContent||"general":"general";
     var nro="COB-"+Math.floor(100000+Math.random()*900000);
 
-    // Discount stock and reserva for each product being cobrado
+    // FIX 2026-05-18: Procesar items (con manejo de combos)
     var stockProms=[];
     idxsCobrados.forEach(function(idx){
       var it=pedItems[idx];
-      if(!it||!it.producto_id||it.isDecan)return;
-      stockProms.push(patchStockFresco(it.producto_id,{vendido_david:+(it.qty||1),reserva:-(it.qty||1)},'Confirmar pedido'));
+      if(!it) return;
+      // Combos: descontar stock de cada producto del combo
+      if(it.isCombo && it.combo_id){
+        stockProms.push(apiGet('combo_items','select=producto_id,cantidad&combo_id=eq.'+it.combo_id).then(function(ci){
+          if(!Array.isArray(ci)) return;
+          return Promise.all(ci.filter(function(cit){return cit.producto_id;}).map(function(cit){
+            var cantTotal = (cit.cantidad||1)*(it.qty||1);
+            return patchStockFresco(cit.producto_id, {vendido_david:+cantTotal, reserva:-cantTotal}, 'Cobro parcial combo '+nro);
+          }));
+        }).catch(function(e){console.error('[cp combo]',e);}));
+        // Venta del combo
+        stockProms.push(apiPost("ventas",{
+          vendedor_id:VENDEDOR_ID, producto_id:null, producto_nombre:it.nombre,
+          cantidad:it.qty||1, precio_unitario:it.precio||0, segmento:'combo',
+          total:it.total||0, periodo:periodo, estado:"confirmada",
+          origen:"reserva", nro_orden:nro, forma_cobro:formaCobro
+        }).catch(function(e){console.error('[cp venta combo]',e);}));
+        return;
+      }
+      // Decants: solo venta sin stock
+      if(it.isDecan || !it.producto_id){
+        if(it.isDecan){
+          stockProms.push(apiPost("ventas",{
+            vendedor_id:VENDEDOR_ID, producto_id:null, producto_nombre:it.nombre,
+            cantidad:it.qty||1, precio_unitario:it.precio||0, segmento:'decan',
+            total:it.total||0, periodo:periodo, estado:"confirmada",
+            origen:"reserva", nro_orden:nro, forma_cobro:formaCobro
+          }).catch(function(e){console.error('[cp venta decan]',e);}));
+        }
+        return;
+      }
+      // Producto normal
+      stockProms.push(patchStockFresco(it.producto_id,{vendido_david:+(it.qty||1),reserva:-(it.qty||1)},'Confirmar pedido '+nro));
       stockProms.push(apiPost("ventas",{
         vendedor_id:VENDEDOR_ID,producto_id:it.producto_id,
         producto_nombre:it.nombre,cantidad:it.qty||1,
@@ -10640,15 +10925,77 @@ function cpConfirmar(pedId,cobradoYa,totalPed,pedItems){
         total:it.total||0,periodo:periodo,estado:"confirmada",
         origen:"reserva",nro_orden:nro,forma_cobro:formaCobro
       }));
+      // FIX 2026-05-18: trazabilidad
+      stockProms.push(apiPost("movimientos_stock",{
+        producto_id: it.producto_id,
+        producto_nombre: it.nombre,
+        tipo: "venta",
+        cantidad: it.qty||1,
+        motivo: "Cobro parcial " + nro,
+        usuario: VENDEDOR_NOMBRE || "vendedor",
+        periodo: periodo
+      }).catch(function(e){console.error('[cp mov_stock]',e);}));
     });
-    Promise.all([
-      apiPatch("pedidos_catalogo",
-        Object.assign(
-          {cobrado_parcial:nuevoCobrado,items_cobrados:JSON.stringify(merged)},
-          esSaldado?{estado:"cobrado",confirmado_cobro:true,confirmado_at:new Date().toISOString(),periodo:periodoActual}:{}
-        ),
-        "id=eq."+pedId),
-    ].concat(stockProms)).then(function(){
+
+    // FIX 2026-05-18: Si es CC, también crear cc_pago + aplicar a cuotas
+    var patchPedidoBase = {
+      cobrado_parcial:nuevoCobrado,
+      cobrado_total:nuevoCobrado,
+      items_cobrados:JSON.stringify(merged)
+    };
+    if(esSaldado){
+      patchPedidoBase.estado = "cobrado";
+      patchPedidoBase.confirmado_cobro = true;
+      patchPedidoBase.confirmado_at = new Date().toISOString();
+      patchPedidoBase.periodo = periodoActual;
+    }
+    // Auto-asignar vendedor si falta
+    if(!pedFull.vendedor_id){
+      patchPedidoBase.vendedor_id = VENDEDOR_ID;
+    }
+
+    var allProms = [
+      apiPatch("pedidos_catalogo", patchPedidoBase, "id=eq."+pedId)
+    ].concat(stockProms);
+
+    // CC: registrar pago + aplicar a cuotas
+    if(esCC && clienteId){
+      allProms.push(
+        apiPost('cc_pagos', {
+          cliente_id: clienteId,
+          monto: montoCob,
+          forma_pago: formaCobro,
+          fecha: new Date().toISOString().split('T')[0],
+          vendedor_id: VENDEDOR_ID,
+          registrado_por: VENDEDOR_NOMBRE || ('Vendedor '+VENDEDOR_ID),
+          nota: (esSaldado ? 'Cobro final ' : 'Cobro parcial ') + nro + ' (productos)',
+          saldo_a_favor: 0
+        }).then(function(rowsP){
+          var pago = Array.isArray(rowsP)&&rowsP.length ? rowsP[0] : null;
+          if(pago && pago.id){
+            return _ccAplicarPagoACuotasPedido(pedId, montoCob).then(function(){
+              return apiPost('cc_pagos_aplicaciones', {
+                pago_id: pago.id,
+                pedido_id: pedId,
+                monto_aplicado: montoCob,
+                cubrio_pedido_completo: esSaldado
+              });
+            });
+          }
+        }).catch(function(e){console.error('[cp cc_pago]',e);})
+      );
+    }
+
+    // FIX 2026-05-18: log de estado
+    allProms.push(apiPost('pedidos_estados_log', {
+      pedido_id: pedId,
+      pedido_tabla: 'pedidos_catalogo',
+      estado: esSaldado ? 'cobrado' : 'cobrado_parcial',
+      nota: 'Cobro parcial por ' + VENDEDOR_NOMBRE + ' (' + formaCobro + ', ' + fmt(montoCob) + ')' + (esSaldado ? ' — pedido saldado' : ''),
+      usuario: VENDEDOR_NOMBRE || ('Vendedor ' + VENDEDOR_ID)
+    }).catch(function(e){console.error('[cp log]',e);}));
+
+    Promise.all(allProms).then(function(){
       toast("Cobro de "+fmt(montoCob)+" al pozo"+(esSaldado?" — Pedido saldado!":""),"tok");
       document.getElementById("moCobParcial").classList.remove("open");
       loadPedidosWeb();loadDineroData();
