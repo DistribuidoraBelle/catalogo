@@ -3900,6 +3900,11 @@ function loadProds(stState){
     if(sample&&typeof sample.cat==="number"){
       toast("Columna cat es numerica. Ejecuta en Supabase SQL: ALTER TABLE productos ALTER COLUMN cat TYPE text;","twarn");
     }
+    // FEAT 2026-05-17: cargar paleta de acordes (BD + auto-extracción)
+    // Non-blocking — si falla la BD, usa la hardcoded + auto-extracción de productos
+    if(typeof _cargarAcordesPaleta === 'function'){
+      _cargarAcordesPaleta(prods).catch(function(e){console.warn('[acordes] paleta:', e);});
+    }
     if(stState){
       // Restore filters and scroll position after save
       _restoreStockState(stState);
@@ -30590,6 +30595,118 @@ function acordeTextColor(bg) {
 // ─── ACORDES: funciones globales standalone ─────────────────────────────────
 var _fpAcordes = window._fpAcordes || [];
 
+// ═══════════════════════════════════════════════════════════════════════════
+// FEAT 2026-05-17: Paleta de acordes persistente
+// - Carga la tabla acordes_paleta de Supabase (paleta global compartida)
+// - Auto-extrae acordes usados en productos existentes que no estén en la paleta
+//   (rescata acordes históricos creados antes de existir la tabla)
+// - Persiste acordes nuevos creados desde el form de producto a la BD
+// ═══════════════════════════════════════════════════════════════════════════
+
+// Color "hash" para acordes sin color asignado (igual que acordeGetColor pero standalone)
+function _acordeColorPorNombre(nombre){
+  if(!nombre) return '#888888';
+  var hash = 0;
+  for(var k=0; k<nombre.length; k++) hash = nombre.charCodeAt(k) + ((hash<<5)-hash);
+  var h = Math.abs(hash) % 360;
+  // Convertir HSL a hex aproximado para que se vea consistente
+  var s = 55, l = 42;
+  var c = (1 - Math.abs(2*l/100 - 1)) * s/100;
+  var x = c * (1 - Math.abs(((h/60) % 2) - 1));
+  var m = l/100 - c/2;
+  var r=0,g=0,b=0;
+  if(h<60){r=c;g=x;b=0;}else if(h<120){r=x;g=c;b=0;}else if(h<180){r=0;g=c;b=x;}
+  else if(h<240){r=0;g=x;b=c;}else if(h<300){r=x;g=0;b=c;}else{r=c;g=0;b=x;}
+  var to2 = function(n){var s=Math.round((n+m)*255).toString(16);return s.length<2?'0'+s:s;};
+  return '#'+to2(r)+to2(g)+to2(b);
+}
+
+function _cargarAcordesPaleta(productos){
+  return apiGet('acordes_paleta','select=nombre,color&order=nombre.asc').then(function(rows){
+    rows = Array.isArray(rows) ? rows : [];
+    // Si la tabla existe y tiene datos → reemplazar ACORDES_PALETA
+    if(rows.length){
+      var nuevaPaleta = {};
+      rows.forEach(function(r){
+        if(r.nombre && r.color) nuevaPaleta[r.nombre] = r.color;
+      });
+      // Mergear con la hardcoded por si la tabla está incompleta
+      Object.keys(ACORDES_PALETA).forEach(function(k){
+        if(!nuevaPaleta[k]) nuevaPaleta[k] = ACORDES_PALETA[k];
+      });
+      ACORDES_PALETA = nuevaPaleta;
+    }
+    // Auto-extraer acordes usados en productos que no estén en la paleta
+    _autoExtraerAcordesDeProductos(productos || []);
+    // Refrescar lista cacheada
+    ACORDES_LISTA = Object.keys(ACORDES_PALETA).sort();
+  }).catch(function(e){
+    // Si la tabla no existe todavía, igual auto-extraer
+    console.warn('[acordes] tabla acordes_paleta no disponible:', e.message||e);
+    _autoExtraerAcordesDeProductos(productos || []);
+    ACORDES_LISTA = Object.keys(ACORDES_PALETA).sort();
+  });
+}
+
+// Recorre los productos y agrega a ACORDES_PALETA los acordes que estén siendo
+// usados pero no estén en la paleta (rescate de acordes históricos).
+function _autoExtraerAcordesDeProductos(productos){
+  if(!Array.isArray(productos)) return;
+  var nombresUsados = {};
+  productos.forEach(function(p){
+    var ac = p.acordes;
+    if(!ac) return;
+    try{
+      if(typeof ac === 'string') ac = JSON.parse(ac);
+    }catch(e){return;}
+    if(!Array.isArray(ac)) return;
+    ac.forEach(function(a){
+      if(!a || !a.nombre) return;
+      var k = a.nombre.trim();
+      if(!k) return;
+      // Solo agregar si NO existe (case-insensitive)
+      var existe = false;
+      for(var key in ACORDES_PALETA){
+        if(key.toLowerCase() === k.toLowerCase()){existe = true; break;}
+      }
+      if(!existe){
+        // Usar el color que tiene en el producto, o generar uno por hash
+        var color = (a.color && /^#[0-9a-fA-F]{6}$/.test(a.color)) ? a.color : _acordeColorPorNombre(k);
+        ACORDES_PALETA[k] = color;
+        nombresUsados[k] = color;
+      }
+    });
+  });
+  if(Object.keys(nombresUsados).length){
+    console.log('[acordes] auto-extraídos de productos:', Object.keys(nombresUsados).length);
+  }
+}
+
+// Persistir un acorde nuevo en la tabla acordes_paleta (non-blocking)
+function _persistirAcordeNuevo(nombre, color){
+  if(!nombre) return Promise.resolve();
+  // Verificar si ya existe en la paleta en memoria
+  var keys = Object.keys(ACORDES_PALETA);
+  for(var i=0; i<keys.length; i++){
+    if(keys[i].toLowerCase() === nombre.toLowerCase()) return Promise.resolve();
+  }
+  // Agregar a la paleta en memoria
+  ACORDES_PALETA[nombre] = color || _acordeColorPorNombre(nombre);
+  ACORDES_LISTA = Object.keys(ACORDES_PALETA).sort();
+  // Persistir en BD (silencioso — si falla, igual queda en memoria)
+  return apiPost('acordes_paleta', {
+    nombre: nombre.trim(),
+    color: color || ACORDES_PALETA[nombre],
+    created_by: (typeof curUser !== 'undefined') ? curUser : 'admin'
+  }).catch(function(e){
+    // 409 Conflict = ya existe en BD, no es error real
+    if(String(e.message||'').indexOf('duplicate') >= 0 || String(e.message||'').indexOf('23505') >= 0){
+      return; // ya existía, está bien
+    }
+    console.warn('[acordes] no se pudo persistir en BD (tal vez la tabla no existe):', e.message||e);
+  });
+}
+
 function _fpAcordeAdd() {
   try {
     var el = document.getElementById('fpAcordesWrap');
@@ -30602,11 +30719,23 @@ function _fpAcordeAdd() {
     }
     var color = '#888888';
     try { color = acordeGetColor(nombre); } catch(e) {}
+    // FEAT 2026-05-17: si el acorde NO existe en la paleta, persistirlo
+    var existeEnPaleta = false;
+    var keys = Object.keys(ACORDES_PALETA);
+    for(var i=0; i<keys.length; i++){
+      if(keys[i].toLowerCase() === nombre.toLowerCase()){existeEnPaleta = true; break;}
+    }
+    if(!existeEnPaleta){
+      // Generar color por hash, persistir, y usar ese color
+      color = _acordeColorPorNombre(nombre);
+      _persistirAcordeNuevo(nombre, color);
+      toast('"'+nombre+'" agregado y guardado en la paleta', 'tok');
+    } else {
+      toast('"'+nombre+'" agregado', 'tok');
+    }
     window._fpAcordes.push({ nombre: nombre, pct: 50, color: color });
     if (custEl) custEl.value = '';
-    if (selEl) selEl.value = '';
     fpRenderAcordes(window._fpAcordes);
-    toast('"'+nombre+'" agregado', 'tok');
   } catch(err) {
     toast('Error al agregar: ' + err.message, 'terr');
   }
@@ -30631,10 +30760,39 @@ function _fpAcordePctChange(i, val) {
 function _fpAcordeColorChange(i, val) {
   try {
     if (window._fpAcordes && window._fpAcordes[parseInt(i)]) {
-      window._fpAcordes[parseInt(i)].color = val;
+      var ac = window._fpAcordes[parseInt(i)];
+      ac.color = val;
+      // FIX 2026-05-17: si el acorde está en la paleta global, actualizar su color
+      // y persistirlo para que afecte a futuros productos. Si no está, agregarlo.
+      if(ac.nombre){
+        ACORDES_PALETA[ac.nombre] = val;
+        ACORDES_LISTA = Object.keys(ACORDES_PALETA).sort();
+        if(typeof _actualizarColorAcordeEnBD === 'function'){
+          _actualizarColorAcordeEnBD(ac.nombre, val);
+        }
+      }
       fpRenderAcordes(window._fpAcordes);
     }
   } catch(err) {}
+}
+
+// Actualiza el color de un acorde en la tabla acordes_paleta. Si no existe → upsert.
+function _actualizarColorAcordeEnBD(nombre, color){
+  if(!nombre || !color) return Promise.resolve();
+  // Primero intentar PATCH; si no existe, hacer POST
+  return apiGet('acordes_paleta','select=nombre&nombre=eq.'+encodeURIComponent(nombre)+'&limit=1').then(function(rows){
+    if(Array.isArray(rows) && rows.length){
+      return apiPatch('acordes_paleta', {color: color}, 'nombre=eq.'+encodeURIComponent(nombre));
+    } else {
+      return apiPost('acordes_paleta', {
+        nombre: nombre.trim(),
+        color: color,
+        created_by: (typeof curUser !== 'undefined') ? curUser : 'admin'
+      });
+    }
+  }).catch(function(e){
+    console.warn('[acordes] no se pudo actualizar color:', e.message||e);
+  });
 }
 
 function _fpAcordeAddVal(nombre, selectEl) {
@@ -30801,14 +30959,30 @@ function _fpImportarAplicar() {
   if (!nuevos.length) { toast('No se reconocieron acordes', 'twarn'); return; }
   if (!window._fpAcordes) window._fpAcordes = [];
   var added = 0;
+  var nuevosEnPaleta = 0;
   nuevos.forEach(function(a) {
     if (!window._fpAcordes.find(function(x){ return x.nombre.toLowerCase()===a.nombre.toLowerCase(); })) {
       window._fpAcordes.push(a);
       added++;
+      // FEAT 2026-05-17: si no existe en la paleta global, persistirlo
+      var existe = false;
+      var keys = Object.keys(ACORDES_PALETA);
+      for(var i=0; i<keys.length; i++){
+        if(keys[i].toLowerCase() === a.nombre.toLowerCase()){existe = true; break;}
+      }
+      if(!existe && typeof _persistirAcordeNuevo === 'function'){
+        _persistirAcordeNuevo(a.nombre, a.color);
+        nuevosEnPaleta++;
+      }
     }
   });
   fpRenderAcordes(window._fpAcordes);
-  toast(added + ' acorde' + (added!==1?'s':'') + ' importado' + (added!==1?'s':''), 'tok');
+  var msg = added + ' acorde' + (added!==1?'s':'') + ' importado' + (added!==1?'s':'');
+  if(nuevosEnPaleta > 0){
+    msg += ' · '+nuevosEnPaleta+' guardado'+(nuevosEnPaleta!==1?'s':'')+' en la paleta';
+  }
+  toast(msg, 'tok');
+  _fpImportarCerrar();
 }
 
 
@@ -39721,6 +39895,104 @@ input[type="search"][data-bclx="1"]{-webkit-appearance:textfield;appearance:text
 <!-- build:20260418-195140-20260418-194515-20260330-001651 -->
 </html>
 <!-- build:20260330-003740 -->
+<!-- build:20260330-004950 -->
+<!-- build:20260330-005641 -->
+<!-- build:20260330-010157 -->
+<!-- build:20260330-010251 -->
+<!-- build:20260330-010924 -->
+<!-- build:20260330-012304 -->
+<!-- build:20260330-012621 -->
+<!-- build:20260330-013228 -->
+<!-- build:20260330-023035 -->
+<!-- build:20260330-023101 -->
+<!-- build:20260330-023130 -->
+<!-- build:20260330-023146 -->
+<!-- build:20260330-023156 -->
+<!-- build:20260330-023207 -->
+<!-- build:20260330-030112 -->
+<!-- build:20260330-030223 -->
+<!-- build:20260330-032417 -->
+<!-- build:20260330-033045 -->
+<!-- build:20260330-033625 -->
+<!-- build:20260330-033849 -->
+<!-- build:20260330-033859 -->
+<!-- build:20260330-034434 -->
+<!-- build:20260330-034520 -->
+<!-- build:20260330-034553 -->
+<!-- build:20260330-041108 -->
+<!-- build:20260330-041110 -->
+<!-- build:20260330-041931 -->
+<!-- build:20260330-134228 -->
+<!-- build:20260330-140639 -->
+<!-- build:20260330-141953 -->
+<!-- build:20260330-143102 -->
+<!-- build:20260330-143438 -->
+<!-- build:20260330-144734 -->
+<!-- build:20260330-145128 -->
+<!-- build:20260330-145421 -->
+<!-- build:20260330-145833 -->
+<!-- build:20260330-150308 -->
+<!-- build:20260330-150400 -->
+<!-- build:20260330-150423 -->
+<!-- build:20260330-150929 -->
+<!-- build:20260330-151342 -->
+<!-- build:20260330-152226 -->
+<!-- build:20260330-153129 -->
+<!-- build:20260330-164515 -->
+<!-- build:20260330-164527 -->
+<!-- build:20260330-171807 -->
+<!-- build:20260330-172610 -->
+<!-- build:20260330-174516 -->
+<!-- build:20260330-183006 -->
+<!-- build:20260330-185553 -->
+<!-- build:20260330-185640 -->
+<!-- build:20260330-191349 -->
+<!-- build:20260330-191923 -->
+<!-- build:20260330-195012 -->
+<!-- build:20260330-195504 -->
+<!-- build:20260330-203355 -->
+<!-- build:20260330-203419 -->
+<!-- build:20260330-205213 -->
+<!-- build:20260330-205309 -->
+<!-- build:20260330-213759 -->
+<!-- build:20260330-214430 -->
+<!-- build:20260330-215452 -->
+<!-- build:20260330-215838 -->
+<!-- build:20260330-232957 -->
+<!-- build:20260330-234454 -->
+<!-- build:20260331-001203 -->
+<!-- build:20260331-001342 -->
+<!-- build:20260331-003005 -->
+<!-- build:20260331-022157 -->
+<!-- build:20260331-032757 -->
+<!-- build:20260331-035621 -->
+<!-- build:20260331-040017 -->
+<!-- build:20260331-040532 -->
+<!-- build:20260331-040712 -->
+<!-- build:20260331-040739 -->
+<!-- build:20260331-041019 -->
+<!-- build:20260331-041347 -->
+<!-- build:20260331-145139 -->
+<!-- build:20260331-151249 -->
+<!-- build:20260331-151818 -->
+<!-- build:20260331-151841 -->
+<!-- build:20260331-153007 -->
+<!-- build:20260331-154400 -->
+<!-- build:20260331-155207 -->
+<!-- build:20260331-155639 -->
+<!-- build:20260331-170426 -->
+<!-- build:20260331-171156 -->
+<!-- build:20260331-171429 -->
+<!-- build:20260331-172834 -->
+<!-- build:20260331-174553 -->
+<!-- build:20260331-181734 -->
+<!-- build:20260331-183624 -->
+<!-- build:20260331-184637 -->
+<!-- build:20260331-185348 -->
+<!-- build:20260331-234736 -->
+<!-- build:20260401-030650 -->
+<!-- build:20260401-032300 -->
+330-003740 -->
 <!-- build:20260330-004950 -->
 <!-- build:20260330-005641 -->
 <!-- build:20260330-010157 -->
