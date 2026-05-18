@@ -5813,10 +5813,11 @@ function guardarRendicionEdit(){
 }
 
 function eliminarGasto(id){
-  if(!confirm("Eliminar este gasto?"))return;
-  apiPatch("gastos_vendedor",{aprobado:false},"id=eq."+id).then(function(){
+  // FIX 2026-05-18 BUG #11: realmente borrar, no des-aprobar
+  if(!confirm("Eliminar este gasto definitivamente?\n\nEsta acción NO se puede deshacer."))return;
+  apiDelete("gastos_vendedor","id=eq."+id).then(function(){
     toast("Gasto eliminado","tok");loadRendicion();
-  });
+  }).catch(function(e){toast("Error al eliminar: "+(e.message||""),"terr");});
 }
 
 
@@ -5824,9 +5825,12 @@ function addGasto(){
   var con=(document.getElementById("gastoConcepto")||{value:""}).value.trim();
   var monto=parseInt((document.getElementById("gastoMonto")||{value:"0"}).value)||0;
   if(!con||!monto){toast("Complete concepto y monto","terr");return;}
-  apiPost("gastos_vendedor",{vendedor_id:1,concepto:con,monto:monto,periodo:periodoActual,aprobado:true}).then(function(){
+  // FIX 2026-05-18 BUG #12: leer vendedor del dropdown si existe, sino default 1 (David)
+  var vendSel = document.getElementById("gastoVendedor");
+  var vendId = vendSel ? (parseInt(vendSel.value)||1) : 1;
+  apiPost("gastos_vendedor",{vendedor_id:vendId,concepto:con,monto:monto,periodo:periodoActual,aprobado:true}).then(function(){
     document.getElementById("gastoConcepto").value="";document.getElementById("gastoMonto").value="";
-    toast("Gasto registrado","tok");loadRendicion();loadDashRendicion();
+    toast("Gasto registrado (vendedor "+vendId+")","tok");loadRendicion();loadDashRendicion();
   });
 }
 
@@ -16538,9 +16542,8 @@ window._ccVerificarYConsolidarPedidoCC = function(pedidoId){
     }, 'id=eq.'+pedidoId));
 
     items.forEach(function(it){
+      // FIX 2026-05-18: stock vendido SIEMPRE va a vendido_david (modelo Belle)
       var colVendido = 'vendido_david';
-      if(vendId === 2) colVendido = 'vendido_facu';
-      else if(vendId === 3) colVendido = 'vendido_marcela';
 
       if(it.isCombo && it.combo_id){
         proms.push(apiGet('combo_items','select=producto_id,cantidad&combo_id=eq.'+it.combo_id).then(function(ci){
@@ -16609,6 +16612,17 @@ window._ccVerificarYConsolidarPedidoCC = function(pedidoId){
       nota: 'Pedido CC saldado completo — stock descontado y ventas registradas (consolidación automática desde admin)',
       usuario: userActor
     }).catch(function(e){console.error('[cc consolidar log]',e);}));
+
+    // FIX 2026-05-18 BUG #10 (REGLA ORO): comisión Marcela al consolidar
+    if(ped.transferida_por_id === 3 && ped.nro_orden && typeof _admCrearComisionMarcelaSiAplica === 'function' && vendId){
+      try {
+        _admCrearComisionMarcelaSiAplica({
+          transferida_por_id: 3,
+          nro_orden: ped.nro_orden,
+          items: items
+        }, vendId, periodoCC);
+      } catch(e){ console.error('[cc consolidar admin] comisión marcela:', e); }
+    }
 
     return Promise.all(proms);
   }).catch(function(e){
@@ -17620,6 +17634,15 @@ function _eliminarClienteAdmin(id){
       ];
       dependencias.forEach(function(t){
         chain=chain.then(function(){return apiDelete(t,"cliente_id=eq."+id).catch(function(e){console.error("[belle] error silencioso eliminando "+t+":",e);});});
+      });
+      // FIX 2026-05-18 BUG #16: borrar cc_cuotas asociadas a pedidos del cliente
+      // (cc_cuotas no tiene cliente_id directo, va por pedido_id)
+      chain=chain.then(function(){
+        return apiGet("pedidos_catalogo","select=id&cliente_id=eq."+id).then(function(peds){
+          if(!Array.isArray(peds)||!peds.length)return;
+          var pedIds = peds.map(function(p){return p.id;}).join(',');
+          return apiDelete("cc_cuotas","pedido_id=in.("+pedIds+")").catch(function(e){console.error("[belle] cc_cuotas err:",e);});
+        }).catch(function(e){console.error("[belle] cc_cuotas lookup err:",e);});
       });
       // Desvincular pedidos cerrados (no borrarlos, solo quitar cliente_id)
       chain=chain.then(function(){return apiPatch("pedidos_catalogo",{cliente_id:null,es_cc:false},"cliente_id=eq."+id).catch(function(e){console.error("[belle] error silencioso:",e);});});
@@ -32875,6 +32898,36 @@ function adminSaveEditVenta(){
   var origen=((document.getElementById('aev-origen')||{}).value||'vendedor');
   var orden=((document.getElementById('aev-orden')||document.getElementById('aev-orden')||{}).value||'');
 
+  // FIX 2026-05-18 BUG #17: si cambia la cantidad, avisar que stock no se ajusta automático
+  // Leer la venta original para comparar
+  apiGet('ventas','select=cantidad,producto_id,producto_nombre&id=eq.'+id+'&limit=1').then(function(rOrig){
+    var vOrig = (rOrig && rOrig[0]) || {};
+    var cantOrig = parseInt(vOrig.cantidad) || 0;
+    var diffCant = cant - cantOrig;
+    if(diffCant !== 0 && vOrig.producto_id){
+      var avisoMsg = '⚠️ La cantidad cambió de '+cantOrig+' a '+cant+' ('+(diffCant>0?'+':'')+diffCant+').\n\n';
+      avisoMsg += 'El STOCK NO se ajustará automáticamente. Si querés sincronizarlo:\n';
+      if(diffCant > 0){
+        avisoMsg += '• Aumentaste cantidad → descontá manualmente '+diffCant+' del stock\n';
+      } else {
+        avisoMsg += '• Reducíste cantidad → devolvé manualmente '+Math.abs(diffCant)+' al stock\n';
+      }
+      avisoMsg += '\n¿Continuar guardando solo la venta?';
+      if(!confirm(avisoMsg)){
+        var btn=document.querySelector('#moAdminEditVenta .btn-a');
+        if(btn){btn.disabled=false;btn.textContent='💾 Guardar cambios';}
+        return;
+      }
+      obs = (obs ? obs + ' | ' : '') + 'Cant cambiada '+cantOrig+'→'+cant+' (stock NO ajustado)';
+    }
+    _adminSaveEditVentaEjecutar(id, nombre, cant, pu, finalTotal, desc, obs, seg, cobro, estado, origen, orden);
+  }).catch(function(){
+    // Fallback si no se puede leer la venta original
+    _adminSaveEditVentaEjecutar(id, nombre, cant, pu, finalTotal, desc, obs, seg, cobro, estado, origen, orden);
+  });
+}
+
+function _adminSaveEditVentaEjecutar(id, nombre, cant, pu, finalTotal, desc, obs, seg, cobro, estado, origen, orden){
   var btn=document.querySelector('#moAdminEditVenta .btn-a');
   if(btn){btn.disabled=true;btn.textContent='Guardando...';}
 
