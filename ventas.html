@@ -9313,7 +9313,22 @@ function abrirControlDavid(pedidoId){
         if(best&&bs>=0.4){matchId=best.id;accion="match";}
       }
       var cantPed=it.cantidad_pedida||0;
-      var cantRec=(it.cantidad_recibida>0)?it.cantidad_recibida:cantPed;
+      // FIX 2026-05-18 BUG #21: NO pre-poblar cantRec con cantPed cuando NO hay control previo.
+      // ANTES: si cantidad_recibida=0 (no controlado todavía), asumía cantRec=cantPed → si el
+      // vendedor confirmaba sin tocar, todo quedaba como "recibido" aunque no llegó.
+      // AHORA: si nunca se controló, cantRec=0 (default seguro). El vendedor DEBE editar
+      // explícitamente cada item para confirmar cuántos llegaron.
+      var cantRec;
+      if(it.cantidad_recibida > 0){
+        // Ya controlado previamente → usar el valor guardado
+        cantRec = it.cantidad_recibida;
+      } else if(it.estado_item === 'macheado' || it.estado_item === 'borrador_match' || it.estado_item === 'controlado'){
+        // Tiene estado de control pero sin cantidad → mantener 0 (vendedor debe revisar)
+        cantRec = 0;
+      } else {
+        // Sin controlar todavía → 0 explícito
+        cantRec = 0;
+      }
       _dCtrlDecisions[it.id]={catalogoAccion:accion,prodId:matchId,cantRecibida:cantRec,cantFallada:it.cantidad_fallada||0,obsFallada:it.observacion||""};
     });
 
@@ -9451,6 +9466,21 @@ function dCtrlSetObs(itemId,val){
 }
 
 function confirmarControlDavid(){
+  // ════════════════════════════════════════════════════════════════
+  // 🐛 FIX BUG #19 (2026-05-18) — PED-915116 STAR (vendedor David)
+  // ════════════════════════════════════════════════════════════════
+  // Lock global por pedido para evitar doble ejecución
+  if(!_dCtrlPedidoId){toast("Sin pedido","terr");return;}
+  window._dCtrlLock = window._dCtrlLock || {};
+  if(window._dCtrlLock[_dCtrlPedidoId]){
+    toast("Ya se está guardando el control","twarn");
+    return;
+  }
+  window._dCtrlLock[_dCtrlPedidoId] = true;
+  var pedidoIdLocal = _dCtrlPedidoId;
+  var _dCtrlTimeout = setTimeout(function(){delete window._dCtrlLock[pedidoIdLocal];}, 60000);
+  function _liberarDCtrl(){clearTimeout(_dCtrlTimeout);delete window._dCtrlLock[pedidoIdLocal];}
+
   _dCtrlItems.forEach(function(it){
     if(_dCtrlDecisions[it.id]&&_dCtrlDecisions[it.id].catalogoAccion==="pendiente")
       _dCtrlDecisions[it.id].catalogoAccion="pendiente_catalogo";
@@ -9462,27 +9492,49 @@ function confirmarControlDavid(){
   var items=_dCtrlItems.slice();var idx=0;
   function saveNext(){
     if(idx>=items.length){
-      apiPatch("pedidos_proveedor",{estado:"controlado",controlado_por:userName,controlado_at:new Date().toISOString()},"id=eq."+_dCtrlPedidoId)
+      apiPatch("pedidos_proveedor",{estado:"controlado",controlado_por:userName,controlado_at:new Date().toISOString()},"id=eq."+pedidoIdLocal)
         .then(function(){
+          _liberarDCtrl();
           cerrarModal("moControlDavid");
           toast("Control completado por "+userName,"tok");
           if(btn){btn.disabled=false;btn.textContent="Confirmar control";}
           loadPedidosProveedorDavid();
-        });
+        }).catch(function(){_liberarDCtrl();if(btn){btn.disabled=false;btn.textContent="Confirmar control";}});
       return;
     }
     var it=items[idx];idx++;
     var d=_dCtrlDecisions[it.id];if(!d){saveNext();return;}
-    var estadoCatalogo={match:"macheado",nuevo:"nuevo",pendiente_catalogo:"pendiente_catalogo"}[d.catalogoAccion]||"pendiente_catalogo";
-    var cantFalt=Math.max(0,it.cantidad_pedida-(d.cantRecibida||0));
+    var cantPed=it.cantidad_pedida||0;
+    var cantRec=d.cantRecibida||0;
+    var cantFalt=Math.max(0,cantPed-cantRec);
+    // FIX BUG #19: si cantRecibida=0 → marcar como FALTANTE (no macheado)
+    // Antes: quedaba 'macheado' con cant=0 → _doAgregarAlStock lo agarraba con cantidad_pedida
+    var noLlego = (cantPed > 0 && cantRec === 0);
+    var estadoCatalogo;
+    if(noLlego){
+      estadoCatalogo = "faltante";
+    } else {
+      estadoCatalogo = {match:"macheado",nuevo:"nuevo",pendiente_catalogo:"pendiente_catalogo"}[d.catalogoAccion]||"pendiente_catalogo";
+    }
     var obs=d.obsFallada||"";
     if(d.cantFallada>0&&!obs)obs="Fallados: "+d.cantFallada;
     if(cantFalt>0)obs+=(obs?", ":"")+"Faltantes: "+cantFalt;
+    if(noLlego && !obs) obs = "Producto NO llegó (faltante total)";
     var _st=setTimeout(function(){saveNext();},5000);
+    // Conservar producto_id en faltantes para que `_doAgregarAlStock` pueda bajar en_viaje correctamente
+    var prodIdGuardar;
+    if(noLlego){
+      prodIdGuardar = d.prodId || it.producto_id || null;
+    } else {
+      prodIdGuardar = d.prodId || null;
+    }
     apiPatch("pedidos_proveedor_items",{
-      producto_id:d.prodId||null,es_nuevo:d.catalogoAccion==="nuevo",
-      estado_item:estadoCatalogo,cantidad_recibida:d.cantRecibida||0,
-      cantidad_fallada:d.cantFallada||0,observacion:obs
+      producto_id: prodIdGuardar,
+      es_nuevo: !noLlego && d.catalogoAccion==="nuevo",
+      estado_item:estadoCatalogo,
+      cantidad_recibida:cantRec,
+      cantidad_fallada:d.cantFallada||0,
+      observacion:obs
     },"id=eq."+it.id).then(function(){clearTimeout(_st);saveNext();}).catch(function(){clearTimeout(_st);saveNext();});
   }
   saveNext();

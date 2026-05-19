@@ -9920,13 +9920,90 @@ function _doAgregarAlStock(pedidoId,items){
     }
 
     var toAdd = freshItems.filter(function(it){
+      // ════════════════════════════════════════════════════════════
+      // 🐛 FIX BUG #19 (2026-05-18) — PED-915116 STAR
+      // ANTES: el filtro aceptaba items con cantidad_recibida=0 y solo
+      // cantidad_pedida>0. Después en cantOk usaba cantidad_pedida como
+      // fallback → los productos NO llegados se sumaban al stock como
+      // si hubieran llegado.
+      // AHORA: requerir cantidad_recibida>0. Los items con 0 recibidos
+      // deberían estar como 'faltante' (no 'macheado/controlado').
+      // ════════════════════════════════════════════════════════════
       return MATCHED.indexOf(it.estado_item)>=0 &&
              it.producto_id &&
-             ((it.cantidad_recibida||0)>0 || (it.cantidad_pedida||0)>0);
+             (it.cantidad_recibida||0) > 0;
+    });
+
+    // ════════════════════════════════════════════════════════════════════
+    // 🐛 FIX BUG #18 (2026-05-18) — PED-881343 MEGA: detección de doble-suma
+    // Si encontramos items en estado 'controlado' (no 'macheado' ni 'borrador_match'),
+    // significa que el pedido pasó por el control VIEJO del admin que YA SUMÓ stock.
+    // Pedir confirmación EXPLÍCITA al admin antes de sumar otra vez.
+    // ════════════════════════════════════════════════════════════════════
+    var itemsYaControlados = toAdd.filter(function(it){
+      return it.estado_item === 'controlado';
+    });
+    if(itemsYaControlados.length > 0 && !window._stockAddForceConfirmedFor){
+      _liberarLock();
+      var msg = "⚠️ ATENCIÓN — Posible duplicación de stock\n\n";
+      msg += "Este pedido tiene "+itemsYaControlados.length+" item(s) en estado 'controlado',\n";
+      msg += "lo cual puede significar que el control ANTERIOR ya sumó el stock\n";
+      msg += "(bug histórico arreglado el 2026-05-18).\n\n";
+      msg += "Si tocás OK, vas a SUMAR EL STOCK OTRA VEZ (duplicación).\n";
+      msg += "Si tocás Cancelar, no se hace nada.\n\n";
+      msg += "¿Querés saltar este pedido y revisarlo manualmente?\n";
+      msg += "(Recomendado: Cancelar y avisar al desarrollador)\n\n";
+      msg += "Items afectados:\n";
+      itemsYaControlados.slice(0,5).forEach(function(it){
+        msg += "• "+(it.nombre_proveedor||'?')+" — pedidas:"+it.cantidad_pedida+" / recibidas:"+it.cantidad_recibida+"\n";
+      });
+      if(itemsYaControlados.length>5) msg += "... y "+(itemsYaControlados.length-5)+" items más\n";
+      if(!confirm(msg+"\n\n¿Forzar suma DE TODOS MODOS? (NO recomendado sin diagnóstico SQL)")){
+        toast("Cancelado — se recomienda diagnóstico SQL primero", "twarn");
+        return;
+      }
+      // Si llegó acá es porque confirmó forzar la suma
+      window._stockAddForceConfirmedFor = pedidoId;
+      // Re-invocar la función con la confirmación activa
+      _doAgregarAlStock(pedidoId, items);
+      return;
+    }
+    // Limpiar el flag después de procesar
+    if(window._stockAddForceConfirmedFor === pedidoId){
+      window._stockAddForceConfirmedFor = null;
+    }
+
+    // Items que estaban macheado/controlado/borrador_match pero quedaron con cantRec=0
+    // → re-clasificarlos como 'faltante' antes de procesar (compatibilidad con datos viejos)
+    var faltantesEnEstadoIncorrecto = freshItems.filter(function(it){
+      return MATCHED.indexOf(it.estado_item)>=0 &&
+             (it.cantidad_recibida||0) === 0 &&
+             (it.cantidad_pedida||0) > 0;
     });
     var toDiscount = freshItems.filter(function(it){
       return (it.estado_item==="faltante" || it.estado_item==="pendiente_catalogo") && it.producto_id;
     });
+
+    // FIX BUG #19: re-clasificar items macheados con cantRec=0 como faltante
+    // ANTES de procesarlos (evita que se cuelen al toAdd en futuras corridas)
+    if(faltantesEnEstadoIncorrecto.length > 0){
+      var promsFix = faltantesEnEstadoIncorrecto.map(function(it){
+        var cantPed = it.cantidad_pedida || 0;
+        var obs = (it.observacion||'') + ' [Re-clasificado: cantRec=0 → faltante]';
+        return apiPatch("pedidos_proveedor_items",{
+          estado_item: "faltante",
+          observacion: obs.trim()
+        },"id=eq."+it.id);
+      });
+      Promise.all(promsFix).catch(function(e){console.error("[belle] re-clasif faltantes:",e);});
+      // Sumar a toDiscount para que también baje en_viaje y cree reclamo
+      faltantesEnEstadoIncorrecto.forEach(function(it){
+        if(it.producto_id){
+          toDiscount.push(Object.assign({}, it, {estado_item: "faltante"}));
+        }
+      });
+      console.warn("[belle] BUG #19 fix: re-clasificados "+faltantesEnEstadoIncorrecto.length+" items con cantRec=0 a faltante");
+    }
 
     if(!toAdd.length && !toDiscount.length){
       _liberarLock();
@@ -9971,7 +10048,14 @@ function _doAgregarAlStock(pedidoId,items){
       var it=cur.it;
       if(cur.type==="add"){
         var p=prods.find(function(x){return x.id===it.producto_id;});
-        var cantOk=Math.max((it.cantidad_recibida||it.cantidad_pedida||0)-(it.cantidad_fallada||0),0);
+        // ════════════════════════════════════════════════════════════
+        // 🐛 FIX BUG #19 (2026-05-18) — PED-915116 STAR
+        // ANTES: `(it.cantidad_recibida||it.cantidad_pedida||0)` — el OR
+        // hacía que si cantidad_recibida=0, agarrara cantidad_pedida como
+        // fallback. Productos NO recibidos se agregaban al stock.
+        // AHORA: SOLO cantidad_recibida. Si es 0, cantOk=0 → skip.
+        // ════════════════════════════════════════════════════════════
+        var cantOk=Math.max((it.cantidad_recibida||0)-(it.cantidad_fallada||0),0);
         if(cantOk<=0){processNext();return;}
         var precioCompra=it.precio_usd||0;
 
@@ -10640,9 +10724,12 @@ function incEliminar(itemId){
       toast("Este item ya fue cancelado","twarn");
       return;
     }
-    // Patch con filtro de estado para idempotencia BD
+    // FIX 2026-05-18 BUG #20: si el item YA estaba en estado faltante/recibido/en_stock,
+    // el en_viaje ya fue ajustado anteriormente (por _doAgregarAlStock o flujos similares).
+    // NO volver a bajarlo (causaría doble-resta).
+    var enViajeYaAjustado = ['faltante','recibido','en_stock','parcial'].indexOf(it.estado_item) >= 0;
     var ops=[apiPatch("pedidos_proveedor_items",{estado_item:"cancelado"},"id=eq."+itemId+"&estado_item=not.eq.cancelado")];
-    if(it.producto_id){
+    if(it.producto_id && !enViajeYaAjustado){
       var cantRestante=Math.max(0,(it.cantidad_pedida||0)-(it.cantidad_recibida||0));
       if(cantRestante>0){
         ops.push(patchStockFresco(it.producto_id,{en_viaje:-cantRestante},"Reclamo eliminado — en viaje ajustado"));
@@ -10813,7 +10900,14 @@ function abrirControlPedido(pedidoId){
         if(fm){matchId=fm.prod.id;accion="match";}
       }
       var cantPed=it.cantidad_pedida||0;
-      var cantRec=(it.cantidad_recibida>0)?it.cantidad_recibida:cantPed;
+      // FIX 2026-05-18 BUG #21 (REGLA ORO): NO pre-poblar cantRec con cantPed.
+      // El admin debe revisar y poner explícitamente la cantidad recibida de cada item.
+      var cantRec;
+      if(it.cantidad_recibida > 0){
+        cantRec = it.cantidad_recibida;
+      } else {
+        cantRec = 0;
+      }
       _controlDecisions[it.id]={
         catalogoAccion:accion,
         prodId:matchId,
@@ -10837,7 +10931,7 @@ function renderControlItems(){
   var el=document.getElementById("ctrlItemsList");if(!el)return;
   ctrlUpdateSummary();
   el.innerHTML=_controlItems.map(function(it){
-    var d=_controlDecisions[it.id]||{catalogoAccion:'pendiente',prodId:null,cantRecibida:it.cantidad_pedida,cantOk:it.cantidad_pedida,cantFallada:0,cantFaltante:0,obsFallada:"",obsGeneral:""};
+    var d=_controlDecisions[it.id]||{catalogoAccion:'pendiente',prodId:null,cantRecibida:0,cantOk:0,cantFallada:0,cantFaltante:0,obsFallada:"",obsGeneral:""};
     var cantPed=it.cantidad_pedida||0;
     var colors={match:"var(--green)",nuevo:"var(--cyan)",pendiente_catalogo:"var(--yel)",pendiente:"var(--tx3)"};
     var accionColor=colors[d.catalogoAccion]||"var(--tx3)";
@@ -25236,8 +25330,20 @@ function guardarControlPedido(){
       proms.push(apiPatch('pedidos_proveedor_items',patch,'id=eq.'+itemId+'&estado_item=not.in.(controlado,recibido,en_stock)'));
 
       // ── Manejar en_viaje y stock ────────────────────────────────────
-      // El en_viaje SOLO se sube desde incConfirmarMatch / cpGuardarMatchesExistente (macheo manual).
-      // guardarControlPedido solo lo BAJA en casos donde corresponde:
+      // ════════════════════════════════════════════════════════════════
+      // 🐛 FIX BUG #18 (2026-05-18) — PED-881343 MEGA: doble suma
+      // ANTES: si el item venía 'macheado' o 'borrador_match', al confirmar
+      // CONTROL ya se SUMABA stock_actual. Después al apretar "Agregar al
+      // stock", `_doAgregarAlStock` también sumaba → DUPLICACIÓN.
+      //
+      // AHORA: el control SOLO valida cantidades y cambia estado_item.
+      // El stock se suma EXCLUSIVAMENTE desde `_doAgregarAlStock` (botón
+      // "Agregar al stock"). Esa función ya tiene locks anti-duplicación.
+      //
+      // El en_viaje también se maneja allá. Acá solo lo bajamos cuando
+      // un item macheado se convierte en NUEVO (porque su en_viaje viejo
+      // quedaría huérfano).
+      // ════════════════════════════════════════════════════════════════
 
       // CASO 1: acción=nuevo y el item YA ESTABA macheado en BD
       // → el en_viaje fue sumado previamente → hay que bajarlo
@@ -25253,43 +25359,9 @@ function guardarControlPedido(){
         );
       }
 
-      // CASO 2: acción=match Y cantRecibida>0 → llegó, hay que SUMAR stock_actual y BAJAR en_viaje
-      // Solo si el item estaba en estado_item donde el en_viaje fue sumado (macheado o borrador_match)
-      // NUNCA si ya estaba 'controlado' (sería duplicación)
-      if(d.catalogoAccion==='match'&&cantRecibida>0&&d.prodId&&
-         (estadoActual==='macheado'||estadoActual==='borrador_match')){
-        var pidNuevo=d.prodId;
-        var cantBajar=Math.min(cantRecibida,cantPedida);
-        proms.push(
-          apiGet('productos','select=id,stock_actual,en_viaje,costo_ind&id=eq.'+pidNuevo).then(function(rows){
-            var p=rows&&rows[0];if(!p)return;
-            var stockAntes = p.stock_actual||0;
-            var ns=stockAntes+cantRecibida;
-            var nv=Math.max(0,(p.en_viaje||0)-cantBajar);
-            var patchProd={stock_actual:ns,en_viaje:nv};
-            // Costo promedio ponderado
-            var cActual=p.costo_ind||0;
-            var pCompra=itemOrig.precio_usd||0;
-            if(pCompra>0&&ns>0){
-              patchProd.costo_ind=Math.round(((( p.stock_actual||0)*cActual)+(cantRecibida*pCompra))/ns*100)/100;
-            }
-            return apiPatch('productos',patchProd,'id=eq.'+pidNuevo).then(function(){
-              // Loggear movimiento con valores correctos
-              return apiPost('movimientos_stock',{
-                producto_id:pidNuevo,
-                producto_nombre:p.nombre||(itemOrig.nombre_proveedor||'Prod '+pidNuevo),
-                tipo:'proveedor',
-                cantidad:cantRecibida,
-                stock_antes:stockAntes,
-                stock_despues:ns,
-                motivo:'Control pedido proveedor — '+(itemOrig.nombre_proveedor||''),
-                usuario:(document.getElementById('sbUser')||{}).textContent||'admin',
-                periodo:periodoActual||''
-              }).catch(function(e){console.error('[belle] error silencioso:',e);});
-            });
-          }).catch(function(e){console.error('[belle] error silencioso:',e);})
-        );
-      }
+      // CASO 2 ELIMINADO (era el bug): control NO suma stock_actual.
+      // El stock se agrega cuando el admin pulsa "Agregar al stock"
+      // (función _doAgregarAlStock).
     });
 
     if(procesadosSkip > 0 && proms.length === 0){
@@ -38220,7 +38292,6 @@ function incObs(itemId,inputId){
 
 function incNoLlega(itemId){
   if(!confirm('Cerrar esta incidencia — el producto definitivamente no llegará.\nEl en viaje del producto se actualizará.\n¿Confirmar?'))return;
-  // FIX 2026-05-16: guard de idempotencia
   apiGet('pedidos_proveedor_items','select=id,producto_id,cantidad_pedida,cantidad_recibida,estado_item&id=eq.'+itemId).then(function(rows){
     var it=rows&&rows[0];
     if(!it){toast("Item no encontrado","terr");return;}
@@ -38228,8 +38299,10 @@ function incNoLlega(itemId){
       toast("Este item ya fue cancelado","twarn");
       return;
     }
+    // FIX 2026-05-18 BUG #20: no bajar en_viaje si ya fue ajustado por otro flujo
+    var enViajeYaAjustado = ['faltante','recibido','en_stock','parcial'].indexOf(it.estado_item) >= 0;
     var ops=[apiPatch('pedidos_proveedor_items',{estado_item:'cancelado'},'id=eq.'+itemId+'&estado_item=not.eq.cancelado')];
-    if(it.producto_id){
+    if(it.producto_id && !enViajeYaAjustado){
       var cantRestante=Math.max(0,(it.cantidad_pedida||0)-(it.cantidad_recibida||0));
       if(cantRestante>0){
         ops.push(patchStockFresco(it.producto_id,{en_viaje:-cantRestante},'Incidencia cerrada — definitivamente no llega'));

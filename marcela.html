@@ -3147,7 +3147,13 @@ function abrirControlDavid(pedidoId){
         if(best&&bs>=0.4){matchId=best.id;accion="match";}
       }
       var cantPed=it.cantidad_pedida||0;
-      var cantRec=(it.cantidad_recibida>0)?it.cantidad_recibida:cantPed;
+      // FIX 2026-05-18 BUG #21 (REGLA ORO): NO pre-poblar cantRec con cantPed
+      var cantRec;
+      if(it.cantidad_recibida > 0){
+        cantRec = it.cantidad_recibida;
+      } else {
+        cantRec = 0;
+      }
       _dCtrlDecisions[it.id]={catalogoAccion:accion,prodId:matchId,cantRecibida:cantRec,cantFallada:it.cantidad_fallada||0,obsFallada:it.observacion||""};
     });
 
@@ -3320,16 +3326,44 @@ function confirmarControlDavid(){
     }
     var it=items[idx];idx++;
     var d=_dCtrlDecisions[it.id];if(!d){saveNext();return;}
-    var estadoCatalogo={match:"macheado",nuevo:"nuevo",pendiente_catalogo:"pendiente_catalogo"}[d.catalogoAccion]||"pendiente_catalogo";
-    var cantFalt=Math.max(0,it.cantidad_pedida-(d.cantRecibida||0));
+    var cantPed=it.cantidad_pedida||0;
+    var cantRec=d.cantRecibida||0;
+    var cantFalt=Math.max(0,cantPed-cantRec);
+    // ════════════════════════════════════════════════════════════
+    // 🐛 FIX BUG #19 (2026-05-18) — PED-915116 STAR
+    // Items con cantRecibida=0 deben ir a "faltante", NO a "macheado".
+    // Si quedan como macheado con cant=0, `_doAgregarAlStock` los agarra
+    // y los suma al stock usando `cantidad_pedida` → ERROR: se agregan
+    // productos que NO llegaron.
+    // ════════════════════════════════════════════════════════════
+    var noLlego = (cantPed > 0 && cantRec === 0);
+    var estadoCatalogo;
+    if(noLlego){
+      estadoCatalogo = "faltante";
+    } else {
+      estadoCatalogo = {match:"macheado",nuevo:"nuevo",pendiente_catalogo:"pendiente_catalogo"}[d.catalogoAccion]||"pendiente_catalogo";
+    }
     var obs=d.obsFallada||"";
     if(d.cantFallada>0&&!obs)obs="Fallados: "+d.cantFallada;
     if(cantFalt>0)obs+=(obs?", ":"")+"Faltantes: "+cantFalt;
+    if(noLlego && !obs) obs = "Producto NO llegó (faltante total)";
     var _st=setTimeout(function(){saveNext();},5000);
+    // IMPORTANTE: si era macheado/match y ahora es faltante, conservar el producto_id
+    // así `_doAgregarAlStock` puede bajar el en_viaje correctamente cuando admin agregue.
+    var prodIdGuardar;
+    if(noLlego){
+      // Si tenía un match previo (en BD o en la decisión), conservar para poder bajar en_viaje
+      prodIdGuardar = d.prodId || it.producto_id || null;
+    } else {
+      prodIdGuardar = d.prodId || null;
+    }
     apiPatch("pedidos_proveedor_items",{
-      producto_id:d.prodId||null,es_nuevo:d.catalogoAccion==="nuevo",
-      estado_item:estadoCatalogo,cantidad_recibida:d.cantRecibida||0,
-      cantidad_fallada:d.cantFallada||0,observacion:obs
+      producto_id: prodIdGuardar,
+      es_nuevo: !noLlego && d.catalogoAccion==="nuevo",
+      estado_item:estadoCatalogo,
+      cantidad_recibida:cantRec,
+      cantidad_fallada:d.cantFallada||0,
+      observacion:obs
     },"id=eq."+it.id).then(function(){clearTimeout(_st);saveNext();}).catch(function(){clearTimeout(_st);saveNext();});
   }
   saveNext();
