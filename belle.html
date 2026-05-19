@@ -10118,7 +10118,7 @@ function _doAgregarAlStock(pedidoId,items){
             // Si llegaron menos de lo pedido, crear reclamo por los faltantes
             if(cantFaltParcial>0){
               proms3.push(apiPost("reclamos",{
-                vendedor_id:null,vendedor_nombre:"Admin "+(curUser||""),
+                vendedor_id:1,vendedor_nombre:"Admin "+(curUser||""),
                 tipo_objeto:"pedido_proveedor",objeto_id:pedidoId,
                 objeto_desc:it.nombre_proveedor||(p?p.nombre:"Producto"),
                 categoria:"stock",
@@ -10149,7 +10149,7 @@ function _doAgregarAlStock(pedidoId,items){
         }
         // Crear incidencia automática
         proms2.push(apiPost("reclamos",{
-          vendedor_id:null,
+          vendedor_id:1,
           vendedor_nombre:"Admin "+(curUser||""),
           tipo_objeto:"pedido_proveedor",
           objeto_id:pedidoId,
@@ -10169,7 +10169,7 @@ function _doAgregarAlStock(pedidoId,items){
       if(cantFallada<=0) return;
       var p3=prods.find(function(x){return x.id===it.producto_id;});
       apiPost("reclamos",{
-        vendedor_id:null,
+        vendedor_id:1,
         vendedor_nombre:"Admin "+(curUser||""),
         tipo_objeto:"pedido_proveedor",
         objeto_id:pedidoId,
@@ -10820,15 +10820,71 @@ function pendienteMachear(itemId){
 function pendienteConfirmarMatch(itemId){
   var sel=document.getElementById("pendsel-"+itemId);
   if(!sel||!sel.value){toast("Selecciona un producto","twarn");return;}
-  apiPatch("pedidos_proveedor_items",{producto_id:parseInt(sel.value),estado_item:"macheado"},"id=eq."+itemId).then(function(){
-    toast("Match guardado","tok");loadPendientesCatalogo();
+  var newProdId=parseInt(sel.value);
+  // FIX 2026-05-18 BUG #22: replicar lógica de incConfirmarMatch — subir en_viaje al machear
+  // (si el item ya estaba macheado a otro producto, restar del viejo)
+  apiGet("pedidos_proveedor_items","select=id,producto_id,cantidad_pedida,estado_item&id=eq."+itemId).then(function(rows){
+    var it = rows && rows[0];
+    if(!it){toast("Item no encontrado","terr");return;}
+    var oldProdId = it.producto_id;
+    var qty = it.cantidad_pedida || 1;
+    var estadoActual = it.estado_item;
+    // Estados donde el en_viaje YA fue ajustado (procesado por el flujo de stock)
+    var YA_AJUSTADO = ['faltante','recibido','en_stock','parcial','cancelado'];
+    var yaAjustado = YA_AJUSTADO.indexOf(estadoActual) >= 0;
+
+    var proms = [
+      apiPatch("pedidos_proveedor_items",{producto_id:newProdId,estado_item:"macheado"},"id=eq."+itemId)
+    ];
+
+    // Si el item venía de estado donde en_viaje no fue ajustado (era pendiente/pendiente_catalogo/nuevo)
+    // → subir en_viaje al nuevo producto. Si tenía otro producto_id antes, restar de ese primero.
+    if(!yaAjustado){
+      if(oldProdId && oldProdId !== newProdId){
+        // Cambio de match: restar del viejo
+        proms.push(patchStockFresco(oldProdId,{en_viaje:-qty},'Cambio match (pendiente)'));
+      }
+      // Solo sumar al nuevo si NO es el mismo producto anterior
+      if(oldProdId !== newProdId){
+        proms.push(patchStockFresco(newProdId,{en_viaje:+qty},'Match desde pendiente'));
+      }
+    }
+    // Si ya estaba ajustado, NO tocar en_viaje (ya fue procesado)
+    return Promise.all(proms);
+  }).then(function(){
+    toast("Match guardado","tok");
+    loadPendientesCatalogo();
+  }).catch(function(e){
+    toast("Error: "+(e.message||""),"terr");
+    console.error(e);
   });
 }
 
 function pendienteEliminar(itemId){
   if(!confirm("Quitar este pendiente? No se podra deshacer."))return;
-  apiPatch("pedidos_proveedor_items",{estado_item:"cancelado"},"id=eq."+itemId).then(function(){
+  // FIX 2026-05-18 BUG #23: chequear estado actual y bajar en_viaje SOLO si corresponde
+  apiGet("pedidos_proveedor_items","select=id,producto_id,cantidad_pedida,cantidad_recibida,estado_item&id=eq."+itemId).then(function(rows){
+    var it = rows && rows[0];
+    if(!it){toast("Item no encontrado","terr");return;}
+    if(it.estado_item === 'cancelado'){
+      toast("Ya estaba cancelado","twarn");
+      return;
+    }
+    var EN_VIAJE_SUMADO = ['macheado','controlado','borrador_match'];
+    var teniaEnViaje = EN_VIAJE_SUMADO.indexOf(it.estado_item) >= 0 && it.producto_id;
+    var ops = [apiPatch("pedidos_proveedor_items",{estado_item:"cancelado"},"id=eq."+itemId+"&estado_item=not.eq.cancelado")];
+    if(teniaEnViaje){
+      var cantRestante = Math.max(0, (it.cantidad_pedida||0) - (it.cantidad_recibida||0));
+      if(cantRestante > 0){
+        ops.push(patchStockFresco(it.producto_id, {en_viaje:-cantRestante}, 'Pendiente eliminado'));
+      }
+    }
+    return Promise.all(ops);
+  }).then(function(){
     toast("Quitado","tok");loadPendientesCatalogo();
+  }).catch(function(e){
+    toast("Error: "+(e.message||""),"terr");
+    console.error(e);
   });
 }
 
@@ -11245,129 +11301,16 @@ function ctrlUpdateSummary(){
     "<span style='color:var(--red)'>&#10007; Faltantes: "+tots.faltantes+"u</span>";
 }
 
+// ════════════════════════════════════════════════════════════════════
+// FUNCIÓN ELIMINADA 2026-05-18: `confirmarControl` (versión vieja)
+// Esta función sumaba stock_actual al confirmar el control, causando
+// duplicación cuando después se apretaba "Agregar al stock".
+// Reemplazada por `guardarControlPedido` (línea ~25321) que NO toca stock.
+// El stock se suma EXCLUSIVAMENTE desde `_doAgregarAlStock`.
+// ════════════════════════════════════════════════════════════════════
 function confirmarControl(){
-  _controlItems.forEach(function(it){
-    if(_controlDecisions[it.id]&&_controlDecisions[it.id].catalogoAccion==='pendiente')
-      _controlDecisions[it.id].catalogoAccion='pendiente_catalogo';
-  });
-
-  var btn=document.getElementById("ctrlConfirmarBtn");
-  if(btn){btn.disabled=true;btn.textContent="Guardando...";}
-
-  var userName=document.getElementById("sbUser")?document.getElementById("sbUser").textContent.trim():"Usuario";
-
-  // Save items sequentially to avoid rate limits and DB errors
-  var items=_controlItems.slice();
-  var idx=0;
-
-  function saveNext(){
-    if(idx>=items.length){
-      // All items saved, now update pedido estado
-      apiPatch("pedidos_proveedor",{
-        estado:"controlado",
-        controlado_por:userName,
-        controlado_at:new Date().toISOString()
-      },"id=eq."+_controlPedidoId).then(function(){
-        cerrarModal("moControlPedido");
-        toast("Control completado por "+userName,"tok");
-        if(btn){btn.disabled=false;btn.textContent="Confirmar control";}
-        loadPedidosProveedor();
-        // Reload prods and refresh stock page
-        apiGet("productos","select=*&activo=is.true&order=empresa,nombre&limit=2000").then(function(d){if(Array.isArray(d))prods=d;renderStockPage();});
-        // Launch new products wizard
-        var nuevos=_controlItems.filter(function(it){
-          return _controlDecisions[it.id]&&_controlDecisions[it.id].catalogoAccion==="nuevo";
-        });
-        if(nuevos.length>0){
-          _newProdsQueue=nuevos.map(function(it){
-            var d=_controlDecisions[it.id];
-            return{item:{nombre_proveedor:it.nombre_proveedor,marca:it.marca||"",
-              codigo_proveedor:it.codigo_proveedor||"",precio_usd:it.precio_usd,id:it.id},
-              recibido:(d?d.cantRecibida:0)||it.cantidad_pedida};
-          });
-          setTimeout(procesarNuevoProducto,200);
-        }
-      }).catch(function(e){
-        console.error("Error updating pedido:",e);
-        toast("Error actualizando estado del pedido","terr");
-        if(btn){btn.disabled=false;btn.textContent="Confirmar control";}
-      });
-      return;
-    }
-
-    var it=items[idx];idx++;
-    var d=_controlDecisions[it.id];
-    if(!d){saveNext();return;}
-
-    var estadoCatalogo={match:"macheado",nuevo:"nuevo",pendiente_catalogo:"pendiente_catalogo"}[d.catalogoAccion]||"pendiente_catalogo";
-    var cantRec=(d.cantRecibida||0);
-    var cantFall=(d.cantFallada||0);
-    var cantFalt=Math.max(0,it.cantidad_pedida-cantRec);
-    var obs=d.obsFallada||"";
-    if(cantFall>0&&obs==="")obs="Fallados: "+cantFall;
-    if(cantFalt>0)obs+=(obs?", ":"")+"Faltantes: "+cantFalt;
-
-    // Build patch object - only include fields that exist in DB
-    var patch={
-      producto_id:d.prodId||null,
-      es_nuevo:d.catalogoAccion==="nuevo",
-      estado_item:estadoCatalogo,
-      cantidad_recibida:cantRec,
-      cantidad_fallada:cantFall,
-      observacion:obs
-    };
-    // Add cantidad_fallada if the SQL was run (safe to try, will be ignored if column missing)
-    patch.cantidad_fallada=cantFall;
-
-    // Use a timeout to ensure saveNext always fires
-    var _saveTimer=setTimeout(function(){console.warn("apiPatch timeout, continuing");saveNext();},5000);
-    apiPatch("pedidos_proveedor_items",patch,"id=eq."+it.id)
-      .then(function(){
-        clearTimeout(_saveTimer);
-        // ── Si se marcó como NUEVO y el item tenía un producto macheado antes ──
-        // bajar en_viaje del producto anterior
-        if(d.catalogoAccion==="nuevo"&&it.producto_id){
-          patchStockFresco(it.producto_id,{en_viaje:-it.cantidad_pedida},'Item desmacheado → marcado como nuevo').catch(function(e){console.error("[belle] error silencioso:",e);});
-        }
-        // ── Actualizar stock_actual y en_viaje en productos ──
-        if(d.prodId && cantRec>0){
-          var p=prods.find(function(x){return x.id===d.prodId;});
-          if(p){
-            var stockEx=p.stock_actual||0;
-            var ns=stockEx+cantRec;
-            var nv=Math.max(0,(p.en_viaje||0)-it.cantidad_pedida);
-            // Precio promedio ponderado
-            var cActual=p.costo_ind||0;
-            var pCompra=it.precio_usd||0;
-            var nCosto=cActual;
-            if(pCompra>0&&ns>0){
-              nCosto=Math.round(((stockEx*cActual)+(cantRec*pCompra))/ns*100)/100;
-            }
-            var patchC={stock_actual:ns,en_viaje:nv};
-            if(nCosto>0&&nCosto!==cActual) patchC.costo_ind=nCosto;
-            p.stock_actual=ns;p.en_viaje=nv;if(nCosto>0)p.costo_ind=nCosto;
-            apiPatch("productos",patchC,"id=eq."+d.prodId)
-              .catch(function(e){console.error("Error actualizando stock:",e);});
-            // Register movement
-            apiPost("movimientos_stock",{
-              producto_id:d.prodId,
-              producto_nombre:p.nombre,
-              tipo:"proveedor",
-              cantidad:cantRec,
-              stock_antes:stockEx,
-              stock_despues:ns,
-              motivo:"Control pedido proveedor — "+(it.nombre_proveedor||p.nombre||""),
-              usuario:(document.getElementById("sbUser")||{}).textContent||"admin",
-              periodo:periodoActual||""
-            }).catch(function(e){console.error("[belle] error silencioso:",e);});
-          }
-        }
-        saveNext();
-      })
-      .catch(function(e){clearTimeout(_saveTimer);console.error("item patch err:",e);saveNext();});
-  }
-
-  saveNext();
+  console.warn("[belle] confirmarControl() está obsoleta y deshabilitada. Usar guardarControlPedido() en su lugar.");
+  toast("Función deshabilitada. Usar 'Confirmar todo' del modal de control.","twarn");
 }
 
 
@@ -20797,6 +20740,20 @@ function recepcionCheckFaltante(idx,pedido,val){
 
 function confirmarRecepcion(){
   // ════════════════════════════════════════════════════════════════════
+  // FUNCIÓN DEPRECADA 2026-05-18: este flujo está reemplazado por el
+  // sistema de Control de pedidos (`abrirControlPedido` + `guardarControlPedido`)
+  // que tiene mejor manejo de cantidades y bugs corregidos.
+  // Si llegás acá por error, abrí el control del pedido en su lugar.
+  // ════════════════════════════════════════════════════════════════════
+  console.warn("[belle] confirmarRecepcion() está obsoleta. Usar abrirControlPedido() en su lugar.");
+  toast("Función deshabilitada. Usá 'Controlar' para procesar el pedido.","twarn");
+  var mo = document.getElementById('moRecepcion');
+  if(mo) mo.classList.remove('open');
+  return;
+}
+
+function _confirmarRecepcion_OLD_DEPRECATED(){
+  // ════════════════════════════════════════════════════════════════════
   // FIX 2026-05-16: agregar guards de idempotencia (igual que _doAgregarAlStock)
   // Antes: doble-click → suma stock dos veces
   // Ahora: lock global + verificación de estado_item por item antes de sumar
@@ -22675,9 +22632,11 @@ function eppGuardar(){
     promises.push(apiPatch("pedidos_proveedor_items",{
       cantidad_pedida:it.cantidad_pedida,precio_usd:it.precio_usd
     },"id=eq."+it.id));
-    // Ajustar en_viaje si cambió la cantidad y el item ya está macheado
-    if(diffCant!==0&&it.producto_id&&
-       (it.estado_item==='macheado'||it.estado_item==='controlado'||it.estado_item==='pendiente_catalogo')){
+    // FIX 2026-05-18 BUG #31: ajustar en_viaje SOLO en estados donde realmente fue sumado.
+    // pendiente_catalogo NO tiene en_viaje sumado (eso pasa al machear, no al estar pendiente).
+    // controlado/borrador_match tampoco se debería poder editar normalmente, pero por seguridad incluyo.
+    var EN_VIAJE_SUMADO=['macheado','borrador_match'];
+    if(diffCant!==0&&it.producto_id&&EN_VIAJE_SUMADO.indexOf(it.estado_item)>=0){
       promises.push(patchStockFresco(it.producto_id,{en_viaje:diffCant},'epp cambio cantidad'));
     }
   });
@@ -22694,7 +22653,9 @@ function eppGuardar(){
   // Eliminar items removidos y ajustar en_viaje
   toDelete.forEach(function(it){
     promises.push(apiPatch("pedidos_proveedor_items",{estado_item:"cancelado"},"id=eq."+it.id));
-    if(it.producto_id&&(it.estado_item==='macheado'||it.estado_item==='controlado')){
+    // FIX 2026-05-18 BUG #31: bajar en_viaje SOLO si el item tenía en_viaje sumado
+    var EN_VIAJE_SUMADO=['macheado','borrador_match'];
+    if(it.producto_id&&EN_VIAJE_SUMADO.indexOf(it.estado_item)>=0){
       promises.push(patchStockFresco(it.producto_id,{en_viaje:-(it.cantidad_pedida||0)},'epp item eliminado'));
     }
   });
@@ -25203,8 +25164,10 @@ function eliminarPedidoProveedor(id){
             if(enViajeAjuste>0)enViajeAjuste=0; // por si recibido > pedido
             break;
           case 'faltante':
-            // No llegó. Si el flujo subió en_viaje cuando se macheó → descontar
-            enViajeAjuste=-qPed;
+            // FIX 2026-05-18 BUG #24: el estado 'faltante' significa que ya pasó por
+            // _doAgregarAlStock (rama toDiscount) y el en_viaje YA fue bajado allí.
+            // NO volver a bajarlo (causaría doble-resta).
+            enViajeAjuste=0;
             break;
           case 'en_stock':
           case 'recibido':
@@ -25315,16 +25278,30 @@ function guardarControlPedido(){
         estadoItem='pendiente_catalogo';
       }
 
+      // Determinar producto_id a guardar:
+      // - acción=nuevo → siempre null (es producto nuevo, no del catálogo)
+      // - noLlego con producto_id previo → CONSERVAR para poder bajar en_viaje desde _doAgregarAlStock
+      // - resto → usar d.prodId
+      var prodIdFinal;
+      if(d.catalogoAccion==='nuevo'){
+        prodIdFinal=null;
+      } else if(noLlego){
+        prodIdFinal=d.prodId||itemOrig.producto_id||null;
+      } else {
+        prodIdFinal=d.prodId||null;
+      }
       var patch={
         cantidad_recibida: cantRecibida,
         cantidad_fallada: d.cantFallada||0,
         estado_item: estadoItem,
-        // FIX: si acción=nuevo, producto_id siempre null (sin importar el fuzzy match)
-        producto_id: (noLlego||d.catalogoAccion==='nuevo')?null:(d.prodId||null),
+        producto_id: prodIdFinal,
         observacion: d.obsFallada||''
       };
       if(llegoParcial&&!patch.observacion){
         patch.observacion='Llegaron '+cantRecibida+' de '+cantPedida+' pedidas';
+      }
+      if(noLlego && !patch.observacion){
+        patch.observacion='Producto NO llegó (faltante total)';
       }
       // PATCH con filtro de estado — solo si el item NO está en estados ya procesados
       proms.push(apiPatch('pedidos_proveedor_items',patch,'id=eq.'+itemId+'&estado_item=not.in.(controlado,recibido,en_stock)'));
@@ -25355,6 +25332,26 @@ function guardarControlPedido(){
             var p=rows&&rows[0];if(!p)return;
             var nv=Math.max(0,(p.en_viaje||0)-cantPedida);
             return apiPatch('productos',{en_viaje:nv},'id=eq.'+pidViejo);
+          }).catch(function(e){console.error('[belle] error silencioso:',e);})
+        );
+      }
+
+      // ════════════════════════════════════════════════════════════════
+      // 🐛 FIX BUG #32 (2026-05-18): subir en_viaje cuando se confirma
+      // un item que venía de 'pendiente' o 'pendiente_catalogo' con auto-match.
+      // Sin esto, `_doAgregarAlStock` bajaría en_viaje que nunca subió y se
+      // comería en_viaje legítimo de otros pedidos del mismo producto.
+      // ════════════════════════════════════════════════════════════════
+      var EN_VIAJE_NO_SUMADO=['pendiente','pendiente_catalogo','faltante','nuevo','borrador','borrador_nuevo'];
+      var ahoraEstaMacheado=(estadoItem==='macheado');
+      var antesNoTeniaEnViaje=EN_VIAJE_NO_SUMADO.indexOf(estadoActual)>=0;
+      if(ahoraEstaMacheado && antesNoTeniaEnViaje && d.prodId){
+        var pidSubir=d.prodId;
+        proms.push(
+          apiGet('productos','select=id,en_viaje&id=eq.'+pidSubir).then(function(rows){
+            var p=rows&&rows[0];if(!p)return;
+            var nv=(p.en_viaje||0)+cantPedida;
+            return apiPatch('productos',{en_viaje:nv},'id=eq.'+pidSubir);
           }).catch(function(e){console.error('[belle] error silencioso:',e);})
         );
       }
@@ -29366,10 +29363,15 @@ function recAgregarFaltante(itemId,prodId,cant,prodNom,itemNom){
       var p=typeof prods!=='undefined'&&prods?prods.find(function(x){return x.id===prodId;}):null;
       var stockAntes=p?p.stock_actual||0:0;
       var nuevoStock=stockAntes+cant;
+      // FIX 2026-05-18 BUG #28: si el estado anterior era 'faltante', en_viaje YA estaba bajado
+      // (lo bajó _doAgregarAlStock cuando se procesó como faltante).
+      // SOLO subir stock_actual, NO tocar en_viaje.
+      var enViajeYaAjustado = (item.estado_item === 'faltante' || item.estado_item === 'pendiente_catalogo');
+      var deltaStock = enViajeYaAjustado ? {stock_actual:+cant} : {stock_actual:+cant,en_viaje:-cant};
       return Promise.all([
-        patchStockFresco(prodId,{stock_actual:+cant,en_viaje:-cant},'Agregar faltante'),
+        patchStockFresco(prodId,deltaStock,'Agregar faltante'),
         apiPost('movimientos_stock',{producto_id:prodId,producto_nombre:prodNom,tipo:'ingreso_faltante',cantidad:cant,stock_antes:stockAntes,stock_despues:nuevoStock,motivo:'Llegó faltante de pedido: '+(itemNom||prodNom),usuario:'admin',periodo:periodoActual||''}).catch(function(e){console.error('mov error:',e);}),
-        apiPost('reclamos',{vendedor_id:null,vendedor_nombre:'Admin '+(curUser||''),tipo_objeto:'pedido_proveedor',objeto_id:itemId,objeto_desc:prodNom,categoria:'stock',titulo:'Faltante resuelto — llegó al stock',descripcion:(cant+'u de '+(itemNom||prodNom)+' agregadas al stock'),estado:'aceptado',prioridad:'normal'}).catch(function(e){console.error("[belle] error silencioso:",e);})
+        apiPost("reclamos",{vendedor_id:1,vendedor_nombre:'Admin '+(curUser||''),tipo_objeto:'pedido_proveedor',objeto_id:itemId,objeto_desc:prodNom,categoria:'stock',titulo:'Faltante resuelto — llegó al stock',descripcion:(cant+'u de '+(itemNom||prodNom)+' agregadas al stock'),estado:'aceptado',prioridad:'normal'}).catch(function(e){console.error("[belle] error silencioso:",e);})
       ]).then(function(){
         toast(cant+'u de '+prodNom+' agregadas al stock ✅','tok');
         _logAct('agregar_faltante_resuelto',{item_id:itemId,producto_id:prodId,cantidad:cant});
@@ -29458,13 +29460,16 @@ function _recAgregarParcialConfirmar(itemId,prodId,cantMax){
     var nuevoStock=stockAntes+cant;
     var quedanFaltando=cantMax-cant;
     var nuevoEstado = quedanFaltando>0?'faltante':'en_stock';
+    // FIX 2026-05-18 BUG #28: si venía de 'faltante', en_viaje ya estaba bajado
+    var enViajeYaAjustado = (item.estado_item === 'faltante' || item.estado_item === 'pendiente_catalogo');
+    var deltaStock = enViajeYaAjustado ? {stock_actual:+cant} : {stock_actual:+cant,en_viaje:-cant};
     // Patch con filtro: si llegó completo (en_stock) usar filtro fuerte; si es parcial, permitir múltiples updates
     var filtroPatch = quedanFaltando>0 ? 'id=eq.'+itemId : 'id=eq.'+itemId+'&estado_item=not.in.(en_stock,recibido)';
     return apiPatch('pedidos_proveedor_items',{cantidad_recibida:cant,estado_item:nuevoEstado},filtroPatch).then(function(){
       return Promise.all([
-        patchStockFresco(prodId,{stock_actual:+cant,en_viaje:-cant},'Agregar parcial faltante'),
+        patchStockFresco(prodId,deltaStock,'Agregar parcial faltante'),
         apiPost('movimientos_stock',{producto_id:prodId,producto_nombre:prodNom,tipo:'ingreso_faltante',cantidad:cant,stock_antes:stockAntes,stock_despues:nuevoStock,motivo:'Llegó faltante parcial ('+quedanFaltando+' todavía faltan)',usuario:'admin',periodo:periodoActual||''}).catch(function(e){console.error('mov error:',e);}),
-        apiPost('reclamos',{vendedor_id:null,vendedor_nombre:'Admin '+(curUser||''),tipo_objeto:'pedido_proveedor',objeto_id:itemId,objeto_desc:prodNom,categoria:'stock',titulo:'Faltante parcial resuelto',descripcion:(cant+'u agregadas. Quedan '+quedanFaltando+'u pendientes.'),estado:'aceptado',prioridad:'normal'}).catch(function(e){console.error("[belle] error silencioso:",e);})
+        apiPost('reclamos',{vendedor_id:1,vendedor_nombre:'Admin '+(curUser||''),tipo_objeto:'pedido_proveedor',objeto_id:itemId,objeto_desc:prodNom,categoria:'stock',titulo:'Faltante parcial resuelto',descripcion:(cant+'u agregadas. Quedan '+quedanFaltando+'u pendientes.'),estado:'aceptado',prioridad:'normal'}).catch(function(e){console.error("[belle] error silencioso:",e);})
       ]);
     }).then(function(){
       toast(cant+'u agregadas. Quedan '+quedanFaltando+'u pendientes.','tok');
@@ -29495,7 +29500,7 @@ function recMarcarFaltanteDefinitivo(itemId){
     if(it.producto_id&&cantRestante>0){
       ops.push(patchStockFresco(it.producto_id,{en_viaje:-cantRestante},'Faltante definitivo — no llega'));
     }
-    ops.push(apiPost('reclamos',{vendedor_id:null,vendedor_nombre:'Admin '+(curUser||''),tipo_objeto:'pedido_proveedor',objeto_id:itemId,objeto_desc:it.nombre_proveedor||'Producto',categoria:'stock',titulo:'Faltante — definitivamente no llega',descripcion:'Item marcado como definitivamente no llegará. '+(cantRestante>0?cantRestante+'u descontadas de en viaje.':''),estado:'cancelado',prioridad:'normal'}).catch(function(e){console.error("[belle] error silencioso:",e);}));
+    ops.push(apiPost("reclamos",{vendedor_id:1,vendedor_nombre:'Admin '+(curUser||''),tipo_objeto:'pedido_proveedor',objeto_id:itemId,objeto_desc:it.nombre_proveedor||'Producto',categoria:'stock',titulo:'Faltante — definitivamente no llega',descripcion:'Item marcado como definitivamente no llegará. '+(cantRestante>0?cantRestante+'u descontadas de en viaje.':''),estado:'cancelado',prioridad:'normal'}).catch(function(e){console.error("[belle] error silencioso:",e);}));
     return Promise.all(ops);
   }).then(function(){toast('Marcado como no llegará — en viaje actualizado','tok');loadReclamos();})
     .catch(function(e){toast('Error: '+e.message,'terr');});
@@ -29659,7 +29664,7 @@ function _recCrearReclamoConfirmar(itemId,tipo,prodNom){
   var prior=(document.getElementById('_recCrearPrior')||{value:'alta'}).value;
   if(!desc){toast('Ingresá una descripción','twarn');return;}
   apiPost('reclamos',{
-    vendedor_id:null,vendedor_nombre:'Admin '+(curUser||''),
+    vendedor_id:1,vendedor_nombre:'Admin '+(curUser||''),
     tipo_objeto:'pedido_proveedor',objeto_id:itemId,
     objeto_desc:prodNom||'Producto',
     categoria:'stock',
