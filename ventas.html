@@ -707,7 +707,7 @@ function apiPatch(t,d,f){return api("PATCH",t,d,f);}
 //   {reserva: +1}       → suma 1 a reserva
 // ═══════════════════════════════════════════════════════════
 function patchStockFresco(prodId, delta, motivo){
-  return apiGet('productos','select=id,stock_actual,reserva,vendido_david&id=eq.'+prodId)
+  return apiGet('productos','select=id,stock_actual,reserva,vendido_david,vendido_facu&id=eq.'+prodId)
   .then(function(rows){
     var r=rows&&rows[0];
     if(!r)return;
@@ -721,12 +721,16 @@ function patchStockFresco(prodId, delta, motivo){
     if(delta.vendido_david!==undefined){
       patch.vendido_david=Math.max(0,(r.vendido_david||0)+delta.vendido_david);
     }
+    if(delta.vendido_facu!==undefined){
+      patch.vendido_facu=Math.max(0,(r.vendido_facu||0)+delta.vendido_facu);
+    }
     // Sincronizar prods en memoria
     var pm=prods.find(function(p){return p.id===prodId;});
     if(pm){
       if(patch.stock_actual!==undefined)pm.stock_actual=patch.stock_actual;
       if(patch.reserva!==undefined)pm.reserva=patch.reserva;
       if(patch.vendido_david!==undefined)pm.vendido_david=patch.vendido_david;
+      if(patch.vendido_facu!==undefined)pm.vendido_facu=patch.vendido_facu;
     }
     // Auto-detectar RE-INGRESO: stock pasa de 0 a positivo
     if(delta.stock_actual>0&&(r.stock_actual||0)===0&&patch.stock_actual>0){
@@ -3796,9 +3800,10 @@ window._ccVerificarYConsolidarPedidoCC = function(pedidoId){
 
     // 2) Para cada item: descontar stock (reserva → vendido) + crear venta
     items.forEach(function(it){
-      // FIX 2026-05-18: stock vendido SIEMPRE va a vendido_david
-      // (David es el receptor final del dinero según modelo de negocio Belle)
+      // Stock vendido va a la columna del RECEPTOR FINAL (quien cobra = vendId del pedido)
+      // David=1 (vendido_david), Facu=2 (vendido_facu). Marcela no cobra, solo transfiere.
       var colVendido = 'vendido_david';
+      if(vendId === 2) colVendido = 'vendido_facu';
 
       // Combos
       if(it.isCombo && it.combo_id){
@@ -6393,9 +6398,9 @@ function cancelarPedidoWeb(pedId,btn){
     var nroOrden = ped.nro_orden || ("WEB-"+pedId);
     // FIX 2026-05-18 BUG #6: detectar si tenía cobro (parcial o total)
     var teniaCobro = (ped.estado==='cobrado' || ped.estado==='cobrado_parcial' || ped.confirmado_cobro || (parseFloat(ped.cobrado_total)||0) > 0);
-    // FIX 2026-05-18: stock vendido SIEMPRE es vendido_david
-    // (modelo Belle: David es el receptor final del dinero y del descuento de stock)
+    // Columna vendido_X = vendedor que COBRÓ (receptor final del dinero y del descuento de stock)
     var colVendido = 'vendido_david';
+    if(ped.vendedor_id === 2) colVendido = 'vendido_facu';
 
     var promises=[apiPatch("pedidos_catalogo",{estado:"cancelado"},"id=eq."+pedId)];
     // FEAT CC v2: cancelar cuotas asociadas
@@ -7780,8 +7785,9 @@ function confirmarCancelPed(){
     var nroOrden = ped.nro_orden || ("CAN-"+pedId);
     // FIX 2026-05-18 BUG #7: detectar si tenía cobro (parcial/total)
     var teniaCobro = (ped.estado==='cobrado' || ped.estado==='cobrado_parcial' || ped.confirmado_cobro || (parseFloat(ped.cobrado_total)||0) > 0);
-    // FIX 2026-05-18: stock vendido SIEMPRE es vendido_david (modelo Belle)
+    // Columna vendido_X según vendedor del pedido (receptor final que cobró)
     var colVendido = 'vendido_david';
+    if(ped.vendedor_id === 2) colVendido = 'vendido_facu';
 
     var promises=[
       apiPatch("pedidos_catalogo",{estado:"cancelado",notas:(ped.notas||"")+" | CANCELADO: "+motivo},"id=eq."+pedId)
@@ -8466,11 +8472,21 @@ function renderCombosSection(){
             "<td style='font-size:.66rem;color:var(--acc);text-align:right;padding:.12rem'>"+fmt(precioItem)+"</td></tr>";
         }).join("")+
       "</table>";
-      return"<div style='background:var(--sur2);border:1px solid var(--adim);border-radius:var(--r);margin-bottom:.35rem;overflow:hidden'>"+
-        "<div style='display:flex;align-items:center;gap:.5rem;padding:.5rem .7rem'>"+
+      return"<div style='background:var(--sur2);border:1px solid "+(c.precio_oferta>0?"var(--rdim,#7a2222)":"var(--adim)")+";border-radius:var(--r);margin-bottom:.35rem;overflow:hidden;position:relative'>"+
+        // Etiqueta si existe
+        (c.etiqueta?"<div style='position:absolute;top:.3rem;left:.4rem;background:var(--red);color:#fff;font-size:.55rem;font-weight:800;padding:.18rem .4rem;border-radius:4px;text-transform:uppercase;letter-spacing:.04em;z-index:2'>"+c.etiqueta+"</div>":"")+
+        "<div style='display:flex;align-items:center;gap:.5rem;padding:.5rem .7rem"+(c.etiqueta?";padding-top:1.05rem":"")+"'>"+
           "<div style='flex:1;min-width:0'>"+
             "<div style='font-size:.75rem;font-weight:700;color:var(--tx1);white-space:nowrap;overflow:hidden;text-overflow:ellipsis'>"+c.nombre+"</div>"+
-            "<div style='font-size:.68rem;color:var(--acc);font-weight:600'>"+fmt(c.precio)+"</div>"+
+            // Si tiene oferta, mostrar tachado + oferta
+            (c.precio_oferta && parseFloat(c.precio_oferta)>0 && parseFloat(c.precio_oferta)<parseFloat(c.precio) ?
+              "<div style='display:flex;align-items:baseline;gap:.4rem'>"+
+                "<span style='font-size:.6rem;color:var(--tx3);text-decoration:line-through'>"+fmt(c.precio)+"</span>"+
+                "<span style='font-size:.78rem;color:var(--red);font-weight:800'>"+fmt(c.precio_oferta)+"</span>"+
+              "</div>"
+              :
+              "<div style='font-size:.68rem;color:var(--acc);font-weight:600'>"+fmt(c.precio)+"</div>"
+            )+
           "</div>"+
           "<button onclick='togComboDetalle("+c.id+")' style='background:transparent;border:none;color:var(--tx3);font-size:.65rem;cursor:pointer;padding:.2rem .4rem;white-space:nowrap;flex-shrink:0'>&#9432; detalle</button>"+
           "<button class='btn btn-a' style='padding:.3rem .7rem;font-size:.72rem;flex-shrink:0' onclick='agregarCombo("+c.id+")'>"+
@@ -8495,10 +8511,12 @@ function agregarCombo(comboId){
   var c=combosVendedor.find(function(x){return x.id===comboId;});
   if(!c)return;
   var key="combo_"+comboId;
+  // Si tiene oferta válida, usar precio_oferta
+  var precioFinal = (c.precio_oferta && parseFloat(c.precio_oferta) > 0 && parseFloat(c.precio_oferta) < parseFloat(c.precio)) ? c.precio_oferta : c.precio;
   if(cart[key]){cart[key].qty++;} else {
     cart[key]={
       id:key,nombre:"Combo: "+c.nombre,qty:1,
-      price:c.precio,seg:"combo",isDecan:false,isCombo:true,
+      price:precioFinal,seg:"combo",isDecan:false,isCombo:true,
       comboId:comboId,comboItems:c.combo_items||[]
     };
   }
@@ -9772,10 +9790,10 @@ function confirmarDevolucion(){
     "• Vuelve al stock: "+(volverAlStock?"SI":"NO (roto/fallado)")
   ))return;
 
-  // FIX 2026-05-18 BUG #8: stock vendido SIEMPRE es vendido_david (modelo Belle)
-  // Las devoluciones siempre afectan vendido_david porque ahí está el stock real vendido
+  // Columna vendido_X según vendedor de la venta original (a quien hay que restarle la venta)
   var vendVenta = v.vendedor_id || VENDEDOR_ID;
   var colVendido = 'vendido_david';
+  if(vendVenta === 2) colVendido = 'vendido_facu';
 
   var promises=[];
 
@@ -10878,18 +10896,38 @@ function concretarEncargo(id){
 }
 
 function caerEncargo(id){
-  if(!confirm("Marcar como caido?"))return;
+  // FIX 2026-05-18 BUG #15: avisar explícitamente que la seña queda en la empresa
   apiGet("encargos","select=*&id=eq."+id).then(function(data){
     if(!Array.isArray(data)||!data.length)return;
     var e=data[0];
+    var sena = parseFloat(e.sena) || 0;
+    var cobradoParcial = parseFloat(e.cobrado_parcial) || 0;
+    var totalCobrado = sena + cobradoParcial;
+    // Construir mensaje de confirmación según si tenía seña/cobros
+    var msg = "¿Marcar este encargo como CAÍDO?\n\n";
+    msg += "📦 Producto: " + (e.producto_nombre || "?") + "\n";
+    msg += "👤 Cliente: " + (e.cliente_nombre || "sin datos") + "\n";
+    msg += "💰 Total del encargo: " + fmt(e.total || 0) + "\n";
+    if(totalCobrado > 0){
+      msg += "\n⚠️ ATENCIÓN — El cliente ya pagó " + fmt(totalCobrado);
+      if(sena > 0) msg += "\n  • Seña: " + fmt(sena);
+      if(cobradoParcial > 0) msg += "\n  • Cobros parciales: " + fmt(cobradoParcial);
+      msg += "\n\n💼 Esa plata QUEDA EN LA EMPRESA (cliente la pierde).";
+      msg += "\nSi querés devolverla, hacelo por fuera del sistema.";
+    }
+    msg += "\n\n¿Confirmar caída del encargo?";
+    if(!confirm(msg))return;
     apiPatch("encargos",{estado:"caido",caido_at:new Date().toISOString()},"id=eq."+id).then(function(){
       apiPost("cotizaciones",{
         vendedor_id:VENDEDOR_ID,producto_nombre:e.producto_nombre,marca:e.marca||"",
-        descripcion:"ENCARGO CAIDO - "+e.cantidad+" unidades sin retirar. Cliente: "+(e.cliente_nombre||"sin datos"),
+        descripcion:"ENCARGO CAIDO - "+e.cantidad+" unidades sin retirar. Cliente: "+(e.cliente_nombre||"sin datos")+(totalCobrado>0?". Cliente había pagado "+fmt(totalCobrado)+" (queda a favor empresa)":""),
         precio_sugerido:e.precio_unitario||0,
-        notas:"Stock: "+e.cantidad+" unidades disponibles.",
+        notas:"Stock: "+e.cantidad+" unidades disponibles."+(totalCobrado>0?" Total cobrado quedó en empresa: "+fmt(totalCobrado):""),
         estado:"incidencia"
-      ,nro_operacion:'COT-'+Math.floor(10000+Math.random()*90000)}).then(function(){toast("Caido - admin notificado","twarn");loadPedidosWeb();});
+      ,nro_operacion:'COT-'+Math.floor(10000+Math.random()*90000)}).then(function(){
+        toast("Encargo marcado caído"+(totalCobrado>0?" — "+fmt(totalCobrado)+" quedó en empresa":""),"twarn");
+        loadPedidosWeb();
+      });
     });
   });
 }
