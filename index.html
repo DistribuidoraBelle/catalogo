@@ -1181,12 +1181,20 @@ function loadProds(){
     fillBrands();
     applyFilters();
     // Cargar pestañas y paneles juntos para que imagen_destacados esté disponible
-    // Cargar fichas de Supabase para el comparador
-    setTimeout(function(){
-      apiGet('fichas_perfume','select=*&order=id&limit=2000').then(function(fdata){
-        window._fichasSB=Array.isArray(fdata)?fdata:[];
-      }).catch(function(){window._fichasSB=[];});
-    },3000);
+    // 🐛 FIX 2026-05-21: ANTES había un setTimeout(3000) que retrasaba la carga de fichas
+    // y causaba que el cliente viera "Sin ficha" si abría la ficha antes de los 3 segundos.
+    // Ahora se carga inmediatamente. window._fichasSBPromise queda expuesto para que
+    // verFichaBelle pueda esperar a que termine si el usuario abre la ficha muy rápido.
+    window._fichasSBLoading = true;
+    window._fichasSBPromise = apiGet('fichas_perfume','select=*&order=id&limit=2000').then(function(fdata){
+      window._fichasSB = Array.isArray(fdata) ? fdata : [];
+      window._fichasSBLoading = false;
+      return window._fichasSB;
+    }).catch(function(){
+      window._fichasSB = [];
+      window._fichasSBLoading = false;
+      return [];
+    });
     Promise.all([
       apiGet('paneles_destacados','select=*&order=orden'),
       apiGet('pestanas_catalogo','select=*&activa=is.true&order=orden'),
@@ -6886,22 +6894,58 @@ function getNotaFoto(notaNombre){
 function verFichaBelle(prodId, btn){
   var prod=allProds.find(function(p){return p.id===prodId;});
   if(!prod)return;
-  var ficha=fichaMatchProd(prod.nombre, FICHAS_BELLE, prod.id);
   var mo=document.getElementById('moFichaBelle');
   var content=document.getElementById('moFichaContent');
   if(!mo||!content)return;
+
+  // 🐛 FIX 2026-05-21: race condition - antes el modal se abría con el contenido
+  // basado en _fichasSB que podía estar vacío porque la carga tardaba 3s en arrancar.
+  // Ahora:
+  //  1. Abrimos el modal de inmediato (loading o ficha si ya está cargada)
+  //  2. Si las fichas aún no terminaron de cargar, esperamos y re-renderizamos cuando lleguen
+  //  3. Resultado: el cliente NO ve "Sin ficha" por timing, solo si realmente no existe.
   mo.style.display='block';
   document.body.style.overflow='hidden';
-  window._fichaActualProd=prod;window._fichaActualData=ficha;
-  content.innerHTML=renderFichaModal(prod, ficha);
-  mo.scrollTop=0;
-  if(prod.imagen_url){ _fichaAdaptarColor(prod.imagen_url, content); }
-  // Sync fotos de notas en background — si llegan, re-renderizar solo la pirámide
-  syncNotasFotosDesdeSupabase(function(){
-    var pir=content.querySelector('.fb-nota-tier');
-    if(pir){ content.innerHTML=renderFichaModal(prod, ficha); mo.scrollTop=0;
-      if(prod.imagen_url)_fichaAdaptarColor(prod.imagen_url,content); }
-  });
+
+  function renderConDatos(){
+    var ficha=fichaMatchProd(prod.nombre, FICHAS_BELLE, prod.id);
+    window._fichaActualProd=prod;window._fichaActualData=ficha;
+    content.innerHTML=renderFichaModal(prod, ficha);
+    mo.scrollTop=0;
+    if(prod.imagen_url){ _fichaAdaptarColor(prod.imagen_url, content); }
+    // Sync fotos de notas en background — si llegan, re-renderizar solo la pirámide
+    syncNotasFotosDesdeSupabase(function(){
+      var pir=content.querySelector('.fb-nota-tier');
+      if(pir){ content.innerHTML=renderFichaModal(prod, ficha); mo.scrollTop=0;
+        if(prod.imagen_url)_fichaAdaptarColor(prod.imagen_url,content); }
+    });
+  }
+
+  // Si todavía está cargando la primera tanda de fichas, mostramos un loading
+  // y esperamos a que termine antes de renderizar el contenido real.
+  if(window._fichasSBLoading && window._fichasSBPromise){
+    var nombreCorto = (prod.nombre||'').split('|')[0].trim();
+    content.innerHTML =
+      '<div style="padding:3rem 2rem;text-align:center;color:#9a8060">'+
+        '<div style="font-size:2rem;margin-bottom:1rem;animation:fbSpin 1.2s linear infinite;display:inline-block">⏳</div>'+
+        '<div style="font-family:Cormorant Garamond,serif;font-style:italic;font-size:1.2rem;color:#c4965a;margin-bottom:.4rem">'+nombreCorto+'</div>'+
+        '<div style="font-size:.85rem">Cargando ficha técnica…</div>'+
+      '</div>'+
+      '<style>@keyframes fbSpin{from{transform:rotate(0)}to{transform:rotate(360deg)}}</style>';
+    mo.scrollTop=0;
+    window._fichasSBPromise.then(function(){
+      // Verificar que el modal sigue abierto y mostrando este producto
+      if(mo.style.display==='block' && window._fichaActualProdId !== false){
+        renderConDatos();
+      }
+    });
+    window._fichaActualProdId = prodId;
+    return;
+  }
+
+  // Si las fichas ya están cargadas (caso normal), render inmediato
+  window._fichaActualProdId = prodId;
+  renderConDatos();
 }
 
 function _fichaAdaptarColor(imgUrl, content){
@@ -6969,6 +7013,9 @@ function cerrarFicha(){
   var mo=document.getElementById('moFichaBelle');
   if(mo)mo.style.display='none';
   document.body.style.overflow='';
+  // 🐛 FIX 2026-05-21: marcar como cerrado para que verFichaBelle no re-renderice
+  // si la promesa de carga termina después de que el usuario cerró el modal.
+  window._fichaActualProdId = false;
 }
 
 // Cerrar con Escape o click en backdrop
