@@ -678,12 +678,23 @@ td{padding:.35rem .5rem;font-size:.78rem;color:var(--tx2);vertical-align:middle;
 
       <!-- Sub-pestaña: Productos (la original) -->
       <div id="fichas-tab-fichas" style="display:block">
-        <div style="display:flex;gap:.5rem;margin-bottom:.8rem;flex-wrap:wrap">
+        <div style="display:flex;gap:.5rem;margin-bottom:.5rem;flex-wrap:wrap">
           <input class="fi" id="fichaSearch" placeholder="Buscar producto..." style="flex:1;min-width:200px" oninput="fichaSearchProd(this.value)">
           <select class="fi" id="fichaMarcaFil" style="max-width:200px" onchange="fichaSearchProd(document.getElementById('fichaSearch').value)">
             <option value="">Todas las marcas</option>
           </select>
+          <!-- 🎯 MEJORA #8 (2026-05-23): filtro por estado de completitud -->
+          <select class="fi" id="fichaEstadoFil" style="max-width:220px;font-size:.72rem" onchange="fichaSearchProd(document.getElementById('fichaSearch').value)">
+            <option value="">📋 Todas las fichas</option>
+            <option value="sin">Sin ficha</option>
+            <option value="incompleta">⚠️ Muy incompleta (0-4/10)</option>
+            <option value="parcial">🔶 Parcial (5-8/10)</option>
+            <option value="completa">✅ Completas (9-10/10)</option>
+            <option value="con_ficha">Con ficha (cualquier estado)</option>
+          </select>
         </div>
+        <!-- 🎯 MEJORA #8: resumen de cuántas hay de cada tipo -->
+        <div id="fichaStatsBar" style="display:none;margin-bottom:.6rem;padding:.5rem .7rem;background:var(--sur2);border-radius:8px;font-size:.7rem;color:var(--tx2);line-height:1.4"></div>
         <div id="fichaListaProds" style="display:flex;flex-direction:column;gap:.4rem"></div>
       </div>
 
@@ -1880,6 +1891,15 @@ td{padding:.35rem .5rem;font-size:.78rem;color:var(--tx2);vertical-align:middle;
         <div class="mb" style="display:flex;flex-direction:column;gap:.7rem">
           <input type="hidden" id="fichaEditProdId">
           <input type="hidden" id="fichaEditId">
+          <!-- 🎯 MEJORA #5 (2026-05-23): botón importar de FICHAS_MD para este producto -->
+          <!-- 🎯 MEJORA #7 (2026-05-23): panel de validación con avisos suaves -->
+          <div id="fichaImportarBox" style="display:none;background:rgba(99,187,106,.08);border:1px solid rgba(99,187,106,.3);border-radius:8px;padding:.55rem .7rem;font-size:.72rem;color:var(--tx2);line-height:1.4">
+            <div style="display:flex;justify-content:space-between;align-items:center;gap:.5rem">
+              <div>📋 Datos disponibles en FICHAS_MD para este producto</div>
+              <button type="button" id="fichaImportarBtn" onclick="fichaImportarParaEsteProducto()" style="font-size:.65rem;padding:.2rem .6rem;background:rgba(99,187,106,.2);border:1px solid rgba(99,187,106,.5);color:#3db87a;border-radius:6px;cursor:pointer;font-weight:600">Completar campos vacíos</button>
+            </div>
+          </div>
+          <div id="fichaValidacionBox" style="display:none"></div>
           <div class="fg"><label>Marca</label><input class="fi" id="fichaEditMarca" placeholder="Afnan Perfumes — Dubai, UAE"></div>
           <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:.5rem">
             <div class="fg"><label>Año</label><input class="fi" id="fichaEditAnno" placeholder="2024"></div>
@@ -1924,6 +1944,8 @@ td{padding:.35rem .5rem;font-size:.78rem;color:var(--tx2);vertical-align:middle;
           <div class="fg"><label>Perfil de usuario</label><textarea class="fi" id="fichaEditPerfil" rows="2" style="resize:vertical"></textarea></div>
           <div style="display:flex;gap:.5rem">
             <button class="btn btn-g" onclick="cerrarModal('moFicha')" style="flex:1">Cancelar</button>
+            <!-- 🎯 MEJORA #6 (2026-05-23): vista previa de la ficha en el catálogo -->
+            <button class="btn btn-g" onclick="fichaVistaPrevia()" title="Abrir el catálogo con esta ficha para ver cómo la ven los clientes" style="flex:1;background:rgba(196,150,90,.12);border-color:rgba(196,150,90,.4);color:var(--acc)">👁 Vista previa</button>
             <button class="btn btn-a" onclick="fichaGuardar()" style="flex:2;font-weight:600">💾 Guardar ficha</button>
           </div>
         </div>
@@ -5632,14 +5654,66 @@ function saveProd(){
   prom.then(function(res){
     if(res&&!Array.isArray(res)&&res.error){toast("Error: "+(res.message||res.error),"terr");return;}
     toast(editProdId?"Producto actualizado":"Producto agregado","tok");
-    // Sincronizar notas con fichas_perfume si existe y las notas cambiaron
-    if(editProdId&&notas){
-      apiGet("fichas_perfume","select=id,notas_salida&producto_id=eq."+editProdId+"&limit=1").then(function(fr){
-        if(Array.isArray(fr)&&fr[0]&&!fr[0].notas_salida){
-          // La ficha existe pero no tiene notas_salida — sincronizar
-          apiPatch("fichas_perfume",{notas_salida:notas},"id=eq."+fr[0].id).catch(function(e){console.error("[belle] error silencioso:",e);});
+    // 🎯 MEJORA #2 AMPLIADA (2026-05-23): sincronización completa producto → ficha
+    // Sincroniza varios campos del producto a su ficha asociada (si existe):
+    //  - nombre_completo (siempre — debe coincidir con el nombre del producto)
+    //  - marca (si la ficha no la tiene)
+    //  - genero (mapeo ♀→Femenino, ♂→Masculino, U→Unisex, solo si la ficha no lo tiene)
+    //  - notas_salida (si la ficha no las tiene — no pisar contenido)
+    //  - familia_olfativa (desde acordes, si la ficha no la tiene)
+    // descripcion NO se sincroniza porque son cosas distintas (comercial vs olfativa)
+    if(editProdId){
+      apiGet("fichas_perfume","select=id,nombre_completo,marca,genero,notas_salida,familia_olfativa&producto_id=eq."+editProdId+"&limit=1").then(function(fr){
+        if(!Array.isArray(fr) || !fr[0]) return;  // no hay ficha, nada que sincronizar
+        var ficha=fr[0];
+        var cambios={};
+
+        // 1. nombre_completo: SIEMPRE actualizar si difiere (debe coincidir con el producto)
+        if(nom && ficha.nombre_completo!==nom){
+          cambios.nombre_completo=nom;
         }
-      }).catch(function(e){console.error("[belle] error silencioso:",e);});
+
+        // 2. marca: usar empresa del producto si la ficha no tiene marca
+        var empresa=data.empresa||"";
+        if(empresa && (!ficha.marca || !String(ficha.marca).trim())){
+          cambios.marca=empresa;
+        }
+
+        // 3. genero: mapear el código del producto a texto. Solo si ficha no tiene.
+        var genMapFicha={"♀️":"Femenino","♂️":"Masculino","U":"Unisex","fem":"Femenino","mas":"Masculino"};
+        var generoTexto=genMapFicha[data.genero||""];
+        if(generoTexto && (!ficha.genero || !String(ficha.genero).trim())){
+          cambios.genero=generoTexto;
+        }
+
+        // 4. notas_salida: usar notas del producto si la ficha no tiene
+        if(notas && (!ficha.notas_salida || !String(ficha.notas_salida).trim())){
+          cambios.notas_salida=notas;
+        }
+
+        // 5. familia_olfativa: extraer texto de los acordes (JSON) si la ficha no tiene
+        if(!ficha.familia_olfativa || !String(ficha.familia_olfativa).trim()){
+          try {
+            var acordesArr=JSON.parse(data.acordes||"[]");
+            if(Array.isArray(acordesArr) && acordesArr.length>0){
+              var acordesTexto=acordesArr.map(function(a){return (a&&a.nombre)?a.nombre:String(a);}).filter(Boolean).join(", ");
+              if(acordesTexto) cambios.familia_olfativa=acordesTexto;
+            }
+          } catch(e){ /* acordes mal formado, ignorar */ }
+        }
+
+        // Si hay cambios, aplicarlos
+        if(Object.keys(cambios).length>0){
+          cambios.updated_at=new Date().toISOString();
+          apiPatch("fichas_perfume",cambios,"id=eq."+ficha.id)
+            .then(function(){
+              if(cambios.nombre_completo){
+                console.log("[ficha-sync] producto "+editProdId+" → ficha "+ficha.id+": "+Object.keys(cambios).filter(function(k){return k!=='updated_at';}).join(", "));
+              }
+            })
+            .catch(function(e){console.error("[belle] error sincronizando ficha:",e);});
+        }
+      }).catch(function(e){console.error("[belle] error consultando ficha para sync:",e);});
     }
     closeProdModal();loadProds();
     // ── GUARDAR OFERTA INDIVIDUAL del producto ──
@@ -37571,12 +37645,15 @@ function fichaLoadPage(){
       for(var j=0;j<marcas.length;j++) optsHtml+='<option value="'+marcas[j]+'">'+marcas[j]+'</option>';
       sel.innerHTML=optsHtml;
     }
-    // Fichas
-    fetch(SB_URL+"/rest/v1/fichas_perfume?select=id,producto_id&order=id",{headers:headers})
+    // Fichas — 🎯 MEJORA #3 (2026-05-23): traer campos clave para indicar completitud
+    // Antes traíamos solo id,producto_id. Ahora traemos los 10 campos más importantes
+    // para que el render pueda mostrar "✅ completa" / "🔶 incompleta X/10" en cada producto.
+    fetch(SB_URL+"/rest/v1/fichas_perfume?select=id,producto_id,familia_olfativa,notas_salida,notas_corazon,notas_fondo,descripcion,perfil_usuario,genero,proyeccion,duracion,estela&order=id",{headers:headers})
     .then(function(r2){return r2.json();})
     .then(function(fichas){
       _fichaData={};
       if(Array.isArray(fichas)){for(var k=0;k<fichas.length;k++)_fichaData[fichas[k].producto_id]=fichas[k];}
+      fichaActualizarStatsBar();
       fichaRenderLista(_fichaProds);
     }).catch(function(){
       _fichaData={};
@@ -37586,23 +37663,97 @@ function fichaLoadPage(){
     el.innerHTML='<div class="empty" style="color:var(--red)">Error fetch: '+(e.message||e)+'</div>';
   });
 }
+// 🎯 MEJORA #3 helper compartido: calcular score de una ficha (0-10)
+function fichaCalcScore(f){
+  if(!f) return -1; // -1 = sin ficha
+  var campos=['familia_olfativa','notas_salida','notas_corazon','notas_fondo','descripcion','perfil_usuario','genero','proyeccion','duracion','estela'];
+  var llenos=0;
+  for(var i=0;i<campos.length;i++){
+    var v=f[campos[i]];
+    if(v && String(v).trim()) llenos++;
+  }
+  return llenos;
+}
 function fichaSearchProd(q){
   var marca=document.getElementById("fichaMarcaFil").value;
+  var estadoFil=(document.getElementById("fichaEstadoFil")||{value:""}).value;
   var lower=(q||"").toLowerCase();
-  fichaRenderLista(_fichaProds.filter(function(p){
-    return(!lower||(p.nombre||"").toLowerCase().indexOf(lower)>=0)&&(!marca||(p.empresa||"")===marca);
-  }));
+  // 🎯 MEJORA #8: filtrar también por estado de completitud
+  var filtrados=_fichaProds.filter(function(p){
+    if(lower && (p.nombre||"").toLowerCase().indexOf(lower)<0) return false;
+    if(marca && (p.empresa||"")!==marca) return false;
+    if(estadoFil){
+      var ficha=_fichaData[p.id];
+      var score=fichaCalcScore(ficha);
+      if(estadoFil==="sin" && ficha) return false;
+      if(estadoFil==="con_ficha" && !ficha) return false;
+      if(estadoFil==="incompleta" && (!ficha || score>=5)) return false;
+      if(estadoFil==="parcial" && (!ficha || score<5 || score>=9)) return false;
+      if(estadoFil==="completa" && (!ficha || score<9)) return false;
+    }
+    return true;
+  });
+  // Mostrar stats globales (siempre, basado en _fichaProds total)
+  fichaActualizarStatsBar();
+  fichaRenderLista(filtrados);
+}
+
+// 🎯 MEJORA #8: barra de stats arriba de la lista
+function fichaActualizarStatsBar(){
+  var bar=document.getElementById("fichaStatsBar");
+  if(!bar || !_fichaProds.length) return;
+  var sinFicha=0, incompletas=0, parciales=0, completas=0;
+  _fichaProds.forEach(function(p){
+    var ficha=_fichaData[p.id];
+    if(!ficha){sinFicha++;return;}
+    var score=fichaCalcScore(ficha);
+    if(score>=9) completas++;
+    else if(score>=5) parciales++;
+    else incompletas++;
+  });
+  var total=_fichaProds.length;
+  var pctCompletas=Math.round(completas*100/total);
+  bar.style.display="block";
+  bar.innerHTML=
+    '<div style="display:flex;gap:.8rem;flex-wrap:wrap;align-items:center">'+
+      '<div><strong>'+total+'</strong> productos</div>'+
+      '<div style="color:#3db87a">✅ <strong>'+completas+'</strong> completas ('+pctCompletas+'%)</div>'+
+      '<div style="color:#e08e0b">🔶 <strong>'+parciales+'</strong> parciales</div>'+
+      '<div style="color:#e53935">⚠️ <strong>'+incompletas+'</strong> muy incompletas</div>'+
+      '<div style="color:var(--tx3)">— <strong>'+sinFicha+'</strong> sin ficha</div>'+
+    '</div>';
 }
 function fichaRenderLista(prods){
   var el=document.getElementById("fichaListaProds");if(!el)return;
   if(!prods.length){el.innerHTML='<div class="empty">Sin resultados</div>';return;}
+  // 🎯 MEJORA #3 (2026-05-23): scoring de completitud
+  // Por cada ficha contamos cuántos de los 10 campos clave están llenos.
+  // ≥9/10 → ✅ completa (verde)
+  // 5-8/10 → 🔶 parcial (naranja)
+  // <5/10 → ⚠️ incompleta (rojo)
+  // Usa la función global fichaCalcScore
   el.innerHTML=prods.map(function(p){
-    var tiene=!!_fichaData[p.id];
+    var ficha=_fichaData[p.id];
+    var tiene=!!ficha;
+    // Calcular score y elegir badge
+    var badge='';
+    if(!tiene){
+      badge='<span style="font-size:.6rem;padding:.1rem .4rem;border-radius:10px;background:rgba(255,100,100,.1);color:#e53935;border:1px solid rgba(255,100,100,.2)" title="Esta ficha aún no fue creada">Sin ficha</span>';
+    } else {
+      var score=fichaCalcScore(ficha);
+      if(score>=9){
+        badge='<span style="font-size:.6rem;padding:.1rem .4rem;border-radius:10px;background:rgba(99,187,106,.15);color:#3db87a;border:1px solid rgba(99,187,106,.3)" title="Ficha completa ('+score+'/10 campos)">✅ Completa</span>';
+      } else if(score>=5){
+        badge='<span style="font-size:.6rem;padding:.1rem .4rem;border-radius:10px;background:rgba(255,165,0,.15);color:#e08e0b;border:1px solid rgba(255,165,0,.3)" title="Ficha parcial: faltan campos por completar">🔶 '+score+'/10</span>';
+      } else {
+        badge='<span style="font-size:.6rem;padding:.1rem .4rem;border-radius:10px;background:rgba(255,100,100,.15);color:#e53935;border:1px solid rgba(255,100,100,.3)" title="Ficha muy incompleta: faltan muchos campos">⚠️ '+score+'/10</span>';
+      }
+    }
     return'<div style="display:flex;align-items:center;gap:.5rem;padding:.5rem .6rem;background:var(--sur2);border-radius:8px;border:1px solid var(--bd)">'
       +(p.imagen_url?'<img src="'+p.imagen_url+'" style="width:36px;height:36px;object-fit:contain;border-radius:5px;background:#fff;flex-shrink:0">':' <div style="width:36px;height:36px;background:var(--sur3);border-radius:5px;flex-shrink:0"></div>')
       +'<div style="flex:1;min-width:0"><div style="font-size:.75rem;font-weight:600;color:var(--tx);overflow:hidden;text-overflow:ellipsis;white-space:nowrap">'+p.nombre+'</div>'
       +'<div style="font-size:.62rem;color:var(--tx3)">'+( p.empresa||"")+'</div></div>'
-      +'<span style="font-size:.6rem;padding:.1rem .4rem;border-radius:10px;background:'+( tiene?"rgba(99,187,106,.15)":"rgba(255,100,100,.1)")+';color:'+( tiene?"#3db87a":"#e53935")+';border:1px solid '+( tiene?"rgba(99,187,106,.3)":"rgba(255,100,100,.2)")+'">'+( tiene?"✅ Con ficha":"Sin ficha")+'</span>'
+      +badge
       +'<button class="btn btn-a" style="font-size:.62rem;padding:.18rem .4rem;flex-shrink:0" onclick="fichaEditarProd('+p.id+')">'+( tiene?"Editar":"+ Crear")+'</button></div>';
   }).join("");
 }
@@ -37687,12 +37838,163 @@ function fichaEditarProd(prodId){
       fichaRenderNotasChips("fichaChipsCorazon", vC?vC.value:"", "corazon");
       fichaRenderNotasChips("fichaChipsFondo", vF?vF.value:"", "fondo");
     }, 50);
+
+    // 🎯 MEJORA #5 (2026-05-23): mostrar caja "Importar de FICHAS_MD" si hay match
+    fichaActualizarCajaImportar(prod);
+    // 🎯 MEJORA #7 (2026-05-23): validación al cargar (avisos de campos vacíos importantes)
+    fichaActualizarValidacion();
   }).catch(function(e){
     // Si después del retry todavía falla, mostrar error pero dejar el modal abierto
     console.error("[ficha] error cargando ficha tras retry:", e);
     if(tituloEl)tituloEl.textContent=nombreLimpio+" ⚠️ (sin datos)";
     toast("No se pudo cargar la ficha. Reintentá en unos segundos.","terr");
   });
+}
+
+// 🎯 MEJORA #5 helper: encontrar match en FICHAS_MD (texto hardcoded) para un producto
+function fichaBuscarEnFichasMD(prod){
+  if(typeof FICHAS_MD==="undefined" || !Array.isArray(FICHAS_MD) || !prod) return null;
+  function norm(s){
+    return (s||"").toLowerCase()
+      .normalize("NFD").replace(/[\u0300-\u036f]/g,"")
+      .replace(/[^a-z0-9\s]/g," ").replace(/\s+/g," ").trim();
+  }
+  var pn=norm(prod.nombre);
+  // 1. Match exacto
+  var exact=FICHAS_MD.find(function(f){return norm(f.nombre_completo)===pn;});
+  if(exact) return exact;
+  // 2. Match por palabras (60% mínimo)
+  var pWords=pn.split(" ").filter(function(w){return w.length>2;});
+  var best=null,bestScore=0;
+  FICHAS_MD.forEach(function(f){
+    var fn=norm(f.nombre_completo||"");
+    var matches=pWords.filter(function(w){return fn.indexOf(w)>=0;});
+    var score=matches.length/Math.max(pWords.length,1);
+    if(score>bestScore && score>=0.6){bestScore=score;best=f;}
+  });
+  return best;
+}
+
+// 🎯 MEJORA #5: mostrar/ocultar caja de importar según haya match en FICHAS_MD
+function fichaActualizarCajaImportar(prod){
+  var box=document.getElementById("fichaImportarBox");
+  if(!box) return;
+  var md=fichaBuscarEnFichasMD(prod);
+  // Guardamos el match en una variable global para que el botón lo use
+  window._fichaMatchMD=md||null;
+  if(md && (md.familia_olfativa || md.notas_salida || md.descripcion)){
+    box.style.display="block";
+  } else {
+    box.style.display="none";
+  }
+}
+
+// 🎯 MEJORA #5: importar campos vacíos de FICHAS_MD al modal actual
+function fichaImportarParaEsteProducto(){
+  var md=window._fichaMatchMD;
+  if(!md){toast("No hay datos para importar","terr");return;}
+  // Mapeo campo FICHAS_MD → id del input en el modal
+  var mapping=[
+    ["marca","fichaEditMarca"],
+    ["anno","fichaEditAnno"],
+    ["concentracion","fichaEditConc"],
+    ["genero","fichaEditGenero"],
+    ["familia_olfativa","fichaEditFamilia"],
+    ["inspirado_en","fichaEditInspirado"],
+    ["notas_salida","fichaEditSalida"],
+    ["notas_corazon","fichaEditCorazon"],
+    ["notas_fondo","fichaEditFondo"],
+    ["descripcion","fichaEditDesc"],
+    ["momento_dia","fichaEditMomento"],
+    ["estacion","fichaEditEstacion"],
+    ["ocasion","fichaEditOcasion"],
+    ["clima","fichaEditClima"],
+    ["proyeccion","fichaEditProyeccion"],
+    ["duracion","fichaEditDuracion"],
+    ["estela","fichaEditEstela"],
+    ["color_liquido","fichaEditColor"],
+    ["perfil_usuario","fichaEditPerfil"]
+  ];
+  var rellenados=0;
+  mapping.forEach(function(m){
+    var campoMD=m[0], inputId=m[1];
+    var valorMD=md[campoMD];
+    if(!valorMD || !String(valorMD).trim()) return;
+    var input=document.getElementById(inputId);
+    if(!input) return;
+    // Solo rellenar si el campo está vacío (no pisar lo que el usuario ya escribió)
+    if(!input.value || !String(input.value).trim()){
+      input.value=valorMD;
+      rellenados++;
+    }
+  });
+  // Refrescar chips de notas
+  var vS=document.getElementById("fichaEditSalida");var vC=document.getElementById("fichaEditCorazon");var vF=document.getElementById("fichaEditFondo");
+  fichaRenderNotasChips("fichaChipsSalida", vS?vS.value:"", "salida");
+  fichaRenderNotasChips("fichaChipsCorazon", vC?vC.value:"", "corazon");
+  fichaRenderNotasChips("fichaChipsFondo", vF?vF.value:"", "fondo");
+  // Refrescar validación
+  fichaActualizarValidacion();
+  if(rellenados>0){
+    toast("✅ "+rellenados+" campo(s) completado(s) desde FICHAS_MD","tok");
+  } else {
+    toast("Todos los campos ya estaban completos","tok");
+  }
+}
+
+// 🎯 MEJORA #6 (2026-05-23): vista previa — abrir el catálogo público con esta ficha
+function fichaVistaPrevia(){
+  var prodId=parseInt(document.getElementById("fichaEditProdId").value);
+  if(!prodId){toast("Error: no hay producto","terr");return;}
+  // Abrir catalogo_index.html en otra pestaña con ?ficha=PRODUCTO_ID
+  // Nota: los cambios no guardados no aparecen — se ve la versión publicada.
+  var url='catalogo_index.html?ficha='+prodId;
+  window.open(url,'_blank');
+}
+
+// 🎯 MEJORA #7: validación suave de campos importantes
+// Muestra una caja con avisos si faltan campos críticos. No bloquea, solo avisa.
+function fichaActualizarValidacion(){
+  var box=document.getElementById("fichaValidacionBox");
+  if(!box) return;
+  var checks=[
+    {id:"fichaEditFamilia",label:"Familia olfativa",critico:true},
+    {id:"fichaEditGenero",label:"Género",critico:true},
+    {id:"fichaEditSalida",label:"Notas de salida",critico:false},
+    {id:"fichaEditDesc",label:"Descripción sensorial",critico:false},
+    {id:"fichaEditPerfil",label:"Perfil de usuario",critico:false},
+    {id:"fichaEditProyeccion",label:"Proyección",critico:false},
+    {id:"fichaEditDuracion",label:"Duración",critico:false},
+    {id:"fichaEditEstela",label:"Estela",critico:false}
+  ];
+  var faltantes=[];
+  checks.forEach(function(c){
+    var el=document.getElementById(c.id);
+    if(!el) return;
+    if(!el.value || !String(el.value).trim()){
+      faltantes.push(c);
+    }
+  });
+  if(faltantes.length===0){
+    box.style.display="none";
+    return;
+  }
+  var criticos=faltantes.filter(function(f){return f.critico;});
+  var color=criticos.length>0 ? "rgba(255,100,100,.4)" : "rgba(255,165,0,.4)";
+  var bgColor=criticos.length>0 ? "rgba(255,100,100,.08)" : "rgba(255,165,0,.08)";
+  var icon=criticos.length>0 ? "⚠️" : "🔶";
+  var titulo=criticos.length>0 ? "Faltan campos importantes" : "Algunos campos están vacíos";
+  box.style.display="block";
+  box.style.background=bgColor;
+  box.style.border="1px solid "+color;
+  box.style.borderRadius="8px";
+  box.style.padding=".55rem .7rem";
+  box.style.fontSize=".72rem";
+  box.style.color="var(--tx2)";
+  box.style.lineHeight="1.4";
+  box.innerHTML=icon+" <strong>"+titulo+"</strong>: "+
+    faltantes.map(function(f){return f.critico?"<strong>"+f.label+"</strong>":f.label;}).join(", ")+
+    '<div style="font-size:.65rem;color:var(--tx3);margin-top:.2rem">Podés guardar igual, pero la ficha quedará incompleta en el catálogo.</div>';
 }
 function fichaGuardar(){
   var prodId=parseInt(document.getElementById("fichaEditProdId").value);
