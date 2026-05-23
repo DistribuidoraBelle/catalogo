@@ -37696,10 +37696,9 @@ function fichaEditarProd(prodId){
 }
 function fichaGuardar(){
   var prodId=parseInt(document.getElementById("fichaEditProdId").value);
-  var fichaId=document.getElementById("fichaEditId").value.trim();
   var prod=_fichaProds.find(function(p){return p.id===prodId;});
   if(!prodId){toast("Error: no hay producto seleccionado","terr");return;}
-  
+
   var data={
     producto_id:prodId,
     nombre_completo:prod?prod.nombre:"",
@@ -37725,30 +37724,54 @@ function fichaGuardar(){
     updated_at:new Date().toISOString()
   };
   toast("Guardando...","tok");
+
+  // 🐛 FIX 2026-05-23 (Fase 4 — prevención de duplicados):
+  // ANTES: confiábamos en fichaEditId del input. Si el modal cargaba mal (red lenta,
+  //        retry falló, etc), fichaEditId quedaba vacío → POST → DUPLICADO.
+  // AHORA: SIEMPRE consultamos la BD primero por producto_id. Si encontramos ficha(s),
+  //        hacemos PATCH a la MÁS RECIENTE. Si no, hacemos POST. Así es imposible
+  //        crear duplicados aunque haya fallas en la carga del modal.
   var headers={"Content-Type":"application/json","apikey":SB_KEY,"Authorization":"Bearer "+SB_KEY,"Prefer":"return=minimal"};
-  // Siempre filtrar por producto_id — el filtro por id no funciona en este contexto
-  var url=SB_URL+"/rest/v1/fichas_perfume?producto_id=eq."+prodId;
-  var method=fichaId?"PATCH":"POST";
-  if(!fichaId){
-    // Ficha nueva — usar upsert
-    headers["Prefer"]="resolution=merge-duplicates,return=minimal";
-    url=SB_URL+"/rest/v1/fichas_perfume";
-  }
-  fetch(url,{method:method,headers:headers,body:JSON.stringify(data)})
-  .then(function(r){
-    return r.text().then(function(t){
-      if(r.status===200||r.status===201||r.status===204||r.status===206){
-        toast(fichaId?"Ficha actualizada ✅":"Ficha creada ✅","tok");
-        cerrarModal("moFicha");
-        fichaLoadPage();
-      } else {
-        toast("Error "+r.status+": "+t.substring(0,120),"terr");
+
+  apiGet("fichas_perfume","select=id,updated_at&producto_id=eq."+prodId+"&order=updated_at.desc.nullslast,id.desc&limit=10")
+    .then(function(existentes){
+      var arr=Array.isArray(existentes)?existentes:[];
+      var fichaExistenteId=arr.length>0?arr[0].id:null;
+
+      // Warning si hay duplicados (sin bloquear el guardado)
+      if(arr.length>1){
+        console.warn("[fichaGuardar] ⚠️ Hay "+arr.length+" fichas para producto_id="+prodId+". Actualizando solo la más reciente (id="+fichaExistenteId+"). Las otras IDs: "+arr.slice(1).map(function(f){return f.id;}).join(","));
       }
+
+      var url, method;
+      if(fichaExistenteId){
+        // ACTUALIZAR la más reciente
+        url=SB_URL+"/rest/v1/fichas_perfume?id=eq."+fichaExistenteId;
+        method="PATCH";
+      } else {
+        // CREAR nueva (no había ficha previa)
+        url=SB_URL+"/rest/v1/fichas_perfume";
+        method="POST";
+      }
+
+      return fetch(url,{method:method,headers:headers,body:JSON.stringify(data)})
+        .then(function(r){
+          return r.text().then(function(t){
+            if(r.status===200||r.status===201||r.status===204||r.status===206){
+              var msg=fichaExistenteId?"Ficha actualizada ✅":"Ficha creada ✅";
+              if(arr.length>1){msg+=" (⚠️ había "+arr.length+" duplicadas, se actualizó la más reciente)";}
+              toast(msg,"tok");
+              cerrarModal("moFicha");
+              fichaLoadPage();
+            } else {
+              toast("Error "+r.status+": "+t.substring(0,120),"terr");
+            }
+          });
+        });
+    })
+    .catch(function(e){
+      toast("Error de red: "+(e.message||e),"terr");
     });
-  })
-  .catch(function(e){
-    toast("Error de red: "+(e.message||e),"terr");
-  });
 }
 function fichaImportarTodas(){
   if(typeof FICHAS_MD==="undefined"||!FICHAS_MD){toast("Error: datos de fichas no cargados","terr");return;}

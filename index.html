@@ -1318,7 +1318,11 @@ function loadProds(){
     // Ahora se carga inmediatamente. window._fichasSBPromise queda expuesto para que
     // verFichaBelle pueda esperar a que termine si el usuario abre la ficha muy rápido.
     window._fichasSBLoading = true;
-    window._fichasSBPromise = apiGet('fichas_perfume','select=*&order=id&limit=2000').then(function(fdata){
+    // 🐛 FIX 2026-05-23: cuando hay fichas duplicadas para un mismo producto_id, .find()
+    // agarra la PRIMERA del array. Ordenamos por updated_at DESC para que la primera sea
+    // la más recientemente actualizada (datos más completos/correctos).
+    // nullslast por si alguna ficha vieja no tiene updated_at; en ese caso van al final.
+    window._fichasSBPromise = apiGet('fichas_perfume','select=*&order=updated_at.desc.nullslast,id.desc&limit=2000').then(function(fdata){
       window._fichasSB = Array.isArray(fdata) ? fdata : [];
       window._fichasSBLoading = false;
       return window._fichasSB;
@@ -7364,22 +7368,63 @@ function renderFichaModal(prod, f){
   html+='</div>';
   
   // Perfil usuario — gráfico visual
-  if(f.perfil_usuario){
+  // 🐛 FIX 2026-05-23: bug de detección de género arreglado
+  // ANTES: el regex de hombre incluía "el\b" que matcheaba cualquier artículo "el"
+  //         dentro del texto (ej: "Para el día" en perfil femenino → UNISEX falso)
+  // AHORA: usa el campo f.genero de la BD como FUENTE DE VERDAD.
+  //        Solo si está vacío, parsea perfil_usuario con regex de palabras completas.
+  //        Default: UNISEX (si no hay info suficiente).
+  if(f.perfil_usuario || f.genero){
     html+='<div class="fb-section">';
     html+='<div class="fb-stitle">Perfil de usuario</div>';
-    
-    var pu=f.perfil_usuario;
-    
-    // Detectar género
-    var esMujer=/mujer|femenin|ella|female/i.test(pu);
-    var esHombre=/hombre|masculin|el\b|male/i.test(pu);
-    var esUnisex=(esMujer&&esHombre)||/unisex|ambos/i.test(pu);
-    
+
+    var pu = f.perfil_usuario || '';
+
+    // === DETECTAR GÉNERO (nueva lógica) ===
+    var esMujer = false, esHombre = false, esUnisex = false;
+
+    // PRIORIDAD 1: campo f.genero de la BD (fuente de verdad)
+    if(f.genero && String(f.genero).trim()){
+      var g = String(f.genero).toLowerCase().trim();
+      // Chequear PRIMERO género específico — "Femenino (unisex en práctica)" debe ser MUJER
+      if(g.indexOf('femenin') >= 0 || g === 'mujer' || g === 'mujeres' || g === 'f'){
+        esMujer = true;
+      }
+      else if(g.indexOf('masculin') >= 0 || g === 'hombre' || g === 'hombres' || g === 'm'){
+        esHombre = true;
+      }
+      else if(g.indexOf('unisex') >= 0 || g.indexOf('ambos') >= 0){
+        esUnisex = true;
+      }
+      else {
+        // Valor raro o desconocido → unisex por defecto
+        esUnisex = true;
+      }
+    }
+    // PRIORIDAD 2: parsear perfil_usuario (con regex arreglados)
+    else if(pu){
+      // Detectar primero combinaciones explícitas de unisex
+      // "mujeres y hombres" / "hombres y mujeres" / "unisex" / "ambos"
+      if(/mujer\w*\s+y\s+hombre\w*|hombre\w*\s+y\s+mujer\w*|\bunisex\b|ambos sexos|ambos g[eé]neros/i.test(pu)){
+        esUnisex = true;
+      } else {
+        // Regex con \b (palabra completa) — NO matchea "el" suelto
+        esMujer  = /\bmujeres?\b|\bfemenin\w*\b|\bfemale\b|\bellas?\b/i.test(pu);
+        esHombre = /\bhombres?\b|\bmasculin\w*\b|\bmale\b/i.test(pu);
+        if(esMujer && esHombre){ esUnisex = true; esMujer = false; esHombre = false; }
+        else if(!esMujer && !esHombre){ esUnisex = true; }  // default si no detecta nada
+      }
+    }
+    // PRIORIDAD 3: sin info → UNISEX por defecto
+    else {
+      esUnisex = true;
+    }
+
     // Detectar rango de edad
-    var edades=pu.match(/(\d{1,2})[‐\-–a-z ]+(\d{2})\s*a[ñn]/i)||pu.match(/(\d{1,2})[\s\-–]+(\d{2})/);
+    var edades = pu ? (pu.match(/(\d{1,2})[‐\-–a-z ]+(\d{2})\s*a[ñn]/i) || pu.match(/(\d{1,2})[\s\-–]+(\d{2})/)) : null;
     var edadMin=edades?parseInt(edades[1]):20;
     var edadMax=edades?parseInt(edades[2]):40;
-    
+
     // Iconos de género
     var generoHtml='';
     if(esUnisex){
@@ -7401,7 +7446,7 @@ function renderFichaModal(prod, f){
     } else {
       generoHtml='<div style="font-size:1.4rem">🧑</div>';
     }
-    
+
     // Barra de edad — rangos 15-25 / 25-35 / 35-50 / 50+
     var rangos=[
       {label:'15–25',min:15,max:25},
@@ -7424,8 +7469,12 @@ function renderFichaModal(prod, f){
     }).join('');
     
     // Descripción corta — extraer solo el estilo
-    var desc=pu.replace(/[Hh]ombres?[^.]*\.?/,'').replace(/[Mm]ujeres?[^.]*\.?/,'').replace(/\d+[‐\-–a-z ]+\d+\s*años?\.?/gi,'').trim();
-    if(desc.length>120) desc=desc.substring(0,117)+'...';
+    // 🐛 FIX 2026-05-23: proteger contra pu vacío (cuando solo viene f.genero sin perfil_usuario)
+    var desc='';
+    if(pu){
+      desc=pu.replace(/[Hh]ombres?[^.]*\.?/,'').replace(/[Mm]ujeres?[^.]*\.?/,'').replace(/\d+[‐\-–a-z ]+\d+\s*años?\.?/gi,'').trim();
+      if(desc.length>120) desc=desc.substring(0,117)+'...';
+    }
     
     html+='<div style="display:flex;gap:1.2rem;align-items:flex-start;flex-wrap:wrap">';
     
