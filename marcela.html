@@ -852,7 +852,8 @@ function calcP(p){
   if(typeof ofertaParaProducto==='function'){
     var oferta=ofertaParaProducto(p.id);
     if(oferta){
-      var esCC=!!(typeof _carritoCliente!=='undefined' && _carritoCliente && _carritoCliente.cuenta_corriente_habilitada);
+      // 🎯 FEAT 2026-05-22: consistencia con belle/ventas — VIP mayorista actúa como CC para precios
+      var esCC=!!(typeof _carritoCliente!=='undefined' && _carritoCliente && (_carritoCliente.cuenta_corriente_habilitada || _carritoCliente.precio_mayorista));
       r=aplicarOferta(r,oferta,esCC);
     }
   }
@@ -3731,7 +3732,8 @@ function marcTransferirCarrito(){
 
   var msg="Transferir a David:\n"+resumen+
     "\nVenta: $"+Math.round(totalVenta).toLocaleString("es-AR",{timeZone:"America/Argentina/Buenos_Aires"})+
-    "\nTu comision ("+totalUn+"u x $"+comUn.toLocaleString("es-AR",{timeZone:"America/Argentina/Buenos_Aires"})+"): $"+Math.round(totalCom).toLocaleString("es-AR",{timeZone:"America/Argentina/Buenos_Aires"})+
+    "\nTu comision ESTIMADA ("+totalUn+"u x $"+comUn.toLocaleString("es-AR",{timeZone:"America/Argentina/Buenos_Aires"})+"): $"+Math.round(totalCom).toLocaleString("es-AR",{timeZone:"America/Argentina/Buenos_Aires"})+
+    "\n(Si el cliente es CC o VIP mayorista, sera $"+(_comisiones.perfume||2000).toLocaleString("es-AR")+"/u sin importar la cantidad)"+
     (conReserva?"\n\nStock reservado ahora. David confirma el cobro.":"\n\nSin reserva de stock. David aprueba y descuenta.");
   if(!confirm(msg)) return;
 
@@ -3835,18 +3837,59 @@ function loadDepositoMarcela(){
     var pedidosNuevos = Array.isArray(res[0])?res[0]:[];
     var transferenciasViejas = Array.isArray(res[1])?res[1]:[];
 
-    // Helper: calcular comisión a partir de items
-    function _calcCom(items){
-      try { items = typeof items==='string' ? JSON.parse(items) : (items||[]); } catch(e){ items=[]; }
-      var perfs = items.filter(function(i){return !i.isDecan;});
-      var decans = items.filter(function(i){return i.isDecan;});
-      var totalUn = perfs.reduce(function(s,i){return s+(i.qty||1);},0);
-      var totalDec = decans.reduce(function(s,i){return s+(i.qty||1);},0);
-      var seg = totalUn>=10?'pm':totalUn>=3?'pe':'pi';
-      var comBase = seg==='pi' ? (_comisiones.minorista||5000) : (_comisiones.perfume||2000);
-      var comDec = _comisiones.decan || 500;
-      return Math.round(totalUn*comBase + totalDec*comDec);
+    // 🎯 FEAT 2026-05-22: Para cálculo correcto de comisión Marcela, necesitamos saber
+    // si el cliente de cada pedido es CC o VIP. Si lo es, comisión = $2000/u siempre.
+    // Recolectamos todos los cliente_id distintos y hacemos UNA sola query batch.
+    var clientesIds = {};
+    pedidosNuevos.forEach(function(p){
+      if(p.cliente_id) clientesIds[p.cliente_id] = true;
+    });
+    var idsArr = Object.keys(clientesIds);
+
+    var clientesPromise;
+    if(idsArr.length){
+      clientesPromise = apiGet('clientes','select=id,cuenta_corriente_habilitada,precio_mayorista&id=in.('+idsArr.join(',')+')')
+        .then(function(rows){
+          var mapa = {};
+          (Array.isArray(rows)?rows:[]).forEach(function(c){
+            mapa[c.id] = !!(c.cuenta_corriente_habilitada || c.precio_mayorista);
+          });
+          return mapa;
+        }).catch(function(){ return {}; });
+    } else {
+      clientesPromise = Promise.resolve({});
     }
+
+    return clientesPromise.then(function(clienteEsMayoristaMapa){
+      // Helper: calcular comisión a partir de items y opcionalmente del pedido (para detectar CC/VIP)
+      function _calcCom(items, pedido){
+        try { items = typeof items==='string' ? JSON.parse(items) : (items||[]); } catch(e){ items=[]; }
+        var perfs = items.filter(function(i){return !i.isDecan;});
+        var decans = items.filter(function(i){return i.isDecan;});
+        var totalUn = perfs.reduce(function(s,i){return s+(i.qty||1);},0);
+        var totalDec = decans.reduce(function(s,i){return s+(i.qty||1);},0);
+
+        // 🎯 FEAT 2026-05-22: detectar si el cliente paga precio mayorista (CC o VIP)
+        // → comisión SIEMPRE $2000/u, sin importar cantidad.
+        var esMayorista = false;
+        if(pedido){
+          if(pedido.es_cc === true){
+            esMayorista = true;
+          } else if(pedido.cliente_id && clienteEsMayoristaMapa[pedido.cliente_id]){
+            esMayorista = true;
+          }
+        }
+
+        var comBase;
+        if(esMayorista){
+          comBase = (_comisiones.perfume||2000);
+        } else {
+          var seg = totalUn>=10?'pm':totalUn>=3?'pe':'pi';
+          comBase = seg==='pi' ? (_comisiones.minorista||5000) : (_comisiones.perfume||2000);
+        }
+        var comDec = _comisiones.decan || 500;
+        return Math.round(totalUn*comBase + totalDec*comDec);
+      }
 
     // ── PENDIENTES: pedidos_catalogo no cobrados ──
     var pendNuevos = pedidosNuevos.filter(function(p){
@@ -3863,10 +3906,11 @@ function loadDepositoMarcela(){
     var pendViejas = transferenciasViejas.filter(function(t){return t.estado==='pendiente';});
 
     // Mapear todos a un formato común
+    // 🎯 FEAT 2026-05-22: pasar el pedido completo a _calcCom para detectar CC/VIP
     var pendComs = pendNuevos.map(function(p){
       return {
         nro_orden: p.nro_orden || ('#'+p.id),
-        monto: _calcCom(p.items),
+        monto: _calcCom(p.items, p),
         created_at: p.transferida_at || p.created_at,
         total: p.total,
         _esLegacy: false
@@ -3874,7 +3918,7 @@ function loadDepositoMarcela(){
     }).concat(pendViejas.map(function(t){
       return {
         nro_orden: t.nro_orden || ('#'+t.id),
-        monto: _calcCom(t.items),
+        monto: _calcCom(t.items, null),
         created_at: t.created_at,
         total: t.total,
         _esLegacy: true
@@ -3884,7 +3928,7 @@ function loadDepositoMarcela(){
     var aceptComs = aceptNuevos.map(function(p){
       return {
         nro_orden: p.nro_orden || ('#'+p.id),
-        monto: _calcCom(p.items),
+        monto: _calcCom(p.items, p),
         created_at: p.confirmado_at || p.transferida_at || p.created_at,
         total: p.total,
         _esLegacy: false
@@ -3892,7 +3936,7 @@ function loadDepositoMarcela(){
     }).concat(aceptViejas.map(function(t){
       return {
         nro_orden: t.nro_orden || ('#'+t.id),
-        monto: _calcCom(t.items),
+        monto: _calcCom(t.items, null),
         created_at: t.confirmada_at || t.created_at,
         total: t.total,
         _esLegacy: true
@@ -3959,6 +4003,7 @@ function loadDepositoMarcela(){
     }
 
     pg.innerHTML=html;
+    }); // ← cierre del clientesPromise.then (agregado en FEAT 2026-05-22)
   }).catch(function(e){
     console.error("[marcela] loadDepositoMarcela error:",e);
     pg.innerHTML='<div class="empty" style="padding:1rem">'+

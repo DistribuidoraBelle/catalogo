@@ -11523,12 +11523,9 @@ function decansRenderConfig(c){
       "</div>"+
     "</div>"+
 
-    // Card 3 (full width): mensaje warning
-    "<div style='background:var(--sur2);border:1px solid var(--bd);border-radius:8px;padding:1rem;grid-column:1/-1'>"+
-      "<h3 style='margin:0 0 .8rem;font-size:.9rem;display:flex;align-items:center;gap:.4rem'>💬 Mensaje al cliente</h3>"+
-      "<p style='font-size:.72rem;color:var(--tx3);margin:0 0 .5rem'>Se muestra cuando el carrito no cumple el mínimo. Podés usar emojis y saltos de línea.</p>"+
-      "<textarea id='decConfMsg' rows='3' style='width:100%;padding:.55rem;background:var(--sur);border:1px solid var(--bd);border-radius:5px;color:var(--tx);font-family:inherit;font-size:.78rem;resize:vertical'>"+(c.mensaje_warning||'')+"</textarea>"+
-    "</div>"+
+    // 🎯 FEAT 2026-05-22: Card 3 "Mensaje al cliente" eliminada.
+    // El mensaje ahora se genera automático en el catálogo con _msgMinimo (✓/⚠ y "falta X").
+    // Si querés un texto personalizado, decímelo y reactivamos esta card como override opcional.
 
     // Botón guardar
     "<div style='grid-column:1/-1;display:flex;gap:.5rem;justify-content:flex-end'>"+
@@ -11545,7 +11542,6 @@ function decansSaveConfig(){
   var minM = parseInt(document.getElementById('decConfMinM').value)||0;
   var pct = (parseFloat(document.getElementById('decConfPct').value)||10)/100;
   var fijo = parseInt(document.getElementById('decConfFijo').value)||0;
-  var msg = (document.getElementById('decConfMsg').value||'').trim();
   var activo = document.getElementById('decConfActivo').checked;
 
   // Validaciones
@@ -11559,7 +11555,8 @@ function decansSaveConfig(){
     min_unidades_sin_perfume:minU,
     min_monto_sin_perfume:minM,
     modo:modo,
-    mensaje_warning:msg||null,
+    // 🎯 FEAT 2026-05-22: el mensaje se genera automático, dejamos null para limpiar el texto viejo
+    mensaje_warning:null,
     precio_decan_pct:pct,
     precio_decan_fijo:fijo,
     activo:activo,
@@ -25526,6 +25523,11 @@ function loadComisionValues(cb){
 // crear la comisión correspondiente en gastos_vendedor.
 // Se acredita al vendedorAcreditado (el que figura como "vendedor del cobro" en cc_pagos).
 // Idempotente por (vendedor_id + nro_operacion + concepto LIKE 'Comision Marcela').
+//
+// 🎯 FEAT 2026-05-22: Si el cliente es CC o VIP mayorista, la comisión por unidad
+// es SIEMPRE la mayorista ($2000), aunque compre 1 sola unidad. Razón: ese cliente
+// paga precio mayorista (x10 fijo), no minorista, por lo que no corresponde cobrar
+// la comisión "minorista" de $5000.
 function _admCrearComisionMarcelaSiAplica(pedido, vendedorAcreditado, periodoActual){
   if(!pedido) return;
   if(pedido.transferida_por_id !== 3) return;
@@ -25538,24 +25540,56 @@ function _admCrearComisionMarcelaSiAplica(pedido, vendedorAcreditado, periodoAct
   var comDecans = items.filter(function(it){return it.isDecan;});
   var totalUn = comItems.reduce(function(s,it){return s+(it.qty||1);},0);
   var totalDec = comDecans.reduce(function(s,it){return s+(it.qty||1);},0);
-  var segTot = totalUn>=10?'pm':totalUn>=3?'pe':'pi';
-  var comBase = segTot==='pi' ? (_comisionValues.comision_minorista || 5000) : (_comisionValues.comision_perfume || 2000);
   var comDec = _comisionValues.comision_decan || 500;
-  var totalCom = Math.round(totalUn*comBase + totalDec*comDec);
-  if(totalCom <= 0) return;
-  // Verificar idempotencia: ¿ya existe esta comisión para este vendedor?
-  apiGet('gastos_vendedor','select=id&vendedor_id=eq.'+vendedorAcreditado+'&nro_operacion=eq.'+encodeURIComponent(pedido.nro_orden)+'&concepto=ilike.%25Comision%20Marcela%25').then(function(existentes){
-    if(Array.isArray(existentes) && existentes.length) return;
-    apiPost('gastos_vendedor',{
-      vendedor_id: vendedorAcreditado,
-      concepto: 'Comision Marcela — '+pedido.nro_orden,
-      monto: totalCom,
-      periodo: periodoActual||'general',
-      aprobado: true,
-      periodo_cerrado: false,
-      nro_operacion: pedido.nro_orden
-    }).catch(function(e){console.error("[belle] crear comision marcela:",e);});
-  }).catch(function(e){console.error("[belle] check comision marcela:",e);});
+
+  // Función interna: cuando ya sabemos si es mayorista, calcular y persistir
+  function _finalizar(esMayorista){
+    var comBase;
+    if(esMayorista){
+      // Cliente CC o VIP: siempre comisión mayorista, sin importar cantidad
+      comBase = _comisionValues.comision_perfume || 2000;
+    } else {
+      // Cliente normal: regla por cantidad
+      var segTot = totalUn>=10?'pm':totalUn>=3?'pe':'pi';
+      comBase = segTot==='pi' ? (_comisionValues.comision_minorista || 5000) : (_comisionValues.comision_perfume || 2000);
+    }
+    var totalCom = Math.round(totalUn*comBase + totalDec*comDec);
+    if(totalCom <= 0) return;
+    // Verificar idempotencia: ¿ya existe esta comisión para este vendedor?
+    apiGet('gastos_vendedor','select=id&vendedor_id=eq.'+vendedorAcreditado+'&nro_operacion=eq.'+encodeURIComponent(pedido.nro_orden)+'&concepto=ilike.%25Comision%20Marcela%25').then(function(existentes){
+      if(Array.isArray(existentes) && existentes.length) return;
+      apiPost('gastos_vendedor',{
+        vendedor_id: vendedorAcreditado,
+        concepto: 'Comision Marcela — '+pedido.nro_orden,
+        monto: totalCom,
+        periodo: periodoActual||'general',
+        aprobado: true,
+        periodo_cerrado: false,
+        nro_operacion: pedido.nro_orden
+      }).catch(function(e){console.error("[belle] crear comision marcela:",e);});
+    }).catch(function(e){console.error("[belle] check comision marcela:",e);});
+  }
+
+  // Detectar si el cliente paga precio mayorista (CC o VIP)
+  // Atajo: si el pedido tiene es_cc=true, ya sabemos que es CC.
+  if(pedido.es_cc === true){
+    _finalizar(true);
+    return;
+  }
+  // Si no es CC pero tiene cliente_id, consultar si tiene precio_mayorista
+  if(pedido.cliente_id){
+    apiGet('clientes','select=cuenta_corriente_habilitada,precio_mayorista&id=eq.'+pedido.cliente_id+'&limit=1').then(function(rows){
+      var c = Array.isArray(rows) && rows[0] ? rows[0] : null;
+      var esMay = !!(c && (c.cuenta_corriente_habilitada || c.precio_mayorista));
+      _finalizar(esMay);
+    }).catch(function(){
+      // Si falla la consulta, asumir cliente normal (regla vieja)
+      _finalizar(false);
+    });
+    return;
+  }
+  // Sin cliente_id ni es_cc: cliente normal
+  _finalizar(false);
 }
 
 // ── ADMIN: Panel Depósito ────────────────────────────────

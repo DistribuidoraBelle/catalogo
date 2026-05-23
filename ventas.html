@@ -4548,24 +4548,49 @@ function _crearComisionMarcelaSiAplica(pedido){
   var comDecans = items.filter(function(it){return it.isDecan;});
   var totalUn = comItems.reduce(function(s,it){return s+(it.qty||1);},0);
   var totalDec = comDecans.reduce(function(s,it){return s+(it.qty||1);},0);
-  var segTot = totalUn>=10?'pm':totalUn>=3?'pe':'pi';
-  var comBase = segTot==='pi' ? (_comisiones && _comisiones.minorista || 5000) : (_comisiones && _comisiones.perfume || 2000);
   var comDec = (_comisiones && _comisiones.decan) || 500;
-  var totalCom = Math.round(totalUn*comBase + totalDec*comDec);
-  if(totalCom <= 0) return;
-  // Verificar idempotencia: ¿ya existe esta comisión?
-  apiGet('gastos_vendedor','select=id&vendedor_id=eq.'+VENDEDOR_ID+'&nro_operacion=eq.'+encodeURIComponent(pedido.nro_orden)+'&concepto=ilike.%25Comision%20Marcela%25').then(function(existentes){
-    if(Array.isArray(existentes) && existentes.length) return;
-    apiPost('gastos_vendedor',{
-      vendedor_id: VENDEDOR_ID,
-      concepto: 'Comision Marcela — '+pedido.nro_orden,
-      monto: totalCom,
-      periodo: periodoActual||'general',
-      aprobado: true,
-      periodo_cerrado: false,
-      nro_operacion: pedido.nro_orden
-    }).catch(function(e){console.error("[belle] crear comision marcela:",e);});
-  }).catch(function(e){console.error("[belle] check comision marcela:",e);});
+
+  // 🎯 FEAT 2026-05-22: si cliente CC o VIP, comisión SIEMPRE mayorista ($2000/u)
+  function _finalizar(esMayorista){
+    var comBase;
+    if(esMayorista){
+      comBase = (_comisiones && _comisiones.perfume) || 2000;
+    } else {
+      var segTot = totalUn>=10?'pm':totalUn>=3?'pe':'pi';
+      comBase = segTot==='pi' ? ((_comisiones && _comisiones.minorista) || 5000) : ((_comisiones && _comisiones.perfume) || 2000);
+    }
+    var totalCom = Math.round(totalUn*comBase + totalDec*comDec);
+    if(totalCom <= 0) return;
+    apiGet('gastos_vendedor','select=id&vendedor_id=eq.'+VENDEDOR_ID+'&nro_operacion=eq.'+encodeURIComponent(pedido.nro_orden)+'&concepto=ilike.%25Comision%20Marcela%25').then(function(existentes){
+      if(Array.isArray(existentes) && existentes.length) return;
+      apiPost('gastos_vendedor',{
+        vendedor_id: VENDEDOR_ID,
+        concepto: 'Comision Marcela — '+pedido.nro_orden,
+        monto: totalCom,
+        periodo: periodoActual||'general',
+        aprobado: true,
+        periodo_cerrado: false,
+        nro_operacion: pedido.nro_orden
+      }).catch(function(e){console.error("[belle] crear comision marcela:",e);});
+    }).catch(function(e){console.error("[belle] check comision marcela:",e);});
+  }
+
+  // Atajo: si el pedido es CC, sabemos que paga precio mayorista
+  if(pedido.es_cc === true){
+    _finalizar(true);
+    return;
+  }
+  // Si tiene cliente_id, verificar si es VIP (precio_mayorista)
+  if(pedido.cliente_id){
+    apiGet('clientes','select=cuenta_corriente_habilitada,precio_mayorista&id=eq.'+pedido.cliente_id+'&limit=1').then(function(rows){
+      var c = Array.isArray(rows) && rows[0] ? rows[0] : null;
+      var esMay = !!(c && (c.cuenta_corriente_habilitada || c.precio_mayorista));
+      _finalizar(esMay);
+    }).catch(function(){ _finalizar(false); });
+    return;
+  }
+  // Sin cliente: usar regla vieja
+  _finalizar(false);
 }
 
 // ══════════════════════════════════════════════════════════════
