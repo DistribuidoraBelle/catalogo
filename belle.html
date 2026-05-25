@@ -1934,13 +1934,20 @@ td{padding:.35rem .5rem;font-size:.78rem;color:var(--tx2);vertical-align:middle;
             <!-- Imagen manual (URL externa o upload) -->
             <div id="fichaInspiradoImagenManual" style="margin-top:.4rem">
               <div style="display:flex;gap:.4rem;align-items:center">
-                <input class="fi" id="fichaInspiradoImgUrl" placeholder="O pegá una URL de imagen del perfume inspirador..." style="flex:1;font-size:.7rem" oninput="fichaInspiradoPreviewImg(this.value)">
+                <input class="fi" id="fichaInspiradoImgUrl" placeholder="O pegá una URL de imagen del perfume inspirador..." style="flex:1;font-size:.7rem"
+                       oninput="fichaInspiradoPreviewImg(this.value)"
+                       onchange="fichaInspiradoPreviewImg(this.value)"
+                       onpaste="var _i=this;setTimeout(function(){fichaInspiradoPreviewImg(_i.value);},10)"
+                       onblur="fichaInspiradoPreviewImg(this.value)">
                 <label for="fichaInspiradoImgFile" style="background:rgba(196,150,90,.15);border:1px solid rgba(196,150,90,.4);color:var(--acc);border-radius:6px;padding:.35rem .6rem;font-size:.7rem;cursor:pointer;white-space:nowrap">📤 Subir foto</label>
                 <input type="file" id="fichaInspiradoImgFile" accept="image/*" style="display:none" onchange="fichaInspiradoSubirFoto(this)">
               </div>
-              <div id="fichaInspiradoImgPreview" style="display:none;margin-top:.4rem">
-                <img id="fichaInspiradoImgPreviewTag" src="" style="max-width:80px;max-height:80px;object-fit:contain;border-radius:6px;background:#fff;border:1px solid var(--bd)" onerror="this.style.display='none'">
-                <button type="button" onclick="fichaInspiradoQuitarImg()" style="margin-left:.4rem;background:rgba(255,100,100,.15);border:1px solid rgba(255,100,100,.4);color:#e53935;border-radius:4px;padding:.15rem .45rem;font-size:.65rem;cursor:pointer;vertical-align:top">Quitar imagen</button>
+              <div id="fichaInspiradoImgPreview" style="display:none;margin-top:.4rem;align-items:center;gap:.4rem">
+                <img id="fichaInspiradoImgPreviewTag" src="" style="max-width:80px;max-height:80px;object-fit:contain;border-radius:6px;background:#fff;border:1px solid var(--bd);display:none"
+                     onload="this.style.display='inline-block';document.getElementById('fichaInspiradoImgPreviewErr').style.display='none'"
+                     onerror="this.style.display='none';var e=document.getElementById('fichaInspiradoImgPreviewErr');if(e)e.style.display='inline-flex'">
+                <span id="fichaInspiradoImgPreviewErr" style="display:none;align-items:center;gap:.3rem;font-size:.65rem;color:#b86d1d;background:rgba(196,150,90,.1);border:1px solid rgba(196,150,90,.3);border-radius:6px;padding:.3rem .5rem">ℹ️ La preview no carga acá (CORS), pero al guardar voy a descargar la imagen y subirla a tu Storage. Si eso también falla, te aviso.</span>
+                <button type="button" onclick="fichaInspiradoQuitarImg()" style="background:rgba(255,100,100,.15);border:1px solid rgba(255,100,100,.4);color:#e53935;border-radius:4px;padding:.15rem .45rem;font-size:.65rem;cursor:pointer;vertical-align:top">Quitar imagen</button>
               </div>
             </div>
             <!-- Hidden inputs que guardan el estado -->
@@ -38321,19 +38328,31 @@ function fichaInspiradoPreviewImg(url){
   url=(url||"").trim();
   var prev=document.getElementById("fichaInspiradoImgPreview");
   var img=document.getElementById("fichaInspiradoImgPreviewTag");
+  var err=document.getElementById("fichaInspiradoImgPreviewErr");
   var hidden=document.getElementById("fichaInspiradoImgFinal");
   if(!url){
     if(prev) prev.style.display="none";
+    if(img){img.style.display="none";img.src="";}
+    if(err) err.style.display="none";
     if(hidden) hidden.value="";
     return;
   }
   // Validar que parezca URL de imagen
   if(!/^https?:\/\//i.test(url)){
     if(prev) prev.style.display="none";
+    if(img){img.style.display="none";img.src="";}
+    if(err) err.style.display="none";
     return;
   }
-  if(img) img.src = url;
-  if(prev) prev.style.display="block";
+  // Mostrar contenedor como flex y resetear estados
+  if(prev) prev.style.display="flex";
+  if(err) err.style.display="none";
+  if(img){
+    img.style.display="none"; // se va a mostrar onload si carga OK
+    img.src = url;
+  }
+  // Guardamos la URL siempre — aunque la preview falle, puede ser un tema CORS
+  // de la preview en el admin, pero la imagen funcionar fuera del navegador.
   if(hidden) hidden.value = url;
 }
 
@@ -38388,6 +38407,62 @@ function fichaInspiradoQuitarImg(){
   document.getElementById("fichaInspiradoImgUrl").value = "";
   document.getElementById("fichaInspiradoImgFinal").value = "";
   document.getElementById("fichaInspiradoImgPreview").style.display="none";
+}
+
+// ════════════════════════════════════════════════════════════════════
+// PROXY: Descarga una URL externa y la sube al bucket Supabase
+// Resuelve el hotlink protection — devuelve URL pública de Storage
+// Si falla (CORS estricto, 404), devuelve null
+// ════════════════════════════════════════════════════════════════════
+function fichaInspiradoFetchYSubir(url){
+  return new Promise(function(resolve){
+    if(!url || !/^https?:\/\//i.test(url)){resolve(null);return;}
+    // Si ya es del bucket de Supabase, no hace falta proxear
+    if(url.indexOf(SB_URL+"/storage/v1/object/public/") === 0){resolve(url);return;}
+    fetch(url, {mode: "cors"})
+      .then(function(r){
+        if(!r.ok) throw new Error("HTTP " + r.status);
+        var ct = r.headers.get("Content-Type") || "image/jpeg";
+        if(!/^image\//.test(ct)){
+          // Algunos servidores no devuelven Content-Type correcto. Asumimos jpeg.
+          ct = "image/jpeg";
+        }
+        return r.blob().then(function(b){return {blob:b, ct:ct};});
+      })
+      .then(function(o){
+        if(o.blob.size > 5*1024*1024) throw new Error("Imagen demasiado grande (>5MB)");
+        // Extraer extensión del Content-Type o del URL
+        var ext = "jpg";
+        if(/png/i.test(o.ct)) ext = "png";
+        else if(/webp/i.test(o.ct)) ext = "webp";
+        else if(/gif/i.test(o.ct)) ext = "gif";
+        else {
+          // Intentar derivar de la URL si no hay CT claro
+          var m = url.match(/\.(png|jpg|jpeg|webp|gif)(?:\?|#|$)/i);
+          if(m) ext = m[1].toLowerCase();
+        }
+        var ts = Date.now();
+        var path = "inspiradores/insp_proxy_" + ts + "." + ext;
+        return fetch(SB_URL + "/storage/v1/object/productos-imagenes/" + path, {
+          method: "POST",
+          headers: {
+            "apikey": SB_KEY,
+            "Authorization": "Bearer " + SB_KEY,
+            "Content-Type": o.ct,
+            "x-upsert": "true"
+          },
+          body: o.blob
+        }).then(function(r2){
+          if(!r2.ok) throw new Error("Upload failed " + r2.status);
+          return SB_URL + "/storage/v1/object/public/productos-imagenes/" + path;
+        });
+      })
+      .then(function(publicUrl){resolve(publicUrl);})
+      .catch(function(e){
+        console.warn("[fichaInspiradoFetchYSubir] fallo:", url, e);
+        resolve(null);
+      });
+  });
 }
 
 // ════════════════════════════════════════════════════════════════════
@@ -38558,6 +38633,43 @@ function fichaGuardar(){
   var prod=_fichaProds.find(function(p){return p.id===prodId;});
   if(!prodId){toast("Error: no hay producto seleccionado","terr");return;}
 
+  // ✨ PROXY 2026-05-25: si la URL de imagen del inspirador es externa (no de nuestro
+  // Supabase Storage), la descargamos y subimos al bucket para evitar hotlink protection.
+  // Si el fetch falla (CORS estricto, 404), guardamos la URL tal cual y avisamos al usuario.
+  var urlOriginal = gv("fichaInspiradoImgFinal") || null;
+  var necesitaProxy = urlOriginal && /^https?:\/\//i.test(urlOriginal) &&
+                      urlOriginal.indexOf(SB_URL+"/storage/v1/object/public/") !== 0;
+
+  var promesaUrl;
+  if(necesitaProxy){
+    toast("📥 Descargando imagen externa…","tok");
+    promesaUrl = fichaInspiradoFetchYSubir(urlOriginal).then(function(nuevaUrl){
+      if(nuevaUrl){
+        // Éxito: actualizar inputs visibles + final
+        var inpUrl=document.getElementById("fichaInspiradoImgUrl");
+        var inpFinal=document.getElementById("fichaInspiradoImgFinal");
+        if(inpUrl) inpUrl.value = nuevaUrl;
+        if(inpFinal) inpFinal.value = nuevaUrl;
+        fichaInspiradoPreviewImg(nuevaUrl);
+        toast("✅ Imagen movida a tu Storage","tok");
+        return nuevaUrl;
+      } else {
+        // Falló (CORS o 404): guardamos URL original igual, pero avisamos
+        toast("⚠️ No pude descargar la imagen externa (probá 'Subir foto'). Se guarda la URL igual.","terr");
+        return urlOriginal;
+      }
+    });
+  } else {
+    promesaUrl = Promise.resolve(urlOriginal);
+  }
+
+  promesaUrl.then(function(urlFinal){
+    _fichaGuardarCore(prodId, prod, urlFinal);
+  });
+}
+
+// Core: arma el payload y hace POST/PATCH (separado para que el proxy pueda esperarlo)
+function _fichaGuardarCore(prodId, prod, urlImagenInspirador){
   var data={
     producto_id:prodId,
     nombre_completo:prod?prod.nombre:"",
@@ -38586,7 +38698,7 @@ function fichaGuardar(){
     rango_edad_max: (function(){var v=parseInt(gv("fichaEditEdadMax"));return isNaN(v)||v<10||v>99?null:v;})(),
     estilo_descripcion: gv("fichaEditEstilo") || null,
     inspirado_en_producto_id: (function(){var v=parseInt(gv("fichaInspiradoProdId"));return isNaN(v)||v<=0?null:v;})(),
-    inspirado_en_imagen_url: gv("fichaInspiradoImgFinal") || null,
+    inspirado_en_imagen_url: urlImagenInspirador || null,
     updated_at:new Date().toISOString()
   };
   toast("Guardando...","tok");
