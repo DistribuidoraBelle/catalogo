@@ -40520,8 +40520,9 @@ function notasAdmFusionarDesdeModal(claveOrigen, claveDestino){
     window._notasAdminCache = null;
     notasAdmCargar();
   }).catch(function(e){
-    console.error('[notasAdm] fusionar modal:', e);
-    toast('Error al fusionar: '+(e.message||''), 'terr');
+    console.warn('[notasAdm] RPC notas_fusionar falló, usando fallback manual:', e);
+    // 🐛 FIX 2026-05-26: si la función SQL no está instalada, usar fallback manual
+    _notasAdmFusionarManualFallback(claveOrigen, claveDestino, origen, destino);
   });
 }
 
@@ -40967,30 +40968,22 @@ function _notasAdmFusionarManualFallback(claveOrigen, claveDestino, origen, dest
         pendientes.push({id: f.id, cambios: cambios});
       }
     });
+    // 🆕 2026-05-26: borrar el registro origen en notas_maestras al final
+    var promBorrar = function(){
+      if(origen.en_maestras && origen.id){
+        return apiDelete('notas_maestras', 'id=eq.'+origen.id).catch(function(){});
+      }
+      return Promise.resolve();
+    };
     if(!pendientes.length){
-      return apiGet('configuracion','select=valor&clave=eq.notas_fotos&limit=1').then(function(res){
-        if(!res || !res[0]) return;
-        var datos = {};
-        try { datos = JSON.parse(res[0].valor || '{}'); } catch(e){}
-        if(datos[claveOrigen]) delete datos[claveOrigen];
-        return apiPatch('configuracion', {valor: JSON.stringify(datos)}, 'clave=eq.notas_fotos');
-      });
+      return promBorrar();
     }
     toast('Procesando '+pendientes.length+' fichas en paralelo...', 'twarn');
-    return _notasAdmPatchesEnChunks(pendientes, 12).then(function(){
-      return apiGet('configuracion','select=valor&clave=eq.notas_fotos&limit=1');
-    }).then(function(res){
-      if(!res || !res[0]) return;
-      var datos = {};
-      try { datos = JSON.parse(res[0].valor || '{}'); } catch(e){}
-      if(datos[claveOrigen]) delete datos[claveOrigen];
-      return apiPatch('configuracion', {valor: JSON.stringify(datos)}, 'clave=eq.notas_fotos');
-    });
-  }).then(function(){
-    toast('✅ Fusión completa','tok');
+    return _notasAdmPatchesEnChunks(pendientes, 12).then(promBorrar).then(function(){return pendientes.length;});
+  }).then(function(actualizadas){
+    toast('✅ Fusión completa — '+(actualizadas||0)+' fichas','tok');
     var mo1 = document.getElementById('moNotaDups');if(mo1) mo1.remove();
     var mo2 = document.getElementById('moNotaEdit');if(mo2) mo2.remove();
-    window._notasFotos = null;
     window._notasAdminCache = null;
     notasAdmCargar();
   }).catch(function(e){
