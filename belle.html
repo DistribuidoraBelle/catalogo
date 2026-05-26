@@ -709,6 +709,24 @@ td{padding:.35rem .5rem;font-size:.78rem;color:var(--tx2);vertical-align:middle;
             <option value="con_imagen">🖼 Con imagen</option>
             <option value="sin_imagen">⚠️ Sin imagen</option>
             <option value="duplicadas">🔁 Posibles duplicadas</option>
+            <option value="sin_uso">👻 Sin uso (huérfanas)</option>
+            <option value="sin_categoria">🏷️ Sin categoría</option>
+          </select>
+          <select class="fi" id="notasAdmFiltroCat" onchange="notasAdmRender()" style="max-width:180px;font-size:.72rem" title="Filtrar por categoría">
+            <option value="">— Todas las categorías —</option>
+            <option value="citrico">🍋 Cítrico</option>
+            <option value="floral">🌸 Floral</option>
+            <option value="amaderado">🌳 Amaderado</option>
+            <option value="oriental">🕌 Oriental</option>
+            <option value="frutal">🍑 Frutal</option>
+            <option value="gourmand">🍫 Gourmand</option>
+            <option value="aromatico">🌿 Aromático</option>
+            <option value="verde">🍃 Verde</option>
+            <option value="especiado">🌶 Especiado</option>
+            <option value="animal">🐂 Animal</option>
+            <option value="musk">☁️ Musk</option>
+            <option value="aldehido">✨ Aldehído</option>
+            <option value="otros">❔ Otros</option>
           </select>
           <button class="btn btn-g" onclick="notasAdmCargar()" style="font-size:.72rem">🔄 Recargar</button>
           <span id="notasAdmCount" style="font-size:.7rem;color:var(--tx3)"></span>
@@ -39863,41 +39881,24 @@ function _levenshtein(a, b){
 function notasAdmCargar(){
   var cont = document.getElementById('notasAdmContainer');
   if(cont) cont.innerHTML = "<div class='loading'><div class='spin'></div>Cargando notas...</div>";
+
+  // 🆕 2026-05-25: nueva arquitectura con tabla notas_maestras
+  // 1. Cargamos fichas para CONTAR usos y armar lista de "fichas por nota"
+  // 2. Cargamos notas_maestras (fuente principal de display/foto/categoría)
+  // 3. Si una nota está en fichas pero NO en notas_maestras → se agrega ad-hoc (modo legacy)
   Promise.all([
-    apiGet('fichas_perfume','select=id,producto_id,notas_salida,notas_corazon,notas_fondo&limit=2000'),
-    apiGet('configuracion','select=valor&clave=eq.notas_fotos&limit=1')
+    apiGet('fichas_perfume','select=id,producto_id,nombre_completo,notas_salida,notas_corazon,notas_fondo&limit=2000'),
+    apiGet('notas_maestras','select=*&order=clave.asc&limit=2000').catch(function(){return [];})
   ]).then(function(r){
     var fichas = Array.isArray(r[0]) ? r[0] : [];
-    var fotosRaw = {};
-    try { fotosRaw = JSON.parse((r[1] && r[1][0]) ? r[1][0].valor : '{}'); } catch(e){}
+    var maestras = Array.isArray(r[1]) ? r[1] : [];
 
-    // ── COMPATIBILIDAD CON CLAVES VIEJAS ──
-    // Versiones antiguas guardaban las claves con tildes (ej: "ámbar").
-    // La versión actual usa sin tildes (ej: "ambar").
-    // Construimos un mapa "clave_normalizada → foto" tolerante a ambos formatos.
-    var fotos = {};
-    var clavesViejasDetectadas = {}; // {claveNueva: claveVieja} para migrar después
-    Object.keys(fotosRaw).forEach(function(k){
-      var keyNorm = _notaNormalizar(k);
-      if(!keyNorm) return;
-      if(!fotos[keyNorm]){
-        fotos[keyNorm] = fotosRaw[k];
-        if(k !== keyNorm){
-          // Es una clave vieja con tildes/mayúsculas → marcarla para migración
-          clavesViejasDetectadas[keyNorm] = k;
-        }
-      }
-    });
+    // Mapa rápido clave → registro maestro
+    var mapaMaestras = {};
+    maestras.forEach(function(m){ if(m && m.clave) mapaMaestras[m.clave] = m; });
 
-    // Si detectamos claves viejas, migrar a formato normalizado en background
-    var clavesViejas = Object.keys(clavesViejasDetectadas);
-    if(clavesViejas.length){
-      console.log('[notasAdm] migrando '+clavesViejas.length+' claves viejas a formato normalizado...');
-      _notasAdmMigrarClavesViejas(fotosRaw, clavesViejasDetectadas);
-    }
-
-    // Indexar todas las notas: {nombreNorm: {display, foto, count, ejemplos}}
-    var mapa = {};
+    // Indexar usos en fichas: {clave: {count, fichas: [{id, producto_id, nombre, campo}]}}
+    var usos = {};
     fichas.forEach(function(f){
       ['notas_salida','notas_corazon','notas_fondo'].forEach(function(campo){
         var val = f[campo] || '';
@@ -39906,25 +39907,64 @@ function notasAdmCargar(){
           if(!notaTrim) return;
           var key = _notaNormalizar(notaTrim);
           if(!key) return;
-          if(!mapa[key]){
-            mapa[key] = {
-              clave: key,
-              nombre_display: notaTrim,
-              foto: fotos[key] || '',
-              count: 0,
-              ejemplos: []
-            };
-          }
-          mapa[key].count++;
-          // Mantener el display más "lindo" (con primera letra mayúscula si aparece)
-          if(notaTrim.length > 0 && notaTrim[0] === notaTrim[0].toUpperCase() && mapa[key].nombre_display === mapa[key].nombre_display.toLowerCase()){
-            mapa[key].nombre_display = notaTrim;
+          if(!usos[key]) usos[key] = {count:0, fichas:[], displayObservado:notaTrim};
+          usos[key].count++;
+          // Guardar referencia a la ficha (sin duplicar)
+          if(!usos[key].fichas.find(function(x){return x.id===f.id;})){
+            usos[key].fichas.push({
+              id: f.id,
+              producto_id: f.producto_id,
+              nombre: f.nombre_completo || '',
+              campos: [campo]
+            });
+          } else {
+            // Misma ficha, otro campo
+            var ex = usos[key].fichas.find(function(x){return x.id===f.id;});
+            if(ex.campos.indexOf(campo)<0) ex.campos.push(campo);
           }
         });
       });
     });
+
+    // Construir el mapa final combinando maestras + usos
+    var mapa = {};
+    var clavesVistas = {};
+
+    // 1. Empezar con maestras (incluyendo las que no tienen uso)
+    maestras.forEach(function(m){
+      var key = m.clave;
+      if(!key) return;
+      clavesVistas[key] = 1;
+      mapa[key] = {
+        id: m.id,
+        clave: key,
+        nombre_display: m.nombre_display || key,
+        foto: m.foto_url || '',
+        categoria: m.categoria || '',
+        notas_libres: m.notas || '',
+        count: usos[key] ? usos[key].count : 0,
+        fichas: usos[key] ? usos[key].fichas : [],
+        en_maestras: true
+      };
+    });
+
+    // 2. Agregar notas que están en fichas pero NO en maestras (legacy / nuevas)
+    Object.keys(usos).forEach(function(key){
+      if(clavesVistas[key]) return;
+      mapa[key] = {
+        id: null,
+        clave: key,
+        nombre_display: usos[key].displayObservado,
+        foto: '',
+        categoria: '',
+        notas_libres: '',
+        count: usos[key].count,
+        fichas: usos[key].fichas,
+        en_maestras: false
+      };
+    });
+
     window._notasAdminCache = mapa;
-    window._notasAdminFotos = fotos;
     notasAdmRender();
   }).catch(function(e){
     console.error('[notasAdm] cargar:', e);
@@ -39987,6 +40027,8 @@ function notasAdmRender(){
   }
   var srch = (document.getElementById('notasAdmSearch')||{value:''}).value.toLowerCase().trim();
   var filtro = (document.getElementById('notasAdmFiltro')||{value:'todas'}).value;
+  // 🆕 filtro por categoría
+  var filtroCat = (document.getElementById('notasAdmFiltroCat')||{value:''}).value;
   // Convertir mapa a array
   var notas = Object.values(window._notasAdminCache);
   // Detectar duplicadas (siempre, para badges)
@@ -39998,39 +40040,64 @@ function notasAdmRender(){
     if(filtro === 'con_imagen' && !n.foto) return false;
     if(filtro === 'sin_imagen' && n.foto) return false;
     if(filtro === 'duplicadas' && !duplicadas[n.clave]) return false;
+    // 🆕 filtro "Sin uso" (notas huérfanas)
+    if(filtro === 'sin_uso' && n.count > 0) return false;
+    // 🆕 filtro "Sin categoría"
+    if(filtro === 'sin_categoria' && n.categoria) return false;
+    // 🆕 filtro por categoría específica
+    if(filtroCat && n.categoria !== filtroCat) return false;
     return true;
   });
-  // Ordenar: primero las sin imagen, luego por uso descendente, luego alfabético
+  // Ordenar
   filtradas.sort(function(a, b){
     if(filtro === 'sin_imagen' || filtro === 'todas'){
-      // Sin imagen primero
       var aHas = !!a.foto, bHas = !!b.foto;
       if(aHas !== bHas) return aHas ? 1 : -1;
     }
-    // Después por count descendente
     if(a.count !== b.count) return b.count - a.count;
     return a.nombre_display.localeCompare(b.nombre_display);
   });
-  // Contador
+  // Contadores
   var totalSin = notas.filter(function(n){return !n.foto;}).length;
   var totalCon = notas.length - totalSin;
   var totalDup = Object.keys(duplicadas).length;
+  var totalSinUso = notas.filter(function(n){return n.count === 0;}).length;
+  var totalSinCat = notas.filter(function(n){return !n.categoria;}).length;
   var cnt = document.getElementById('notasAdmCount');
-  if(cnt) cnt.textContent = filtradas.length+' / '+notas.length+' notas · '+totalCon+' con foto · '+totalSin+' sin foto · '+totalDup+' posibles duplicadas';
-  // Render tabla compacta
+  if(cnt) cnt.textContent = filtradas.length+' / '+notas.length+' notas · '+totalCon+' con foto · '+totalSin+' sin foto · '+totalDup+' duplicadas · '+totalSinUso+' sin uso · '+totalSinCat+' sin categoría';
+  // Render tabla
   if(!filtradas.length){
     cont.innerHTML = "<div class='empty' style='padding:2rem;text-align:center;color:var(--tx3)'>Sin resultados con esos filtros</div>";
     return;
   }
-  var html = "<div style='overflow-x:auto;border:1px solid var(--bd);border-radius:8px;background:var(--sur)'>"+
+  // 🆕 Barra de bulk actions (vacía inicialmente, se llena onclick)
+  var bulkBar = "<div id='notasAdmBulkBar' style='display:none;background:var(--sur2);border:1px solid var(--acc);border-radius:8px;padding:.5rem .7rem;margin-bottom:.5rem;align-items:center;gap:.6rem;flex-wrap:wrap'>"+
+    "<span style='font-size:.75rem;color:var(--tx2)'><span id='notasAdmBulkCount'>0</span> seleccionadas</span>"+
+    "<button class='btn btn-a' style='font-size:.7rem;padding:.25rem .55rem' onclick='notasAdmBulkFusionar()'>🔁 Fusionar en una</button>"+
+    "<button class='btn btn-a' style='font-size:.7rem;padding:.25rem .55rem' onclick='notasAdmBulkSetCategoria()'>🏷️ Asignar categoría</button>"+
+    "<button class='btn btn-g' style='font-size:.7rem;padding:.25rem .55rem;color:#e53935;border-color:#e53935' onclick='notasAdmBulkEliminar()'>🗑 Eliminar sin uso</button>"+
+    "<button class='btn btn-g' style='font-size:.7rem;padding:.25rem .55rem' onclick='notasAdmBulkLimpiar()'>✕ Limpiar selección</button>"+
+  "</div>";
+
+  // Categorías con emoji para mostrar
+  var catLabels = {
+    citrico:'🍋 Cítrico', floral:'🌸 Floral', amaderado:'🌳 Amaderado',
+    oriental:'🕌 Oriental', frutal:'🍑 Frutal', gourmand:'🍫 Gourmand',
+    aromatico:'🌿 Aromático', verde:'🍃 Verde', especiado:'🌶 Especiado',
+    animal:'🐂 Animal', musk:'☁️ Musk', aldehido:'✨ Aldehído', otros:'❔ Otros'
+  };
+
+  var html = bulkBar + "<div style='overflow-x:auto;border:1px solid var(--bd);border-radius:8px;background:var(--sur)'>"+
     "<table style='width:100%;border-collapse:collapse;font-size:.78rem'>"+
     "<thead style='background:var(--sur2);position:sticky;top:0;z-index:1'>"+
       "<tr>"+
+        "<th style='padding:.55rem .35rem;width:32px;text-align:center;border-bottom:1px solid var(--bd)'><input type='checkbox' id='notasAdmSelAll' onchange='notasAdmBulkToggleAll(this)' title='Seleccionar todos los visibles'></th>"+
         "<th style='padding:.55rem .65rem;text-align:left;font-size:.66rem;color:var(--tx3);text-transform:uppercase;letter-spacing:.05em;border-bottom:1px solid var(--bd);width:48px'>Foto</th>"+
         "<th style='padding:.55rem .65rem;text-align:left;font-size:.66rem;color:var(--tx3);text-transform:uppercase;letter-spacing:.05em;border-bottom:1px solid var(--bd)'>Nombre</th>"+
+        "<th style='padding:.55rem .65rem;text-align:left;font-size:.66rem;color:var(--tx3);text-transform:uppercase;letter-spacing:.05em;border-bottom:1px solid var(--bd);width:120px'>Categoría</th>"+
         "<th style='padding:.55rem .65rem;text-align:left;font-size:.66rem;color:var(--tx3);text-transform:uppercase;letter-spacing:.05em;border-bottom:1px solid var(--bd);width:80px'>Usos</th>"+
-        "<th style='padding:.55rem .65rem;text-align:left;font-size:.66rem;color:var(--tx3);text-transform:uppercase;letter-spacing:.05em;border-bottom:1px solid var(--bd);width:120px'>Estado</th>"+
-        "<th style='padding:.55rem .65rem;text-align:right;font-size:.66rem;color:var(--tx3);text-transform:uppercase;letter-spacing:.05em;border-bottom:1px solid var(--bd);width:200px'>Acciones</th>"+
+        "<th style='padding:.55rem .65rem;text-align:left;font-size:.66rem;color:var(--tx3);text-transform:uppercase;letter-spacing:.05em;border-bottom:1px solid var(--bd);width:140px'>Estado</th>"+
+        "<th style='padding:.55rem .65rem;text-align:right;font-size:.66rem;color:var(--tx3);text-transform:uppercase;letter-spacing:.05em;border-bottom:1px solid var(--bd);width:160px'>Acciones</th>"+
       "</tr>"+
     "</thead><tbody>";
   filtradas.forEach(function(n){
@@ -40038,70 +40105,323 @@ function notasAdmRender(){
     var fotoHtml = n.foto
       ? "<img src='"+n.foto+"' style='width:36px;height:36px;border-radius:50%;object-fit:cover;border:1px solid var(--bd);background:var(--sur3)' onerror=\"this.outerHTML='<div style=\\'width:36px;height:36px;border-radius:50%;background:var(--sur3);display:flex;align-items:center;justify-content:center;font-size:.7rem;color:var(--red)\\' title=\\'Imagen rota\\'>!</div>'\">"
       : "<div style='width:36px;height:36px;border-radius:50%;background:var(--sur3);display:flex;align-items:center;justify-content:center;font-size:.65rem;color:var(--tx3);border:1px dashed var(--bd)'>📷</div>";
+    // 🆕 Indicador de base64
+    var esBase64 = n.foto && /^data:image\//i.test(n.foto);
     var estado = '';
     if(!n.foto){
       estado += "<span style='display:inline-block;background:rgba(232,160,40,.15);color:#c89c5a;padding:.15rem .4rem;border-radius:8px;font-size:.6rem;font-weight:600;margin-right:.2rem'>⚠ Sin foto</span>";
+    } else if(esBase64){
+      estado += "<span style='display:inline-block;background:rgba(150,100,200,.15);color:#9d6cd0;padding:.15rem .4rem;border-radius:8px;font-size:.6rem;font-weight:600;margin-right:.2rem' title='Foto embebida en BD (pesa en cada carga del catálogo). Recomendado: editar y migrar a Storage.'>⚡ base64</span>";
     } else {
       estado += "<span style='display:inline-block;background:rgba(125,211,163,.15);color:#7dd3a3;padding:.15rem .4rem;border-radius:8px;font-size:.6rem;font-weight:600;margin-right:.2rem'>✓ OK</span>";
+    }
+    if(n.count === 0){
+      estado += "<span style='display:inline-block;background:rgba(229,57,53,.12);color:#e57373;padding:.15rem .4rem;border-radius:8px;font-size:.6rem;font-weight:600;margin-right:.2rem' title='No la usa ninguna ficha'>👻 Huérfana</span>";
     }
     if(dups.length){
       estado += "<span style='display:inline-block;background:rgba(91,141,238,.15);color:#5b8dee;padding:.15rem .4rem;border-radius:8px;font-size:.6rem;font-weight:600;cursor:pointer' onclick='notasAdmVerDuplicadas(\""+n.clave.replace(/"/g,'')+"\")' title='Click para ver duplicadas'>🔁 "+dups.length+"</span>";
     }
-    html += "<tr style='border-bottom:1px solid var(--bd)'>"+
+    var catChip = n.categoria
+      ? "<span style='display:inline-block;background:rgba(196,150,90,.12);color:var(--acc);padding:.18rem .45rem;border-radius:10px;font-size:.62rem;font-weight:600'>"+(catLabels[n.categoria]||n.categoria)+"</span>"
+      : "<span style='font-size:.6rem;color:var(--tx3);font-style:italic'>— sin —</span>";
+    var keyEsc = n.clave.replace(/"/g,'').replace(/'/g,"\\'");
+    html += "<tr style='border-bottom:1px solid var(--bd)' data-clave='"+_ofEsc(n.clave)+"'>"+
+      "<td style='padding:.45rem .35rem;text-align:center'><input type='checkbox' class='notasAdmRowChk' data-clave='"+_ofEsc(n.clave)+"' onchange='notasAdmBulkUpdate()'></td>"+
       "<td style='padding:.45rem .65rem'>"+fotoHtml+"</td>"+
       "<td style='padding:.45rem .65rem'>"+
         "<div style='font-weight:600;color:var(--tx)'>"+_ofEsc(n.nombre_display)+"</div>"+
         "<div style='font-size:.62rem;color:var(--tx3)'>clave: "+_ofEsc(n.clave)+"</div>"+
       "</td>"+
+      "<td style='padding:.45rem .65rem'>"+catChip+"</td>"+
       "<td style='padding:.45rem .65rem'>"+
         "<span style='font-weight:700;color:var(--acc)'>"+n.count+"</span>"+
         "<span style='font-size:.62rem;color:var(--tx3)'> ficha"+(n.count===1?'':'s')+"</span>"+
       "</td>"+
       "<td style='padding:.45rem .65rem'>"+estado+"</td>"+
       "<td style='padding:.45rem .65rem;text-align:right'>"+
-        "<button class='btn btn-a' onclick=\"notasAdmEditar('"+n.clave.replace(/"/g,'').replace(/'/g,"\\'")+"')\" style='font-size:.65rem;padding:.25rem .55rem'>✏️ Editar</button>"+
+        "<button class='btn btn-a' onclick=\"notasAdmEditar('"+keyEsc+"')\" style='font-size:.65rem;padding:.25rem .55rem'>✏️ Editar</button>"+
       "</td>"+
     "</tr>";
   });
   html += "</tbody></table></div>";
   cont.innerHTML = html;
+  // Reset estado de selección
+  notasAdmBulkUpdate();
 }
 
-// ─── MODAL DE EDICIÓN DE UNA NOTA ────────────────────────────────────
+// ─── BULK ACTIONS (2026-05-25) ───────────────────────────────────────
+function notasAdmBulkToggleAll(chk){
+  var rows = document.querySelectorAll('.notasAdmRowChk');
+  rows.forEach(function(c){c.checked = chk.checked;});
+  notasAdmBulkUpdate();
+}
+
+function notasAdmBulkUpdate(){
+  var sel = document.querySelectorAll('.notasAdmRowChk:checked');
+  var bar = document.getElementById('notasAdmBulkBar');
+  var cnt = document.getElementById('notasAdmBulkCount');
+  if(cnt) cnt.textContent = sel.length;
+  if(bar) bar.style.display = sel.length > 0 ? 'flex' : 'none';
+}
+
+function notasAdmBulkLimpiar(){
+  document.querySelectorAll('.notasAdmRowChk:checked').forEach(function(c){c.checked=false;});
+  var all = document.getElementById('notasAdmSelAll');
+  if(all) all.checked = false;
+  notasAdmBulkUpdate();
+}
+
+function _notasAdmBulkClavesSeleccionadas(){
+  return Array.prototype.slice.call(document.querySelectorAll('.notasAdmRowChk:checked'))
+    .map(function(c){return c.dataset.clave;})
+    .filter(Boolean);
+}
+
+function notasAdmBulkFusionar(){
+  var claves = _notasAdmBulkClavesSeleccionadas();
+  if(claves.length < 2){toast('Seleccioná al menos 2 notas','twarn');return;}
+  var cache = window._notasAdminCache || {};
+  // Sugerir como destino la que tenga más usos (o la primera alfabéticamente)
+  var ordenadas = claves.map(function(k){return cache[k];}).filter(Boolean)
+    .sort(function(a,b){
+      if(a.count !== b.count) return b.count - a.count;
+      return a.nombre_display.localeCompare(b.nombre_display);
+    });
+  var opciones = ordenadas.map(function(n,i){return (i+1)+'. '+n.nombre_display+' ('+n.count+' ficha'+(n.count===1?'':'s')+')';}).join('\n');
+  var elec = prompt('Elegí el número de la nota DESTINO (las otras se fusionarán en esa):\n\n'+opciones);
+  if(!elec) return;
+  var idx = parseInt(elec)-1;
+  if(isNaN(idx) || idx<0 || idx>=ordenadas.length){toast('Número inválido','twarn');return;}
+  var destino = ordenadas[idx];
+  var origenes = ordenadas.filter(function(_,i){return i!==idx;});
+  if(!confirm('Fusionar '+origenes.length+' notas en "'+destino.nombre_display+'":\n\n'+
+      origenes.map(function(o){return '- '+o.nombre_display+' ('+o.count+')';}).join('\n')+
+      '\n\nTodas sus fichas pasarán a usar "'+destino.nombre_display+'".\n\n¿Confirmar?')) return;
+  toast('Fusionando '+origenes.length+' notas en serie...','twarn');
+  // Fusionar una a una en serie
+  var promesa = Promise.resolve();
+  var totalFichas = 0;
+  origenes.forEach(function(o){
+    promesa = promesa.then(function(){
+      return apiPost('rpc/notas_fusionar', {
+        p_clave_origen: o.clave,
+        p_clave_destino: destino.clave,
+        p_nombre_destino: destino.nombre_display
+      }).then(function(res){
+        var info = (Array.isArray(res) && res[0]) ? res[0] : res;
+        var n = (info && typeof info.fichas_actualizadas !== 'undefined') ? info.fichas_actualizadas : o.count;
+        totalFichas += n;
+        if(o.en_maestras && o.id){
+          return apiDelete('notas_maestras', 'id=eq.'+o.id).catch(function(){});
+        }
+      });
+    });
+  });
+  promesa.then(function(){
+    toast('✅ '+totalFichas+' fichas fusionadas en '+destino.nombre_display, 'tok');
+    window._notasAdminCache = null;
+    notasAdmCargar();
+  }).catch(function(e){
+    console.error('[bulkFusionar]', e);
+    toast('Error: '+(e.message||''), 'terr');
+  });
+}
+
+function notasAdmBulkSetCategoria(){
+  var claves = _notasAdmBulkClavesSeleccionadas();
+  if(!claves.length){toast('Sin selección','twarn');return;}
+  var opts = 'citrico, floral, amaderado, oriental, frutal, gourmand, aromatico, verde, especiado, animal, musk, aldehido, otros';
+  var cat = prompt('Categoría para '+claves.length+' notas seleccionadas:\n\nOpciones: '+opts+'\n\n(dejá vacío para quitar la categoría)');
+  if(cat === null) return;
+  cat = cat.trim().toLowerCase();
+  if(cat && opts.indexOf(cat) < 0){
+    if(!confirm('"'+cat+'" no es una categoría estándar. ¿Usarla igual?')) return;
+  }
+  var cache = window._notasAdminCache || {};
+  var pendientes = claves.map(function(k){return cache[k];}).filter(Boolean);
+  toast('Actualizando categoría en '+pendientes.length+' notas...','twarn');
+  // Hacer UPDATEs en paralelo (chunks de 10)
+  var i = 0;
+  function siguiente(){
+    if(i >= pendientes.length){
+      toast('✅ '+pendientes.length+' notas actualizadas','tok');
+      window._notasAdminCache = null;
+      notasAdmCargar();
+      return;
+    }
+    var batch = pendientes.slice(i, i+10);
+    i += 10;
+    var promesas = batch.map(function(n){
+      var payload = {categoria: cat || null, updated_at: new Date().toISOString()};
+      if(n.en_maestras && n.id){
+        return apiPatch('notas_maestras', payload, 'id=eq.'+n.id);
+      } else {
+        payload.clave = n.clave;
+        payload.nombre_display = n.nombre_display;
+        return apiPost('notas_maestras', payload);
+      }
+    });
+    Promise.all(promesas).then(siguiente).catch(function(e){
+      console.error('[bulkCat]', e);
+      toast('Error: '+(e.message||''), 'terr');
+    });
+  }
+  siguiente();
+}
+
+function notasAdmBulkEliminar(){
+  var claves = _notasAdmBulkClavesSeleccionadas();
+  var cache = window._notasAdminCache || {};
+  var elegibles = claves.map(function(k){return cache[k];}).filter(function(n){return n && n.count === 0 && n.en_maestras && n.id;});
+  if(!elegibles.length){
+    toast('Ninguna de las seleccionadas es huérfana en maestras','twarn');
+    return;
+  }
+  var conUso = claves.length - elegibles.length;
+  var msg = 'Se eliminarán '+elegibles.length+' notas SIN USO.';
+  if(conUso > 0) msg += '\n('+conUso+' tienen uso en fichas y serán salteadas.)';
+  msg += '\n\n¿Confirmar?';
+  if(!confirm(msg)) return;
+  var ids = elegibles.map(function(n){return n.id;});
+  apiDelete('notas_maestras', 'id=in.('+ids.join(',')+')').then(function(){
+    toast('✅ '+elegibles.length+' notas eliminadas','tok');
+    window._notasAdminCache = null;
+    notasAdmCargar();
+  }).catch(function(e){
+    console.error('[bulkEliminar]', e);
+    toast('Error: '+(e.message||''), 'terr');
+  });
+}
+
+// ─── MODAL DE EDICIÓN DE UNA NOTA (rediseñado 2026-05-25) ────────────
+// Incluye: nombre, foto, categoría, notas libres, lista de fichas que usan,
+// posibles duplicadas, botón eliminar (si 0 usos), botón migrar base64 a Storage.
 function notasAdmEditar(claveNorm){
   var nota = window._notasAdminCache[claveNorm];
   if(!nota){toast('Nota no encontrada','terr');return;}
   var existing = document.getElementById('moNotaEdit');
   if(existing) existing.remove();
+
+  // Detectar duplicadas/similares (Levenshtein) en el cache
+  var duplicadas = _notasAdmDetectarSimilares(claveNorm);
+
+  // Detectar si la foto es base64
+  var esBase64 = nota.foto && /^data:image\//i.test(nota.foto);
+
+  // Categorías predefinidas
+  var categorias = [
+    {v:'',  l:'— Sin categoría —'},
+    {v:'citrico', l:'🍋 Cítrico'},
+    {v:'floral', l:'🌸 Floral'},
+    {v:'amaderado', l:'🌳 Amaderado'},
+    {v:'oriental', l:'🕌 Oriental / Ámbar'},
+    {v:'frutal', l:'🍑 Frutal'},
+    {v:'gourmand', l:'🍫 Gourmand'},
+    {v:'aromatico', l:'🌿 Aromático / Herbal'},
+    {v:'verde', l:'🍃 Verde'},
+    {v:'especiado', l:'🌶 Especiado'},
+    {v:'animal', l:'🐂 Animal / Cuero'},
+    {v:'musk', l:'☁️ Musk / Almizcle'},
+    {v:'aldehido', l:'✨ Aldehído'},
+    {v:'otros', l:'❔ Otros'}
+  ];
+  var optCat = categorias.map(function(c){
+    var sel = (c.v === (nota.categoria||'')) ? ' selected' : '';
+    return "<option value='"+c.v+"'"+sel+">"+c.l+"</option>";
+  }).join('');
+
+  // Lista de fichas que usan la nota (primeras 50)
+  var fichasUsoHtml = '';
+  if(nota.fichas && nota.fichas.length){
+    var listaFichas = nota.fichas.slice(0, 50);
+    fichasUsoHtml = "<div style='font-size:.65rem;color:var(--tx3);margin-top:.4rem;max-height:140px;overflow-y:auto;background:var(--sur2);border:1px solid var(--bd);border-radius:6px;padding:.4rem .55rem;line-height:1.6'>";
+    listaFichas.forEach(function(fi){
+      var dondeChip = fi.campos.map(function(c){
+        if(c==='notas_salida') return '<span style="background:rgba(255,170,80,.15);color:#e08c20;padding:0 .3rem;border-radius:3px;font-size:.55rem;margin-left:.2rem">Salida</span>';
+        if(c==='notas_corazon') return '<span style="background:rgba(255,120,170,.15);color:#d04a8a;padding:0 .3rem;border-radius:3px;font-size:.55rem;margin-left:.2rem">Corazón</span>';
+        if(c==='notas_fondo') return '<span style="background:rgba(120,90,60,.2);color:#a07440;padding:0 .3rem;border-radius:3px;font-size:.55rem;margin-left:.2rem">Fondo</span>';
+        return '';
+      }).join('');
+      fichasUsoHtml += "<div style='padding:.15rem 0'>• <a href='#' onclick='event.preventDefault();notasAdmAbrirFicha("+fi.producto_id+")' style='color:var(--acc);text-decoration:none'>"+_ofEsc(fi.nombre||('Ficha #'+fi.id))+"</a>"+dondeChip+"</div>";
+    });
+    if(nota.fichas.length > 50){
+      fichasUsoHtml += "<div style='padding:.2rem 0;color:var(--tx3);font-style:italic'>... y "+(nota.fichas.length-50)+" más</div>";
+    }
+    fichasUsoHtml += "</div>";
+  } else {
+    fichasUsoHtml = "<div style='font-size:.65rem;color:var(--tx3);margin-top:.4rem;padding:.4rem;background:rgba(229,57,53,.06);border:1px dashed rgba(229,57,53,.3);border-radius:6px;text-align:center'>⚠️ Esta nota no está en uso por ninguna ficha (huérfana)</div>";
+  }
+
+  // Sección duplicadas
+  var dupsHtml = '';
+  if(duplicadas && duplicadas.length){
+    dupsHtml = "<div class='fg' style='margin-top:.6rem'><label style='color:#d4a456'>🔁 Posibles duplicadas detectadas</label>"+
+      "<div style='font-size:.62rem;color:var(--tx3);margin-bottom:.4rem'>Nombres similares en tu catálogo. Hacé clic en 'Fusionar' para mover las fichas de esa duplicada a esta nota.</div>"+
+      "<div style='display:flex;flex-direction:column;gap:.35rem;max-height:200px;overflow-y:auto'>";
+    duplicadas.forEach(function(d){
+      var n2 = window._notasAdminCache[d.clave];
+      if(!n2) return;
+      dupsHtml += "<div style='display:flex;align-items:center;gap:.5rem;background:rgba(212,164,86,.05);border:1px solid rgba(212,164,86,.2);border-radius:6px;padding:.35rem .5rem'>"+
+        (n2.foto ? "<img src='"+_ofEsc(n2.foto)+"' style='width:28px;height:28px;border-radius:50%;object-fit:cover;flex-shrink:0' onerror=\"this.style.display='none'\">" : "<div style='width:28px;height:28px;border-radius:50%;background:var(--sur2);flex-shrink:0'></div>")+
+        "<div style='flex:1;min-width:0'>"+
+          "<div style='font-weight:600;font-size:.72rem;color:var(--tx)'>"+_ofEsc(n2.nombre_display)+"</div>"+
+          "<div style='font-size:.55rem;color:var(--tx3)'>"+n2.count+" ficha"+(n2.count===1?'':'s')+" · similitud "+d.score+"%</div>"+
+        "</div>"+
+        "<button class='btn btn-a' style='font-size:.62rem;padding:.2rem .45rem' onclick=\"notasAdmFusionarDesdeModal('"+d.clave.replace(/'/g,"\\'")+"','"+claveNorm.replace(/'/g,"\\'")+"')\">→ Fusionar acá</button>"+
+      "</div>";
+    });
+    dupsHtml += "</div></div>";
+  }
+
+  // Botón eliminar (solo si 0 fichas)
+  var btnEliminar = '';
+  if(nota.count === 0 && nota.en_maestras && nota.id){
+    btnEliminar = "<button class='btn btn-g' style='color:#e53935;border-color:#e53935' onclick=\"notasAdmEliminar('"+claveNorm.replace(/'/g,"\\'")+"',"+nota.id+")\">🗑 Eliminar nota</button>";
+  }
+
+  // Botón migrar base64
+  var btnMigrarB64 = '';
+  if(esBase64){
+    btnMigrarB64 = "<button class='btn btn-g' style='font-size:.65rem;padding:.2rem .5rem' onclick='_notaEditMigrarBase64()' title='La foto está embebida en BD (base64). Subirla a Storage la hace mucho más liviana.'>⚡ Migrar foto a Storage</button>";
+  }
+
   var mo = document.createElement('div');
   mo.id = 'moNotaEdit';
   mo.className = 'mo';
   mo.style.display = 'flex';
   mo.innerHTML =
-    "<div class='md' style='max-width:520px'>"+
+    "<div class='md' style='max-width:620px'>"+
       "<div class='mh'><div class='mtt'>✏️ Editar nota: "+_ofEsc(nota.nombre_display)+"</div>"+
         "<button class='btn btn-g' onclick='document.getElementById(\"moNotaEdit\").remove()' style='padding:.2rem .5rem'>✕</button>"+
       "</div>"+
       "<div class='mb' style='display:flex;flex-direction:column;gap:.7rem'>"+
         "<div style='font-size:.7rem;color:var(--tx3);background:rgba(196,150,90,.08);border-left:3px solid var(--acc);padding:.5rem .7rem;border-radius:4px;line-height:1.5'>"+
-          "💡 Esta nota se usa en <b>"+nota.count+"</b> ficha"+(nota.count===1?'':'s')+". "+
-          "Si cambiás el nombre, se actualiza en todas las fichas. "+
-          "Si cambiás la foto, se replica automáticamente."+
+          "💡 Esta nota se usa en <b>"+nota.count+"</b> ficha"+(nota.count===1?'':'s')+". Si cambiás el nombre, se actualiza en todas las fichas. Si cambiás la foto/categoría, se replica al catálogo."+
         "</div>"+
-        "<div class='fg'>"+
-          "<label>Nombre de la nota</label>"+
-          "<input class='fi' id='_notaEditNombre' value='"+_ofEsc(nota.nombre_display)+"' placeholder='Ej: Bergamota'>"+
-          "<div style='font-size:.6rem;color:var(--tx3);margin-top:.2rem'>Clave normalizada actual: <b style='color:var(--tx2)'>"+_ofEsc(nota.clave)+"</b></div>"+
+
+        "<div style='display:grid;grid-template-columns:1fr 1fr;gap:.7rem'>"+
+          "<div class='fg'>"+
+            "<label>Nombre de la nota</label>"+
+            "<input class='fi' id='_notaEditNombre' value='"+_ofEsc(nota.nombre_display)+"' placeholder='Ej: Bergamota'>"+
+            "<div style='font-size:.6rem;color:var(--tx3);margin-top:.2rem'>Clave: <b style='color:var(--tx2)'>"+_ofEsc(nota.clave)+"</b></div>"+
+          "</div>"+
+          "<div class='fg'>"+
+            "<label>Categoría olfativa</label>"+
+            "<select class='fi' id='_notaEditCategoria'>"+optCat+"</select>"+
+            "<div style='font-size:.6rem;color:var(--tx3);margin-top:.2rem'>Útil para filtros futuros en el catálogo</div>"+
+          "</div>"+
         "</div>"+
+
         "<div class='fg'>"+
           "<label>URL de imagen</label>"+
           "<input class='fi' id='_notaEditFoto' value='"+_ofEsc(nota.foto||'')+"' placeholder='https://...' oninput='_notaEditPrev()'>"+
         "</div>"+
-        "<div style='display:flex;gap:.5rem;align-items:center'>"+
+        "<div style='display:flex;gap:.5rem;align-items:center;flex-wrap:wrap'>"+
           "<label class='btn btn-a' style='cursor:pointer;font-size:.72rem'>"+
             "📷 Subir imagen<input type='file' accept='image/*' style='display:none' onchange='_notaEditSubirImg(this)'>"+
           "</label>"+
           "<button class='btn btn-g' onclick='_notaEditQuitarFoto()' style='font-size:.72rem'>🗑 Quitar foto</button>"+
+          btnMigrarB64+
           "<span id='_notaEditUploadStatus' style='font-size:.65rem;color:var(--acc)'></span>"+
         "</div>"+
         "<div id='_notaEditPrevWrap' style='text-align:center;padding:.5rem;background:var(--sur2);border-radius:8px;border:1px solid var(--bd);min-height:80px;display:flex;align-items:center;justify-content:center'>"+
@@ -40110,13 +40430,169 @@ function notasAdmEditar(claveNorm){
             : "<div style='color:var(--tx3);font-size:.72rem'>Sin foto</div>"
           )+
         "</div>"+
+
+        "<div class='fg'>"+
+          "<label>Notas internas (opcional)</label>"+
+          "<textarea class='fi' id='_notaEditNotasLibres' rows='2' style='resize:vertical;font-size:.75rem' placeholder='Anotaciones para vos. Ej: revisar después si fusionar con X, ver foto mejor en Wikipedia...'>"+_ofEsc(nota.notas_libres||'')+"</textarea>"+
+        "</div>"+
+
+        dupsHtml+
+
+        "<div class='fg' style='margin-top:.3rem'>"+
+          "<label>Fichas que usan esta nota ("+nota.count+")</label>"+
+          fichasUsoHtml+
+        "</div>"+
       "</div>"+
-      "<div class='mf'>"+
-        "<button class='btn btn-g' onclick='document.getElementById(\"moNotaEdit\").remove()'>Cancelar</button>"+
-        "<button class='btn btn-a' onclick='notasAdmGuardar(\""+claveNorm.replace(/"/g,'')+"\")'>💾 Guardar</button>"+
+      "<div class='mf' style='display:flex;justify-content:space-between;gap:.5rem;flex-wrap:wrap'>"+
+        "<div>"+btnEliminar+"</div>"+
+        "<div style='display:flex;gap:.4rem'>"+
+          "<button class='btn btn-g' onclick='document.getElementById(\"moNotaEdit\").remove()'>Cancelar</button>"+
+          "<button class='btn btn-a' onclick='notasAdmGuardar(\""+claveNorm.replace(/"/g,'').replace(/'/g,"\\'")+"\")'>💾 Guardar</button>"+
+        "</div>"+
       "</div>"+
     "</div>";
   document.body.appendChild(mo);
+}
+
+// ─── HELPERS DEL MODAL ────────────────────────────────────────────────
+// Detectar notas similares (Levenshtein)
+function _notasAdmDetectarSimilares(claveOriginal){
+  var cache = window._notasAdminCache||{};
+  var notaA = cache[claveOriginal];
+  if(!notaA) return [];
+  var resultados = [];
+  Object.keys(cache).forEach(function(k){
+    if(k === claveOriginal) return;
+    var d = _levenshteinPct(claveOriginal, k);
+    // Considerar similares si >= 75% (típicamente typos / variantes)
+    if(d.score >= 75){
+      resultados.push({clave:k, score:d.score});
+    }
+  });
+  // Ordenar por score desc, mostrar las 8 más probables
+  resultados.sort(function(a,b){return b.score-a.score;});
+  return resultados.slice(0,8);
+}
+
+// Levenshtein con score 0-100
+function _levenshteinPct(a, b){
+  if(!a || !b) return {score:0};
+  if(a === b) return {score:100};
+  var an = a.length, bn = b.length;
+  if(Math.abs(an-bn) / Math.max(an,bn) > 0.5) return {score:0};
+  var dp = [];
+  for(var i=0;i<=an;i++){dp[i]=[];dp[i][0]=i;}
+  for(var j=0;j<=bn;j++) dp[0][j]=j;
+  for(var i2=1;i2<=an;i2++){
+    for(var j2=1;j2<=bn;j2++){
+      var cost = (a[i2-1] === b[j2-1]) ? 0 : 1;
+      dp[i2][j2] = Math.min(dp[i2-1][j2]+1, dp[i2][j2-1]+1, dp[i2-1][j2-1]+cost);
+    }
+  }
+  var dist = dp[an][bn];
+  var maxL = Math.max(an,bn);
+  return {score: Math.round((1 - dist/maxL) * 100)};
+}
+
+// Fusionar desde el modal: clave origen → clave destino (la actual del modal)
+function notasAdmFusionarDesdeModal(claveOrigen, claveDestino){
+  var origen = window._notasAdminCache[claveOrigen];
+  var destino = window._notasAdminCache[claveDestino];
+  if(!origen || !destino){toast('Datos incompletos','terr');return;}
+  if(!confirm('FUSIONAR:\n\n'+origen.count+' fichas que usan "'+origen.nombre_display+'" pasarán a usar "'+destino.nombre_display+'".\n\nLa nota "'+origen.nombre_display+'" será eliminada del catálogo.\n\n¿Confirmar?')) return;
+  toast('Fusionando '+origen.count+' fichas...','twarn');
+  apiPost('rpc/notas_fusionar', {
+    p_clave_origen: claveOrigen,
+    p_clave_destino: claveDestino,
+    p_nombre_destino: destino.nombre_display
+  }).then(function(res){
+    var info = (Array.isArray(res) && res[0]) ? res[0] : res;
+    var actualizadas = (info && typeof info.fichas_actualizadas !== 'undefined') ? info.fichas_actualizadas : origen.count;
+    // Borrar el registro origen en notas_maestras si era una entrada propia
+    var promBorrar = origen.en_maestras && origen.id
+      ? apiDelete('notas_maestras', 'id=eq.'+origen.id).catch(function(){})
+      : Promise.resolve();
+    return promBorrar.then(function(){return actualizadas;});
+  }).then(function(actualizadas){
+    toast('✅ '+actualizadas+' fichas fusionadas','tok');
+    var mo = document.getElementById('moNotaEdit');
+    if(mo) mo.remove();
+    window._notasAdminCache = null;
+    notasAdmCargar();
+  }).catch(function(e){
+    console.error('[notasAdm] fusionar modal:', e);
+    toast('Error al fusionar: '+(e.message||''), 'terr');
+  });
+}
+
+// Eliminar nota (solo si 0 usos)
+function notasAdmEliminar(clave, id){
+  var nota = window._notasAdminCache[clave];
+  if(!nota){toast('Nota no encontrada','terr');return;}
+  if(nota.count > 0){toast('No se puede eliminar: en uso por '+nota.count+' fichas','twarn');return;}
+  if(!confirm('Eliminar la nota "'+nota.nombre_display+'"?\n\nNo está en uso por ninguna ficha. Esta acción no se puede deshacer.')) return;
+  apiDelete('notas_maestras', 'id=eq.'+id).then(function(){
+    toast('✅ Nota eliminada','tok');
+    var mo = document.getElementById('moNotaEdit');
+    if(mo) mo.remove();
+    window._notasAdminCache = null;
+    notasAdmCargar();
+  }).catch(function(e){
+    toast('Error: '+(e.message||''), 'terr');
+  });
+}
+
+// Abrir ficha desde el listado del modal
+function notasAdmAbrirFicha(productoId){
+  var mo = document.getElementById('moNotaEdit');
+  if(mo) mo.remove();
+  // Cambiar a la pestaña de fichas y abrir el editor
+  if(typeof fichasTabSwitch === 'function') fichasTabSwitch('productos');
+  if(typeof fichaEditar === 'function'){
+    setTimeout(function(){fichaEditar(productoId);}, 200);
+  }
+}
+
+// Migrar foto base64 a Storage
+function _notaEditMigrarBase64(){
+  var inp = document.getElementById('_notaEditFoto');
+  if(!inp || !inp.value || !/^data:image\//i.test(inp.value)){
+    toast('La foto actual no es base64','twarn');
+    return;
+  }
+  var status = document.getElementById('_notaEditUploadStatus');
+  if(status) status.textContent = 'Subiendo a Storage...';
+  // Convertir base64 a blob
+  fetch(inp.value).then(function(r){return r.blob();}).then(function(blob){
+    if(blob.size > 5*1024*1024) throw new Error('Imagen muy grande (>5MB)');
+    var ext = 'jpg';
+    if(/png/i.test(blob.type)) ext = 'png';
+    else if(/webp/i.test(blob.type)) ext = 'webp';
+    var ts = Date.now();
+    var path = 'notas/nota_'+ts+'.'+ext;
+    return fetch(SB_URL + '/storage/v1/object/productos-imagenes/' + path, {
+      method: 'POST',
+      headers: {
+        'apikey': SB_KEY,
+        'Authorization': 'Bearer ' + SB_KEY,
+        'Content-Type': blob.type || 'image/jpeg',
+        'x-upsert': 'true'
+      },
+      body: blob
+    }).then(function(r2){
+      if(!r2.ok) throw new Error('Upload failed '+r2.status);
+      return SB_URL + '/storage/v1/object/public/productos-imagenes/' + path;
+    });
+  }).then(function(publicUrl){
+    inp.value = publicUrl;
+    _notaEditPrev();
+    if(status) status.textContent = '✅ Migrado. Acordate de guardar.';
+    toast('Foto subida a Storage','tok');
+  }).catch(function(e){
+    if(status) status.textContent = '';
+    console.error('[migrarBase64]', e);
+    toast('Error: '+(e.message||''),'terr');
+  });
 }
 
 function _notaEditPrev(){
@@ -40175,13 +40651,19 @@ function notasAdmGuardar(claveOriginal){
   if(!nota){toast('Nota no encontrada','terr');return;}
   var nuevoNombre = (document.getElementById('_notaEditNombre')||{value:''}).value.trim();
   var nuevaFoto = (document.getElementById('_notaEditFoto')||{value:''}).value.trim();
+  // 🆕 2026-05-25: nuevos campos editables
+  var categoria = (document.getElementById('_notaEditCategoria')||{value:''}).value || '';
+  var notasLibres = (document.getElementById('_notaEditNotasLibres')||{value:''}).value.trim();
   if(!nuevoNombre){toast('El nombre no puede estar vacío','twarn');return;}
   var claveNueva = _notaNormalizar(nuevoNombre);
   if(!claveNueva){toast('Nombre inválido','twarn');return;}
   // Detectar si cambió el nombre (clave normalizada distinta)
   var cambioNombre = (claveNueva !== claveOriginal);
   var cambioFoto = ((nota.foto||'') !== nuevaFoto);
-  if(!cambioNombre && !cambioFoto){
+  var cambioDisplay = ((nota.nombre_display||'') !== nuevoNombre);
+  var cambioCat = ((nota.categoria||'') !== categoria);
+  var cambioNotas = ((nota.notas_libres||'') !== notasLibres);
+  if(!cambioNombre && !cambioFoto && !cambioDisplay && !cambioCat && !cambioNotas){
     toast('No hay cambios','twarn');
     return;
   }
@@ -40192,9 +40674,18 @@ function notasAdmGuardar(claveOriginal){
       return;
     }
   }
-  // Si no hay cambio de nombre, solo actualizar foto en `configuracion`
+  // Si NO cambia la clave (solo display/foto/cat/notas): UPDATE directo en maestras
   if(!cambioNombre){
-    _notasAdmGuardarFotoSolo(claveOriginal, nuevaFoto);
+    _notasAdmActualizarMaestras(claveOriginal, claveOriginal, nuevoNombre, nuevaFoto, categoria, notasLibres).then(function(){
+      toast('✅ Nota actualizada', 'tok');
+      var mo = document.getElementById('moNotaEdit');
+      if(mo) mo.remove();
+      window._notasAdminCache = null;
+      notasAdmCargar();
+    }).catch(function(e){
+      console.error('[notasAdm] update maestras:', e);
+      toast('Error: '+(e.message||''), 'terr');
+    });
     return;
   }
   // Cambio de nombre: hay que actualizar las fichas.
@@ -40207,27 +40698,23 @@ function notasAdmGuardar(claveOriginal){
   }).then(function(res){
     var info = (Array.isArray(res) && res[0]) ? res[0] : res;
     var actualizadas = (info && typeof info.fichas_actualizadas !== 'undefined') ? info.fichas_actualizadas : nota.count;
-    // Si además cambió la foto, actualizarla aparte
-    if(cambioFoto){
-      return _notasAdmActualizarConfigFotos(null, claveNueva, nuevaFoto).then(function(){return actualizadas;});
-    }
-    return actualizadas;
+    // Sincronizar en notas_maestras (nueva clave + display + foto + categoría + notas)
+    return _notasAdmActualizarMaestras(claveOriginal, claveNueva, nuevoNombre, nuevaFoto, categoria, notasLibres).then(function(){return actualizadas;});
   }).then(function(actualizadas){
     toast('✅ '+actualizadas+' fichas actualizadas','tok');
     var mo = document.getElementById('moNotaEdit');
     if(mo) mo.remove();
-    window._notasFotos = null;
     window._notasAdminCache = null;
     notasAdmCargar();
   }).catch(function(e){
     console.warn('[notasAdm] RPC notas_fusionar falló, usando fallback:', e);
     // ── FALLBACK: paralelización en chunks ──
-    _notasAdmGuardarManualFallback(claveOriginal, claveNueva, nuevoNombre, nuevaFoto, cambioFoto, nota);
+    _notasAdmGuardarManualFallback(claveOriginal, claveNueva, nuevoNombre, nuevaFoto, cambioFoto, nota, categoria, notasLibres);
   });
 }
 
 // FALLBACK: rename manual con paralelización (sin función SQL)
-function _notasAdmGuardarManualFallback(claveOriginal, claveNueva, nuevoNombre, nuevaFoto, cambioFoto, nota){
+function _notasAdmGuardarManualFallback(claveOriginal, claveNueva, nuevoNombre, nuevaFoto, cambioFoto, nota, categoria, notasLibres){
   toast('⚠️ Función SQL no instalada, usando método lento...', 'twarn');
   var primeraPalabra = (claveOriginal.split(' ')[0] || claveOriginal);
   var patronBusq = encodeURIComponent('*'+primeraPalabra+'*');
@@ -40267,13 +40754,12 @@ function _notasAdmGuardarManualFallback(claveOriginal, claveNueva, nuevoNombre, 
       toast('Actualizando '+pendientes.length+' fichas en paralelo...', 'twarn');
     }
     return _notasAdmPatchesEnChunks(pendientes, 12).then(function(){
-      return _notasAdmActualizarConfigFotos(claveOriginal, claveNueva, nuevaFoto);
+      return _notasAdmActualizarMaestras(claveOriginal, claveNueva, nuevoNombre, nuevaFoto, categoria, notasLibres);
     });
   }).then(function(){
     toast('✅ '+nota.count+' fichas actualizadas','tok');
     var mo = document.getElementById('moNotaEdit');
     if(mo) mo.remove();
-    window._notasFotos = null;
     window._notasAdminCache = null;
     notasAdmCargar();
   }).catch(function(e){
@@ -40301,24 +40787,31 @@ function _notasAdmPatchesEnChunks(pendientes, tamañoChunk){
 }
 
 function _notasAdmGuardarFotoSolo(clave, nuevaFoto){
-  // Solo cambia la foto en `configuracion.notas_fotos` (no toca fichas)
-  apiGet('configuracion','select=valor&clave=eq.notas_fotos&limit=1').then(function(res){
-    var datos = {};
-    try { datos = JSON.parse((res && res[0]) ? res[0].valor : '{}'); } catch(e){}
-    if(nuevaFoto){
-      datos[clave] = nuevaFoto;
-    } else {
-      delete datos[clave];
-    }
-    var json = JSON.stringify(datos);
-    return (res && res[0])
-      ? apiPatch('configuracion', {valor: json}, 'clave=eq.notas_fotos')
-      : apiPost('configuracion', {clave: 'notas_fotos', valor: json});
-  }).then(function(){
-    toast(nuevaFoto ? '✅ Foto actualizada' : '✅ Foto eliminada', 'tok');
+  // 🆕 2026-05-25: guardar foto en notas_maestras (fuente principal)
+  // También recibe categoría y notas libres si están en el form (edición ampliada)
+  var nota = (window._notasAdminCache||{})[clave] || {};
+  var categoria = (document.getElementById('_notaEditCategoria')||{value:''}).value || null;
+  var notasLibres = (document.getElementById('_notaEditNotasLibres')||{value:''}).value.trim() || null;
+  var payload = {
+    foto_url: nuevaFoto || null,
+    categoria: categoria,
+    notas: notasLibres,
+    updated_at: new Date().toISOString()
+  };
+  var promesa;
+  if(nota.en_maestras && nota.id){
+    // UPDATE por id
+    promesa = apiPatch('notas_maestras', payload, 'id=eq.'+nota.id);
+  } else {
+    // INSERT (con UPSERT por clave)
+    payload.clave = clave;
+    payload.nombre_display = nota.nombre_display || clave;
+    promesa = apiPost('notas_maestras', payload);
+  }
+  promesa.then(function(){
+    toast(nuevaFoto ? '✅ Foto actualizada' : '✅ Datos actualizados', 'tok');
     var mo = document.getElementById('moNotaEdit');
     if(mo) mo.remove();
-    window._notasFotos = null;
     window._notasAdminCache = null;
     notasAdmCargar();
   }).catch(function(e){
@@ -40327,23 +40820,37 @@ function _notasAdmGuardarFotoSolo(clave, nuevaFoto){
   });
 }
 
-function _notasAdmActualizarConfigFotos(claveVieja, claveNueva, nuevaFoto){
-  return apiGet('configuracion','select=valor&clave=eq.notas_fotos&limit=1').then(function(res){
-    var datos = {};
-    try { datos = JSON.parse((res && res[0]) ? res[0].valor : '{}'); } catch(e){}
-    // Si cambió la clave, mover/borrar la vieja
-    if(claveVieja && claveNueva && claveVieja !== claveNueva){
-      delete datos[claveVieja];
-    }
-    if(nuevaFoto){
-      datos[claveNueva] = nuevaFoto;
+function _notasAdmActualizarMaestras(claveVieja, claveNueva, nuevoNombre, nuevaFoto, categoria, notasLibres){
+  // Reemplaza _notasAdmActualizarConfigFotos. Trabaja sobre notas_maestras.
+  // Si claveVieja !== claveNueva: borra/fusiona el registro viejo en maestras
+  // (las fichas ya las renombró la función RPC o el fallback)
+  var payload = {
+    clave: claveNueva,
+    nombre_display: nuevoNombre,
+    foto_url: nuevaFoto || null,
+    categoria: categoria || null,
+    notas: notasLibres || null,
+    updated_at: new Date().toISOString()
+  };
+  // Primero, ver si el destino ya existe en maestras
+  return apiGet('notas_maestras', 'select=id&clave=eq.'+encodeURIComponent(claveNueva)+'&limit=1').then(function(r){
+    var existeDestino = Array.isArray(r) && r.length>0;
+    var p;
+    if(existeDestino){
+      p = apiPatch('notas_maestras', payload, 'id=eq.'+r[0].id);
     } else {
-      delete datos[claveNueva];
+      p = apiPost('notas_maestras', payload);
     }
-    var json = JSON.stringify(datos);
-    return (res && res[0])
-      ? apiPatch('configuracion', {valor: json}, 'clave=eq.notas_fotos')
-      : apiPost('configuracion', {clave: 'notas_fotos', valor: json});
+    return p.then(function(){
+      // Si hubo cambio de clave y la vieja existía como entrada propia, borrarla
+      if(claveVieja && claveNueva && claveVieja !== claveNueva){
+        return apiGet('notas_maestras', 'select=id&clave=eq.'+encodeURIComponent(claveVieja)+'&limit=1').then(function(r2){
+          if(Array.isArray(r2) && r2.length>0){
+            return apiDelete('notas_maestras', 'id=eq.'+r2[0].id);
+          }
+        });
+      }
+    });
   });
 }
 
