@@ -25195,11 +25195,20 @@ function bcRenderComparativa(){
       // Match %
       h += '<td style="padding:.35rem .5rem;text-align:center;white-space:nowrap">';
       if(e.matchCat){
-        var mCol = e.matchPct >= 100 ? '#22c55e' : e.matchPct >= 90 ? '#84cc16' : e.matchPct >= 70 ? '#f59e0b' : 'var(--tx3)';
-        var mIc = e.manualPid ? '✏️' : '✅';
-        h += '<div style="font-weight:700;color:'+mCol+';font-size:.78rem">'+mIc+' '+e.matchPct+'%</div>';
+        // 🆕 2026-05-26: escala ajustada al nuevo umbral 0.75
+        //   100% = verde brillante (idénticos)
+        //   90+  = verde lima (muy alto)
+        //   80+  = ámbar (medio-alto)
+        //   75-79 = naranja (revisar! borderline)
+        var mCol = e.matchPct >= 100 ? '#22c55e'
+                 : e.matchPct >= 90  ? '#84cc16'
+                 : e.matchPct >= 80  ? '#f59e0b'
+                 : '#fb923c'; // naranja para 75-79
+        var mIc = e.manualPid ? '✏️' : (e.matchPct < 80 ? '⚠️' : '✅');
+        var tip = e.manualPid ? 'Match manual' : (e.matchPct < 80 ? 'Match débil — revisá si es correcto' : 'Match automático');
+        h += '<div style="font-weight:700;color:'+mCol+';font-size:.78rem" title="'+tip+'">'+mIc+' '+e.matchPct+'%</div>';
       } else {
-        h += '<span style="color:var(--tx3);font-size:.7rem">—</span>';
+        h += '<span style="color:var(--tx3);font-size:.7rem" title="Sin match en catálogo">—</span>';
       }
       h += '</td>';
 
@@ -26504,7 +26513,7 @@ function bcRenderRecomendaciones(){
         if(match){
           var pFull = (match.empresa||'') + ' ' + (match.nombre||'');
           matchScore = bcSim(bcNorm(pFull), bcNorm(item.nombre_norm||item.nombre_proveedor||''));
-          // El threshold de bcFindInProds ya garantiza >=0.90, pero calculamos exacto.
+          // 🔧 2026-05-26: bcFindInProds garantiza >=0.75 (antes 0.90). El score exacto se usa para chip visual.
         }
 
         var entry = {
@@ -26624,7 +26633,8 @@ function bcRenderRecomendaciones(){
     var optionsMacheo = [
       {v:100, lbl:'🎯 Exacto 100%', cnt:stats.match100, tip:'Solo productos que coinciden 100% (nombre + ml)'},
       {v:90,  lbl:'✅ 90% o más',   cnt:stats.match100+stats.match90, tip:'Productos con macheo alta confianza'},
-      {v:70,  lbl:'⚠️ 70% o más',  cnt:stats.conMatch, tip:'Incluye matches de menor confianza (revisar manualmente)'},
+      // 🔧 2026-05-26: contador corregido (antes solo sumaba match100+match70, faltaba match90)
+      {v:70,  lbl:'⚠️ 70% o más',  cnt:stats.match100+stats.match90+stats.match70, tip:'Incluye matches de menor confianza (revisar manualmente)'},
       {v:-1,  lbl:'📋 Todos',        cnt:stats.total,    tip:'Sin filtro de macheo (incluye sin match)'},
       {v:0,   lbl:'❌ Sin match',    cnt:stats.sinMatch, tip:'Solo productos que NO existen en tu catálogo'}
     ];
@@ -26736,10 +26746,16 @@ function bcRenderRecomendaciones(){
         var ped = bcPedidos[provKey] && bcPedidos[provKey].items && bcPedidos[provKey].items['l'+it._idx];
         var qty = ped ? ped.qty : 0;
 
-        // Color del % de match
-        var matchCol = e.matchPct >= 100 ? '#22c55e' : e.matchPct >= 90 ? '#84cc16' : e.matchPct >= 70 ? '#f59e0b' : 'var(--tx3)';
+        // 🆕 2026-05-26: escala ajustada al nuevo umbral 0.75
+        var matchCol = e.matchPct >= 100 ? '#22c55e'
+                     : e.matchPct >= 90  ? '#84cc16'
+                     : e.matchPct >= 80  ? '#f59e0b'
+                     : '#fb923c'; // 75-79 naranja, advertencia
         var matchTxt = prod ? e.matchPct+'%' : '—';
-        var matchTip = prod ? 'Coincidencia entre "'+(it.nombre_proveedor||'')+'" y "'+(prod.empresa||'')+' '+(prod.nombre||'')+'"' : 'Sin match en tu catálogo';
+        var matchTip = prod
+          ? 'Coincidencia entre "'+(it.nombre_proveedor||'')+'" y "'+(prod.empresa||'')+' '+(prod.nombre||'')+'"'+
+            (e.matchPct < 80 ? ' — REVISÁ, podría ser otro producto' : '')
+          : 'Sin match en tu catálogo';
 
         // Color de fila por urgencia
         var rowBg = e.urgencia >= 4 ? 'rgba(239,68,68,.06)' : e.urgencia >= 3 ? 'rgba(251,191,36,.06)' : (idx%2===1 ? 'var(--sur3)' : 'transparent');
@@ -27296,9 +27312,11 @@ function _bcEjecutarBusqueda(){
 // MEJORA (2026-05-12): cache para evitar recalcular match con catálogo en cada render.
 // Se invalida al recargar prods o al cambiar matches manuales.
 window._bcFindCache = {};
+window._bcFindScoreCache = {};
 window._bcFindCacheReady = false;
 function _bcResetFindCache(){
   window._bcFindCache = {};
+  window._bcFindScoreCache = {};
   window._bcFindCacheReady = false;
   // FIX (2026-05-12): invalidar también caches de normalización
   window._bcNormCache = {};
@@ -27343,7 +27361,10 @@ function bcFindInProds(item){
     var pn = bcNorm(pFull);
     if(!pn) return;
     var score = bcSim(nombre, pn);
-    if(score >= 0.90){
+    // 🔧 FIX 2026-05-26: bajado 0.90 → 0.75 (era muy estricto, perdíamos matches reales).
+    // Las variaciones de ml/marca/orden de palabras a veces caen entre 0.75-0.89.
+    // El usuario puede revisar/corregir desde la UI.
+    if(score >= 0.75){
       candidatos.push({prod:p, score:score, pn:pn});
       if(score > bestScore) bestScore = score;
     }
@@ -27403,6 +27424,9 @@ function bcFindInProds(item){
 
   var winner = topCandidatos[0].prod;
   window._bcFindCache[nombre] = winner.id;
+  // 🆕 2026-05-26: cachear el score del ganador para mostrarlo como chip en UI
+  if(!window._bcFindScoreCache) window._bcFindScoreCache = {};
+  window._bcFindScoreCache[nombre] = topCandidatos[0].score;
   return winner;
 }
 
