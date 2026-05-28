@@ -24989,8 +24989,15 @@ function bcRenderComparativa(){
 
     var matchScore = 0;
     if(matchCat){
-      var pFull = (matchCat.empresa||'') + ' ' + (matchCat.nombre||'');
-      matchScore = bcSim(bcNorm(pFull), bcNorm(r.nombre));
+      // 🆕 2026-05-26 (HÍBRIDO C): preferir score cacheado si bcFindInProds lo guardó
+      // (porque incluye los matches por fallback de palabras que bcSim sola no captura)
+      var nombreNorm = bcNorm(r.nombre);
+      if(window._bcFindScoreCache && window._bcFindScoreCache.hasOwnProperty(nombreNorm)){
+        matchScore = window._bcFindScoreCache[nombreNorm];
+      } else {
+        var pFull = (matchCat.empresa||'') + ' ' + (matchCat.nombre||'');
+        matchScore = bcSim(bcNorm(pFull), nombreNorm);
+      }
     }
 
     // Cuántos proveedores tienen este producto
@@ -25210,17 +25217,22 @@ function bcRenderComparativa(){
       // Match %
       h += '<td style="padding:.35rem .5rem;text-align:center;white-space:nowrap">';
       if(e.matchCat){
-        // 🆕 2026-05-26: escala ajustada al nuevo umbral 0.75
-        //   100% = verde brillante (idénticos)
-        //   90+  = verde lima (muy alto)
-        //   80+  = ámbar (medio-alto)
-        //   75-79 = naranja (revisar! borderline)
+        // 🆕 2026-05-26: escala con HÍBRIDO C — incluye matches 55-74% del fallback de palabras
+        //   100%  = verde brillante (idénticos)
+        //   90+   = verde lima (muy alto)
+        //   80+   = ámbar (medio-alto)
+        //   75-79 = naranja (borderline)
+        //   55-74 = rojo suave (fallback por palabras — ⚠️ revisar)
         var mCol = e.matchPct >= 100 ? '#22c55e'
                  : e.matchPct >= 90  ? '#84cc16'
                  : e.matchPct >= 80  ? '#f59e0b'
-                 : '#fb923c'; // naranja para 75-79
-        var mIc = e.manualPid ? '✏️' : (e.matchPct < 80 ? '⚠️' : '✅');
-        var tip = e.manualPid ? 'Match manual' : (e.matchPct < 80 ? 'Match débil — revisá si es correcto' : 'Match automático');
+                 : e.matchPct >= 75  ? '#fb923c'
+                 : '#f87171'; // 55-74 rojo suave
+        var mIc = e.manualPid ? '✏️' : (e.matchPct < 75 ? '🔍' : (e.matchPct < 80 ? '⚠️' : '✅'));
+        var tip = e.manualPid ? 'Match manual'
+                : e.matchPct < 75 ? 'Match estimado por palabras — REVISÁ que sea el correcto'
+                : e.matchPct < 80 ? 'Match débil — revisá si es correcto'
+                : 'Match automático';
         h += '<div style="font-weight:700;color:'+mCol+';font-size:.78rem" title="'+tip+'">'+mIc+' '+e.matchPct+'%</div>';
       } else {
         h += '<span style="color:var(--tx3);font-size:.7rem" title="Sin match en catálogo">—</span>';
@@ -25404,7 +25416,13 @@ function bcRenderListaCompleta(nombre){
     var match=bcFindInProds(it);
     var matchScore=0;
     if(match){
-      matchScore=Math.round(bcSim(bcNorm(it.nombre_norm||it.nombre_proveedor||''),bcNorm(match.nombre||''))*100);
+      // 🆕 2026-05-26 (HÍBRIDO C): preferir score cacheado si está disponible
+      var nombreNorm = bcNorm(it.nombre_norm||it.nombre_proveedor||'');
+      if(window._bcFindScoreCache && window._bcFindScoreCache.hasOwnProperty(nombreNorm)){
+        matchScore = Math.round(window._bcFindScoreCache[nombreNorm]*100);
+      } else {
+        matchScore=Math.round(bcSim(nombreNorm,bcNorm(match.nombre||''))*100);
+      }
     }
     var stockN=match?(match.stock_actual||0):null;
     var viajeN=match?(match.en_viaje||0):0;
@@ -25426,11 +25444,17 @@ function bcRenderListaCompleta(nombre){
       '<td style="padding:.3rem .4rem;min-width:160px">'+
         (match?
           (function(){
-            // MEJORA (2026-05-12): mostrar score con color visual
-            var scoreCol = matchScore>=85?'#22c55e':matchScore>=65?'#f97316':'#94a3b8';
-            var scoreLbl = matchScore>=85?'✅':matchScore>=65?'⚠️':'❓';
+            // 🆕 2026-05-26: escala unificada con HÍBRIDO C (incluye 55-74 fallback)
+            var scoreCol = matchScore>=90?'#22c55e'
+                         : matchScore>=80?'#84cc16'
+                         : matchScore>=75?'#fb923c'
+                         : '#f87171';
+            var scoreLbl = matchScore>=80?'✅' : matchScore>=75?'⚠️' : '🔍';
+            var scoreTip = matchScore>=80 ? 'Match alto' :
+                           matchScore>=75 ? 'Match borderline, revisá' :
+                           'Match estimado por palabras — REVISÁ';
             return '<div style="font-size:.65rem;color:var(--tx);font-weight:500">'+match.empresa+' '+match.nombre+'</div>'+
-              '<div style="font-size:.55rem;color:'+scoreCol+';font-weight:600;margin-top:.1rem">'+scoreLbl+' '+matchScore+'% match</div>';
+              '<div style="font-size:.55rem;color:'+scoreCol+';font-weight:600;margin-top:.1rem" title="'+scoreTip+'">'+scoreLbl+' '+matchScore+'% match</div>';
           })()
           :'<span style="font-size:.62rem;color:#f97316;background:rgba(249,115,22,.1);padding:.1rem .3rem;border-radius:3px;font-weight:600">❌ SIN MATCH — usar 🔍</span>')+
       '</td>'+
@@ -26526,9 +26550,14 @@ function bcRenderRecomendaciones(){
         // Calcular score con el match si existe
         var matchScore = 0;
         if(match){
-          var pFull = (match.empresa||'') + ' ' + (match.nombre||'');
-          matchScore = bcSim(bcNorm(pFull), bcNorm(item.nombre_norm||item.nombre_proveedor||''));
-          // 🔧 2026-05-26: bcFindInProds garantiza >=0.75 (antes 0.90). El score exacto se usa para chip visual.
+          // 🆕 2026-05-26 (HÍBRIDO C): preferir score cacheado (puede ser por fallback de palabras)
+          var nombreNorm = bcNorm(item.nombre_norm||item.nombre_proveedor||'');
+          if(window._bcFindScoreCache && window._bcFindScoreCache.hasOwnProperty(nombreNorm)){
+            matchScore = window._bcFindScoreCache[nombreNorm];
+          } else {
+            var pFull = (match.empresa||'') + ' ' + (match.nombre||'');
+            matchScore = bcSim(bcNorm(pFull), nombreNorm);
+          }
         }
 
         var entry = {
@@ -26761,15 +26790,17 @@ function bcRenderRecomendaciones(){
         var ped = bcPedidos[provKey] && bcPedidos[provKey].items && bcPedidos[provKey].items['l'+it._idx];
         var qty = ped ? ped.qty : 0;
 
-        // 🆕 2026-05-26: escala ajustada al nuevo umbral 0.75
+        // 🆕 2026-05-26: escala con HÍBRIDO C
         var matchCol = e.matchPct >= 100 ? '#22c55e'
                      : e.matchPct >= 90  ? '#84cc16'
                      : e.matchPct >= 80  ? '#f59e0b'
-                     : '#fb923c'; // 75-79 naranja, advertencia
+                     : e.matchPct >= 75  ? '#fb923c'
+                     : '#f87171'; // 55-74 fallback de palabras
         var matchTxt = prod ? e.matchPct+'%' : '—';
         var matchTip = prod
           ? 'Coincidencia entre "'+(it.nombre_proveedor||'')+'" y "'+(prod.empresa||'')+' '+(prod.nombre||'')+'"'+
-            (e.matchPct < 80 ? ' — REVISÁ, podría ser otro producto' : '')
+            (e.matchPct < 75 ? ' — ⚠️ Match estimado, REVISÁ que sea correcto' :
+             e.matchPct < 80 ? ' — REVISÁ, podría ser otro producto' : '')
           : 'Sin match en tu catálogo';
 
         // Color de fila por urgencia
@@ -27385,10 +27416,75 @@ function bcFindInProds(item){
     }
   });
 
-  // Sin candidatos, no match
+  // Sin candidatos por bcSim → 🆕 FALLBACK POR PALABRAS (HÍBRIDO C, 2026-05-26)
+  // Aplicamos lógica tipo "Recepción de Pedidos": cuento palabras DISTINTIVAS
+  // que el proveedor comparte con cada producto del catálogo.
+  // Esto rescata casos como "Freya EDP 100ml" (proveedor) vs "AL HARAMAIN Freya 100ml"
+  // donde bcSim daba 0.57 por penalizar palabras desiguales.
+  //
+  // IMPORTANTE: ignoramos palabras GENÉRICAS (edp, edt, parfum, ml, eau, etc) porque
+  // si las contáramos, "Freya EDP 100ml" matchearía con cualquier "X EDP 100ml".
   if(!candidatos.length){
-    window._bcFindCache[nombre] = null;
-    return null;
+    var GENERICAS = {
+      'edp':1,'edt':1,'edc':1,'edn':1,'eau':1,'parfum':1,'cologne':1,
+      'ml':1,'oz':1,'spr':1,'spray':1,'extrait':1,'intense':1,'absolute':1,
+      'pour':1,'for':1,'her':1,'him':1,'men':1,'women':1,'hombre':1,'mujer':1,'unisex':1,
+      'the':1,'and':1,'and':1,'del':1
+    };
+    var words = nombre.split(/\s+/).filter(function(w){
+      // Distintiva: largo >=3, NO es número puro (100, 50), NO está en lista genérica, NO termina en 'ml'
+      if(w.length < 3) return false;
+      if(GENERICAS[w]) return false;
+      if(/^\d+$/.test(w)) return false;     // "100", "50", "30"
+      if(/^\d+ml$/.test(w)) return false;   // "100ml" pegado
+      if(/^\d+oz$/.test(w)) return false;
+      return true;
+    });
+    if(words.length < 2){
+      // Nombre muy corto (1 palabra distintiva o menos) — no se puede aplicar fallback con seguridad
+      window._bcFindCache[nombre] = null;
+      return null;
+    }
+    var candFallback = [];
+    prods.forEach(function(p){
+      var pFull = (p.empresa||'') + ' ' + (p.nombre||'');
+      var pn = bcNorm(pFull);
+      if(!pn) return;
+      // Filtro de volumen sigue activo (si proveedor dice 100ml y catalog 50ml → NO)
+      var volCat = _bcExtraerVolumen(pn);
+      if(volProv != null && volCat != null && volProv !== volCat){
+        return;
+      }
+      // Contar palabras DISTINTIVAS compartidas (presentes en el producto del catalogo)
+      var compartidas = 0;
+      for(var i=0; i<words.length; i++){
+        if(pn.indexOf(words[i]) >= 0) compartidas++;
+      }
+      if(compartidas >= 2){
+        // Score "estimado" para fallback: proporcional a palabras matcheadas
+        var fbScore = 0.55 + (compartidas / words.length) * 0.19;
+        candFallback.push({prod:p, score:fbScore, pn:pn, compartidas:compartidas});
+      }
+    });
+    if(!candFallback.length){
+      window._bcFindCache[nombre] = null;
+      return null;
+    }
+    // Ordenar candidatos del fallback: más palabras en común > stock > más vendido
+    candFallback.sort(function(a,b){
+      if(b.compartidas !== a.compartidas) return b.compartidas - a.compartidas;
+      var sA = (a.prod.stock_actual||0) > 0 ? 1 : 0;
+      var sB = (b.prod.stock_actual||0) > 0 ? 1 : 0;
+      if(sA !== sB) return sB - sA;
+      var vA = a.prod.vendido_david||0, vB = b.prod.vendido_david||0;
+      return vB - vA;
+    });
+    // Tomar el top y devolverlo
+    var winnerFb = candFallback[0].prod;
+    window._bcFindCache[nombre] = winnerFb.id;
+    if(!window._bcFindScoreCache) window._bcFindScoreCache = {};
+    window._bcFindScoreCache[nombre] = candFallback[0].score;
+    return winnerFb;
   }
 
   // Filtrar a los que están cerca del mejor score (dentro de 0.05)
