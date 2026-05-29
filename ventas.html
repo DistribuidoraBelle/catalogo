@@ -17712,24 +17712,80 @@ function _vcFIFOConfirmarPago(clienteId){
       });
     });
 
-    // Paso 3: si algún pedido quedó completo → confirmar stock con patchStockFresco
-    // Patrón idéntico al sistema viejo: reserva → vendido_david
+    // Paso 3: para cada pedido completado → crear ventas + confirmar stock (solo si NO existen aún).
+    // FIX 2026-05-29 (revisado): ESPEJO EXACTO del Paso 3 del admin (_admFIFOConfirmarPago) por REGLA ORO.
+    // Incluye la GUARDA anti-doble-descuento: si el pedido YA tiene ventas (creadas por la consolidación
+    // de cuotas _ccVerificarYConsolidarPedidoCC, o por un cobro parcial previo), NO se vuelve a tocar stock.
+    // - Pedido CC CON cuotas: la consolidación ya creó ventas+stock → esta guarda lo detecta y skipea (evita doble).
+    // - Pedido CC SIN cuotas: la consolidación no corre → acá se crean las ventas y se confirma el stock.
     chain = chain.then(function(){
       var stockChain = Promise.resolve();
       pedidosCobrados.forEach(function(p){
+        var nroOrden = p.nro_orden || ("WEB-"+p.id);
         stockChain = stockChain.then(function(){
-          // Cargar items del pedido
-          return apiGet("pedidos_catalogo_items","select=producto_id,qty&pedido_id=eq."+p.id);
-        }).then(function(items){
-          if(!Array.isArray(items)||!items.length) return;
-          var c2 = Promise.resolve();
-          items.forEach(function(it){
-            if(!it.producto_id || !it.qty) return;
-            c2 = c2.then(function(){
-              return patchStockFresco(it.producto_id, {reserva:-it.qty, vendido_david:+it.qty}, "Cobro CC FIFO pedido "+(p.nro_orden||"#"+p.id));
+          // ── PROTECCIÓN CONTRA DOBLE DESCUENTO ──
+          return apiGet("ventas","select=id&nro_orden=eq."+encodeURIComponent(nroOrden)+"&limit=1");
+        }).then(function(ventasExistentes){
+          if(Array.isArray(ventasExistentes) && ventasExistentes.length){
+            // Ya hay ventas → stock ya descontado y ventas creadas. No tocar nada.
+            return;
+          }
+          return apiGet("pedidos_catalogo","select=items&id=eq."+p.id+"&limit=1").then(function(rowsP){
+            if(!Array.isArray(rowsP)||!rowsP[0]) return;
+            var items = [];
+            try{ items = typeof rowsP[0].items==='string' ? JSON.parse(rowsP[0].items) : (rowsP[0].items||[]); }catch(e){ items = []; }
+            if(!Array.isArray(items)) return;
+            var c2 = Promise.resolve();
+            items.forEach(function(it){
+              c2 = c2.then(function(){
+                // COMBOS: crear venta + descontar reserva→vendido por componente
+                if(it.isCombo){
+                  return apiPost('ventas',{
+                    vendedor_id:VENDEDOR_ID, producto_id:null, producto_nombre:it.nombre,
+                    cantidad:it.qty||1, precio_unitario:it.precio||0, segmento:'combo',
+                    total:it.total||0, estado:'confirmada', origen:'catalogo',
+                    nro_orden:nroOrden, periodo:periodoActual, forma_cobro:forma
+                  }).then(function(){
+                    if(!it.combo_id) return;
+                    return apiGet('combo_items','select=producto_id,cantidad&combo_id=eq.'+it.combo_id).then(function(ci){
+                      if(!Array.isArray(ci)) return;
+                      var c3 = Promise.resolve();
+                      ci.filter(function(x){return x.producto_id;}).forEach(function(cit){
+                        var cantTot=(cit.cantidad||1)*(it.qty||1);
+                        c3 = c3.then(function(){
+                          return patchStockFresco(cit.producto_id,{reserva:-cantTot,vendido_david:+cantTot},'Cobro CC FIFO combo '+nroOrden);
+                        });
+                      });
+                      return c3;
+                    });
+                  });
+                }
+                // DECAN o sin producto_id: solo crear venta (decan), sin tocar stock
+                if(it.isDecan || !it.producto_id){
+                  if(it.isDecan){
+                    return apiPost('ventas',{
+                      vendedor_id:VENDEDOR_ID, producto_id:it.producto_id||null, producto_nombre:it.nombre,
+                      cantidad:it.qty||1, precio_unitario:it.precio||0, segmento:'decan',
+                      total:it.total||0, estado:'confirmada', origen:'catalogo',
+                      nro_orden:nroOrden, periodo:periodoActual, forma_cobro:forma
+                    });
+                  }
+                  return;
+                }
+                // PRODUCTO NORMAL: descontar stock + crear venta
+                return patchStockFresco(it.producto_id,{reserva:-(it.qty||1),vendido_david:+(it.qty||1)},'Cobro CC FIFO '+nroOrden)
+                  .then(function(){
+                    return apiPost('ventas',{
+                      vendedor_id:VENDEDOR_ID, producto_id:it.producto_id, producto_nombre:it.nombre,
+                      cantidad:it.qty||1, precio_unitario:it.precio||0, segmento:it.segmento||'pi',
+                      total:it.total||0, estado:'confirmada', origen:'catalogo',
+                      nro_orden:nroOrden, periodo:periodoActual, forma_cobro:forma
+                    });
+                  });
+              });
             });
+            return c2;
           });
-          return c2;
         });
       });
       return stockChain;
