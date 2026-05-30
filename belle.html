@@ -3817,6 +3817,9 @@ function apiGetAll(t,f){
 }
 function apiPost(t,d){return api("POST",t,d);}
 function apiPatch(t,d,f){return api("PATCH",t,d,f);}
+// _dV (2026-05-29 Duda#1): arma el delta de stock con la columna del vendedor correcto.
+// vendedor 2 = Facu (vendido_facu), resto = David (vendido_david). Consistente con cancel/consolidacion.
+function _dV(v, qty, base){ base=base||{}; base[(parseInt(v)===2)?"vendido_facu":"vendido_david"]=qty; return base; }
 function patchStockFresco(prodId, delta, motivo){
   return apiGet('productos','select=id,stock_actual,reserva,en_viaje,vendido_david,vendido_facu&id=eq.'+prodId)
   .then(function(rows){
@@ -8155,7 +8158,7 @@ function _adminGuardarCobro(id){
                 ci.filter(function(cit){return cit.producto_id;}).forEach(function(cit){
                   var cantTotal=(cit.cantidad||1)*(it.qty||1);
                   chain=chain.then(function(){
-                    return patchStockFresco(cit.producto_id,{reserva:-cantTotal,vendido_david:+cantTotal},'Confirmar combo '+nroOrden);
+                    return patchStockFresco(cit.producto_id,_dV(vendId,+cantTotal,{reserva:-cantTotal}),'Confirmar combo '+nroOrden);
                   });
                 });
                 return chain;
@@ -8177,7 +8180,7 @@ function _adminGuardarCobro(id){
           }
           // PRODUCTOS NORMALES: crear venta + reserva → vendido_david
           promesas.push(
-            patchStockFresco(it.producto_id,{reserva:-(it.qty||1),vendido_david:+(it.qty||1)},'Confirmar '+nroOrden)
+            patchStockFresco(it.producto_id,_dV(vendId,+(it.qty||1),{reserva:-(it.qty||1)}),'Confirmar '+nroOrden)
           );
           promesas.push(apiPost('ventas',{
             vendedor_id:vendId,producto_id:it.producto_id,producto_nombre:it.nombre,
@@ -8284,14 +8287,14 @@ function _adminRevertirCobro(id){
             if(!Array.isArray(ci))return;
             return Promise.all(ci.filter(function(c){return c.producto_id;}).map(function(c){
               var q=(parseInt(c.cantidad)||1)*(parseInt(it.qty)||1);
-              return patchStockFresco(c.producto_id,{vendido_david:-q,reserva:+q},'Revertir combo '+nroOrden);
+              return patchStockFresco(c.producto_id,_dV(p.vendedor_id,-q,{reserva:+q}),'Revertir combo '+nroOrden);
             }));
           }));
           return;
         }
         if(it.isDecan||!it.producto_id)return;
         var qty=parseInt(it.qty)||parseInt(it.cantidad)||1;
-        promesas.push(patchStockFresco(it.producto_id,{vendido_david:-qty,reserva:+qty},'Revertir cobro '+nroOrden));
+        promesas.push(patchStockFresco(it.producto_id,_dV(p.vendedor_id,-qty,{reserva:+qty}),'Revertir cobro '+nroOrden));
       });
     }
 
@@ -8414,7 +8417,7 @@ function _adminCancelarPedido(id){
         var qty=parseInt(it.qty)||parseInt(it.cantidad)||1;
         if(estabaCobrado){
           // Stock estaba en vendido_david → devolver a stock_actual
-          promesas.push(patchStockFresco(it.producto_id,{stock_actual:+qty,vendido_david:-qty},'Cancelación pedido '+nroOrden));
+          promesas.push(patchStockFresco(it.producto_id,_dV(p.vendedor_id,-qty,{stock_actual:+qty}),'Cancelación pedido '+nroOrden));
         } else {
           // Stock estaba en reserva → devolver a stock_actual
           promesas.push(patchStockFresco(it.producto_id,{stock_actual:+qty,reserva:-qty},'Cancelación pedido '+nroOrden));
@@ -8425,7 +8428,7 @@ function _adminCancelarPedido(id){
             return Promise.all(ci.filter(function(c){return c.producto_id;}).map(function(c){
               var q=(parseInt(c.cantidad)||1)*qty;
               if(estabaCobrado){
-                return patchStockFresco(c.producto_id,{stock_actual:+q,vendido_david:-q},'Cancelación combo '+nroOrden);
+                return patchStockFresco(c.producto_id,_dV(p.vendedor_id,-q,{stock_actual:+q}),'Cancelación combo '+nroOrden);
               } else {
                 return patchStockFresco(c.producto_id,{stock_actual:+q,reserva:-q},'Cancelación combo '+nroOrden);
               }
@@ -8484,7 +8487,7 @@ function _adminEliminarPedido(id){
           if(!it.producto_id||it.isDecan)return;
           var qty=parseInt(it.qty)||parseInt(it.cantidad)||1;
           if(estabaCobrado){
-            promesas.push(patchStockFresco(it.producto_id,{stock_actual:+qty,vendido_david:-qty},'Eliminación pedido '+nroOrden));
+            promesas.push(patchStockFresco(it.producto_id,_dV(p.vendedor_id,-qty,{stock_actual:+qty}),'Eliminación pedido '+nroOrden));
           } else {
             promesas.push(patchStockFresco(it.producto_id,{stock_actual:+qty,reserva:-qty},'Eliminación pedido '+nroOrden));
           }
@@ -8494,7 +8497,7 @@ function _adminEliminarPedido(id){
               return Promise.all(ci.filter(function(c){return c.producto_id;}).map(function(c){
                 var q=(parseInt(c.cantidad)||1)*qty;
                 if(estabaCobrado){
-                  return patchStockFresco(c.producto_id,{stock_actual:+q,vendido_david:-q},'Eliminación combo '+nroOrden);
+                  return patchStockFresco(c.producto_id,_dV(p.vendedor_id,-q,{stock_actual:+q}),'Eliminación combo '+nroOrden);
                 } else {
                   return patchStockFresco(c.producto_id,{stock_actual:+q,reserva:-q},'Eliminación combo '+nroOrden);
                 }
@@ -14328,12 +14331,12 @@ function _mgConfirmarCobro(){
         if(!Array.isArray(ci))return;
         ci.forEach(function(cit){
           var cant=(cit.cantidad||1)*comboQty;
-          patchStockFresco(cit.producto_id,{vendido_david:+cant,reserva:-cant},'Cobro combo').catch(function(e){console.error("[belle] error silencioso:",e);});
+          patchStockFresco(cit.producto_id,_dV(VENDEDOR_ID,+cant,{reserva:-cant}),'Cobro combo').catch(function(e){console.error("[belle] error silencioso:",e);});
         });
       }).catch(function(e){console.error("[belle] error silencioso:",e);});
     }
     if(pid&&!esDecanItem&&!esComboItem){
-      proms.push(patchStockFresco(pid,{vendido_david:+s.qty,reserva:-s.qty},'Cobro parcial'));
+      proms.push(patchStockFresco(pid,_dV(VENDEDOR_ID,+s.qty,{reserva:-s.qty}),'Cobro parcial'));
     }
     proms.push(apiPost('ventas',{
       vendedor_id:VENDEDOR_ID,
@@ -15569,7 +15572,7 @@ function _admBorrarPago(pagoId, clienteId, clienteNombre){
               // Producto normal
               if(it.producto_id && !it.isCombo){
                 c2 = c2.then(function(){
-                  return patchStockFresco(it.producto_id, {reserva:+qty, vendido_david:-qty}, "Reverso pago borrado pedido "+(p.nro_orden||"#"+p.id));
+                  return patchStockFresco(it.producto_id, _dV(p.vendedor_id,-qty,{reserva:+qty}), "Reverso pago borrado pedido "+(p.nro_orden||"#"+p.id));
                 });
               }
               // Combo: revertir stock de cada producto del combo
@@ -15581,7 +15584,7 @@ function _admBorrarPago(pagoId, clienteId, clienteNombre){
                     ci.filter(function(x){return x.producto_id;}).forEach(function(cit){
                       var cTot = (cit.cantidad||1)*qty;
                       c3 = c3.then(function(){
-                        return patchStockFresco(cit.producto_id, {reserva:+cTot, vendido_david:-cTot}, "Reverso combo pago borrado "+(p.nro_orden||"#"+p.id));
+                        return patchStockFresco(cit.producto_id, _dV(p.vendedor_id,-cTot,{reserva:+cTot}), "Reverso combo pago borrado "+(p.nro_orden||"#"+p.id));
                       });
                     });
                     return c3;
@@ -18535,7 +18538,7 @@ function _admFIFOConfirmarPago(clienteId){
                       ci.filter(function(x){return x.producto_id;}).forEach(function(cit){
                         var cantTot = (cit.cantidad||1)*(it.qty||1);
                         c3 = c3.then(function(){
-                          return patchStockFresco(cit.producto_id,{reserva:-cantTot,vendido_david:+cantTot},'Cobro CC FIFO combo '+nroOrden);
+                          return patchStockFresco(cit.producto_id,_dV(vendedorAcreditado,+cantTot,{reserva:-cantTot}),'Cobro CC FIFO combo '+nroOrden);
                         });
                       });
                       return c3;
@@ -18555,7 +18558,7 @@ function _admFIFOConfirmarPago(clienteId){
                   return;
                 }
                 // PRODUCTO NORMAL: descontar stock + crear venta
-                return patchStockFresco(it.producto_id,{reserva:-(it.qty||1),vendido_david:+(it.qty||1)},'Cobro CC FIFO '+nroOrden)
+                return patchStockFresco(it.producto_id,_dV(vendedorAcreditado,+(it.qty||1),{reserva:-(it.qty||1)}),'Cobro CC FIFO '+nroOrden)
                   .then(function(){
                     return apiPost('ventas',{
                       vendedor_id: vendedorAcreditado, producto_id: it.producto_id, producto_nombre: it.nombre,
