@@ -3798,6 +3798,23 @@ function api(method,table,data,filters){
     });
 }
 function apiGet(t,f){return api("GET",t,null,f);}
+// apiGetAll — trae TODAS las filas paginando de a 1000 (Supabase corta en 1000 por request, ignora limit alto).
+// Usar SOLO en consultas que SUMAN/totalizan y pueden superar 1000 filas. El resto sigue con apiGet.
+// Para resultados <1000 hace una sola request (sin penalización). Quita limit/offset del filtro y los maneja solo.
+function apiGetAll(t,f){
+  f=(f||"").replace(/&limit=\d+/g,"").replace(/&offset=\d+/g,"");
+  if(f.indexOf("order=")<0)f+="&order=id";
+  var PAGE=1000,todas=[];
+  function traer(off){
+    return apiGet(t,f+"&limit="+PAGE+"&offset="+off).then(function(tanda){
+      if(!Array.isArray(tanda))return todas;
+      todas=todas.concat(tanda);
+      if(tanda.length===PAGE&&(off/PAGE)<200)return traer(off+PAGE);
+      return todas;
+    });
+  }
+  return traer(0).catch(function(e){console.error("apiGetAll error",t,e);return todas;});
+}
 function apiPost(t,d){return api("POST",t,d);}
 function apiPatch(t,d,f){return api("PATCH",t,d,f);}
 function patchStockFresco(prodId, delta, motivo){
@@ -4161,7 +4178,7 @@ function loadDashboard(){
 
   Promise.all([
     // [0] Ventas semana propias (presenciales, sin origen catalogo) — IGUAL QUE VENDEDORES (línea 12120)
-    apiGet("ventas","select=vendedor_id,total,cantidad,producto_nombre,producto_id,segmento,estado,created_at,origen,descuento,forma_cobro&estado=in.(confirmada,dev_parcial,devuelta)&created_at=gte."+desde+"T00:00:00&created_at=lte."+hasta+"T23:59:59&order=created_at.desc&limit=10000"),
+    apiGetAll("ventas","select=vendedor_id,total,cantidad,producto_nombre,producto_id,segmento,estado,created_at,origen,descuento,forma_cobro&estado=in.(confirmada,dev_parcial,devuelta)&created_at=gte."+desde+"T00:00:00&created_at=lte."+hasta+"T23:59:59&order=created_at.desc&limit=10000"),
     // [1] Rendiciones pendientes
     apiGet("rendiciones","select=*&estado=eq.pendiente&tipo=neq.reclamo&order=created_at.desc"),
     // [2] Gastos pendientes
@@ -4179,7 +4196,7 @@ function loadDashboard(){
     // [8] Pedidos proveedor en camino
     apiGet("pedidos_proveedor","select=id,nro_pedido,proveedor,estado,total_usd,nro_guia,fecha_estimada&estado=eq.pendiente&order=fecha_estimada.asc.nullslast"),
     // [9] Todas las ventas (saldo historico) — solo confirmada, igual que panel vendedor
-    apiGet("ventas","select=vendedor_id,total,estado&estado=eq.confirmada&limit=10000"),
+    apiGetAll("ventas","select=vendedor_id,total,estado&estado=eq.confirmada&limit=10000"),
     // [10] Ventas HOY propias
     apiGet("ventas","select=id,estado,created_at,origen&created_at=gte."+hoy+"T00:00:00"),
   ]).then(function(res){
@@ -6091,7 +6108,7 @@ function saveStkModal(){
 // RENDICION
 function loadRendicion(){
   Promise.all([
-    apiGet("ventas","select=*&estado=eq.confirmada&order=created_at.desc&limit=10000"),
+    apiGetAll("ventas","select=*&estado=eq.confirmada&order=created_at.desc&limit=10000"),
     apiGet("rendiciones","select=*&estado=neq.archivada&tipo=neq.reclamo&order=created_at.desc"),
     apiGet("gastos_vendedor","select=*&periodo_cerrado=eq.false&order=created_at.desc")
   ]).then(function(res){
@@ -9774,7 +9791,7 @@ function eliminarSlide(id){
 // CIERRE
 function loadCierrePage(){
   Promise.all([
-    apiGet("ventas","select=total&vendedor_id=eq.1&estado=eq.confirmada&limit=10000"),
+    apiGetAll("ventas","select=total&vendedor_id=eq.1&estado=eq.confirmada&limit=10000"),
     apiGet("gastos_vendedor","select=monto,aprobado&periodo_cerrado=eq.false"),
     apiGet("rendiciones","select=monto,estado&vendedor_id=eq.1&estado=neq.archivada&tipo=neq.reclamo"),
     apiGet("historial_periodos","select=*&order=fecha_cierre.desc&limit=10")
@@ -9874,7 +9891,7 @@ function _cargarContadoresCombos(){
   // 🐛 FIX 2026-05-23: antes leía de tabla pedidos_catalogo_items que NO EXISTE.
   // El patrón correcto (usado en el resto del código): leer items JSON de pedidos_catalogo.
   Promise.all([
-    apiGet("ventas","select=producto_nombre,cantidad&estado=eq.confirmada&segmento=eq.combo&limit=2000").catch(function(){return [];}),
+    apiGetAll("ventas","select=producto_nombre,cantidad&estado=eq.confirmada&segmento=eq.combo&limit=2000").catch(function(){return [];}),
     apiGet("pedidos_catalogo","select=id,estado,items&estado=neq.cancelado&estado=neq.cobrado&limit=2000").catch(function(){return [];})
   ]).then(function(res){
     var ventas=Array.isArray(res[0])?res[0]:[];
@@ -11967,7 +11984,7 @@ function decansLoadStats(){
   // O analizar movimientos_stock con tipo=venta...
   // PARA SIMPLIFICAR: leer ventas con tipo='venta' y buscar las que contengan 'Decan' en producto_nombre
   Promise.all([
-    apiGet('ventas','select=id,producto_id,producto_nombre,total,cantidad,created_at,vendedor_id&order=created_at.desc&limit=5000'),
+    apiGetAll('ventas','select=id,producto_id,producto_nombre,total,cantidad,created_at,vendedor_id&order=created_at.desc&limit=5000'),
     apiGet('productos','select=id,nombre,empresa,precio_decan,precio_min_ars,genero&precio_decan=gte.0&limit=2000')
   ]).then(function(r){
     var ventas = Array.isArray(r[0])?r[0]:[];
@@ -14997,7 +15014,7 @@ function loadDashMetrics(){
   var since=new Date();since.setDate(since.getDate()-56);
   var sinceStr=since.toISOString().slice(0,10);
   Promise.all([
-    apiGet("ventas","select=total,created_at,producto_nombre&estado=eq.confirmada&created_at=gte."+sinceStr+"&order=created_at&limit=10000"),
+    apiGetAll("ventas","select=total,created_at,producto_nombre&estado=eq.confirmada&created_at=gte."+sinceStr+"&order=created_at&limit=10000"),
     apiGet("ventas","select=total,cantidad,producto_nombre&estado=eq.confirmada&order=total.desc&limit=50")
   ]).then(function(res){
     var ventas=Array.isArray(res[0])?res[0]:[];
@@ -19750,7 +19767,7 @@ function loadCotizHistorial(){
   apiGet("configuracion","select=cotizacion_usd,updated_at&limit=1").then(function(data){
     var cur=Array.isArray(data)&&data.length?data[0].cotizacion_usd:cotizActual;
     // Also load ventas grouped by week to show average price per unit over time
-    apiGet("ventas","select=created_at,total,cantidad&estado=eq.confirmada&order=created_at.desc&limit=10000").then(function(ventas){
+    apiGetAll("ventas","select=created_at,total,cantidad&estado=eq.confirmada&order=created_at.desc&limit=10000").then(function(ventas){
       if(!Array.isArray(ventas))ventas=[];
       // Group by month
       var months={};
@@ -21782,12 +21799,12 @@ function loadVendedores(){
   }
 
   Promise.all([
-    apiGet("ventas","select=vendedor_id,total,estado,created_at,origen,nro_orden&estado=eq.confirmada&limit=2000"),
+    apiGetAll("ventas","select=vendedor_id,total,estado,created_at,origen,nro_orden&estado=eq.confirmada&limit=2000"),
     apiGet("gastos_vendedor","select=vendedor_id,monto,concepto,aprobado,created_at,id&periodo_cerrado=eq.false&order=created_at.desc&limit=500"),
     apiGet("rendiciones","select=vendedor_id,monto,estado,tipo,concepto,created_at,id&estado=neq.archivada&tipo=neq.reclamo&order=created_at.desc&limit=500"),
     apiGet("ventas_transferidas","select=*&estado=neq.cancelada&order=created_at.desc&limit=500"),
-    apiGet("ventas","select=vendedor_id,total,estado,nro_orden,created_at,producto_nombre,cantidad&estado=in.(confirmada,dev_parcial,devuelta)&created_at=gte."+desde+"T00:00:00&created_at=lte."+hasta+"T23:59:59&limit=10000"),
-    apiGet("ventas","select=vendedor_id,total,estado,nro_orden,created_at,producto_nombre,cantidad&origen=eq.catalogo&estado=in.(confirmada,pagada,completada)&created_at=gte."+desde+"T00:00:00&created_at=lte."+hasta+"T23:59:59&limit=10000"),
+    apiGetAll("ventas","select=vendedor_id,total,estado,nro_orden,created_at,producto_nombre,cantidad&estado=in.(confirmada,dev_parcial,devuelta)&created_at=gte."+desde+"T00:00:00&created_at=lte."+hasta+"T23:59:59&limit=10000"),
+    apiGetAll("ventas","select=vendedor_id,total,estado,nro_orden,created_at,producto_nombre,cantidad&origen=eq.catalogo&estado=in.(confirmada,pagada,completada)&created_at=gte."+desde+"T00:00:00&created_at=lte."+hasta+"T23:59:59&limit=10000"),
   ]).then(function(res){
     var todasVentas=Array.isArray(res[0])?res[0]:[];
     var gastos=Array.isArray(res[1])?res[1]:[];
@@ -22358,7 +22375,7 @@ function loadEstadisticas(){
   if(vendFil)qR+="&vendedor_id=eq."+vendFil;
 
   Promise.all([
-    apiGet("ventas",qV),
+    apiGetAll("ventas",qV),
     apiGet("gastos_vendedor",qG),
     apiGet("rendiciones",qR)
   ]).then(function(res){
@@ -27925,7 +27942,7 @@ function _repObtenerCobrosPeriodo(){
   // FIX: filtrar forma_cobro != 'pendiente' para evitar double counting de ventas a crédito
   return Promise.all([
     apiGet("cc_pagos", "select=*&fecha=gte."+desdeISO+"&fecha=lt."+hastaISO+"&order=fecha.desc&limit=5000").catch(function(){return [];}),
-    apiGet("ventas", "select=*&estado=eq.confirmada&forma_cobro=neq.pendiente&created_at=gte."+r.desde.toISOString()+"&created_at=lt."+r.hasta.toISOString()+"&order=created_at.desc&limit=5000").catch(function(){return [];})
+    apiGetAll("ventas", "select=*&estado=eq.confirmada&forma_cobro=neq.pendiente&created_at=gte."+r.desde.toISOString()+"&created_at=lt."+r.hasta.toISOString()+"&order=created_at.desc&limit=5000").catch(function(){return [];})
   ]).then(function(res){
     _repCacheCobros = { ccPagos: res[0]||[], ventas: res[1]||[] };
     return _repCacheCobros;
@@ -28096,9 +28113,9 @@ function _repCargarRentabilidad(){
 
   Promise.all([
     // Ventas del período
-    apiGet("ventas", "select=*&"+estadosV+"&created_at=gte."+r.desde.toISOString()+"&created_at=lt."+r.hasta.toISOString()+"&limit=5000").catch(function(){return [];}),
+    apiGetAll("ventas", "select=*&"+estadosV+"&created_at=gte."+r.desde.toISOString()+"&created_at=lt."+r.hasta.toISOString()+"&limit=5000").catch(function(){return [];}),
     // Ventas del período anterior (mismo tamaño)
-    apiGet("ventas", "select=producto_id,producto_nombre,cantidad,total,vendedor_id,segmento&"+estadosV+"&created_at=gte."+rAnt.desde.toISOString()+"&created_at=lt."+rAnt.hasta.toISOString()+"&limit=5000").catch(function(){return [];}),
+    apiGetAll("ventas", "select=producto_id,producto_nombre,cantidad,total,vendedor_id,segmento&"+estadosV+"&created_at=gte."+rAnt.desde.toISOString()+"&created_at=lt."+rAnt.hasta.toISOString()+"&limit=5000").catch(function(){return [];}),
     // Gastos aprobados del período
     apiGet("gastos_vendedor", "select=*&aprobado=is.true&created_at=gte."+r.desde.toISOString()+"&created_at=lt."+r.hasta.toISOString()+"&limit=5000").catch(function(){return [];}),
     // Gastos del anterior
@@ -28639,7 +28656,7 @@ function _repObtenerPeriodoAnterior(){
 
   return Promise.all([
     apiGet("cc_pagos", "select=monto&fecha=gte."+desdeISO+"&fecha=lt."+hastaISO+"&limit=5000").catch(function(){return [];}),
-    apiGet("ventas", "select=total&estado=eq.confirmada&forma_cobro=neq.pendiente&created_at=gte."+desdeAnt.toISOString()+"&created_at=lt."+hastaAnt.toISOString()+"&limit=5000").catch(function(){return [];})
+    apiGetAll("ventas", "select=total&estado=eq.confirmada&forma_cobro=neq.pendiente&created_at=gte."+desdeAnt.toISOString()+"&created_at=lt."+hastaAnt.toISOString()+"&limit=5000").catch(function(){return [];})
   ]).then(function(res){
     var t1 = (res[0]||[]).reduce(function(s,p){return s+(parseFloat(p.monto)||0);}, 0);
     var t2 = (res[1]||[]).reduce(function(s,v){return s+(parseFloat(v.total)||0);}, 0);
@@ -29102,7 +29119,7 @@ function _repCargarProductos(){
   var r = _repCalcRango(window._repPeriodo);
 
   Promise.all([
-    apiGet("ventas", "select=*&estado=eq.confirmada&created_at=gte."+r.desde.toISOString()+"&created_at=lt."+r.hasta.toISOString()+"&limit=5000").catch(function(){return [];}),
+    apiGetAll("ventas", "select=*&estado=eq.confirmada&created_at=gte."+r.desde.toISOString()+"&created_at=lt."+r.hasta.toISOString()+"&limit=5000").catch(function(){return [];}),
     apiGet("productos", "select=id,nombre,empresa,stock_actual,deposito_m,activo&activo=is.true&limit=2000").catch(function(){return [];})
   ]).then(function(data){
     var ventas = data[0]; var productos = data[1];
@@ -31970,7 +31987,7 @@ function exportarExcel(){
   if(vendedorId)fq+='&vendedor_id=eq.'+vendedorId;
 
   Promise.all([
-    apiGet('ventas','select=*&estado=in.(confirmada,devolucion)&order=created_at.desc&limit=5000'+fq),
+    apiGetAll('ventas','select=*&estado=in.(confirmada,devolucion)&order=created_at.desc&limit=5000'+fq),
     apiGet('gastos_vendedor','select=*&order=created_at.desc&limit=2000'+fq),
     apiGet('rendiciones','select=*&tipo=neq.saldo_arrastrado&order=created_at.desc&limit=2000'+fq),
   ]).then(function(res){
@@ -32431,12 +32448,12 @@ function loadRentabilidad(){
   var estadosV="estado=in.(confirmada,archivada_periodo)";
 
   Promise.all([
-    apiGet('ventas','select=producto_id,cantidad,precio_unitario,total,vendedor_id,created_at&'+estadosV+'&created_at=gte.'+hoyIni.toISOString()+'&created_at=lte.'+hoyFin.toISOString()+'&limit=2000'),
-    apiGet('ventas','select=producto_id,cantidad,precio_unitario,total,vendedor_id,created_at&'+estadosV+'&created_at=gte.'+ayerIni.toISOString()+'&created_at=lte.'+ayerFin.toISOString()+'&limit=2000'),
-    apiGet('ventas','select=producto_id,cantidad,precio_unitario,total,vendedor_id,created_at&'+estadosV+'&created_at=gte.'+semIni.toISOString()+'&created_at=lte.'+semFin.toISOString()+'&limit=2000'),
-    apiGet('ventas','select=producto_id,cantidad,precio_unitario,total,vendedor_id,created_at&'+estadosV+'&created_at=gte.'+semAntIni.toISOString()+'&created_at=lte.'+semAntFin.toISOString()+'&limit=2000'),
-    apiGet('ventas','select=producto_id,cantidad,precio_unitario,total,vendedor_id,created_at&'+estadosV+'&created_at=gte.'+mesIni.toISOString()+'&created_at=lte.'+mesFin.toISOString()+'&limit=2000'),
-    apiGet('ventas','select=producto_id,cantidad,precio_unitario,total,vendedor_id,created_at&'+estadosV+'&created_at=gte.'+mesAntIni.toISOString()+'&created_at=lte.'+mesAntFin.toISOString()+'&limit=2000'),
+    apiGetAll('ventas','select=producto_id,cantidad,precio_unitario,total,vendedor_id,created_at&'+estadosV+'&created_at=gte.'+hoyIni.toISOString()+'&created_at=lte.'+hoyFin.toISOString()+'&limit=2000'),
+    apiGetAll('ventas','select=producto_id,cantidad,precio_unitario,total,vendedor_id,created_at&'+estadosV+'&created_at=gte.'+ayerIni.toISOString()+'&created_at=lte.'+ayerFin.toISOString()+'&limit=2000'),
+    apiGetAll('ventas','select=producto_id,cantidad,precio_unitario,total,vendedor_id,created_at&'+estadosV+'&created_at=gte.'+semIni.toISOString()+'&created_at=lte.'+semFin.toISOString()+'&limit=2000'),
+    apiGetAll('ventas','select=producto_id,cantidad,precio_unitario,total,vendedor_id,created_at&'+estadosV+'&created_at=gte.'+semAntIni.toISOString()+'&created_at=lte.'+semAntFin.toISOString()+'&limit=2000'),
+    apiGetAll('ventas','select=producto_id,cantidad,precio_unitario,total,vendedor_id,created_at&'+estadosV+'&created_at=gte.'+mesIni.toISOString()+'&created_at=lte.'+mesFin.toISOString()+'&limit=2000'),
+    apiGetAll('ventas','select=producto_id,cantidad,precio_unitario,total,vendedor_id,created_at&'+estadosV+'&created_at=gte.'+mesAntIni.toISOString()+'&created_at=lte.'+mesAntFin.toISOString()+'&limit=2000'),
     apiGet('gastos_vendedor','select=monto,created_at&aprobado=eq.true&created_at=gte.'+hoyIni.toISOString()+'&created_at=lte.'+hoyFin.toISOString()),
     apiGet('gastos_vendedor','select=monto,created_at&aprobado=eq.true&created_at=gte.'+semIni.toISOString()+'&created_at=lte.'+semFin.toISOString()),
     apiGet('gastos_vendedor','select=monto,created_at&aprobado=eq.true&created_at=gte.'+mesIni.toISOString()+'&created_at=lte.'+mesFin.toISOString()),
@@ -33933,7 +33950,7 @@ function adminResetearSaldo(vendedorId,vendedorNombre){
   // - rendiciones: aprobadas, no archivadas, no de tipo reclamo
   // - saldo arrastrado: suma. envio_dinero del admin: suma. resto: resta
   Promise.all([
-    apiGet('ventas','select=total&vendedor_id=eq.'+vendedorId+'&estado=eq.confirmada&limit=5000'),
+    apiGetAll('ventas','select=total&vendedor_id=eq.'+vendedorId+'&estado=eq.confirmada&limit=5000'),
     apiGet('gastos_vendedor','select=monto,aprobado&vendedor_id=eq.'+vendedorId+'&periodo_cerrado=eq.false&limit=5000'),
     apiGet('rendiciones','select=monto,tipo&vendedor_id=eq.'+vendedorId+'&estado=eq.aprobada&estado=neq.archivada&tipo=neq.reclamo&limit=5000')
   ]).then(function(res){
@@ -34192,7 +34209,7 @@ function loadResumenPeriodoActual(){
   // Cargar en paralelo: ventas confirmadas, gastos, rendiciones, productos (para costo), cotizacion
   Promise.all([
     // Ventas confirmadas de todos los vendedores
-    apiGet('ventas','select=vendedor_id,total,cantidad,producto_id,segmento&estado=eq.confirmada').catch(function(){return [];}),
+    apiGetAll('ventas','select=vendedor_id,total,cantidad,producto_id,segmento&estado=eq.confirmada').catch(function(){return [];}),
     // Gastos aprobados del periodo activo (sin periodo_cerrado = no archivados)
     apiGet('gastos_vendedor','select=vendedor_id,monto,aprobado,concepto,estado_comision&periodo_cerrado=eq.false').catch(function(){return [];}),
     // Rendiciones aprobadas activas
@@ -34347,7 +34364,7 @@ function loadPeriodoDetalle(el,p){
   var per=encodeURIComponent(p.periodo);
   el.innerHTML='<div class="loading" style="padding:.8rem"><div class="spin"></div>Cargando movimientos...</div>';
   Promise.all([
-    apiGet('ventas','select=vendedor_id,producto_nombre,cantidad,total,estado,nro_orden,created_at&periodo=eq.'+per+'&order=created_at.desc&limit=500'),
+    apiGetAll('ventas','select=vendedor_id,producto_nombre,cantidad,total,estado,nro_orden,created_at&periodo=eq.'+per+'&order=created_at.desc'),
     // Gastos: buscar por nombre de periodo Y por 'true' (formato viejo) para compatibilidad histórica
     apiGet('gastos_vendedor','select=*&periodo=eq.'+per+'&order=created_at.desc'),
     apiGet('rendiciones','select=*&periodo=eq.'+per+'&order=created_at.desc'),
@@ -34609,7 +34626,7 @@ function loadCierrePreview(el) {
   var VENDS = [{id:1,n:'David'},{id:2,n:'Facu'},{id:3,n:'Marcela'}];
   Promise.all(VENDS.map(function(v) {
     return Promise.all([
-      apiGet('ventas','select=total&vendedor_id=eq.'+v.id+'&estado=eq.confirmada&periodo=eq.'+encodeURIComponent(periodoActual)),
+      apiGetAll('ventas','select=total&vendedor_id=eq.'+v.id+'&estado=eq.confirmada&periodo=eq.'+encodeURIComponent(periodoActual)),
       apiGet('gastos_vendedor','select=monto,aprobado,concepto,vendedor_id&vendedor_id=eq.'+v.id+'&periodo_cerrado=eq.false'),
       apiGet('rendiciones','select=monto,tipo&vendedor_id=eq.'+v.id+'&estado=eq.aprobada&periodo=eq.'+encodeURIComponent(periodoActual))
     ]).then(function(r) {
@@ -34689,7 +34706,7 @@ async function adminEjecutarCierrePeriodo() {
   // PASO 1: Calcular saldos por vendedor
   Promise.all(vends.map(function(v) {
     return Promise.all([
-      apiGet('ventas',          'select=total,id&vendedor_id=eq.'+v.id+'&estado=eq.confirmada&periodo=eq.'+encodeURIComponent(periodoActual)),
+      apiGetAll('ventas',          'select=total,id&vendedor_id=eq.'+v.id+'&estado=eq.confirmada&periodo=eq.'+encodeURIComponent(periodoActual)),
       apiGet('gastos_vendedor', 'select=monto,id,concepto,estado_comision,aprobado,vendedor_id&vendedor_id=eq.'+v.id+'&periodo_cerrado=eq.false'),
       apiGet('rendiciones',     'select=monto,id&vendedor_id=eq.'+v.id+'&estado=eq.aprobada&tipo=neq.saldo_arrastrado&periodo=eq.'+encodeURIComponent(periodoActual)),
       apiGet('rendiciones',     'select=monto&vendedor_id=eq.'+v.id+'&estado=eq.aprobada&tipo=eq.saldo_arrastrado&periodo=eq.'+encodeURIComponent(periodoActual))
@@ -34942,7 +34959,7 @@ function perConfigChange() {
   try{
     var results=await Promise.all([
       apiGet("productos","select=*&limit=2000"),
-      apiGet("ventas","select=*&order=created_at.desc&limit=5000"),
+      apiGetAll("ventas","select=*&order=created_at.desc&limit=5000"),
       apiGet("rendiciones","select=*&order=created_at.desc"),
       apiGet("gastos_vendedor","select=*&order=created_at.desc"),
       apiGet("movimientos_stock","select=*&order=created_at.desc&limit=2000"),
@@ -36839,7 +36856,7 @@ async function diagRun(id) {
         var errores=[];
         for(var i=0;i<VENDS.length;i++){
           var v=VENDS[i];
-          var vt=await apiGet('ventas','select=total&vendedor_id=eq.'+v.id+'&estado=eq.confirmada').catch(function(){return[];});
+          var vt=await apiGetAll('ventas','select=total&vendedor_id=eq.'+v.id+'&estado=eq.confirmada').catch(function(){return[];});
           var gt=await apiGet('gastos_vendedor','select=monto&vendedor_id=eq.'+v.id+'&aprobado=eq.true&periodo_cerrado=eq.false').catch(function(){return[];});
           var rt=await apiGet('rendiciones','select=monto&vendedor_id=eq.'+v.id+'&estado=eq.aprobada').catch(function(){return[];});
           var tv=Array.isArray(vt)?vt.reduce(function(s,x){return s+(x.total||0);},0):0;
