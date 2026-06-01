@@ -744,7 +744,9 @@ tr.row-hl:hover td{
             <option value="otros">❔ Otros</option>
           </select>
           <button class="btn btn-g" onclick="notasAdmCargar()" style="font-size:.72rem">🔄 Recargar</button>
+          <button class="btn btn-g" onclick="guardarFotosNotasSupabase()" style="font-size:.72rem" title="Guarda en tu propio storage TODAS las fotos de notas que todavía no están ahí (embebidas y de sitios externos), para que sean permanentes y salgan siempre en la imagen del card">💾 Guardar fotos en Supabase</button>
           <span id="notasAdmCount" style="font-size:.7rem;color:var(--tx3)"></span>
+          <span id="notasRehostStatus" style="font-size:.7rem;color:var(--acc);flex-basis:100%"></span>
         </div>
         <div style="font-size:.65rem;color:var(--tx3);margin-bottom:.5rem;line-height:1.45">
           💡 Acá administrás las notas olfativas centralizadas. Cambiá nombre o foto y se replica a todas las fichas que la usen.
@@ -39521,6 +39523,71 @@ function _levenshtein(a, b){
   return dp[n];
 }
 
+// Convierte una data: URL en Blob (para subir a storage las fotos embebidas).
+function _dataURLaBlob(durl){
+  try{
+    var arr=durl.split(','), m=arr[0].match(/:(.*?);/), mime=m?m[1]:'image/jpeg';
+    var bstr=atob(arr[1]), n=bstr.length, u8=new Uint8Array(n);
+    while(n--){u8[n]=bstr.charCodeAt(n);}
+    return new Blob([u8],{type:mime});
+  }catch(e){return null;}
+}
+
+// Guarda en TU storage todas las fotos de notas que todavía no están ahí
+// (embebidas data: y links externos). Deja todo permanente y CORS-OK.
+function guardarFotosNotasSupabase(){
+  var statusEl=document.getElementById('notasRehostStatus');
+  function setStatus(t){ if(statusEl)statusEl.textContent=t; }
+  var yaStorage=SB_URL+'/storage/v1/object/public/';
+  apiGet('notas_maestras','select=id,clave,foto_url&order=clave').then(function(rows){
+    rows=Array.isArray(rows)?rows:[];
+    var pend=rows.filter(function(n){
+      var u=n.foto_url||'';
+      if(!u)return false;
+      if(u.indexOf(yaStorage)===0)return false; // ya está en tu storage
+      return true; // data: o link externo → guardar
+    });
+    if(!pend.length){ setStatus('Todas las fotos ya están en tu storage. Nada para hacer.'); alert('Todas las fotos de notas ya están guardadas en tu storage.'); return; }
+    var nExternas=pend.filter(function(n){return /^https?:\/\//.test(n.foto_url||'');}).length;
+    var nEmbebidas=pend.length-nExternas;
+    if(!confirm('Se van a guardar '+pend.length+' fotos en tu storage:\n• '+nExternas+' de sitios externos\n• '+nEmbebidas+' embebidas (se mueven a archivo y aligeran la base)\n\nSe guarda copia de los links externos antes de empezar.\n¿Continuar?'))return;
+    var backup={}; pend.forEach(function(n){ if(/^https?:\/\//.test(n.foto_url||''))backup[n.id]=n.foto_url; });
+    apiUpsert('configuracion',{clave:'notas_rehost_backup',valor:JSON.stringify(backup)}).catch(function(){}).then(function(){
+      var ok=0,fail=0,i=0;
+      function subirYActualizar(n,blob){
+        if(!blob||!blob.size){ fail++; setTimeout(siguiente,80); return; }
+        subirImagenStorage(blob,'notas-imagenes',function(nuevaUrl){
+          apiPatch('notas_maestras',{foto_url:nuevaUrl},'id=eq.'+n.id).then(function(){ ok++; setTimeout(siguiente,80); }).catch(function(){ fail++; setTimeout(siguiente,80); });
+        },function(){ fail++; setTimeout(siguiente,80); });
+      }
+      function siguiente(){
+        if(i>=pend.length){
+          setStatus('Listo: '+ok+' guardadas, '+fail+' fallaron.');
+          alert('Terminado.\n\nGuardadas en tu storage: '+ok+'\nFallaron: '+fail+(fail?'\n\n(Las que fallaron quedaron como estaban.)':''));
+          notasAdmCargar();
+          return;
+        }
+        var n=pend[i]; i++;
+        setStatus('Guardando '+i+'/'+pend.length+'  ('+ok+' ok · '+fail+' fallaron)…');
+        var u=n.foto_url||'';
+        if(u.indexOf('data:')===0){
+          subirYActualizar(n,_dataURLaBlob(u));
+        } else {
+          var limpio=u.replace(/^https?:\/\//,'');
+          var prox='https://images.weserv.nl/?url='+encodeURIComponent(limpio)+'&output=jpg';
+          fetch(u,{mode:'cors',cache:'force-cache'}).then(function(r){return r.ok?r.blob():null;}).then(function(b){
+            if(b&&b.size){ subirYActualizar(n,b); return; }
+            fetch(prox,{cache:'force-cache'}).then(function(r){return r.ok?r.blob():null;}).then(function(b2){ subirYActualizar(n,b2); }).catch(function(){ fail++; setTimeout(siguiente,80); });
+          }).catch(function(){
+            fetch(prox,{cache:'force-cache'}).then(function(r){return r.ok?r.blob():null;}).then(function(b2){ subirYActualizar(n,b2); }).catch(function(){ fail++; setTimeout(siguiente,80); });
+          });
+        }
+      }
+      siguiente();
+    });
+  }).catch(function(e){ setStatus('Error: '+((e&&e.message)||e)); });
+}
+
 function notasAdmCargar(){
   var cont = document.getElementById('notasAdmContainer');
   if(cont) cont.innerHTML = "<div class='loading'><div class='spin'></div>Cargando notas...</div>";
@@ -39740,7 +39807,7 @@ function notasAdmRender(){
         "<th style='padding:.55rem .65rem;text-align:left;font-size:.66rem;color:var(--tx3);text-transform:uppercase;letter-spacing:.05em;border-bottom:1px solid var(--bd);width:120px'>Categoría</th>"+
         "<th style='padding:.55rem .65rem;text-align:left;font-size:.66rem;color:var(--tx3);text-transform:uppercase;letter-spacing:.05em;border-bottom:1px solid var(--bd);width:80px'>Usos</th>"+
         "<th style='padding:.55rem .65rem;text-align:left;font-size:.66rem;color:var(--tx3);text-transform:uppercase;letter-spacing:.05em;border-bottom:1px solid var(--bd);width:140px'>Estado</th>"+
-        "<th style='padding:.55rem .65rem;text-align:right;font-size:.66rem;color:var(--tx3);text-transform:uppercase;letter-spacing:.05em;border-bottom:1px solid var(--bd);width:160px'>Acciones</th>"+
+        "<th style='padding:.55rem .65rem;text-align:right;font-size:.66rem;color:var(--tx3);text-transform:uppercase;letter-spacing:.05em;border-bottom:1px solid var(--bd);width:250px'>Acciones</th>"+
       "</tr>"+
     "</thead><tbody>";
   filtradas.forEach(function(n){
@@ -39781,8 +39848,10 @@ function notasAdmRender(){
         "<span style='font-size:.62rem;color:var(--tx3)'> ficha"+(n.count===1?'':'s')+"</span>"+
       "</td>"+
       "<td style='padding:.45rem .65rem'>"+estado+"</td>"+
-      "<td style='padding:.45rem .65rem;text-align:right'>"+
-        "<button class='btn btn-a' onclick=\"notasAdmEditar('"+keyEsc+"')\" style='font-size:.65rem;padding:.25rem .55rem'>✏️ Editar</button>"+
+      "<td style='padding:.45rem .65rem;text-align:right;white-space:nowrap'>"+
+        "<button class='btn btn-g' onclick=\"notaSugerirFoto('"+keyEsc+"')\" style='font-size:.64rem;padding:.25rem .5rem;margin-right:.25rem' title='Buscar 8 fotos con licencia libre y guardarla en tu storage'>🖼 Sugerir foto</button>"+
+        "<button class='btn btn-a' onclick=\"notasAdmEditar('"+keyEsc+"')\" style='font-size:.64rem;padding:.25rem .55rem;margin-right:.25rem'>✏️ Editar</button>"+
+        "<button class='btn btn-g' onclick=\"notaBorrar('"+keyEsc+"')\" style='font-size:.64rem;padding:.25rem .5rem;color:#e53935;border-color:#e53935' title='Borrar nota'>🗑</button>"+
       "</td>"+
     "</tr>";
   });
@@ -39790,6 +39859,126 @@ function notasAdmRender(){
   cont.innerHTML = html;
   // Reset estado de selección
   notasAdmBulkUpdate();
+}
+
+// ─── BORRAR NOTA + SUGERIR FOTO (Wikimedia Commons + Openverse) — 2026-05-31 ───
+function notaBorrar(clave){
+  var nota=(window._notasAdminCache||{})[clave];
+  if(!nota){toast('Nota no encontrada','terr');return;}
+  if(!nota.en_maestras || !nota.id){
+    alert('Esta nota no tiene entrada propia en la tabla: aparece solo porque alguna ficha la usa. Para sacarla hay que quitarla de esas fichas o fusionarla.');
+    return;
+  }
+  var msg='¿Borrar la nota "'+nota.nombre_display+'"?';
+  if(nota.count>0){
+    msg+='\n\nOJO: la usan '+nota.count+' ficha(s). Borrar acá le saca la foto/categoría centralizada, pero la nota va a seguir apareciendo en esas fichas (con foto por defecto).';
+  }
+  msg+='\n\n¿Continuar?';
+  if(!confirm(msg))return;
+  apiDelete('notas_maestras','id=eq.'+nota.id).then(function(){
+    toast('✅ Nota borrada','tok');
+    window._notasAdminCache=null;
+    notasAdmCargar();
+  }).catch(function(e){ toast('Error: '+(e.message||''),'terr'); });
+}
+
+function notaSugerirFoto(clave){
+  var nota=(window._notasAdminCache||{})[clave];
+  if(!nota){toast('Nota no encontrada','terr');return;}
+  var ex=document.getElementById('moSugerirFoto'); if(ex)ex.remove();
+  var termInicial=(nota.nombre_display||clave).replace(/\s*\|.*$/,'').trim();
+  var mo=document.createElement('div');
+  mo.id='moSugerirFoto';
+  mo.style.cssText='position:fixed;inset:0;z-index:9999;background:rgba(0,0,0,.55);display:flex;align-items:center;justify-content:center;padding:1rem';
+  mo.innerHTML=
+    "<div style='background:var(--sur,#fff);border-radius:14px;max-width:680px;width:100%;max-height:88vh;overflow:auto;padding:1.1rem 1.2rem;box-shadow:0 20px 60px rgba(0,0,0,.4)'>"+
+      "<div style='display:flex;align-items:center;justify-content:space-between;margin-bottom:.6rem'>"+
+        "<div style='font-weight:700;font-size:1rem;color:var(--tx)'>Sugerir foto · "+_ofEsc(nota.nombre_display||clave)+"</div>"+
+        "<button onclick=\"var m=document.getElementById('moSugerirFoto');if(m)m.remove();\" style='background:none;border:none;font-size:1.4rem;cursor:pointer;color:var(--tx3)'>×</button>"+
+      "</div>"+
+      "<div style='font-size:.7rem;color:var(--tx3);margin-bottom:.6rem'>Imágenes con licencia libre (Wikimedia Commons + Openverse). Tocá una y se guarda en TU storage. Si no aparece lo que buscás, probá otro término (incluso en inglés).</div>"+
+      "<div style='display:flex;gap:.4rem;margin-bottom:.7rem'>"+
+        "<input id='_sugFotoTerm' class='fi' style='flex:1' value=\""+_ofEsc(termInicial)+"\" placeholder='Buscar…' onkeydown=\"if(event.key==='Enter')_sugFotoBuscar('"+clave.replace(/'/g,"\\'")+"')\">"+
+        "<button class='btn btn-a' onclick=\"_sugFotoBuscar('"+clave.replace(/'/g,"\\'")+"')\">🔍 Buscar</button>"+
+      "</div>"+
+      "<div id='_sugFotoGrid' style='display:grid;grid-template-columns:repeat(4,1fr);gap:.5rem'></div>"+
+      "<div id='_sugFotoMsg' style='font-size:.72rem;color:var(--tx3);margin-top:.5rem'></div>"+
+    "</div>";
+  document.body.appendChild(mo);
+  _sugFotoBuscar(clave);
+}
+
+function _sugFotoBuscar(clave){
+  var grid=document.getElementById('_sugFotoGrid');
+  var msg=document.getElementById('_sugFotoMsg');
+  var term=((document.getElementById('_sugFotoTerm')||{value:''}).value||'').trim();
+  if(!term){if(msg)msg.textContent='Escribí algo para buscar.';return;}
+  if(grid)grid.innerHTML='';
+  if(msg)msg.textContent='Buscando imágenes…';
+  var resultados=[];
+  function pintar(){
+    var vistos={}, unicos=[];
+    resultados.forEach(function(r){ if(r&&r.full&&!vistos[r.full]){vistos[r.full]=1;unicos.push(r);} });
+    unicos=unicos.slice(0,12);
+    if(!grid)return;
+    if(!unicos.length){ grid.innerHTML=''; if(msg)msg.textContent='No encontré imágenes para "'+term+'". Probá otro término (por ej. en inglés).'; return; }
+    if(msg)msg.textContent=unicos.length+' opciones. Tocá una para guardarla en tu storage.';
+    grid.innerHTML=unicos.map(function(r){
+      var f=encodeURIComponent(r.full);
+      return "<button onclick=\"_sugFotoElegir('"+clave.replace(/'/g,"\\'")+"','"+f+"')\" style='border:1px solid var(--bd);border-radius:10px;overflow:hidden;cursor:pointer;background:var(--sur3);aspect-ratio:1/1;padding:0'>"+
+        "<img src='"+r.thumb+"' loading='lazy' style='width:100%;height:100%;object-fit:cover' onerror=\"this.parentNode.style.display='none'\">"+
+      "</button>";
+    }).join('');
+  }
+  var pend=2;
+  function done(){ pend--; if(pend<=0)pintar(); }
+  // Wikimedia Commons (CORS via origin=*)
+  var wm='https://commons.wikimedia.org/w/api.php?action=query&format=json&origin=*&generator=search&gsrsearch='+encodeURIComponent(term)+'&gsrnamespace=6&gsrlimit=10&prop=imageinfo&iiprop=url&iiurlwidth=300';
+  fetch(wm).then(function(r){return r.json();}).then(function(d){
+    try{
+      var pages=(d&&d.query&&d.query.pages)||{};
+      Object.keys(pages).forEach(function(k){
+        var ii=pages[k].imageinfo&&pages[k].imageinfo[0];
+        if(ii&&ii.thumburl && /\.(jpg|jpeg|png|webp)$/i.test(ii.url||'')) resultados.push({thumb:ii.thumburl, full:ii.url||ii.thumburl});
+      });
+    }catch(e){}
+    done();
+  }).catch(done);
+  // Openverse (CORS, imágenes con licencia libre)
+  var ov='https://api.openverse.org/v1/images/?q='+encodeURIComponent(term)+'&page_size=10';
+  fetch(ov).then(function(r){return r.json();}).then(function(d){
+    try{
+      ((d&&d.results)||[]).forEach(function(it){
+        if(it&&(it.thumbnail||it.url)) resultados.push({thumb:it.thumbnail||it.url, full:it.url||it.thumbnail});
+      });
+    }catch(e){}
+    done();
+  }).catch(done);
+}
+
+function _sugFotoElegir(clave, fullUrlEnc){
+  var msg=document.getElementById('_sugFotoMsg');
+  if(msg)msg.textContent='Guardando la foto en tu storage…';
+  var url=decodeURIComponent(fullUrlEnc);
+  var limpio=url.replace(/^https?:\/\//,'');
+  var prox='https://images.weserv.nl/?url='+encodeURIComponent(limpio)+'&output=jpg&w=600';
+  function fallar(t){ if(msg)msg.textContent=t||'No se pudo guardar esa imagen. Probá otra.'; }
+  fetch(prox,{cache:'force-cache'}).then(function(r){return r.ok?r.blob():null;}).then(function(blob){
+    if(!blob||!blob.size){ fallar(); return; }
+    subirImagenStorage(blob,'notas-imagenes',function(nuevaUrl){
+      var nota=(window._notasAdminCache||{})[clave]||{};
+      var payload={foto_url:nuevaUrl,updated_at:new Date().toISOString()};
+      var p;
+      if(nota.en_maestras&&nota.id){ p=apiPatch('notas_maestras',payload,'id=eq.'+nota.id); }
+      else { payload.clave=clave; payload.nombre_display=nota.nombre_display||clave; p=apiPost('notas_maestras',payload); }
+      p.then(function(){
+        toast('✅ Foto guardada','tok');
+        var m=document.getElementById('moSugerirFoto'); if(m)m.remove();
+        window._notasAdminCache=null;
+        notasAdmCargar();
+      }).catch(function(e){ fallar('Error al guardar: '+(e.message||'')); });
+    },function(){ fallar('No se pudo subir al storage.'); });
+  }).catch(function(){ fallar(); });
 }
 
 // ─── BULK ACTIONS (2026-05-25) ───────────────────────────────────────
