@@ -20298,6 +20298,7 @@ function draftLoad(id){
   bcRenderMain();
   bcRenderPedidos();
   bcRenderFloating();
+  if(typeof bcWarmMatchCache==='function') bcWarmMatchCache();
 }
 
 function draftNew(){
@@ -23572,6 +23573,7 @@ function bcGuardarProveedor(nombre, items){
   draftSave();
   bcRenderProvsList();
   bcRenderMain();
+  if(typeof bcWarmMatchCache==='function') bcWarmMatchCache();
 }
 
 function bcRenderProvsList(){
@@ -23668,8 +23670,14 @@ function bcRenderMain(){
   var busqTab=document.getElementById('bctab-busqueda');
   if(busqTab) busqTab.style.display=keys.length?'block':'none';
 
-  // Auto-select tab
-  if(keys.length===1){
+  // Auto-select tab — restaurar la última solapa abierta de este borrador (MEJORA 2026-06)
+  var _saved=_bcGetLastTab();
+  if(_saved && _saved.tab==='lista' && _saved.prov && keys.indexOf(_saved.prov)>=0){
+    var _tEl=tabsEl?tabsEl.querySelector('[data-prov-idx="'+keys.indexOf(_saved.prov)+'"]'):null;
+    bcSetTabLista(_saved.prov, _tEl);
+  } else if(_saved && _saved.tab && _saved.tab!=='lista' && document.getElementById('bctab-'+_saved.tab) && document.getElementById('bctab-'+_saved.tab).style.display!=='none'){
+    bcSetTab(_saved.tab, document.getElementById('bctab-'+_saved.tab));
+  } else if(keys.length===1){
     var firstTab=tabsEl?tabsEl.querySelector('[data-prov-idx="0"]'):null;
     bcSetTabLista(keys[0], firstTab);
   } else {
@@ -23678,8 +23686,11 @@ function bcRenderMain(){
   bcRenderFloating();
 }
 
+function _bcSaveLastTab(tab,prov){ try{ localStorage.setItem('bcLastTab_'+(activeDraftId||'default'), JSON.stringify({tab:tab,prov:prov||null})); }catch(e){} }
+function _bcGetLastTab(){ try{ var s=localStorage.getItem('bcLastTab_'+(activeDraftId||'default')); return s?JSON.parse(s):null; }catch(e){ return null; } }
 function bcSetTab(tab, el){
   bcCurrentTab=tab;
+  _bcSaveLastTab(tab,null);
   document.querySelectorAll('.bc-tab').forEach(function(t){
     t.style.borderBottomColor='transparent';t.style.color='var(--tx3)';
   });
@@ -23712,6 +23723,7 @@ function bcSetTab(tab, el){
 function bcSetTabLista(nombre, el){
   bcCurrentTab='lista';
   bcCurrentProv=nombre;
+  _bcSaveLastTab('lista',nombre);
   document.querySelectorAll('.bc-tab').forEach(function(t){
     t.style.borderBottomColor='transparent';t.style.color='var(--tx3)';
   });
@@ -24392,9 +24404,11 @@ function bcScrollToPedido(k){
   bcRenderPedidos();
   var el=document.getElementById('bcped-'+k);
   if(!el) return;
-  // Guardar posición actual para poder volver
-  var scrollEl=document.querySelector('.main-content')||document.documentElement||window;
-  var savedY=scrollEl===window?window.scrollY:(scrollEl.scrollTop||0);
+  // FIX (2026-06): guardar la posición de TODOS los posibles scrollers (no adivinar uno).
+  // Así "Volver" restaura exactamente donde estabas, sea el window, el <html> o .main-content.
+  var scrollers=[window, document.scrollingElement, document.documentElement, document.querySelector('.main-content')]
+    .filter(function(s,i,a){return s && a.indexOf(s)===i;});
+  var saved=scrollers.map(function(s){return s===window ? (window.scrollY||window.pageYOffset||0) : (s.scrollTop||0);});
   el.scrollIntoView({behavior:'smooth',block:'start'});
   // Mostrar botón volver después del scroll
   setTimeout(function(){
@@ -24402,22 +24416,23 @@ function bcScrollToPedido(k){
     if(existing) existing.remove();
     var btn=document.createElement('button');
     btn.id='bcVolverBtn';
-    btn.innerHTML='&#8593; Volver';
+    btn.innerHTML='&#8593; Volver a donde estaba';
     btn.style.cssText='position:fixed;bottom:70px;right:16px;z-index:9999;'+
       'background:var(--sur);border:1.5px solid var(--acc);border-radius:20px;'+
       'color:var(--acc);font-size:.75rem;font-weight:700;padding:.35rem .85rem;'+
       'cursor:pointer;box-shadow:0 2px 12px rgba(0,0,0,.4);white-space:nowrap';
     btn.onclick=function(){
-      if(scrollEl===window){
-        window.scrollTo({top:savedY,behavior:'smooth'});
-      } else {
-        scrollEl.scrollTo({top:savedY,behavior:'smooth'});
-      }
-      setTimeout(function(){btn.remove();},600);
+      scrollers.forEach(function(s,i){
+        try{
+          if(s===window) window.scrollTo({top:saved[i],behavior:'smooth'});
+          else s.scrollTo({top:saved[i],behavior:'smooth'});
+        }catch(e){ if(s!==window) s.scrollTop=saved[i]; }
+      });
+      setTimeout(function(){btn.remove();},700);
     };
     document.body.appendChild(btn);
-    // Auto-ocultar después de 8 segundos
-    setTimeout(function(){if(btn.parentNode)btn.remove();},8000);
+    // Auto-ocultar después de 12 segundos
+    setTimeout(function(){if(btn.parentNode)btn.remove();},12000);
   },600);
 }
 
@@ -25195,6 +25210,14 @@ function bcRenderListaCompleta(nombre){
     return catalogBrands.indexOf(bcGetBrand(it).toUpperCase())>=0;
   }).length:0;
 
+  // MEJORA 2026-06: contar equiparados (sobre toda la lista) + filtro "solo sin equiparar"
+  var _matchedAll=0;
+  items.forEach(function(it){ if(bcFindInProds(it)) _matchedAll++; });
+  var soloSinMatch = !!window._bcSoloSinMatch;
+  if(soloSinMatch){
+    filtered = filtered.filter(function(it){ return !bcFindInProds(it); });
+  }
+
   var searchVal=bcSearchLista[nombre]||'';
   var brandVal=bcBrandLista[nombre]||'';
 
@@ -25295,7 +25318,9 @@ function bcRenderListaCompleta(nombre){
     var sel=existingControls.querySelector('#bcListaBrandSel');
     if(sel) sel.value=brandVal;
     var counter=document.getElementById('bcListaCounter');
-    if(counter) counter.textContent=filtered.length+'/'+items.length;
+    if(counter) counter.textContent='✅ '+_matchedAll+'/'+items.length+' equip.';
+    var ssBtn=document.getElementById('bcSoloSinMatchBtn');
+    if(ssBtn){ ssBtn.style.background=soloSinMatch?'#f97316':'transparent'; ssBtn.style.color=soloSinMatch?'#000':'#f97316'; }
     var clearBtn=document.getElementById('bcListaClear');
     if(clearBtn) clearBtn.style.display=(search||brandF||soloNuestras)?'':'none';
     var nBtn=document.getElementById('bcFiltroNuestrasBtn');
@@ -25321,11 +25346,14 @@ function bcRenderListaCompleta(nombre){
       '<button id="bcFiltroNuestrasBtn" class="btn" style="font-size:.7rem;border:1px solid var(--acc);'+
         (soloNuestras?'background:var(--acc);color:#000;':'background:transparent;color:var(--acc);')+
         '" title="Solo marcas que trabajamos">★ Nuestras</button>'+
+      '<button id="bcSoloSinMatchBtn" onclick="window._bcSoloSinMatch=!window._bcSoloSinMatch;bcRenderListaCompleta(\''+nombre.replace(/\'/g,"\\'")+'\')" class="btn" style="font-size:.7rem;border:1px solid #f97316;'+
+        (soloSinMatch?'background:#f97316;color:#000;':'background:transparent;color:#f97316;')+
+        '" title="Mostrar solo los que faltan equiparar">❌ Solo sin equiparar</button>'+
       '<button onclick="bcSugerirCantidades(\''+nombre.replace(/\'/g,"\\'")+'\')" class="btn" '+
         'style="font-size:.7rem;border:1px solid #fbbf24;background:transparent;color:#fbbf24" '+
         'title="Sugerir cantidades basado en stock y ventas">💡 Sugerir</button>'+
       '<button id="bcListaClear" class="btn btn-g" style="font-size:.7rem;display:'+((search||brandF||soloNuestras)?'':'none')+'">&#10006; Limpiar</button>'+
-      '<span id="bcListaCounter" style="font-size:.7rem;color:var(--tx3)">'+filtered.length+'/'+items.length+'</span>'+
+      '<span id="bcListaCounter" style="font-size:.7rem;color:var(--tx3)">✅ '+_matchedAll+'/'+items.length+' equip.</span>'+
     '</div>'+
     '<div class="tbl-wrap"><div class="tbl-scroll"><table style="width:100%">'+
       '<thead><tr style="font-size:.68rem;background:var(--sur2)">'+
@@ -27167,6 +27195,29 @@ function _bcResetFindCache(){
   window._bcMarcaCache = {};
   // FIX (2026-05-13): cache de volumen
   window._bcVolumenCache = {};
+}
+
+// FIX (2026-06) BUG #1: pre-calentar el cache de match en SEGUNDO PLANO (en tandas),
+// para que cambiar de solapa entre proveedores sea instantáneo (no se tilde).
+// El trabajo pesado (bcFindInProds de cada item) se hace una vez, repartido en el
+// tiempo, en vez de todo de golpe la primera vez que abrís cada solapa.
+function bcWarmMatchCache(){
+  if(window._bcWarming) return;
+  if(typeof prods==='undefined' || !prods || !prods.length) return;
+  var all=[];
+  Object.keys(bcProveedores||{}).forEach(function(k){
+    (bcProveedores[k]||[]).forEach(function(it){ all.push(it); });
+  });
+  if(!all.length) return;
+  window._bcWarming=true;
+  var i=0, CH=20;
+  function step(){
+    var end=Math.min(i+CH, all.length);
+    for(; i<end; i++){ try{ bcFindInProds(all[i]); }catch(e){} }
+    if(i<all.length){ setTimeout(step, 0); }
+    else { window._bcWarming=false; window._bcFindCacheReady=true; }
+  }
+  setTimeout(step, 0);
 }
 
 function bcFindInProds(item){
@@ -29168,7 +29219,7 @@ function navTo(pg,el){
   document.querySelectorAll(".sb-item").forEach(function(s){s.classList.remove("act");});
   if(el)el.classList.add("act");
   var ti=document.getElementById("pageTitle");if(ti)ti.textContent=PAGE_TITLES[pg]||pg;
-  if(pg==="compras-ia"){if(!drafts.length)draftInit();else draftRenderTabs();bcRenderProvsList();}else{listaShowFloating(false);}
+  if(pg==="compras-ia"){if(!drafts.length)draftInit();else draftRenderTabs();bcRenderProvsList();if(typeof bcWarmMatchCache==='function')bcWarmMatchCache();}else{listaShowFloating(false);}
   if(pg==="dashboard"){loadDashMetrics();loadDashRendicion();}
   if(pg==="stock"){
     if(!prods||!prods.length){
