@@ -20222,9 +20222,10 @@ function draftInit(){
   apiGet('bellcito_drafts','select=*&order=updated_at.asc').then(function(rows){
     if(Array.isArray(rows)&&rows.length){
       var activeRow=rows.find(function(r){return r.draft_id==='__active__';});
-      // Excluir el registro especial __active__ y los __matches__<id> (matches manuales)
+      // Excluir el registro especial __active__, los __matches__ (matches manuales) y __crossreject__ (rechazos)
       var draftRows=rows.filter(function(r){
-        return r.draft_id!=='__active__' && (r.draft_id||'').indexOf('__matches__')!==0;
+        var d=(r.draft_id||'');
+        return d!=='__active__' && d.indexOf('__matches__')!==0 && d.indexOf('__crossreject__')!==0;
       });
       if(draftRows.length){
         drafts=draftRows.map(function(r){
@@ -23791,9 +23792,46 @@ function bcRechazarCrossProv(baseNorm, prov){
   window._bcManualMatches = window._bcManualMatches || {};
   var key = baseNorm + '@@' + prov;
   if(window._bcManualMatches[key] === -1){ delete window._bcManualMatches[key]; toast('Reactivado el match automático','tok'); }
-  else { window._bcManualMatches[key] = -1; toast('Quitado de esta comparación','twarn'); }
+  else { window._bcManualMatches[key] = -1; toast('Quitado — queda guardado','twarn'); }
   bcMatchCache = null;
+  bcSaveCrossReject();
   if(typeof bcRenderComparativa==='function') bcRenderComparativa();
+}
+// MEJORA 2026-06: persistir los rechazos cross-proveedor (global, durable) — localStorage + Supabase
+function bcSaveCrossReject(){
+  var data = window._bcManualMatches || {};
+  try{localStorage.setItem('bcCrossReject_global',JSON.stringify(data));}catch(e){}
+  clearTimeout(window._bcCrossSaveTimer);
+  window._bcCrossSaveTimer=setTimeout(function(){
+    apiUpsert('bellcito_drafts',{
+      draft_id:'__crossreject__global',
+      label:'crossreject',
+      items:JSON.stringify(data),
+      proveedores:'{}',
+      pedidos:'{}',
+      updated_at:new Date().toISOString()
+    }).catch(function(e){console.error('[bc] save crossreject err:',e);});
+  },800);
+}
+function bcLoadCrossReject(){
+  try{
+    var s=localStorage.getItem('bcCrossReject_global');
+    window._bcManualMatches = s?JSON.parse(s):(window._bcManualMatches||{});
+  }catch(e){ window._bcManualMatches = window._bcManualMatches||{}; }
+  apiGet('bellcito_drafts','select=items&draft_id=eq.__crossreject__global').then(function(rows){
+    if(Array.isArray(rows)&&rows.length&&rows[0].items){
+      try{
+        var fromDb=JSON.parse(rows[0].items);
+        if(fromDb&&typeof fromDb==='object'){
+          window._bcManualMatches=fromDb;
+          try{localStorage.setItem('bcCrossReject_global',JSON.stringify(fromDb));}catch(e){}
+          bcMatchCache=null;
+          var pg=document.getElementById('page-compras-ia');
+          if(pg&&pg.style.display!=='none'&&typeof bcRenderAllViews==='function')bcRenderAllViews();
+        }
+      }catch(e){}
+    }
+  }).catch(function(){});
 }
 
 function bcGetMatches(){
@@ -29362,7 +29400,7 @@ function navTo(pg,el){
   document.querySelectorAll(".sb-item").forEach(function(s){s.classList.remove("act");});
   if(el)el.classList.add("act");
   var ti=document.getElementById("pageTitle");if(ti)ti.textContent=PAGE_TITLES[pg]||pg;
-  if(pg==="compras-ia"){if(!drafts.length)draftInit();else draftRenderTabs();bcRenderProvsList();if(typeof bcWarmMatchCache==='function')bcWarmMatchCache();}else{listaShowFloating(false);}
+  if(pg==="compras-ia"){if(!drafts.length)draftInit();else draftRenderTabs();if(typeof bcLoadManualMatches==='function')bcLoadManualMatches();if(typeof bcLoadCrossReject==='function')bcLoadCrossReject();bcRenderProvsList();if(typeof bcWarmMatchCache==='function')bcWarmMatchCache();}else{listaShowFloating(false);}
   if(pg==="dashboard"){loadDashMetrics();loadDashRendicion();}
   if(pg==="stock"){
     if(!prods||!prods.length){
@@ -32619,12 +32657,12 @@ function bcSetManualMatch(k,pid){
   _bcResetFindCache();
   bcMatchCache=null;
   // Cache local inmediato
-  try{localStorage.setItem('bcMatches_'+(activeDraftId||'default'),JSON.stringify(bcManualMatches));}catch(e){}
+  try{localStorage.setItem('bcMatches_'+'global',JSON.stringify(bcManualMatches));}catch(e){}
   // Persistir a Supabase (debounce de 800ms para no saturar)
   clearTimeout(window._bcMatchSaveTimer);
   window._bcMatchSaveTimer=setTimeout(function(){
     apiUpsert('bellcito_drafts',{
-      draft_id:'__matches__'+(activeDraftId||'default'),
+      draft_id:'__matches__'+'global',
       label:'matches',
       items:JSON.stringify(bcManualMatches),
       proveedores:'{}',
@@ -32637,18 +32675,18 @@ function bcSetManualMatch(k,pid){
 function bcLoadManualMatches(){
   // 1) Cargar primero del cache local (rápido)
   try{
-    var s=localStorage.getItem('bcMatches_'+(activeDraftId||'default'));
+    var s=localStorage.getItem('bcMatches_'+'global');
     bcManualMatches=s?JSON.parse(s):{};
   }catch(e){bcManualMatches={};}
   // 2) Después intentar leer de Supabase y reemplazar (autoritativo)
-  apiGet('bellcito_drafts','select=items&draft_id=eq.__matches__'+(activeDraftId||'default')).then(function(rows){
+  apiGet('bellcito_drafts','select=items&draft_id=eq.__matches__'+'global').then(function(rows){
     if(Array.isArray(rows)&&rows.length&&rows[0].items){
       try{
         var fromDb=JSON.parse(rows[0].items);
         if(fromDb&&typeof fromDb==='object'){
           bcManualMatches=fromDb;
           // Sincronizar cache local
-          try{localStorage.setItem('bcMatches_'+(activeDraftId||'default'),JSON.stringify(bcManualMatches));}catch(e){}
+          try{localStorage.setItem('bcMatches_'+'global',JSON.stringify(bcManualMatches));}catch(e){}
           // Re-renderizar si la vista del comparador está abierta
           if(document.getElementById('page-compras-ia')&&document.getElementById('page-compras-ia').style.display!=='none'){
             if(typeof bcRenderAllViews==='function')bcRenderAllViews();
