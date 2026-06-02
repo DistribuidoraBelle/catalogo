@@ -23577,6 +23577,40 @@ function bcGuardarProveedor(nombre, items){
   bcRenderProvsList();
   bcRenderMain();
   if(typeof bcWarmMatchCache==='function') bcWarmMatchCache();
+  if(typeof bcPreciosCompararYGuardar==='function') bcPreciosCompararYGuardar(nombre, items);
+}
+
+// MEJORA 2026-06: histórico de precios — comparar precio actual vs última lista del proveedor
+function bcPreciosCompararYGuardar(nombre, items){
+  if(typeof apiGet!=='function') return;
+  window._bcPrecioPrev = window._bcPrecioPrev || {};
+  apiGet('precios_historico','select=producto_norm,precio,fecha&proveedor=eq.'+encodeURIComponent(nombre)+'&order=fecha.desc&limit=3000').then(function(rows){
+    var prev={};
+    (rows||[]).forEach(function(r){ if(!prev.hasOwnProperty(r.producto_norm)) prev[r.producto_norm]=Number(r.precio); });
+    window._bcPrecioPrev[nombre]=prev;
+    // re-render para mostrar ▲/▼ si estás viendo esta lista
+    if(bcCurrentTab==='lista' && bcCurrentProv===nombre){ try{ bcRenderListaCompleta(nombre); }catch(e){} }
+    // guardar precios actuales (append) para la próxima comparación
+    var payload=(items||[]).map(function(it){
+      return { proveedor:nombre, producto_norm:bcNorm(it.nombre_proveedor||''), nombre_proveedor:(it.nombre_proveedor||''), precio:it.precio_usd };
+    }).filter(function(x){
+      if(!x.producto_norm) return false;
+      var pv=prev[x.producto_norm];
+      // guardar solo si es nuevo o cambió el precio (evita inflar la tabla y truncar el histórico)
+      return (pv==null) || (Number(pv)!==Number(x.precio));
+    });
+    if(payload.length && typeof apiPost==='function'){ apiPost('precios_historico', payload).catch(function(){}); }
+  }).catch(function(){});
+}
+function _bcPriceDeltaTag(nombre,it){
+  try{
+    var prev=(window._bcPrecioPrev&&window._bcPrecioPrev[nombre])?window._bcPrecioPrev[nombre][bcNorm(it.nombre_proveedor||'')]:undefined;
+    if(prev==null||it.precio_usd==null) return '';
+    var d=it.precio_usd-prev;
+    if(Math.abs(d)<0.01) return '';
+    var up=d>0;
+    return '<div style="font-size:.54rem;font-weight:600;color:'+(up?'#ef4444':'#22c55e')+'" title="Precio anterior: u$d '+prev.toFixed(2)+'">'+(up?'▲ +':'▼ ')+d.toFixed(2)+'</div>';
+  }catch(e){ return ''; }
 }
 
 function bcRenderProvsList(){
@@ -24013,6 +24047,7 @@ function bcRenderPedidos(){
     html += '<div style="font-size:.85rem;font-weight:700;color:var(--acc)">📊 Resumen del borrador</div>';
     html += '<div style="display:flex;gap:.3rem">';
     html += '<button onclick="bcCopiarResumenWA()" title="Copiar resumen para WhatsApp" style="background:rgba(34,197,94,.15);border:1px solid #22c55e;color:#22c55e;border-radius:5px;padding:.25rem .55rem;cursor:pointer;font-size:.7rem;font-weight:600">📋 Resumen WA</button>';
+    html += '<button onclick="bcExportarBorradorCSV()" title="Descargar el borrador como Excel/CSV" style="background:rgba(16,185,129,.15);border:1px solid #10b981;color:#10b981;border-radius:5px;padding:.25rem .55rem;cursor:pointer;font-size:.7rem;font-weight:600">📊 Excel/CSV</button>';
     html += '<button onclick="bcAnalizarBorrador()" title="Análisis detallado" style="background:rgba(168,85,247,.15);border:1px solid #a855f7;color:#a855f7;border-radius:5px;padding:.25rem .55rem;cursor:pointer;font-size:.7rem;font-weight:600">🔍 Analizar</button>';
     html += '</div>';
     html += '</div>';
@@ -24440,6 +24475,42 @@ function bcScrollToPedido(k){
 }
 
 // ── EXPORT / CONFIRM ────────────────────────────────────────────
+// MEJORA 2026-06: exportar todo el borrador a Excel/CSV
+function bcExportarBorradorCSV(){
+  var keys=Object.keys(bcPedidos||{});
+  var rows=[['Proveedor','Producto proveedor','Match catalogo','Cantidad','Precio USD','Subtotal USD']];
+  var totalGen=0, count=0;
+  keys.forEach(function(k){
+    var sel=Object.values((bcPedidos[k]||{}).items||{}).filter(function(it){return it.qty>0;});
+    sel.forEach(function(it){
+      var m=bcFindInProds({nombre_norm:it.nombre, nombre_proveedor:it.nombre});
+      var matchTxt=m?(((m.empresa||'')+' '+(m.nombre||'')).trim()):'(sin equiparar)';
+      var sub=(it.precio||0)*(it.qty||0); totalGen+=sub; count++;
+      rows.push([k, it.nombre, matchTxt, it.qty, (it.precio||0).toFixed(2), sub.toFixed(2)]);
+    });
+  });
+  if(!count){ toast('No hay items en el borrador','twarn'); return; }
+  rows.push([]);
+  rows.push(['','','','','TOTAL', totalGen.toFixed(2)]);
+  var csv=rows.map(function(r){
+    return r.map(function(c){
+      var s=String(c==null?'':c);
+      if(/[",;\n]/.test(s)){ s='"'+s.replace(/"/g,'""')+'"'; }
+      return s;
+    }).join(';');
+  }).join('\n');
+  try{
+    var blob=new Blob(['\ufeff'+csv], {type:'text/csv;charset=utf-8;'});
+    var url=URL.createObjectURL(blob);
+    var a=document.createElement('a');
+    a.href=url;
+    a.download='borrador_compras_'+new Date().toISOString().slice(0,10)+'.csv';
+    document.body.appendChild(a); a.click();
+    setTimeout(function(){ if(a.parentNode)a.parentNode.removeChild(a); URL.revokeObjectURL(url); }, 600);
+    toast('CSV exportado ✓ ('+count+' items)','tok');
+  }catch(e){ toast('No se pudo exportar el CSV','terr'); }
+}
+
 function bcExportPedidoWA(k){
   var sel=Object.values(bcPedidos[k]&&bcPedidos[k].items||{}).filter(function(i){return i.qty>0;});
   if(!sel.length){toast('Pedido vacio','twarn');return;}
@@ -25079,9 +25150,9 @@ function bcRenderComparativa(){
         var qty = inOrd ? bcPedidos[k].items['c'+realRi].qty : 0;
 
         // Precio
-        h += '<td style="padding:.35rem .35rem;text-align:right;white-space:nowrap;font-weight:600;color:'+(isMin?'#22c55e':isMax?'#ef4444':'var(--tx)')+'">';
+        h += '<td style="padding:.35rem .35rem;text-align:right;white-space:nowrap;font-weight:600;'+(isMin?'background:rgba(34,197,94,.12);':'')+'color:'+(isMin?'#22c55e':isMax?'#ef4444':'var(--tx)')+'">';
         if(pd){
-          h += 'u$d '+pd.precio.toFixed(2);
+          h += (isMin?'🏆 ':'')+'u$d '+pd.precio.toFixed(2);
           if(pd.partial){
             h += '<div style="font-size:.55rem;color:#f59e0b;font-style:italic" title="Match parcial">~'+Math.round(pd.score*100)+'%</div>';
           }
@@ -25220,6 +25291,10 @@ function bcRenderListaCompleta(nombre){
   if(soloSinMatch){
     filtered = filtered.filter(function(it){ return !bcFindInProds(it); });
   }
+  // MEJORA 2026-06: duplicados dentro de la lista (mismo nombre normalizado repetido)
+  var _nameCount={};
+  items.forEach(function(it){ var _n=bcNorm(it.nombre_proveedor||''); if(_n) _nameCount[_n]=(_nameCount[_n]||0)+1; });
+  var _dups=0; Object.keys(_nameCount).forEach(function(n){ if(_nameCount[n]>1) _dups++; });
 
   var searchVal=bcSearchLista[nombre]||'';
   var brandVal=bcBrandLista[nombre]||'';
@@ -25231,6 +25306,25 @@ function bcRenderListaCompleta(nombre){
       return '<option value="'+b+'"'+(brandVal===b?' selected':'')+'>'+
         (esNuestraB?'★ ':isNew?'🆕 ':'')+b+'</option>';
     }).join('');
+
+  var _sort=window._bcListaSort||'';
+  if(_sort){
+    filtered=filtered.slice().sort(function(a,b){
+      var ma=bcFindInProds(a), mb=bcFindInProds(b);
+      if(_sort==='barato'){ return (a.precio_usd||0)-(b.precio_usd||0); }
+      if(_sort==='ahorro'){
+        var aa=(ma&&ma.costo_ind)?(ma.costo_ind-(a.precio_usd||0)):-1e9;
+        var bb=(mb&&mb.costo_ind)?(mb.costo_ind-(b.precio_usd||0)):-1e9;
+        return bb-aa;
+      }
+      if(_sort==='sinstock'){
+        var sa=ma?(ma.stock_actual||0):9999, sb=mb?(mb.stock_actual||0):9999;
+        return sa-sb;
+      }
+      if(_sort==='sinmatch'){ return (ma?1:0)-(mb?1:0); }
+      return 0;
+    });
+  }
 
   var rows=filtered.map(function(it){
     var idx=items.indexOf(it);
@@ -25263,7 +25357,7 @@ function bcRenderListaCompleta(nombre){
         (it.codigo?'<div style="font-size:.58rem;color:var(--tx3)">cod: '+it.codigo+'</div>':'')+
         '<div style="font-size:.6rem;color:var(--acc)">'+bcGetBrand(it)+'</div>'+
       '</td>'+
-      '<td style="padding:.3rem .4rem;text-align:right;font-weight:700;color:var(--acc);white-space:nowrap">u$d '+it.precio_usd.toFixed(2)+'</td>'+
+      '<td style="padding:.3rem .4rem;text-align:right;font-weight:700;color:var(--acc);white-space:nowrap">u$d '+it.precio_usd.toFixed(2)+_bcPriceDeltaTag(nombre,it)+'</td>'+
       '<td style="padding:.3rem .4rem;min-width:160px">'+
         (match?
           (function(){
@@ -25340,12 +25434,20 @@ function bcRenderListaCompleta(nombre){
         '<div style="font-size:.72rem;color:var(--tx3)">'+items.length+' productos</div>'+
       '</div>'+
       (nuestrasCount?'<div style="font-size:.65rem;color:var(--acc)">★ '+nuestrasCount+' marcas conocidas</div>':'<div style="font-size:.65rem;color:var(--tx3)">Sin marcas conocidas</div>')+
+      (_dups?'<div style="font-size:.62rem;color:#f97316;margin-top:.1rem" title="Productos con nombre repetido en esta lista del proveedor">⚠️ '+_dups+' duplicado'+(_dups>1?'s':'')+'</div>':'')+
     '</div>'+
     '<div id="bcListaControls" style="display:flex;gap:.4rem;flex-wrap:wrap;align-items:center;margin-bottom:.5rem">'+
       '<div class="sbox" style="flex:1;min-width:160px"><span class="sbi">&#128269;</span>'+
         '<input id="bcListaSearchInp" type="text" placeholder="Buscar producto..." value="'+searchVal+'" style="width:100%">'+
       '</div>'+
       '<select id="bcListaBrandSel" class="sel" style="min-width:140px">'+brandOpts+'</select>'+
+      '<select id="bcListaSortSel" class="sel" style="min-width:130px" onchange="window._bcListaSort=this.value;bcRenderListaCompleta(\''+nombre.replace(/\'/g,"\\'")+'\')" title="Ordenar la lista">'+
+        '<option value=""'+(_sort===''?' selected':'')+'>Orden original</option>'+
+        '<option value="barato"'+(_sort==='barato'?' selected':'')+'>💲 Más barato</option>'+
+        '<option value="ahorro"'+(_sort==='ahorro'?' selected':'')+'>📉 Mayor ahorro</option>'+
+        '<option value="sinstock"'+(_sort==='sinstock'?' selected':'')+'>📦 Sin stock primero</option>'+
+        '<option value="sinmatch"'+(_sort==='sinmatch'?' selected':'')+'>❌ Sin equiparar primero</option>'+
+      '</select>'+
       '<button id="bcFiltroNuestrasBtn" class="btn" style="font-size:.7rem;border:1px solid var(--acc);'+
         (soloNuestras?'background:var(--acc);color:#000;':'background:transparent;color:var(--acc);')+
         '" title="Solo marcas que trabajamos">★ Nuestras</button>'+
@@ -26351,6 +26453,27 @@ window._bcRecomFiltroMacheo = window._bcRecomFiltroMacheo || 100; // 100 | 90 | 
 window._bcRecomFiltroTipo   = window._bcRecomFiltroTipo   || 'todas'; // todas|sin|bajo|top|precio|nuevo|nunca
 window._bcRecomProvSel      = window._bcRecomProvSel      || 'todos'; // 'todos' | provKey
 
+// MEJORA 2026-06: agregar TODAS las recomendaciones de un proveedor al pedido (1u c/u)
+function bcAgregarTodosRecom(provKey){
+  var entries=(window._bcRecomEntries&&window._bcRecomEntries[provKey])||[];
+  if(!entries.length){ toast('No hay recomendaciones para agregar','twarn'); return; }
+  if(!bcPedidos[provKey]) bcPedidos[provKey]={items:{}};
+  var agregados=0;
+  entries.forEach(function(e){
+    var it=e.item; var idx=it._idx;
+    var ya=bcPedidos[provKey].items['l'+idx];
+    if(ya && ya.qty>0) return; // no pisar lo que ya pusiste
+    var provIt=(bcProveedores[provKey]||[])[idx]||{};
+    bcPedidos[provKey].items['l'+idx]={nombre:bcTitleCase(it.nombre_proveedor||''),precio:it.precio_usd,qty:1,key:'l'+idx,codigo:provIt.codigo||''};
+    agregados++;
+  });
+  draftSave();
+  bcRenderFloating();
+  bcRenderPedidos();
+  bcRenderRecomendaciones();
+  toast(agregados ? ('➕ '+agregados+' agregados (1u c/u)') : 'Ya estaban todos agregados','tok');
+}
+
 function bcRenderRecomendaciones(){
   var wrap=document.getElementById('bcRecomContent');
   if(!wrap) return;
@@ -26590,6 +26713,7 @@ function bcRenderRecomendaciones(){
 
       // Header del proveedor
       html += '<div style="background:var(--sur2);border:1px solid var(--bd);border-radius:8px;margin-bottom:.7rem;overflow:hidden">';
+      window._bcRecomEntries=window._bcRecomEntries||{}; window._bcRecomEntries[provKey]=entries;
       html += '<div style="display:flex;justify-content:space-between;align-items:center;padding:.6rem .8rem;background:rgba(0,0,0,.15);border-bottom:1px solid var(--bd)">';
       html += '<div style="font-size:.85rem;font-weight:700;color:var(--acc)">📦 '+_esc(provKey)+'</div>';
       html += '<div style="display:flex;gap:.8rem;align-items:center">';
@@ -26597,6 +26721,7 @@ function bcRenderRecomendaciones(){
       if(totalUnidades>0){
         html += '<span style="font-size:.7rem;color:var(--green);font-weight:700">'+totalUnidades+' u · u$d '+totalGasto.toFixed(2)+'</span>';
       }
+      html += '<button onclick="bcAgregarTodosRecom(\''+String(provKey).replace(/\'/g,"\\'")+'\')" title="Agregar todas estas recomendaciones al pedido (1u c/u, sin pisar lo que ya pusiste)" style="background:rgba(34,197,94,.15);border:1px solid #22c55e;color:#22c55e;border-radius:5px;padding:.2rem .5rem;cursor:pointer;font-size:.66rem;font-weight:700;white-space:nowrap">➕ Agregar todos</button>';
       html += '</div>';
       html += '</div>';
 
