@@ -648,6 +648,24 @@ tr.row-hl:hover td{
         </select>
         <button class="btn btn-a" onclick="openProdModal(null)">+ Nuevo producto</button>
       </div>
+      <div id="stkBulkBar" style="display:none;align-items:center;gap:.5rem;flex-wrap:wrap;background:var(--sur2);border:1px solid var(--acc);border-radius:8px;padding:.5rem .7rem;margin-bottom:.6rem">
+        <span style="font-weight:700;color:var(--acc);font-size:.78rem"><span id="stkSelCount">0</span> seleccionados</span>
+        <span style="color:var(--tx3)">·</span>
+        <select class="sel" id="stkBulkAccion" onchange="stkBulkAccionChange()" style="font-size:.72rem">
+          <option value="gan_may_pct">Ganancia mayorista ±%</option>
+          <option value="gan_med_pct">Ganancia media ±%</option>
+          <option value="gan_may_add">Ganancia mayorista ±USD</option>
+          <option value="gan_med_add">Ganancia media ±USD</option>
+          <option value="cat">Categoría (S/1/2/3)</option>
+          <option value="activar">Activar</option>
+          <option value="desactivar">Desactivar</option>
+        </select>
+        <input class="fi" id="stkBulkValor" type="number" step="0.5" placeholder="valor (ej: 10 o -10)" style="width:130px;font-size:.72rem">
+        <select class="sel" id="stkBulkCat" style="display:none;font-size:.72rem"><option value="S">S</option><option value="1">1</option><option value="2">2</option><option value="3">3</option></select>
+        <button class="btn btn-a" onclick="stkBulkAplicar()" style="font-size:.72rem;font-weight:700">Aplicar</button>
+        <button class="btn btn-g" onclick="stkSelAllFiltered()" style="font-size:.72rem">☑️ Seleccionar todos (filtrados)</button>
+        <button class="btn btn-g" onclick="stkSelClear()" style="font-size:.72rem">Limpiar</button>
+      </div>
       <div class="tbl-wrap" id="stockProdWrap">
         <div class="tbl-scroll">
           <table style="min-width:1400px;font-size:.71rem">
@@ -4132,6 +4150,83 @@ function recalcPreciosMasivo(){
 }
 
 // ════════════════════════════════════════════════════════════════════
+// ☑️ EDICIÓN MASIVA de productos (selección por casillas + acción en lote)
+// ════════════════════════════════════════════════════════════════════
+window._stkSel = window._stkSel || new Set();
+
+function stkToggleSel(id,checked){
+  if(checked) window._stkSel.add(id); else window._stkSel.delete(id);
+  stkUpdateBulkBar();
+}
+function stkUpdateBulkBar(){
+  var bar=document.getElementById('stkBulkBar'); if(!bar)return;
+  var n=window._stkSel.size;
+  var c=document.getElementById('stkSelCount'); if(c)c.textContent=n;
+  bar.style.display=n>0?'flex':'none';
+}
+function stkBulkAccionChange(){
+  var a=(document.getElementById('stkBulkAccion')||{value:''}).value;
+  var v=document.getElementById('stkBulkValor');
+  var cat=document.getElementById('stkBulkCat');
+  var esCat=(a==='cat'), esToggle=(a==='activar'||a==='desactivar');
+  if(v)v.style.display=(esCat||esToggle)?'none':'';
+  if(cat)cat.style.display=esCat?'':'none';
+}
+function stkSelAllFiltered(){
+  if(typeof stFiltered!=='function')return;
+  stFiltered().forEach(function(p){window._stkSel.add(p.id);});
+  stkUpdateBulkBar(); renderStockPage();
+}
+function stkSelClear(){
+  window._stkSel.clear(); stkUpdateBulkBar(); renderStockPage();
+}
+function stkBulkAplicar(){
+  var ids=Array.from(window._stkSel);
+  if(!ids.length){toast('No hay productos seleccionados','twarn');return;}
+  var a=(document.getElementById('stkBulkAccion')||{value:''}).value;
+  var valor=parseFloat((document.getElementById('stkBulkValor')||{value:''}).value);
+  var cat=(document.getElementById('stkBulkCat')||{value:'S'}).value;
+  var desc='';
+  if(a==='cat'){ desc='Categoría → '+cat; }
+  else if(a==='activar'){ desc='Activar'; }
+  else if(a==='desactivar'){ desc='Desactivar'; }
+  else {
+    if(isNaN(valor)||valor===0){toast('Ingresá un valor distinto de 0','twarn');return;}
+    var unidad=(a.indexOf('pct')>=0)?'%':' USD';
+    var campoTxt=(a.indexOf('may')>=0)?'mayorista':'media';
+    desc='Ganancia '+campoTxt+' '+(valor>0?'+':'')+valor+unidad+(a.indexOf('pct')<0?'':'')+' (recalcula precios)';
+  }
+  if(!confirm('Aplicar a '+ids.length+' producto(s):\n\n'+desc+'\n\n¿Continuar?')) return;
+  toast('Aplicando a '+ids.length+' producto(s)...','twarn');
+  var ok=0,fail=0,i=0;
+  (function _step(){
+    if(i>=ids.length){
+      toast('Listo: '+ok+' OK'+(fail?' · '+fail+' errores':''),'tok');
+      window._stkSel.clear(); stkUpdateBulkBar(); loadProds(); return;
+    }
+    var id=ids[i++];
+    var p=prods.find(function(x){return x.id===id;});
+    if(!p){fail++;return _step();}
+    var patch={};
+    if(a==='cat'){ patch.cat=cat; }
+    else if(a==='activar'){ patch.activo=true; }
+    else if(a==='desactivar'){ patch.activo=false; }
+    else {
+      var campo=(a.indexOf('may')>=0)?'gan_usd_may':'gan_usd_med';
+      var actual=parseFloat(p[campo])||0;
+      var nuevo=(a.indexOf('pct')>=0)?actual*(1+valor/100):actual+valor;
+      nuevo=Math.max(0,Math.round(nuevo*100)/100);
+      patch[campo]=nuevo;
+      // Recalcular y guardar los precios con la nueva ganancia (mantener el fallback al día)
+      var tmp={}; for(var k in p){ tmp[k]=p[k]; } tmp[campo]=nuevo;
+      var r=calcP(tmp);
+      patch.precio_may_ars=r.pm; patch.precio_med_ars=r.pe; patch.precio_min_ars=r.pi;
+    }
+    apiPatch('productos',patch,'id=eq.'+id).then(function(){ok++;},function(){fail++;}).then(_step);
+  })();
+}
+
+// ════════════════════════════════════════════════════════════════════
 // 📄 Indicador de ficha técnica en la tabla de Stock
 // rojo = falta ficha · amarillo = incompleta · verde = completa · gris = no aplica/kit
 // ════════════════════════════════════════════════════════════════════
@@ -5237,6 +5332,7 @@ function renderStockPage(){
     }
     return"<tr>"+
       "<td style='white-space:nowrap'>"+
+        "<input type='checkbox' class='stk-chk' onclick='stkToggleSel("+id+",this.checked)' "+((window._stkSel&&window._stkSel.has(id))?"checked":"")+" title='Seleccionar' style='margin-right:.25rem;vertical-align:middle;cursor:pointer'>"+
         "<button class='ib ib-e' onclick='openProdModal("+id+")' title='Editar producto'>✏️</button>"+
         "<button class='ib ib-s' onclick='openStkModal("+id+")' title='Editar stock'>📦</button>"+
         "<button class='ib' onclick='adminVerMovimientos("+id+","+JSON.stringify(p.nombre)+")' title='Ver movimientos' style='background:var(--sur3);color:var(--tx);border-color:var(--bd2)'>📋</button>"+
@@ -5267,6 +5363,7 @@ function renderStockPage(){
   }).join("");
   document.getElementById("stTbody").innerHTML=rows||"<tr><td colspan='20'><div class='empty'>Sin resultados</div></td></tr>";
   document.getElementById("stPgi").textContent=total+" productos";
+  if(typeof stkUpdateBulkBar==='function') stkUpdateBulkBar();
 }
 
 function fillEmps(){
