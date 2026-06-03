@@ -2237,7 +2237,6 @@ tr.row-hl:hover td{
         <div style="display:grid;grid-template-columns:1fr 1fr;gap:.5rem;margin-bottom:.5rem">
           <div class="fg"><label>Costo ind. USD</label><input class="fi" id="fpCI" type="number" step="0.01" value="0" oninput="calcModalP()"></div>
           <div class="fg"><label>Costo log. USD</label><input class="fi" id="fpCL" type="number" step="0.01" value="2.3" oninput="calcModalP()"></div>
-          <div class="fg"><label>Cotiz. histórica <span style="font-size:.62rem;color:var(--tx3)">(vacío = usa sistema)</span></label><div style="display:flex;gap:.3rem"><input class="fi" id="fpCH" type="number" value="1520" style="flex:1" oninput="calcModalP()"><button onclick="fpUsarCotizSistema()" title="Usar cotización del sistema" style="padding:.4rem .6rem;background:var(--sur3);border:1px solid var(--bd);border-radius:var(--r);cursor:pointer;font-size:.85rem">💵</button></div></div>
           <div class="fg"><label>Precio ML</label><input class="fi" id="fpML" type="number" value="0" oninput="calcModalP()"></div>
           <div class="fg"><label>Ganancia may. USD</label><input class="fi" id="fpGM" type="number" step="0.5" value="0" oninput="calcModalP()"></div>
           <div class="fg"><label>Ganancia med. USD</label><input class="fi" id="fpGE" type="number" step="0.5" value="0" oninput="calcModalP()"></div>
@@ -4092,8 +4091,8 @@ function calcP(p){
   // MULTIPLO.SUPERIOR al entero (igual que Google Sheet)
   var ct=ci>0?Math.ceil(ci+cl):0;
   var gm=p.gan_usd_may||0, ge=p.gan_usd_med||0;
-  // Usar cotización del producto si tiene, sino la del sistema
-  var cotiz=p.cotiz_hist&&p.cotiz_hist>0?p.cotiz_hist:cotizActual;
+  // Cotización del sistema (siempre — se eliminó la cotización histórica por producto)
+  var cotiz=cotizActual;
   // MULTIPLO.SUPERIOR a 100 ARS (igual que Google Sheet)
   var pm=ct>0||gm>0?Math.ceil((ct+gm)*cotiz/100)*100:(p.precio_may_ars||0);
   var pe=ct>0||ge>0?Math.ceil((ct+gm+ge)*cotiz/100)*100:(p.precio_med_ars||0);
@@ -4105,6 +4104,59 @@ function calcP(p){
   var decan=p.precio_decan>0?p.precio_decan:(pi>0?(Math.ceil(pi*0.1/1000)*1000+3000):0);
   return{ct:ct,pm:pm,pe:pe,pi:pi,rM:rM,rE:rE,decan:decan};
 }
+// ════════════════════════════════════════════════════════════════════
+// 📄 Indicador de ficha técnica en la tabla de Stock
+// rojo = falta ficha · amarillo = incompleta · verde = completa · gris = no aplica/kit
+// ════════════════════════════════════════════════════════════════════
+window._fichaScoreMap = window._fichaScoreMap || {};
+window._fichaScoreLoaded = false;
+
+function _cargarFichaScores(){
+  return apiGet("fichas_perfume","select=producto_id,estilo_descripcion,perfil_usuario,familia_olfativa,notas_salida,notas_corazon,notas_fondo,descripcion,genero,proyeccion,duracion,estela&limit=3000").then(function(rows){
+    var m={};
+    (Array.isArray(rows)?rows:[]).forEach(function(f){
+      if(f && f.producto_id!=null) m[f.producto_id]=(typeof fichaCalcScore==='function'?fichaCalcScore(f):0);
+    });
+    window._fichaScoreMap=m;
+    window._fichaScoreLoaded=true;
+    // refrescar la tabla de stock si está visible (para pintar los iconos ya con color real)
+    var pg=document.getElementById('page-stock');
+    if(pg && pg.style.display!=='none' && document.getElementById('stTbody') && typeof renderStockPage==='function') renderStockPage();
+  }).catch(function(e){console.warn('[ficha-scores]',e);});
+}
+
+function _fichaIconHTML(p){
+  var kit=Array.isArray(p.kit_componentes)&&p.kit_componentes.length>0;
+  var noAplica=!!p.no_aplica_ficha;
+  // Mientras no cargaron los scores, mostrar neutro (evita "flash" rojo en toda la tabla)
+  if(!window._fichaScoreLoaded){
+    return "<button class='ib' onclick='irAFichaProd("+p.id+")' title='Ficha…' style='background:var(--sur3);color:var(--tx3);border-color:var(--bd2)'>📄</button>";
+  }
+  if(noAplica||kit){
+    return "<button class='ib' onclick='irAFichaProd("+p.id+")' title='No aplica ficha' style='background:var(--sur3);color:var(--tx3);border-color:var(--bd2)'>📄</button>";
+  }
+  var sc=(p.id in window._fichaScoreMap)?window._fichaScoreMap[p.id]:-1;
+  if(sc<0){
+    return "<button class='ib' onclick='irAFichaProd("+p.id+")' title='Ficha: FALTA (sin ficha)' style='background:#d9534f;color:#fff;border-color:#d9534f;font-weight:700'>📄</button>";
+  }
+  if(sc<=8){
+    return "<button class='ib' onclick='irAFichaProd("+p.id+")' title='Ficha incompleta ("+sc+"/10)' style='background:#e6b800;color:#000;border-color:#e6b800;font-weight:700'>📄</button>";
+  }
+  return "<button class='ib' onclick='irAFichaProd("+p.id+")' title='Ficha completa ("+sc+"/10)' style='background:#6dcca0;color:#000;border-color:#6dcca0;font-weight:700'>📄</button>";
+}
+
+function irAFichaProd(prodId){
+  // Navega a la pestaña Fichas y abre la ficha de ese producto
+  if(typeof navTo==='function') navTo('fichas', null);
+  var intentos=0;
+  (function esperar(){
+    var listo = typeof _fichaProds!=='undefined' && Array.isArray(_fichaProds) &&
+                _fichaProds.some(function(p){return p.id===prodId;});
+    if(listo && typeof fichaEditarProd==='function'){ fichaEditarProd(prodId); }
+    else if(intentos++ < 40){ setTimeout(esperar,100); }
+  })();
+}
+
 function loadProds(stState){
   document.getElementById("stTbody").innerHTML="<tr><td colspan='20'><div class='loading'><div class='spin'></div>Cargando...</div></td></tr>";
   apiGet("productos","select=*&activo=is.true&order=empresa,nombre&limit=2000").then(function(data){
@@ -4120,6 +4172,8 @@ function loadProds(stState){
     if(typeof _cargarAcordesPaleta === 'function'){
       _cargarAcordesPaleta(prods).catch(function(e){console.warn('[acordes] paleta:', e);});
     }
+    // 📄 Cargar estado de fichas para pintar el icono de ficha en cada fila (no bloqueante)
+    if(typeof _cargarFichaScores === 'function'){ _cargarFichaScores(); }
     if(stState){
       // Restore filters and scroll position after save
       _restoreStockState(stState);
@@ -4976,8 +5030,8 @@ function stFiltered(){
           // Valor inventario = stock_actual * costo_total
           var ciA=(a.costo_ind||0)+(a.costo_log||0);
           var ciB=(b.costo_ind||0)+(b.costo_log||0);
-          var cotA=a.cotiz_hist&&a.cotiz_hist>0?a.cotiz_hist:cotizActual;
-          var cotB=b.cotiz_hist&&b.cotiz_hist>0?b.cotiz_hist:cotizActual;
+          var cotA=cotizActual;
+          var cotB=cotizActual;
           var valA=(a.stock_actual||0)*ciA*cotA;
           var valB=(b.stock_actual||0)*ciB*cotB;
           return valB-valA;
@@ -5070,7 +5124,7 @@ function _renderStockStats(){
     if(sa===0)sinStock++;
     else if(sa>=1&&sa<=3)critico++;
     var ci=(p.costo_ind||0)+(p.costo_log||0);
-    var cot=p.cotiz_hist&&p.cotiz_hist>0?p.cotiz_hist:cotizActual;
+    var cot=cotizActual;
     if(sa>0&&ci>0)valorInv+=sa*ci*cot;
   });
 
@@ -5150,10 +5204,8 @@ function renderStockPage(){
       "<td style='white-space:nowrap'>"+
         "<button class='ib ib-e' onclick='openProdModal("+id+")' title='Editar producto'>✏️</button>"+
         "<button class='ib ib-s' onclick='openStkModal("+id+")' title='Editar stock'>📦</button>"+
-        "<button class='ib' onclick='adminEditarStock("+id+")' title='Ajuste rápido' style='background:var(--acc);color:#000;border-color:var(--acc);font-weight:600'>⚡</button>"+
-        "<button class='ib' onclick='adminEditarPrecios("+id+")' title='Editar precios' style='background:#6dcca0;color:#000;border-color:#6dcca0;font-weight:600'>💰</button>"+
         "<button class='ib' onclick='adminVerMovimientos("+id+","+JSON.stringify(p.nombre)+")' title='Ver movimientos' style='background:var(--sur3);color:var(--tx);border-color:var(--bd2)'>📋</button>"+
-        "<button class='ib ib-x' onclick='deleteProd("+id+")' title='Eliminar'>X</button>"+
+        _fichaIconHTML(p)+
       "</td>"+
       "<td><span class='"+catCls+"'>"+catStr+"</span></td>"+
       "<td style='font-size:.65rem;color:var(--tx3);max-width:60px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap'>"+(p.empresa||"-")+"</td>"+
@@ -5495,7 +5547,6 @@ function openProdModal(id){
   document.getElementById("fpRE").value=(p&&p.reserva)||0;
   document.getElementById("fpCI").value=(p&&p.costo_ind)||0;
   document.getElementById("fpCL").value=(p&&p.costo_log)||(!p?2.3:0);
-  document.getElementById("fpCH").value=(p&&p.cotiz_hist)||cotizActual;
   document.getElementById("fpGM").value=(p&&p.gan_usd_may)||0;
   document.getElementById("fpGE").value=(p&&p.gan_usd_med)||0;
   document.getElementById("fpML").value=(p&&p.precio_ml)||0;
@@ -5761,9 +5812,8 @@ function calcModalP(){
   var ci=parseFloat(document.getElementById("fpCI").value)||0;
   var cl=parseFloat(document.getElementById("fpCL").value)||0;
   var ct=ci>0?Math.ceil(ci+cl):0;
-  // Usar cotiz_hist del producto si está cargada, sino cotizActual del sistema
-  var chEl=document.getElementById("fpCH");
-  var ca=chEl&&parseFloat(chEl.value)>0?parseFloat(chEl.value):cotizActual;
+  // Cotización del sistema (siempre — se eliminó la cotización histórica por producto)
+  var ca=cotizActual;
   var gm=parseFloat(document.getElementById("fpGM").value)||0;
   var ge=parseFloat(document.getElementById("fpGE").value)||0;
   var ml=parseFloat(document.getElementById("fpML").value)||0;
@@ -5971,7 +6021,7 @@ function saveProd(){
   var gm=parseFloat(document.getElementById("fpGM").value)||0;
   var ge=parseFloat(document.getElementById("fpGE").value)||0;
   var ml=parseFloat(document.getElementById("fpML").value)||0;
-  var ca=cotizActual,ct=Math.ceil(ci+cl);
+  var ca=cotizActual,ct=ci>0?Math.ceil(ci+cl):0;
   var pm=Math.ceil((ct+gm)*ca/100)*100;
   var pe=Math.ceil((ct+gm+ge)*ca/100)*100;
   var pi=ml>0?Math.ceil((ml+pe)/2/100)*100:pe;
@@ -5989,7 +6039,6 @@ function saveProd(){
     reserva:parseInt(document.getElementById("fpRE").value)||0,
     en_viaje:parseInt(document.getElementById("fpVJ").value)||0,
     costo_ind:ci,costo_log:cl,
-    cotiz_hist:parseFloat(document.getElementById("fpCH").value)||0,
     gan_usd_may:gm,gan_usd_med:ge,
     precio_may_ars:document.getElementById("pmManual").checked?
       (parseInt(document.getElementById("fpManX10").value)||0):pm,
@@ -12373,14 +12422,14 @@ function decansRenderRent(prods){
   var fijoC = parseInt(cfg.precio_decan_fijo)||3000;
 
   // Calcular rentabilidad por producto
-  // Estimación: costo_decan = (costo_ind+costo_log) * cotiz_hist / 20  (1 decan = 5ml de 100ml = 1/20)
+  // Estimación: costo_decan = (costo_ind+costo_log) * cotización_sistema / 20  (1 decan = 5ml de 100ml = 1/20)
   var rentables = prods.map(function(p){
     var precioMin = parseInt(p.precio_min_ars)||0;
     var precioDecan = p.precio_decan>0 ? p.precio_decan : (precioMin>0?(Math.ceil(precioMin*pctC/1000)*1000+fijoC):0);
     var precioMay = parseInt(p.precio_may_ars)||0;
     var costoIndUSD = parseFloat(p.costo_ind)||0;
     var costoLogUSD = parseFloat(p.costo_log)||0;
-    var cotiz = parseFloat(p.cotiz_hist)||1520;
+    var cotiz = cotizActual||1520;
     var costoTotalARS = (costoIndUSD+costoLogUSD)*cotiz;
     var costoDecanARS = costoTotalARS/20; // 5ml de 100ml
     var ganDecan = precioDecan - costoDecanARS;
@@ -34554,12 +34603,12 @@ function loadResumenPeriodoActual(){
 
   // Cargar en paralelo: ventas confirmadas, gastos, rendiciones, productos (para costo), cotizacion
   Promise.all([
-    // Ventas confirmadas de todos los vendedores
-    apiGetAll('ventas','select=vendedor_id,total,cantidad,producto_id,segmento&estado=eq.confirmada').catch(function(){return [];}),
+    // Ventas confirmadas del periodo actual
+    apiGetAll('ventas','select=vendedor_id,total,cantidad,producto_id,segmento&estado=eq.confirmada&periodo=eq.'+encodeURIComponent(periodoActual)).catch(function(){return [];}),
     // Gastos aprobados del periodo activo (sin periodo_cerrado = no archivados)
     apiGet('gastos_vendedor','select=vendedor_id,monto,aprobado,concepto,estado_comision&periodo_cerrado=eq.false').catch(function(){return [];}),
-    // Rendiciones aprobadas activas
-    apiGet('rendiciones','select=vendedor_id,monto,tipo&estado=eq.aprobada').catch(function(){return [];}),
+    // Rendiciones aprobadas del periodo actual
+    apiGet('rendiciones','select=vendedor_id,monto,tipo&estado=eq.aprobada&periodo=eq.'+encodeURIComponent(periodoActual)).catch(function(){return [];}),
     // Productos con sus costos (solo los que tienen costo cargado)
     apiGet('productos','select=id,costo_ind,costo_log&costo_ind=gt.0').catch(function(){return [];}),
     // Cotización actual
@@ -34673,7 +34722,7 @@ function loadResumenPeriodoActual(){
 function renderPeriodoCard(p){
   var fecha=p.fecha_cierre?new Date(p.fecha_cierre).toLocaleDateString('es-AR',{day:'2-digit',month:'2-digit',year:'2-digit',timeZone:'America/Argentina/Buenos_Aires'}):'-';
   var desde=p.fecha_inicio?new Date(p.fecha_inicio).toLocaleDateString('es-AR',{day:'2-digit',month:'2-digit',timeZone:'America/Argentina/Buenos_Aires'}):'-';
-  var tv=p.total_ventas||0,tg=p.total_gastos||0,tr=p.total_rendido||0,sa=p.saldo_arrastrado||0;
+  var tv=p.total_ventas||0,tg=p.total_gastos||0,tr=p.total_rendido||0,sa=p.saldo_pendiente||0;
   return '<div style="background:var(--sur3);border-radius:8px;overflow:hidden;border:1px solid var(--bd);margin-bottom:.4rem">'
     +'<div style="padding:.6rem .85rem;cursor:pointer;display:flex;align-items:center;justify-content:space-between;gap:.5rem;flex-wrap:wrap" onclick="togglePeriodoDetalle(\'pd-'+p.id+'\')">'
       +'<div style="display:flex;align-items:center;gap:.6rem">'
@@ -34736,6 +34785,8 @@ function loadPeriodoDetalle(el,p){
     h+='</div>';
     // Resumen por vendedor
     h+='<div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(185px,1fr));gap:.4rem;margin-bottom:.65rem">';
+    var _rvDet=p.resumen_vendedores; if(typeof _rvDet==='string'){try{_rvDet=JSON.parse(_rvDet);}catch(e){_rvDet=null;}}
+    var _rvName={1:'david',2:'facu',3:'marcela'};
     [1,2,3].forEach(function(vid){
       var vd=bv[vid];
       var tv=vd.v.reduce(function(s,x){return s+(x.total||0);},0);
@@ -34747,7 +34798,7 @@ function loadPeriodoDetalle(el,p){
       var tc=vd.c.reduce(function(s,x){return s+(x.monto||0);},0);
       // Fórmula: vendido - gastos - rendido + dinero_enviado
       var saldo=tv-tg-tr+te;
-      var sa=p['saldo_arrastrado_'+vid]||0;
+      var sa=(_rvDet&&_rvDet[_rvName[vid]]&&_rvDet[_rvName[vid]].saldo)?_rvDet[_rvName[vid]].saldo:0;
       h+='<div style="background:var(--sur2);border-radius:6px;padding:.5rem .65rem;border:1px solid var(--bd)">';
         h+='<div style="font-size:.73rem;font-weight:700;color:var(--acc);margin-bottom:.28rem">'+VENDS[vid]+'</div>';
         h+='<div style="display:grid;grid-template-columns:1fr 1fr;gap:.1rem .3rem;font-size:.69rem">';
@@ -35032,6 +35083,16 @@ async function adminEjecutarCierrePeriodo() {
   if (!nuevoPer) { toast('Ingresa el nombre del nuevo periodo','twarn'); return; }
   if (!confirm('CONFIRMAR CIERRE DEL PERIODO "'+periodoActual+'"?\nEsto no se puede deshacer.')) return;
 
+  // GUARD anti-doble-cierre: si ya existe un cierre registrado para este periodo, abortar
+  // (evita re-archivar y volver a crear el saldo arrastrado por error)
+  try {
+    var _yaCerrado = await apiGet('historial_periodos', 'select=id&periodo=eq.'+encodeURIComponent(periodoActual)+'&limit=1');
+    if (Array.isArray(_yaCerrado) && _yaCerrado.length) {
+      toast('El periodo "'+periodoActual+'" ya tiene un cierre registrado. No se puede cerrar dos veces.','terr');
+      return;
+    }
+  } catch(e){ /* si la consulta falla por red, no bloqueamos el cierre */ }
+
   // PASO 0: Backup completo antes de cerrar
   toast('Generando backup previo al cierre...','twarn');
   await generarBackup(false);
@@ -35054,7 +35115,7 @@ async function adminEjecutarCierrePeriodo() {
     return Promise.all([
       apiGetAll('ventas',          'select=total,id&vendedor_id=eq.'+v.id+'&estado=eq.confirmada&periodo=eq.'+encodeURIComponent(periodoActual)),
       apiGet('gastos_vendedor', 'select=monto,id,concepto,estado_comision,aprobado,vendedor_id&vendedor_id=eq.'+v.id+'&periodo_cerrado=eq.false'),
-      apiGet('rendiciones',     'select=monto,id&vendedor_id=eq.'+v.id+'&estado=eq.aprobada&tipo=neq.saldo_arrastrado&periodo=eq.'+encodeURIComponent(periodoActual)),
+      apiGet('rendiciones',     'select=monto,id,tipo&vendedor_id=eq.'+v.id+'&estado=eq.aprobada&tipo=neq.saldo_arrastrado&periodo=eq.'+encodeURIComponent(periodoActual)),
       apiGet('rendiciones',     'select=monto&vendedor_id=eq.'+v.id+'&estado=eq.aprobada&tipo=eq.saldo_arrastrado&periodo=eq.'+encodeURIComponent(periodoActual))
     ]).then(function(r) {
       var ventas    = Array.isArray(r[0]) ? r[0] : [];
@@ -35075,13 +35136,18 @@ async function adminEjecutarCierrePeriodo() {
 
       var tv = ventas.reduce(   function(s,x){return s+(x.total||0);}, 0);
       var tg = gastosCerrar.reduce(function(s,x){return s+(x.monto||0);}, 0);
-      var tr = rendics.reduce(  function(s,x){return s+(x.monto||0);}, 0);
+      // Rendiciones no-arrastrado: separar las que RESTAN (entrega_dinero) de las que SUMAN (envio_dinero)
+      // Esto debe coincidir con el preview (loadCierrePreview) y el dashboard (loadResumenPeriodoActual)
+      var rendicsResta = rendics.filter(function(x){ return x.tipo !== 'envio_dinero'; });
+      var rendicsEnvio = rendics.filter(function(x){ return x.tipo === 'envio_dinero'; });
+      var tr = rendicsResta.reduce(function(s,x){return s+(x.monto||0);}, 0);
+      var te = rendicsEnvio.reduce(function(s,x){return s+(x.monto||0);}, 0);
       var ta = arrastrado.reduce(function(s,x){return s+(x.monto||0);}, 0);
 
       return {
         id: v.id, n: v.n,
-        tv: tv, tg: tg, tr: tr, ta: ta,
-        saldo: tv - tg - tr + ta,
+        tv: tv, tg: tg, tr: tr, ta: ta, te: te,
+        saldo: tv - tg - tr + ta + te,
         ventasIds:      ventas.map(function(x){return x.id;}),
         gastosCerrarIds:gastosCerrar.map(function(x){return x.id;}),
         rendicsIds:     rendics.map(function(x){return x.id;})
@@ -35091,15 +35157,25 @@ async function adminEjecutarCierrePeriodo() {
 
   // PASO 2: Guardar historial del periodo
   .then(function(resultados) {
+    // El detalle por vendedor va en la columna jsonb resumen_vendedores (no en columnas sueltas)
+    var _vNombre = {1:'david', 2:'facu', 3:'marcela'};
+    var _resumen = {};
+    resultados.forEach(function(r){
+      _resumen[_vNombre[r.id] || ('v'+r.id)] = {
+        tv: r.tv, tg: r.tg, tr: r.tr, ta: r.ta, te: r.te,
+        saldo: Math.max(0, r.saldo)
+      };
+    });
     var hData = {
       periodo:          periodoActual,
       fecha_cierre:     fechaCierre,
       total_ventas:     resultados.reduce(function(s,r){return s+r.tv;}, 0),
       total_gastos:     resultados.reduce(function(s,r){return s+r.tg;}, 0),
       total_rendido:    resultados.reduce(function(s,r){return s+r.tr;}, 0),
-      saldo_arrastrado: resultados.reduce(function(s,r){return s+Math.max(0,r.saldo);}, 0)
+      saldo_pendiente:  resultados.reduce(function(s,r){return s+Math.max(0,r.saldo);}, 0),
+      resumen_vendedores: _resumen,
+      created_by:       'admin'
     };
-    resultados.forEach(function(r){ hData['saldo_arrastrado_'+r.id] = Math.max(0, r.saldo); });
 
     return apiPost('historial_periodos', hData).then(function(){ return resultados; });
   })
@@ -35330,7 +35406,7 @@ function perConfigChange() {
     csv+="=== MOVIMIENTOS ("+(Array.isArray(results[4])?results[4].length:0)+") ===\n";
     csv+=toCsvB(results[4],["id","producto_nombre","tipo","cantidad","stock_antes","stock_despues","motivo","usuario","created_at"])+"\n\n";
     csv+="=== HISTORIAL PERIODOS ("+(Array.isArray(results[5])?results[5].length:0)+") ===\n";
-    csv+=toCsvB(results[5],["id","periodo","fecha_cierre","total_ventas","total_gastos","total_rendido","saldo_arrastrado"])+"\n\n";
+    csv+=toCsvB(results[5],["id","periodo","fecha_cierre","total_ventas","total_gastos","total_rendido","saldo_pendiente"])+"\n\n";
     csv+="=== PEDIDOS CATALOGO ("+(Array.isArray(results[6])?results[6].length:0)+") ===\n";
     csv+=toCsvB(results[6],["id","nro_orden","notas","total","estado","confirmado_cobro","created_at"]);
 
@@ -42159,10 +42235,6 @@ function _homeAddDestacadosSection(){
 }
 
 
-function fpUsarCotizSistema(){
-  var el=document.getElementById('fpCH');
-  if(el){el.value=cotizActual;calcModalP&&calcModalP();}
-}
 </script>
 <script src="https://maps.googleapis.com/maps/api/js?key=AIzaSyDNoIeGswrjA2FcL2G4ZUPi6iu5Wzf68cY&libraries=places&loading=async&language=es&region=AR" async defer></script>
 
