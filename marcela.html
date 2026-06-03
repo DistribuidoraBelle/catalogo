@@ -642,6 +642,26 @@ function patchStockFresco(prodId, delta, motivo){
   });
 }
 
+// comboIdDeItem (2026-06-03 auditoría stock): resuelve el combo_id de un item de pedido, sea cual sea su formato.
+//  · A (nuevo): {isCombo:true, combo_id:"11"} → 11 · B (viejo): {producto_id:"combo_10"} → 10 · C: solo segmento → null
+function comboIdDeItem(it){
+  if(!it||typeof it!=='object')return null;
+  if(it.isCombo===true||it.isCombo==='true'){
+    var n=parseInt(String(it.combo_id==null?'':it.combo_id).replace(/\D/g,''),10);
+    return isNaN(n)?null:n;
+  }
+  if(typeof it.producto_id==='string' && /combo/i.test(it.producto_id)){
+    var m=it.producto_id.match(/(\d+)/);
+    return m?parseInt(m[1],10):null;
+  }
+  return null;
+}
+function _esProductoNumerico(pid){
+  if(typeof pid==='number')return pid>0;
+  if(typeof pid==='string')return /^\d+$/.test(pid);
+  return false;
+}
+
 // ─── Helper unificado de logging de movimientos de stock (2026-05-11) ───
 // Best-effort: si falla, solo deja warn en consola, NO bloquea el flujo principal.
 function _logMovStock(opts){
@@ -1841,9 +1861,10 @@ function cancelarPedidoWeb(pedId,btn){
     promises.push(apiPatch('cc_cuotas',{estado:'cancelada',updated_at:new Date().toISOString()},'pedido_id=eq.'+pedId+'&estado=in.(pendiente,parcial,vencida)').catch(function(){}));
 
     if(Array.isArray(items))items.forEach(function(it){
-      if(it.isCombo){
+      var _cid=comboIdDeItem(it);
+      if(_cid){
         if(!teniaCobro && ped.estado!=="reservado" && ped.estado!=="pendiente") return;
-        apiGet("combo_items","select=producto_id,cantidad&combo_id=eq."+(it.combo_id||0)).then(function(ci){
+        apiGet("combo_items","select=producto_id,cantidad&combo_id=eq."+_cid).then(function(ci){
           if(!Array.isArray(ci))return;
           ci.forEach(function(cit){
             var cantTotal=(cit.cantidad||1)*(it.qty||1);
@@ -1856,7 +1877,8 @@ function cancelarPedidoWeb(pedId,btn){
         return;
       }
       var pid=it.producto_id;
-      if(!pid||it.isDecan)return;
+      if(it.isDecan||!_esProductoNumerico(pid))return;
+      pid=parseInt(pid,10);
       var qty=it.qty||1;
       if(!teniaCobro && ped.estado!=="reservado" && ped.estado!=="pendiente") return;
       var delta = {stock_actual:+qty};
@@ -2535,8 +2557,20 @@ function cancelarPedReservado(pedId,btn){
     try{items=typeof ped.items==="string"?JSON.parse(ped.items):ped.items;}catch(ex){}
     var promises=[apiPatch("pedidos_catalogo",{estado:"cancelado"},"id=eq."+pedId)];
     if(Array.isArray(items))items.forEach(function(it){
-      if(!it.producto_id||it.isDecan||it.segmento==='decan')return;
-      promises.push(patchStockFresco(it.producto_id,{stock_actual:+(it.qty||1),reserva:-(it.qty||1)},'Cancelar ped reservado'));
+      if(it.isDecan||it.segmento==='decan')return;
+      var _cid=comboIdDeItem(it);
+      if(_cid){
+        promises.push(apiGet("combo_items","select=producto_id,cantidad&combo_id=eq."+_cid).then(function(ci){
+          if(!Array.isArray(ci))return;
+          return Promise.all(ci.filter(function(c){return c.producto_id;}).map(function(c){
+            var qd=(parseInt(c.cantidad)||1)*(it.qty||1);
+            return patchStockFresco(c.producto_id,{stock_actual:+qd,reserva:-qd},'Cancelar ped reservado combo');
+          }));
+        }));
+        return;
+      }
+      if(!_esProductoNumerico(it.producto_id))return;
+      promises.push(patchStockFresco(parseInt(it.producto_id,10),{stock_actual:+(it.qty||1),reserva:-(it.qty||1)},'Cancelar ped reservado'));
     });
     Promise.all(promises).then(function(){
       toast("Reserva cancelada - stock devuelto","twarn");loadPedidosWeb();renderCat();

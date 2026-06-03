@@ -3856,6 +3856,30 @@ function patchStockFresco(prodId, delta, motivo){
   });
 }
 
+// comboIdDeItem (2026-06-03 auditoría stock): resuelve el combo_id de un item de pedido, sea cual sea su formato.
+//  · Formato A (nuevo):     {isCombo:true, combo_id:"11"}  → 11
+//  · Formato B (viejo):     {producto_id:"combo_10"}        → 10
+//  · Formato C (viejísimo): solo {segmento:"combo"} sin id  → null (no resoluble por id, se ignora sin romper)
+// Devuelve el combo_id numérico, o null si el item NO es un combo / no se puede resolver por id.
+function comboIdDeItem(it){
+  if(!it||typeof it!=='object')return null;
+  if(it.isCombo===true||it.isCombo==='true'){
+    var n=parseInt(String(it.combo_id==null?'':it.combo_id).replace(/\D/g,''),10);
+    return isNaN(n)?null:n;
+  }
+  if(typeof it.producto_id==='string' && /combo/i.test(it.producto_id)){
+    var m=it.producto_id.match(/(\d+)/);
+    return m?parseInt(m[1],10):null;
+  }
+  return null;
+}
+// _esProductoNumerico: true si el item apunta a un producto real (id numérico), no a un combo/decan/placeholder.
+function _esProductoNumerico(pid){
+  if(typeof pid==='number')return pid>0;
+  if(typeof pid==='string')return /^\d+$/.test(pid);
+  return false;
+}
+
 function _checkReingreso(prodId, stockAntes, stockDespues){
   // Si el stock pasa de 0 a positivo → marcar como re-ingreso
   if((stockAntes||0)===0 && (stockDespues||0)>0){
@@ -8148,8 +8172,9 @@ function _adminGuardarCobro(id){
       var items=[];try{items=typeof p.items==='string'?JSON.parse(p.items):p.items||[];}catch(e){items=[];}
       if(Array.isArray(items)){
         items.forEach(function(it){
-          // COMBOS
-          if(it.isCombo){
+          var _cid=comboIdDeItem(it);
+          // COMBOS (cualquier formato A/B; el C sin id cae a la rama normal y no toca stock)
+          if(_cid){
             promesas.push(apiPost('ventas',{
               vendedor_id:vendId,producto_id:null,producto_nombre:it.nombre,
               cantidad:it.qty||1,precio_unitario:it.precio||0,segmento:'combo',
@@ -8157,7 +8182,7 @@ function _adminGuardarCobro(id){
               nro_orden:nroOrden,periodo:periodoActual,forma_cobro:forma
             }));
             promesas.push(
-              apiGet('combo_items','select=producto_id,cantidad&combo_id=eq.'+it.combo_id).then(function(ci){
+              apiGet('combo_items','select=producto_id,cantidad&combo_id=eq.'+_cid).then(function(ci){
                 if(!Array.isArray(ci))return;
                 var chain=Promise.resolve();
                 ci.filter(function(cit){return cit.producto_id;}).forEach(function(cit){
@@ -8287,8 +8312,9 @@ function _adminRevertirCobro(id){
     // === [B] Devolver stock vendido → reserva (revertir el descuento del cobro) ===
     if(Array.isArray(items)){
       items.forEach(function(it){
-        if(it.isCombo&&it.combo_id){
-          promesas.push(apiGet('combo_items','select=producto_id,cantidad&combo_id=eq.'+it.combo_id).then(function(ci){
+        var _cid=comboIdDeItem(it);
+        if(_cid){
+          promesas.push(apiGet('combo_items','select=producto_id,cantidad&combo_id=eq.'+_cid).then(function(ci){
             if(!Array.isArray(ci))return;
             return Promise.all(ci.filter(function(c){return c.producto_id;}).map(function(c){
               var q=(parseInt(c.cantidad)||1)*(parseInt(it.qty)||1);
@@ -8297,9 +8323,9 @@ function _adminRevertirCobro(id){
           }));
           return;
         }
-        if(it.isDecan||!it.producto_id)return;
+        if(it.isDecan||!_esProductoNumerico(it.producto_id))return;
         var qty=parseInt(it.qty)||parseInt(it.cantidad)||1;
-        promesas.push(patchStockFresco(it.producto_id,_dV(p.vendedor_id,-qty,{reserva:+qty}),'Revertir cobro '+nroOrden));
+        promesas.push(patchStockFresco(parseInt(it.producto_id,10),_dV(p.vendedor_id,-qty,{reserva:+qty}),'Revertir cobro '+nroOrden));
       });
     }
 
@@ -8362,18 +8388,21 @@ function _adminReactivarPedido(id){
     },'pedido_id=eq.'+id+'&estado=eq.cancelada').catch(function(e){console.error('[cc] reactivar cuotas:',e);}));
     if(Array.isArray(items)){
       items.forEach(function(it){
-        if(!it.producto_id||it.isDecan)return;
+        if(it.isDecan)return;
         var qty=parseInt(it.qty)||parseInt(it.cantidad)||1;
-        promesas.push(patchStockFresco(it.producto_id,{stock_actual:-qty,reserva:+qty},'Reactivar pedido '+p.nro_orden));
-        if(it.isCombo&&it.combo_id){
-          promesas.push(apiGet('combo_items','select=producto_id,cantidad&combo_id=eq.'+it.combo_id).then(function(ci){
+        var _cid=comboIdDeItem(it);
+        if(_cid){
+          promesas.push(apiGet('combo_items','select=producto_id,cantidad&combo_id=eq.'+_cid).then(function(ci){
             if(!Array.isArray(ci))return;
             return Promise.all(ci.filter(function(c){return c.producto_id;}).map(function(c){
               var q=(parseInt(c.cantidad)||1)*qty;
               return patchStockFresco(c.producto_id,{stock_actual:-q,reserva:+q},'Reactivar combo '+p.nro_orden);
             }));
           }));
+          return;
         }
+        if(!_esProductoNumerico(it.producto_id))return;
+        promesas.push(patchStockFresco(parseInt(it.producto_id,10),{stock_actual:-qty,reserva:+qty},'Reactivar pedido '+p.nro_orden));
       });
     }
     return Promise.all(promesas);
@@ -8418,17 +8447,13 @@ function _adminCancelarPedido(id){
     // Devolver stock: depende si estaba reservado o cobrado (incluido parcial)
     if(Array.isArray(items)){
       items.forEach(function(it){
-        if(!it.producto_id||it.isDecan)return;
+        if(it.isDecan)return;
         var qty=parseInt(it.qty)||parseInt(it.cantidad)||1;
-        if(estabaCobrado){
-          // Stock estaba en vendido_david → devolver a stock_actual
-          promesas.push(patchStockFresco(it.producto_id,_dV(p.vendedor_id,-qty,{stock_actual:+qty}),'Cancelación pedido '+nroOrden));
-        } else {
-          // Stock estaba en reserva → devolver a stock_actual
-          promesas.push(patchStockFresco(it.producto_id,{stock_actual:+qty,reserva:-qty},'Cancelación pedido '+nroOrden));
-        }
-        if(it.isCombo&&it.combo_id){
-          promesas.push(apiGet('combo_items','select=producto_id,cantidad&combo_id=eq.'+it.combo_id).then(function(ci){
+        var _cid=comboIdDeItem(it);
+        if(_cid){
+          // COMBO (cualquier formato A/B): revertir cada componente. Antes el guard de producto_id
+          // salteaba los combos nuevos (producto_id:null) → fuga de reserva al cancelar combos.
+          promesas.push(apiGet('combo_items','select=producto_id,cantidad&combo_id=eq.'+_cid).then(function(ci){
             if(!Array.isArray(ci))return;
             return Promise.all(ci.filter(function(c){return c.producto_id;}).map(function(c){
               var q=(parseInt(c.cantidad)||1)*qty;
@@ -8439,6 +8464,16 @@ function _adminCancelarPedido(id){
               }
             }));
           }));
+          return;
+        }
+        if(!_esProductoNumerico(it.producto_id))return; // decan / placeholder / combo no resoluble → no tocar stock
+        var pid=parseInt(it.producto_id,10);
+        if(estabaCobrado){
+          // Stock estaba en vendido → devolver a stock_actual
+          promesas.push(patchStockFresco(pid,_dV(p.vendedor_id,-qty,{stock_actual:+qty}),'Cancelación pedido '+nroOrden));
+        } else {
+          // Stock estaba en reserva → devolver a stock_actual
+          promesas.push(patchStockFresco(pid,{stock_actual:+qty,reserva:-qty},'Cancelación pedido '+nroOrden));
         }
       });
     }
@@ -8489,15 +8524,11 @@ function _adminEliminarPedido(id){
       var items=[];try{items=typeof p.items==='string'?JSON.parse(p.items):p.items||[];}catch(e){items=[];}
       if(Array.isArray(items)){
         items.forEach(function(it){
-          if(!it.producto_id||it.isDecan)return;
+          if(it.isDecan)return;
           var qty=parseInt(it.qty)||parseInt(it.cantidad)||1;
-          if(estabaCobrado){
-            promesas.push(patchStockFresco(it.producto_id,_dV(p.vendedor_id,-qty,{stock_actual:+qty}),'Eliminación pedido '+nroOrden));
-          } else {
-            promesas.push(patchStockFresco(it.producto_id,{stock_actual:+qty,reserva:-qty},'Eliminación pedido '+nroOrden));
-          }
-          if(it.isCombo&&it.combo_id){
-            promesas.push(apiGet('combo_items','select=producto_id,cantidad&combo_id=eq.'+it.combo_id).then(function(ci){
+          var _cid=comboIdDeItem(it);
+          if(_cid){
+            promesas.push(apiGet('combo_items','select=producto_id,cantidad&combo_id=eq.'+_cid).then(function(ci){
               if(!Array.isArray(ci))return;
               return Promise.all(ci.filter(function(c){return c.producto_id;}).map(function(c){
                 var q=(parseInt(c.cantidad)||1)*qty;
@@ -8508,6 +8539,14 @@ function _adminEliminarPedido(id){
                 }
               }));
             }));
+            return;
+          }
+          if(!_esProductoNumerico(it.producto_id))return;
+          var pid=parseInt(it.producto_id,10);
+          if(estabaCobrado){
+            promesas.push(patchStockFresco(pid,_dV(p.vendedor_id,-qty,{stock_actual:+qty}),'Eliminación pedido '+nroOrden));
+          } else {
+            promesas.push(patchStockFresco(pid,{stock_actual:+qty,reserva:-qty},'Eliminación pedido '+nroOrden));
           }
         });
       }
@@ -8701,12 +8740,26 @@ function _belleGuardarEditPed(pedId){
     items[idx].qty=newQty;
     items[idx].total=(items[idx].precio||0)*newQty;
     // Ajustar stock si hay diferencia
-    if(newQty!==oldQty&&items[idx].producto_id&&!items[idx].isDecan){
+    if(newQty!==oldQty&&!items[idx].isDecan){
       var diff=oldQty-newQty;
-      if(mo._ped.estado==="reservado"){
-        patchStockFresco(items[idx].producto_id,{reserva:-diff},"Edición pedido admin");
-      } else {
-        patchStockFresco(items[idx].producto_id,{stock_actual:+diff},"Edición pedido admin");
+      var _cidE=comboIdDeItem(items[idx]);
+      var _resv=(mo._ped.estado==="reservado");
+      if(_cidE){
+        // Combo: ajustar cada componente proporcionalmente al cambio de cantidad
+        apiGet('combo_items','select=producto_id,cantidad&combo_id=eq.'+_cidE).then(function(ci){
+          if(!Array.isArray(ci))return;
+          ci.filter(function(c){return c.producto_id;}).forEach(function(c){
+            var cd=(parseInt(c.cantidad)||1)*diff;
+            if(_resv) patchStockFresco(c.producto_id,{reserva:-cd},"Edición combo admin");
+            else patchStockFresco(c.producto_id,{stock_actual:+cd},"Edición combo admin");
+          });
+        });
+      } else if(_esProductoNumerico(items[idx].producto_id)){
+        if(_resv){
+          patchStockFresco(parseInt(items[idx].producto_id,10),{reserva:-diff},"Edición pedido admin");
+        } else {
+          patchStockFresco(parseInt(items[idx].producto_id,10),{stock_actual:+diff},"Edición pedido admin");
+        }
       }
     }
   });
@@ -8732,9 +8785,10 @@ function cancelarPedidoWeb(pedId,btn){
       var estadoPed=ped.estado;
       var stockProms=[];
       if(Array.isArray(items))items.forEach(function(it){
-        if(it.isCombo){
+        var _cid=comboIdDeItem(it);
+        if(_cid){
           if(estadoPed!=="reservado"&&estadoPed!=="pendiente")return;
-          stockProms.push(apiGet("combo_items","select=producto_id,cantidad&combo_id=eq."+it.combo_id).then(function(ci){
+          stockProms.push(apiGet("combo_items","select=producto_id,cantidad&combo_id=eq."+_cid).then(function(ci){
             if(!Array.isArray(ci))return;
             return Promise.all(ci.filter(function(cit){return cit.producto_id;}).map(function(cit){
               return patchStockFresco(cit.producto_id,{stock_actual:+(cit.cantidad||1)*(it.qty||1),reserva:-(cit.cantidad||1)*(it.qty||1)},'Admin cancelar combo web');
@@ -8743,14 +8797,14 @@ function cancelarPedidoWeb(pedId,btn){
           return;
         }
         var pid=it.producto_id;
-        if(!pid||it.isDecan)return;
+        if(it.isDecan||!_esProductoNumerico(pid))return;
         if(estadoPed!=="reservado"&&estadoPed!=="pendiente")return;
         var qty=it.qty||1;
         stockProms.push(apiGet("productos","select=id,stock_actual,reserva&id=eq."+pid).then(function(rows){
           var fp=rows&&rows[0];if(!fp)return;
           var devQty=Math.min(qty,fp.reserva||0);
           if(devQty<=0)return;
-          return patchStockFresco(pid,{stock_actual:+devQty,reserva:-devQty},'Admin cancelar web');
+          return patchStockFresco(parseInt(pid,10),{stock_actual:+devQty,reserva:-devQty},'Admin cancelar web');
         }));
       });
       Promise.all(stockProms).then(function(){
@@ -8774,14 +8828,32 @@ function cancelarPedReservado(pedId,btn){
       try{items=typeof ped.items==="string"?JSON.parse(ped.items):ped.items;}catch(ex){}
       var stockProms=[];
       if(Array.isArray(items))items.forEach(function(it){
+        if(it.isDecan)return;
+        var _cid=comboIdDeItem(it);
+        if(_cid){
+          // Antes esta función salteaba los combos (||it.isCombo)return) → fuga total de reserva al cancelar reservados con combo.
+          stockProms.push(apiGet("combo_items","select=producto_id,cantidad&combo_id=eq."+_cid).then(function(ci){
+            if(!Array.isArray(ci))return;
+            return Promise.all(ci.filter(function(cit){return cit.producto_id;}).map(function(cit){
+              var qd=(cit.cantidad||1)*(it.qty||1);
+              return apiGet("productos","select=id,stock_actual,reserva&id=eq."+cit.producto_id).then(function(rows){
+                var fp=rows&&rows[0];if(!fp)return;
+                var devQty=Math.min(qd,fp.reserva||0);
+                if(devQty<=0)return;
+                return patchStockFresco(cit.producto_id,{stock_actual:+devQty,reserva:-devQty},'Admin cancelar reserva combo');
+              });
+            }));
+          }));
+          return;
+        }
         var pid=it.producto_id;
-        if(!pid||it.isDecan||it.isCombo)return;
+        if(!_esProductoNumerico(pid))return;
         var qty=it.qty||1;
         stockProms.push(apiGet("productos","select=id,stock_actual,reserva&id=eq."+pid).then(function(rows){
           var fp=rows&&rows[0];if(!fp)return;
           var devQty=Math.min(qty,fp.reserva||0);
           if(devQty<=0)return;
-          return patchStockFresco(pid,{stock_actual:+devQty,reserva:-devQty},'Admin cancelar reserva');
+          return patchStockFresco(parseInt(pid,10),{stock_actual:+devQty,reserva:-devQty},'Admin cancelar reserva');
         }));
       });
       Promise.all(stockProms).then(function(){
@@ -8806,13 +8878,30 @@ function cancelarTransf(id,conReserva,btn){
       var stockProms=[apiPatch("ventas_transferidas",{estado:"cancelada"},"id=eq."+id)];
       if(conReserva&&Array.isArray(items)){
         items.forEach(function(it){
+          if(it.isDecan)return;
+          var _cid=comboIdDeItem(it);
+          if(_cid){
+            stockProms.push(apiGet("combo_items","select=producto_id,cantidad&combo_id=eq."+_cid).then(function(ci){
+              if(!Array.isArray(ci))return;
+              return Promise.all(ci.filter(function(cit){return cit.producto_id;}).map(function(cit){
+                var qd=(cit.cantidad||1)*(it.qty||1);
+                return apiGet("productos","select=id,stock_actual,reserva&id=eq."+cit.producto_id).then(function(rows){
+                  var fp=rows&&rows[0];if(!fp)return;
+                  var devQty=Math.min(qd,fp.reserva||0);
+                  if(devQty<=0)return;
+                  return patchStockFresco(cit.producto_id,{stock_actual:+devQty,reserva:-devQty},'Admin cancelar transf combo');
+                });
+              }));
+            }));
+            return;
+          }
           var pid=it.producto_id;
-          if(!pid||it.isDecan)return;
+          if(!_esProductoNumerico(pid))return;
           stockProms.push(apiGet("productos","select=id,stock_actual,reserva&id=eq."+pid).then(function(rows){
             var fp=rows&&rows[0];if(!fp)return;
             var devQty=Math.min(it.qty||1,fp.reserva||0);
             if(devQty<=0)return;
-            return patchStockFresco(pid,{stock_actual:+devQty,reserva:-devQty},'Admin cancelar transf');
+            return patchStockFresco(parseInt(pid,10),{stock_actual:+devQty,reserva:-devQty},'Admin cancelar transf');
           }));
         });
       }
@@ -9845,8 +9934,9 @@ function _cargarContadoresCombos(){
       try{ items = typeof ped.items==="string" ? JSON.parse(ped.items) : ped.items; }catch(ex){ items=[]; }
       if(!Array.isArray(items))return;
       items.forEach(function(it){
-        if(!it || !it.isCombo || !it.combo_id)return;
-        resCount[it.combo_id] = (resCount[it.combo_id]||0) + (parseInt(it.qty)||1);
+        var _cid=comboIdDeItem(it);
+        if(_cid==null)return;
+        resCount[_cid] = (resCount[_cid]||0) + (parseInt(it.qty)||1);
       });
     });
 
@@ -9947,7 +10037,7 @@ function renderCombosInStock(){
       if(Array.isArray(data))data.forEach(function(ped){
         var items=[];try{items=typeof ped.items==="string"?JSON.parse(ped.items):ped.items;}catch(ex){}
         if(Array.isArray(items))items.forEach(function(it){
-          if(it.isCombo&&it.combo_id===c.id)reserved+=it.qty||1;
+          if(comboIdDeItem(it)===c.id)reserved+=it.qty||1;
         });
       });
       var el=document.getElementById("combo-res-"+c.id);
@@ -14251,22 +14341,22 @@ function _mgConfirmarCobro(){
   seleccionados.forEach(function(s){
     var it=items[s.idx];if(!it)return;
     var esDecanItem=it.isDecan||it.segmento==='decan';
-    var esComboItem=it.isCombo||it.segmento==='combo';
+    var _cid=comboIdDeItem(it);
+    var esComboItem=!!_cid||it.isCombo||it.segmento==='combo';
     var pid=it.producto_id;
-    // Combo: registrar venta y descontar stock de cada producto del combo
-    if(esComboItem&&it.combo_id){
-      var comboId=it.combo_id;
+    // Combo: descontar reserva de cada componente (la venta del combo se registra más abajo, igual que antes)
+    if(_cid){
       var comboQty=s.qty||1;
-      apiGet('combo_items','select=*&combo_id=eq.'+comboId).then(function(ci){
+      proms.push(apiGet('combo_items','select=*&combo_id=eq.'+_cid).then(function(ci){
         if(!Array.isArray(ci))return;
-        ci.forEach(function(cit){
+        return Promise.all(ci.filter(function(cit){return cit.producto_id;}).map(function(cit){
           var cant=(cit.cantidad||1)*comboQty;
-          patchStockFresco(cit.producto_id,_dV(VENDEDOR_ID,+cant,{reserva:-cant}),'Cobro combo').catch(function(e){console.error("[belle] error silencioso:",e);});
-        });
-      }).catch(function(e){console.error("[belle] error silencioso:",e);});
+          return patchStockFresco(cit.producto_id,_dV(VENDEDOR_ID,+cant,{reserva:-cant}),'Cobro combo');
+        }));
+      }).catch(function(e){console.error("[belle] error silencioso:",e);}));
     }
-    if(pid&&!esDecanItem&&!esComboItem){
-      proms.push(patchStockFresco(pid,_dV(VENDEDOR_ID,+s.qty,{reserva:-s.qty}),'Cobro parcial'));
+    if(pid&&!esDecanItem&&!esComboItem&&_esProductoNumerico(pid)){
+      proms.push(patchStockFresco(parseInt(pid,10),_dV(VENDEDOR_ID,+s.qty,{reserva:-s.qty}),'Cobro parcial'));
     }
     proms.push(apiPost('ventas',{
       vendedor_id:VENDEDOR_ID,
@@ -15501,16 +15591,11 @@ function _admBorrarPago(pagoId, clienteId, clienteNombre){
             items.forEach(function(it){
               if(it.isDecan) return; // decans no tocan stock
               var qty = parseInt(it.qty)||parseInt(it.cantidad)||1;
-              // Producto normal
-              if(it.producto_id && !it.isCombo){
+              var _cid=comboIdDeItem(it);
+              // Combo: revertir reserva de cada componente
+              if(_cid){
                 c2 = c2.then(function(){
-                  return patchStockFresco(it.producto_id, _dV(p.vendedor_id,-qty,{reserva:+qty}), "Reverso pago borrado pedido "+(p.nro_orden||"#"+p.id));
-                });
-              }
-              // Combo: revertir stock de cada producto del combo
-              if(it.isCombo && it.combo_id){
-                c2 = c2.then(function(){
-                  return apiGet('combo_items','select=producto_id,cantidad&combo_id=eq.'+it.combo_id).then(function(ci){
+                  return apiGet('combo_items','select=producto_id,cantidad&combo_id=eq.'+_cid).then(function(ci){
                     if(!Array.isArray(ci))return;
                     var c3 = Promise.resolve();
                     ci.filter(function(x){return x.producto_id;}).forEach(function(cit){
@@ -15521,6 +15606,13 @@ function _admBorrarPago(pagoId, clienteId, clienteNombre){
                     });
                     return c3;
                   });
+                });
+                return;
+              }
+              // Producto normal (id numérico)
+              if(_esProductoNumerico(it.producto_id)){
+                c2 = c2.then(function(){
+                  return patchStockFresco(parseInt(it.producto_id,10), _dV(p.vendedor_id,-qty,{reserva:+qty}), "Reverso pago borrado pedido "+(p.nro_orden||"#"+p.id));
                 });
               }
             });
@@ -16957,8 +17049,9 @@ window._ccVerificarYConsolidarPedidoCC = function(pedidoId){
       var colVendido = 'vendido_david';
       if(vendId === 2) colVendido = 'vendido_facu';
 
-      if(it.isCombo && it.combo_id){
-        proms.push(apiGet('combo_items','select=producto_id,cantidad&combo_id=eq.'+it.combo_id).then(function(ci){
+      var _cid=comboIdDeItem(it);
+      if(_cid){
+        proms.push(apiGet('combo_items','select=producto_id,cantidad&combo_id=eq.'+_cid).then(function(ci){
           if(!Array.isArray(ci)) return;
           return Promise.all(ci.filter(function(cit){return cit.producto_id;}).map(function(cit){
             var cantTotal = (cit.cantidad||1)*(it.qty||1);
@@ -18455,16 +18548,16 @@ function _admFIFOConfirmarPago(clienteId){
             var c2 = Promise.resolve();
             items.forEach(function(it){
               c2 = c2.then(function(){
+                var _cid=comboIdDeItem(it);
                 // COMBOS
-                if(it.isCombo){
+                if(_cid){
                   return apiPost('ventas',{
                     vendedor_id: vendedorAcreditado, producto_id: null, producto_nombre: it.nombre,
                     cantidad: it.qty||1, precio_unitario: it.precio||0, segmento: 'combo',
                     total: it.total||0, estado: 'confirmada', origen: 'catalogo',
                     nro_orden: nroOrden, periodo: periodoActual, forma_cobro: forma
                   }).then(function(){
-                    if(!it.combo_id) return;
-                    return apiGet('combo_items','select=producto_id,cantidad&combo_id=eq.'+it.combo_id).then(function(ci){
+                    return apiGet('combo_items','select=producto_id,cantidad&combo_id=eq.'+_cid).then(function(ci){
                       if(!Array.isArray(ci))return;
                       var c3 = Promise.resolve();
                       ci.filter(function(x){return x.producto_id;}).forEach(function(cit){
@@ -22692,13 +22785,15 @@ function eprGuardar(){
   // Calculate stock differences
   // For each product: new qty - old qty = delta (positive = need more stock OUT, negative = return stock)
   var stockChanges={};
+  // Nota: este editor ajusta sólo productos normales (por stock_actual). Los combos y los ids
+  // no numéricos se omiten acá para no patchear un producto inexistente (formato "combo_N").
   orig.forEach(function(it){
-    if(it.producto_id){
+    if(_esProductoNumerico(it.producto_id) && !comboIdDeItem(it)){
       stockChanges[it.producto_id]=(stockChanges[it.producto_id]||0)-it.qty;
     }
   });
   items.forEach(function(it){
-    if(it.producto_id){
+    if(_esProductoNumerico(it.producto_id) && !comboIdDeItem(it)){
       stockChanges[it.producto_id]=(stockChanges[it.producto_id]||0)+it.qty;
     }
   });
@@ -29674,10 +29769,14 @@ function loadAuditoriaStock(){
     var pedidos=res[1]||[];
     var comboItemsRaw=res[2]||[];
 
+    // Normaliza un combo_id a su número como string: 6 → "6", "combo_10" → "10"
+    function _auditComboNum(v){ if(v==null)return null; var m=String(v).match(/(\d+)/); return m?String(parseInt(m[1],10)):null; }
     var comboIdx={};
     comboItemsRaw.forEach(function(ci){
-      if(!comboIdx[ci.combo_id])comboIdx[ci.combo_id]=[];
-      comboIdx[ci.combo_id].push(ci);
+      var k=_auditComboNum(ci.combo_id);
+      if(k==null)return;
+      if(!comboIdx[k])comboIdx[k]=[];
+      comboIdx[k].push(ci);
     });
 
     var reservasEsperadas={};
@@ -29702,13 +29801,19 @@ function loadAuditoriaStock(){
       items.forEach(function(it,idx){
         if(cobradosIdx.indexOf(idx)>=0)return;
         if(it.isDecan)return;
-        if(it.isCombo&&it.combo_id){
-          var cis=comboIdx[it.combo_id]||[];
+        // Combo en CUALQUIER formato: {isCombo:true,combo_id:N} o el viejo {producto_id:"combo_N"}
+        var cNum=null;
+        if(it.isCombo && it.combo_id!=null) cNum=_auditComboNum(it.combo_id);
+        else if(typeof it.producto_id==="string" && /combo/i.test(it.producto_id)) cNum=_auditComboNum(it.producto_id);
+        if(cNum!=null){
+          var cis=comboIdx[cNum]||[];
           cis.forEach(function(ci){sumarReserva(ci.producto_id,(ci.cantidad||1)*(it.qty||1),ped.nro_orden);});
           return;
         }
         if(!it.producto_id)return;
-        sumarReserva(it.producto_id,it.qty||1,ped.nro_orden);
+        var pid=(typeof it.producto_id==="string"&&/^\d+$/.test(it.producto_id))?parseInt(it.producto_id,10):it.producto_id;
+        if(typeof pid!=="number")return;
+        sumarReserva(pid,it.qty||1,ped.nro_orden);
       });
     });
 
@@ -29767,6 +29872,7 @@ function loadAuditoriaStock(){
 
     if(inconsistencias.length){
       html+="<div style='font-size:.72rem;font-weight:700;color:var(--tx2);margin-bottom:.5rem;text-transform:uppercase;letter-spacing:.05em'>⚠️ Inconsistencias detectadas ("+inconsistencias.length+")</div>";
+      html+="<div style='margin-bottom:.7rem'><button class='btn btn-a' style='font-size:.7rem;padding:.4rem .8rem' onclick='auditoriaCorregirTodo()'>🔧 Corregir todas las reservas</button> <span style='font-size:.6rem;color:var(--tx3)'>· ajusta reserva↔stock, no cambia el físico</span></div>";
       inconsistencias.forEach(function(x){
         var p=x.p;
         var esCritica=x.problemas.some(function(pr){return pr.sev==="critica";});
@@ -29901,6 +30007,39 @@ function auditoriaCorregir(prodId,deltaReserva,nombre,stockActual){
       loadAuditoriaStock();
     });
   }).catch(function(e){toast("Error al corregir: "+(e&&e.message||""),"terr");});
+}
+
+
+// Corrección masiva: aplica la MISMA lógica que el botón por-producto a todas las reservas descuadradas.
+function auditoriaCorregirTodo(){
+  var cont=document.getElementById("auditoriaContainer");
+  if(!cont)return;
+  var btns=Array.prototype.slice.call(cont.querySelectorAll("button[data-delta]"));
+  if(!btns.length){toast("No hay reservas auto-corregibles","twarn");return;}
+  var jobs=btns.map(function(b){return {pid:parseInt(b.dataset.pid),delta:parseFloat(b.dataset.delta)};})
+               .filter(function(j){return j.pid&&!isNaN(j.delta)&&j.delta!==0;});
+  if(!jobs.length){toast("No hay reservas auto-corregibles","twarn");return;}
+  if(!confirm("¿Corregir TODAS las reservas descuadradas?\n\nSe ajustarán "+jobs.length+" productos. Mueve unidades entre reserva y stock (no cambia el físico total).\n\nEs la misma corrección del botón de cada producto, pero todas juntas.")) return;
+  toast("Corrigiendo "+jobs.length+" productos…","tok");
+  var ok=0, fail=0, i=0;
+  function next(){
+    if(i>=jobs.length){
+      window._auditoriaForceReload=true;
+      loadAuditoriaStock();
+      toast("Listo: "+ok+" corregidos"+(fail?(" · "+fail+" omitidos (stock insuficiente o cambió)"):""),"tok");
+      return;
+    }
+    var j=jobs[i++];
+    apiGet("productos","select=id,stock_actual,reserva&id=eq."+j.pid+"&limit=1").then(function(rows){
+      var fresh=rows&&rows[0];
+      if(!fresh){fail++;return next();}
+      var stockFresco=fresh.stock_actual||0, reservaFresca=fresh.reserva||0;
+      // mismas validaciones que auditoriaCorregir: no dejar stock ni reserva en negativo
+      if((stockFresco-j.delta)<0 || (reservaFresca+j.delta)<0){fail++;return next();}
+      return patchStockFresco(j.pid,{reserva:j.delta,stock_actual:-j.delta},"Corrección auditoría masiva").then(function(){ok++;next();});
+    }).catch(function(){fail++;next();});
+  }
+  next();
 }
 
 
