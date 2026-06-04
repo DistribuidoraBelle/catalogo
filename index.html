@@ -3793,47 +3793,24 @@ function _reservarProducto(pid, qty, intentos, nombreProd, nroOrden){
   // Devuelve una promesa que resuelve con {ok:true} o {ok:false, error:...}
   // para poder agregar manejo de errores en el flujo principal.
   // FIX 2 (2026-05-11): aceptar nombreProd y nroOrden para registrar movimiento_stock
-  return apiGet("productos","select=id,nombre,stock_actual,reserva&id=eq."+pid)
-    .then(function(rows){
-      var fp=rows&&rows[0];
-      if(!fp){
-        console.error('reserva: producto no encontrado id='+pid);
-        return {ok:false, error:'producto no encontrado'};
-      }
-      var stockAntes=fp.stock_actual||0;
-      var ns=Math.max(0,stockAntes-qty);
-      var nr=(fp.reserva||0)+qty;
-      var nombre=nombreProd||fp.nombre||('Prod #'+pid);
-      return fetch(SB_URL+"/rest/v1/productos?id=eq."+pid,{
-        method:"PATCH",
-        headers:{"Content-Type":"application/json","apikey":SB_KEY,"Authorization":"Bearer "+SB_KEY,"Prefer":"return=minimal"},
-        body:JSON.stringify({stock_actual:ns,reserva:nr})
-      }).then(function(r){
-        if(!r.ok){
-          throw new Error('HTTP '+r.status);
-        }
-        // FIX 2 (2026-05-11): registrar movimiento de reserva (best-effort).
-        // No bloquea el flujo si falla — solo se pierde el log de auditoría.
-        try{
-          fetch(SB_URL+"/rest/v1/movimientos_stock",{
-            method:"POST",
-            headers:{"Content-Type":"application/json","apikey":SB_KEY,"Authorization":"Bearer "+SB_KEY,"Prefer":"return=minimal"},
-            body:JSON.stringify({
-              producto_id:pid,
-              producto_nombre:nombre,
-              tipo:'reserva',
-              cantidad:qty,
-              stock_antes:stockAntes,
-              stock_despues:ns,
-              motivo:'Reserva pedido web '+(nroOrden||'(sin orden)'),
-              usuario:'cliente_web',
-              created_at:new Date().toISOString()
-            })
-          }).catch(function(e){console.warn('mov reserva no registrado:',e);});
-        }catch(eLog){console.warn('mov reserva error:',eLog);}
-        return {ok:true};
-      });
-    }).catch(function(e){
+  // BLINDAJE (2026-06-04): la reserva de stock pasa por la funcion protegida del
+  // servidor reservar_stock_web (SECURITY DEFINER). El catalogo ya no escribe directo
+  // en productos/movimientos_stock. Misma firma y mismos reintentos que antes.
+  var _tok=(typeof _sbToken==='function')?_sbToken():null;
+  return fetch(SB_URL+"/rest/v1/rpc/reservar_stock_web",{
+    method:"POST",
+    headers:{"Content-Type":"application/json","apikey":SB_KEY,"Authorization":"Bearer "+(_tok||SB_KEY)},
+    body:JSON.stringify({p_pid:pid,p_qty:qty,p_nombre:(nombreProd||null),p_nro_orden:(nroOrden||null)})
+  }).then(function(r){
+    if(!r.ok){ throw new Error('HTTP '+r.status); }
+    return r.json();
+  }).then(function(res){
+    if(res && res.ok===false){
+      console.error('reserva: '+(res.error||'fallo')+' id='+pid);
+      return {ok:false, error:res.error||'reserva fallida'};
+    }
+    return {ok:true};
+  }).catch(function(e){
       console.error('reserva stock error pid='+pid+' intento='+intentos,e);
       if(intentos<2){
         // Reintentar con backoff
