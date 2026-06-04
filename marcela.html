@@ -1988,13 +1988,14 @@ function editarPedido(pedId){
     if(tbody){
       tbody.innerHTML=items.map(function(it,i){
         var prodId=it.producto_id||null;
+        var _cid=comboIdDeItem(it);
         var p=prodId?prods.find(function(x){return x.id===prodId;}):null;
         // Normalizar segmento: si quedó "Precio unico" del bug viejo, tratarlo como "pi"
         var segReal=it.segmento||"pi";
         if(segReal==="Precio unico"||segReal==="precio unico"||segReal==="Precio único")segReal="pi";
         return"<tr data-orig-qty='"+(it.qty||1)+"' data-prod-id='"+(prodId||"")+"' data-is-decan='"+(it.isDecan?"1":"0")+"' data-segmento='"+segReal+"'>"+
           "<td style='font-size:.78rem;color:var(--tx)'>"+it.nombre+"</td>"+
-          "<td><input type='number' min='0' value='"+(it.qty||1)+"' data-idx='"+i+"' data-prod-id='"+(prodId||"")+"' data-orig-precio='"+(it.precio||0)+"' data-is-decan='"+(it.isDecan?"1":"0")+"' data-segmento='"+segReal+"' class='edit-qty-inp' style='width:55px;padding:.28rem .4rem;background:var(--sur3);border:1px solid var(--bd);border-radius:4px;color:var(--tx);font-size:.78rem;text-align:center' onchange='recalcEditPed()'></td>"+
+          "<td><input type='number' min='0' value='"+(it.qty||1)+"' data-idx='"+i+"' data-prod-id='"+(prodId||"")+"' data-orig-precio='"+(it.precio||0)+"' data-is-decan='"+(it.isDecan?"1":"0")+"' data-segmento='"+segReal+"' data-combo-id='"+(_cid||"")+"' data-is-combo='"+(_cid?"1":"0")+"' class='edit-qty-inp' style='width:55px;padding:.28rem .4rem;background:var(--sur3);border:1px solid var(--bd);border-radius:4px;color:var(--tx);font-size:.78rem;text-align:center' onchange='recalcEditPed()'></td>"+
           "<td style='font-size:.78rem;color:var(--acc);text-align:right' id='epit-"+i+"'>-</td>"+
           "<td style='font-size:.72rem;color:var(--tx3);text-align:center' id='epseg-"+i+"'>-</td>"+
           "<td><button onclick='removeEditItem("+i+")' style='background:var(--rdim);border:1px solid var(--red);color:var(--red);border-radius:3px;width:22px;height:22px;cursor:pointer;font-size:.75rem'>X</button></td>"+
@@ -2052,49 +2053,79 @@ function recalcEditPed(){
   if(tt)tt.textContent=fmt(total);
 }
 
+// _reconciliarStockEdicion: replica EXACTA del ayudante de belle (probado).
+// Compara items viejos vs nuevos, expande combos, saltea decants, aplica modelo reserva
+// (no cobrado) o vendido vía _dV (cobrado). En marcela el cobrado está bloqueado al editar.
+function _reconciliarStockEdicion(oldItems, newItems, estabaCobrado, vendedorId, nroOrden){
+  try{
+    var netoProd={};      // producto_id real -> cantidad neta (nuevo - viejo)
+    var combosNetos={};   // combo_id -> cantidad neta
+    function acumular(items, signo){
+      (items||[]).forEach(function(it){
+        if(!it || it.isDecan) return;
+        var qty=(parseInt(it.qty)||parseInt(it.cantidad)||1)*signo;
+        if(!qty) return;
+        var cid=comboIdDeItem(it);
+        if(cid){ combosNetos[cid]=(combosNetos[cid]||0)+qty; return; }
+        if(!_esProductoNumerico(it.producto_id)) return;
+        var pid=parseInt(it.producto_id,10);
+        netoProd[pid]=(netoProd[pid]||0)+qty;
+      });
+    }
+    acumular(oldItems,-1);
+    acumular(newItems,+1);
+    var comboIds=Object.keys(combosNetos).filter(function(c){return combosNetos[c]!==0;});
+    var prep = comboIds.length ? Promise.all(comboIds.map(function(cid){
+      return apiGet('combo_items','select=producto_id,cantidad&combo_id=eq.'+cid).then(function(ci){
+        if(!Array.isArray(ci))return;
+        ci.forEach(function(c){
+          if(!c.producto_id)return;
+          var pid=parseInt(c.producto_id,10); if(!pid)return;
+          netoProd[pid]=(netoProd[pid]||0)+(parseInt(c.cantidad)||1)*combosNetos[cid];
+        });
+      }).catch(function(e){console.error('[reconcil combo]',cid,e);});
+    })) : Promise.resolve();
+    return prep.then(function(){
+      var ops=[];
+      Object.keys(netoProd).forEach(function(pidStr){
+        var pid=parseInt(pidStr,10); var d=netoProd[pid]; if(!pid||!d)return;
+        // d>0 = se agregaron unidades (descontar); d<0 = se quitaron (devolver).
+        var delta = estabaCobrado ? _dV(vendedorId, d, {stock_actual:-d}) : {stock_actual:-d, reserva:d};
+        ops.push(patchStockFresco(pid, delta, 'Ajuste edición pedido '+(nroOrden||'')));
+      });
+      return Promise.all(ops);
+    });
+  }catch(e){ console.error('[_reconciliarStockEdicion]',e); return Promise.resolve(); }
+}
+
 function guardarEditPed(){
   var pedId=document.getElementById("editPedId").value;
   var newItems=[];
   var total=0;
-  var stockPromises=[];
 
   document.querySelectorAll(".edit-qty-inp").forEach(function(inp){
     var newQty=parseInt(inp.value)||0;
-    var origQty=parseInt(inp.closest("tr").dataset.origQty)||0;
     var prodId=parseInt(inp.dataset.prodId)||0;
     var isDecan=inp.dataset.isDecan==="1";
     var precio=parseFloat(inp.dataset.precioCalc||inp.dataset.origPrecio)||0;
     var tr=inp.closest("tr");
     var nombre=tr?tr.cells[0].textContent:"";
+    var _cid=parseInt(inp.dataset.comboId)||0;
+    var _isCombo=inp.dataset.isCombo==="1"||!!_cid;
 
-    // Stock adjustment según con_reserva del pedido/transferida
-    // con_reserva=true: stock ya está en 'reserva' → solo ajustar reserva
-    // con_reserva=false o pedido_web: stock está libre → ajustar stock_actual
-    var _conRes=window._editTransfConReserva||false;
-    if(!isDecan&&prodId&&origQty!==newQty){
-      var diff=origQty-newQty;
-      if(diff!==0){
-        // FIX: sin prods.find() — siempre ajustar stock
-        if(_conRes){
-          stockPromises.push(patchStockFresco(prodId,{reserva:-diff},'Editar pedido'));
-        } else {
-          stockPromises.push(patchStockFresco(prodId,{stock_actual:+diff},'Editar pedido'));
-        }
-      }
-    }
-
-    if(newQty<=0)return; // skip removed items
+    // El ajuste de stock NO se hace acá: lo resuelve _reconciliarStockEdicion()
+    // comparando items originales vs nuevos (modelo reserva, igual que belle/creación).
+    if(newQty<=0)return; // ítem quitado → no se agrega al pedido
     var sub=newQty*precio;
     total+=sub;
-    // FIX bug "Precio unico": leer segmento del data-segmento del input (no del textContent del DOM)
-    var segItem=inp.dataset.segmento||"pi";
-    if(segItem==="Precio unico"||segItem==="precio unico"||segItem==="Precio único")segItem="pi";
-    newItems.push({
-      nombre:nombre,qty:newQty,precio:precio,total:sub,
-      producto_id:prodId||null,
-      segmento:segItem,
-      isDecan:isDecan
-    });
+    if(_isCombo){
+      // Preservar identidad del combo (antes se perdía → se corrompía a ítem suelto)
+      newItems.push({nombre:nombre,qty:newQty,precio:precio,total:sub,producto_id:null,segmento:"combo",isCombo:true,combo_id:_cid});
+    } else {
+      var segItem=inp.dataset.segmento||"pi";
+      if(segItem==="Precio unico"||segItem==="precio unico"||segItem==="Precio único")segItem="pi";
+      newItems.push({nombre:nombre,qty:newQty,precio:precio,total:sub,producto_id:prodId||null,segmento:segItem,isDecan:isDecan});
+    }
   });
 
   if(!newItems.length){toast("El pedido no puede quedar sin productos","twarn");return;}
@@ -2106,9 +2137,12 @@ function guardarEditPed(){
   // Sistema unificado: todo en pedidos_catalogo
   savePromise=apiPatch("pedidos_catalogo",{items:JSON.stringify(newItems),total:totalFinal},"id=eq."+pedId);
 
-  var allPromises=stockPromises.concat([savePromise]);
+  // Stock: reconciliar contra los items originales (modelo reserva + combos, igual que belle).
+  // En marcela el cobrado está bloqueado al editar → estabaCobrado=false siempre.
+  var _nroOrd=(document.getElementById("editPedOrden")||{}).textContent||"";
+  var reconPromise=_reconciliarStockEdicion(window._editPedOrigItems||[], newItems, false, 0, _nroOrd);
 
-  Promise.all(allPromises).then(function(){
+  Promise.all([reconPromise,savePromise]).then(function(){
     // Notificar productos que volvieron al stock
     var devueltos=[];
     document.querySelectorAll(".edit-qty-inp").forEach(function(inp){
