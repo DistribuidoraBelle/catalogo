@@ -3805,15 +3805,37 @@ function _verComoCliente(clienteId){
 }
 
 
+// ════════════════════════════════════════════════════════════════════
+// AUTH (Supabase) — sesión real del staff (este panel: solo admin).
+// El token JWT viaja en cada llamada. Red de seguridad: si no hay sesión,
+// usa la anon key (como hoy), así nada se rompe en la transición.
+// ════════════════════════════════════════════════════════════════════
+var PANEL_ROL="admin";
+var _authToken=null;
+var _sbAuthClient=null;
+function _sbAuth(){
+  if(!_sbAuthClient && window.supabase && window.supabase.createClient){
+    _sbAuthClient = window.supabase.createClient(SB_URL, SB_KEY, {auth:{persistSession:true, autoRefreshToken:true, detectSessionInUrl:false, storageKey:"belle-auth-admin"}});
+    _sbAuthClient.auth.onAuthStateChange(function(_e, session){ _authToken = session ? session.access_token : null; });
+  }
+  return _sbAuthClient;
+}
+
 function api(method,table,data,filters){
   var url=SB_URL+"/rest/v1/"+table+(filters?"?"+filters:"");
-  var h={"Content-Type":"application/json","apikey":SB_KEY,"Authorization":"Bearer "+SB_KEY};
+  var h={"Content-Type":"application/json","apikey":SB_KEY,"Authorization":"Bearer "+(_authToken||SB_KEY)};
   if(method==="POST"||method==="PATCH")h["Prefer"]="return=representation";
   return fetch(url,{method:method,headers:h,body:data?JSON.stringify(data):undefined})
     .then(function(r){
       if(r.status===204)return null;
       return r.json().then(function(body){
         if(r.status>=400){
+          if(r.status===401 && _authToken){
+            _authToken=null;
+            try{var _c=_sbAuth(); if(_c)_c.auth.signOut();}catch(_e){}
+            var _ls=document.getElementById("loginScreen"); if(_ls)_ls.style.display="flex";
+            var _ap=document.getElementById("app"); if(_ap)_ap.style.display="none";
+          }
           console.error("API HTTP "+r.status,method,table,body);
           throw new Error((body&&body.message)||('HTTP '+r.status+' en '+table));
         }
@@ -3939,7 +3961,7 @@ function _logMovStock(opts){
 function apiDelete(t,f){return api("DELETE",t,null,f);}
 function apiUpsert(t,d){
   var url=SB_URL+"/rest/v1/"+t;
-  var h={"Content-Type":"application/json","apikey":SB_KEY,"Authorization":"Bearer "+SB_KEY,
+  var h={"Content-Type":"application/json","apikey":SB_KEY,"Authorization":"Bearer "+(_authToken||SB_KEY),
          "Prefer":"resolution=merge-duplicates,return=minimal"};
   return fetch(url,{method:"POST",headers:h,body:JSON.stringify(d)})
     .then(function(r){return r.status<300?null:r.json();})
@@ -3957,42 +3979,59 @@ var pestanasStk=[];
 
 var USERS={admin:{pass:"belle2024",role:"admin"},david:{pass:"david123",role:"vendedor",id:1},facu:{pass:"facu123",role:"vendedor",id:2},marcela:{pass:"marcela123",role:"deposito",id:3}};
 
+function _loginError(msg){
+  var le=document.getElementById("lErr");
+  if(le){ le.textContent = msg || "Usuario o contrasena incorrectos"; le.style.display="block"; }
+}
+function _entrarStaff(perfil){
+  curUser = perfil.nombre || "Admin";
+  curRole = perfil.rol || "admin";
+  if(perfil.vendedor_id) VENDEDOR_ID = perfil.vendedor_id;
+  document.getElementById("loginScreen").style.display="none";
+  document.getElementById("app").style.display="block";
+  var su=document.getElementById("sbUser"); if(su)su.textContent=curUser;
+  var sr=document.getElementById("sbRole"); if(sr)sr.textContent=(curRole==="admin"?"Administrador":curRole==="deposito"?"Depósito":"Vendedor");
+  if(curRole==="vendedor")document.querySelectorAll(".admin-only").forEach(function(el){el.style.display="none";});
+  var le=document.getElementById("lErr"); if(le)le.style.display="none";
+  initApp();
+}
 function doLogin(){
   var u=document.getElementById("lUser").value.trim().toLowerCase();
   var p=document.getElementById("lPass").value;
-  var err=document.getElementById("lErr");
-  err.style.display="none";
-  function enterApp(obj){
-    curUser=obj.usuario||obj.user||u;
-    curRole=obj.rol||obj.role||"vendedor";
-    document.getElementById("loginScreen").style.display="none";
-    document.getElementById("app").style.display="block";
-    document.getElementById("sbUser").textContent=obj.nombre||obj.name||(u.charAt(0).toUpperCase()+u.slice(1));
-    document.getElementById("sbRole").textContent=curRole==="admin"?"Administrador":curRole==="deposito"?"Depósito":"Vendedor";
-    if(curRole==="vendedor")document.querySelectorAll(".admin-only").forEach(function(el){el.style.display="none";});
-    initApp();
-  }
-  if(USERS[u]&&USERS[u].pass===p){
-    enterApp({usuario:u,rol:USERS[u].role,nombre:u.charAt(0).toUpperCase()+u.slice(1)});
-    return;
-  }
-  apiGet("usuarios_sistema","select=*&usuario=eq."+u+"&activo=is.true").then(function(rows){
-    if(Array.isArray(rows)&&rows.length&&rows[0].password===p){enterApp(rows[0]);}
-    else{err.textContent="Usuario o contrasena incorrectos";err.style.display="block";}
-  }).catch(function(){
-    // Fallback to local USERS if API fails
-    if(USERS[u]&&USERS[u].pass===p){
-      enterApp({usuario:u,rol:USERS[u].role,nombre:u.charAt(0).toUpperCase()+u.slice(1)});
-    } else {
-      err.textContent="Error de conexion - intenta de nuevo";
-      err.style.display="block";
-    }
-  });
+  var email = u.indexOf("@")>=0 ? u : (u+"@distribuidorabelle.com");
+  var cli=_sbAuth();
+  if(!cli){ _loginError("No se pudo inicializar el login. Recarga la pagina."); return; }
+  cli.auth.signInWithPassword({email:email,password:p}).then(function(res){
+    if(res.error || !res.data || !res.data.session){ _loginError("Usuario o contrasena incorrectos"); return; }
+    _authToken = res.data.session.access_token;
+    var uid = res.data.session.user.id;
+    apiGet("staff_perfiles","select=rol,vendedor_id,nombre&auth_user_id=eq."+uid+"&activo=is.true").then(function(rows){
+      var perfil = (Array.isArray(rows)&&rows[0]) ? rows[0] : null;
+      if(!perfil){ cli.auth.signOut(); _authToken=null; _loginError("Esta cuenta no tiene acceso al panel."); return; }
+      if(perfil.rol!==PANEL_ROL){ cli.auth.signOut(); _authToken=null; _loginError("Esta cuenta no tiene acceso a este panel."); return; }
+      _entrarStaff(perfil);
+    }).catch(function(e){ console.error("perfil",e); _loginError("Error verificando el acceso."); });
+  }).catch(function(e){ console.error("login",e); _loginError("Usuario o contrasena incorrectos"); });
 }
 window.doLogin=doLogin;
+function _tryAutoLogin(){
+  var cli=_sbAuth(); if(!cli) return;
+  cli.auth.getSession().then(function(res){
+    var s = res && res.data ? res.data.session : null;
+    if(!s) return;
+    _authToken = s.access_token;
+    apiGet("staff_perfiles","select=rol,vendedor_id,nombre&auth_user_id=eq."+s.user.id+"&activo=is.true").then(function(rows){
+      var perfil = (Array.isArray(rows)&&rows[0]) ? rows[0] : null;
+      if(perfil && perfil.rol===PANEL_ROL) _entrarStaff(perfil);
+    }).catch(function(){});
+  }).catch(function(){});
+}
+window.addEventListener("load", function(){ setTimeout(_tryAutoLogin, 300); });
 
 
 function doLogout(){
+  try{ var c=_sbAuth(); if(c) c.auth.signOut(); }catch(e){}
+  _authToken=null;
   curUser=null;curRole=null;
   document.getElementById("loginScreen").style.display="flex";
   document.getElementById("app").style.display="none";
@@ -26748,7 +26787,7 @@ function autoCategorizar(){
     fetch(SB_URL+"/rest/v1/ventas?select=producto_id,cantidad&estado=eq.confirmada&order=id",{
       headers:{
         "apikey":SB_KEY,
-        "Authorization":"Bearer "+SB_KEY,
+        "Authorization":"Bearer "+(_authToken||SB_KEY),
         "Range":desde+"-"+hasta,
         "Range-Unit":"items",
         "Prefer":"count=none"
@@ -38252,7 +38291,7 @@ function destGuardarPanel(){try{
   var url=SB_URL+'/rest/v1/paneles_destacados'+(id?'?id=eq.'+id:'');
   fetch(url,{
     method:id?'PATCH':'POST',
-    headers:{'Content-Type':'application/json','apikey':SB_KEY,'Authorization':'Bearer '+SB_KEY,'Prefer':'return=representation'},
+    headers:{'Content-Type':'application/json','apikey':SB_KEY,'Authorization':'Bearer '+(_authToken||SB_KEY),'Prefer':'return=representation'},
     body:JSON.stringify(data)
   }).then(function(r){
     if(!r.ok)return r.text().then(function(t){toast('Error: '+t.slice(0,150),'terr');});
@@ -38357,7 +38396,7 @@ function fichaLoadPage(){
   if(!el)return;
   el.innerHTML='<div class="loading"><div class="spin"></div>Cargando productos...</div>';
   var url=SB_URL+"/rest/v1/productos?select=id,nombre,empresa,imagen_url,notas,acordes,kit_componentes,no_aplica_ficha&activo=is.true&order=empresa,nombre&limit=2000";
-  var headers={"apikey":SB_KEY,"Authorization":"Bearer "+SB_KEY};
+  var headers={"apikey":SB_KEY,"Authorization":"Bearer "+(_authToken||SB_KEY)};
   fetch(url,{headers:headers})
   .then(function(r){return r.json();})
   .then(function(prods){
@@ -39158,7 +39197,7 @@ function _fichaGuardarCore(prodId, prod, urlImagenInspirador){
   // AHORA: SIEMPRE consultamos la BD primero por producto_id. Si encontramos ficha(s),
   //        hacemos PATCH a la MÁS RECIENTE. Si no, hacemos POST. Así es imposible
   //        crear duplicados aunque haya fallas en la carga del modal.
-  var headers={"Content-Type":"application/json","apikey":SB_KEY,"Authorization":"Bearer "+SB_KEY,"Prefer":"return=minimal"};
+  var headers={"Content-Type":"application/json","apikey":SB_KEY,"Authorization":"Bearer "+(_authToken||SB_KEY),"Prefer":"return=minimal"};
 
   apiGet("fichas_perfume","select=id,updated_at&producto_id=eq."+prodId+"&order=updated_at.desc.nullslast,id.desc&limit=10")
     .then(function(existentes){
@@ -39265,8 +39304,8 @@ function fichaImportarTodas(){
       var fichaExistenteId=existentesPorProd[best.id];
       return function(){
         var prom=fichaExistenteId
-          ? fetch(SB_URL+"/rest/v1/fichas_perfume?id=eq."+fichaExistenteId,{method:"PATCH",headers:{"apikey":SB_KEY,"Authorization":"Bearer "+SB_KEY,"Content-Type":"application/json","Prefer":"return=minimal"},body:JSON.stringify(data)})
-          : fetch(SB_URL+"/rest/v1/fichas_perfume",{method:"POST",headers:{"apikey":SB_KEY,"Authorization":"Bearer "+SB_KEY,"Content-Type":"application/json","Prefer":"return=minimal"},body:JSON.stringify(data)});
+          ? fetch(SB_URL+"/rest/v1/fichas_perfume?id=eq."+fichaExistenteId,{method:"PATCH",headers:{"apikey":SB_KEY,"Authorization":"Bearer "+(_authToken||SB_KEY),"Content-Type":"application/json","Prefer":"return=minimal"},body:JSON.stringify(data)})
+          : fetch(SB_URL+"/rest/v1/fichas_perfume",{method:"POST",headers:{"apikey":SB_KEY,"Authorization":"Bearer "+(_authToken||SB_KEY),"Content-Type":"application/json","Prefer":"return=minimal"},body:JSON.stringify(data)});
         return prom.then(function(r){
           if(r.ok||r.status===201||r.status===204){
             if(fichaExistenteId)actualizadas++;else importadas++;
