@@ -12893,6 +12893,85 @@ function _ofertaFormatFechas(o){
   return '';
 }
 
+// ─── ALERTAS Y RESUMEN (Ola 1: detectar errores silenciosos) ───────
+// Detecta problemas en una campaña (sin tocar nada, solo lee datos cargados).
+function _ofAlertasCampania(c, oferta, prodsAsig){
+  var al=[]; prodsAsig=prodsAsig||[];
+  var P=(typeof prods!=='undefined'?prods:[]);
+  var vig=(c.activa!==false) && oferta && _ofertaEstaVigente(oferta);
+  if(vig && prodsAsig.length===0) al.push('Vigente pero sin productos asignados');
+  if(prodsAsig.length){
+    var sinStock=prodsAsig.filter(function(pid){var p=P.find(function(x){return x.id===pid;});return p&&(p.stock_actual||0)<=0;}).length;
+    if(sinStock>0) al.push(sinStock+' de '+prodsAsig.length+' producto'+(prodsAsig.length===1?'':'s')+' sin stock');
+  }
+  if(oferta && _ofertaEstaVencida(oferta) && c.activa!==false) al.push('Oferta vencida — conviene pausarla o renovar fechas');
+  if(oferta && oferta.tipo==='precio_unico' && prodsAsig.length && typeof calcP==='function'){
+    var sinDesc=prodsAsig.filter(function(pid){var p=P.find(function(x){return x.id===pid;});if(!p)return false;var pi=calcP(p).pi||0;return pi>0 && (oferta.precio_unico||0)>=pi;}).length;
+    if(sinDesc>0) al.push('El precio único NO genera descuento en '+sinDesc+' producto'+(sinDesc===1?'':'s'));
+  }
+  return al;
+}
+// Detecta problemas en una oferta individual.
+function _ofAlertasIndividual(o){
+  var al=[]; var P=(typeof prods!=='undefined'?prods:[]);
+  var p=P.find(function(x){return x.id===o.producto_id;});
+  if(o.activa!==false && _ofertaEstaVencida(o)) al.push('Vencida pero sigue activa');
+  if(p && (p.stock_actual||0)<=0 && _ofertaEstaVigente(o)) al.push('Producto sin stock');
+  if(o.tipo==='precio_unico' && p && typeof calcP==='function'){
+    var pi=calcP(p).pi||0;
+    if(pi>0 && (o.precio_unico||0)>=pi) al.push('El precio único NO descuenta (≥ precio normal)');
+  }
+  return al;
+}
+// Tira de resumen arriba del grid de campañas.
+function _ofResumenHTML(){
+  var camps=window._campaniasData||[];
+  var vig=0,prog=0,venc=0,paus=0,alert=0;
+  camps.forEach(function(c){
+    var oferta=(window._ofertasDeCampanias||[]).find(function(o){return o.campania_id===c.id;});
+    if(c.activa===false){paus++;}
+    else if(oferta && _ofertaEstaVigente(oferta)){vig++;}
+    else if(oferta && _ofertaEstaProgramada(oferta)){prog++;}
+    if(oferta && _ofertaEstaVencida(oferta)){venc++;}
+    var prodsAsig=(window._ofertasCampaniaProductos||{})[c.id]||[];
+    if(_ofAlertasCampania(c,oferta,prodsAsig).length) alert++;
+  });
+  function chip(emoji,label,n,color){
+    return '<div style="display:flex;align-items:center;gap:.35rem;background:var(--sur2);border:1px solid var(--bd);border-radius:8px;padding:.35rem .6rem">'+
+      '<span style="font-size:.9rem">'+emoji+'</span>'+
+      '<span style="font-size:1.05rem;font-weight:800;color:'+color+'">'+n+'</span>'+
+      '<span style="font-size:.64rem;color:var(--tx3)">'+label+'</span></div>';
+  }
+  if(!camps.length) return '';
+  return '<div style="display:flex;gap:.5rem;flex-wrap:wrap;margin-bottom:.8rem">'+
+    chip('🔥','vigentes',vig,'#9ee2b8')+
+    chip('📅','programadas',prog,'#a0a8d0')+
+    chip('⏱','vencidas',venc,'#e8a0a0')+
+    chip('⏸','pausadas',paus,'#e8c0a0')+
+    (alert>0?chip('⚠','con alertas',alert,'#ffcc66'):'')+
+  '</div>';
+}
+
+// Resultados de campaña (Ola 2): llama al RPC y muestra unidades/pedidos/facturado.
+function verResultadosCampania(id, btn){
+  if(btn){ btn.disabled=true; btn.textContent='⏳ Calculando...'; }
+  api("POST","rpc/oferta_campania_stats",{p_campania_id:id}).then(function(s){
+    s=s||{};
+    var cont=document.getElementById('ofRes_'+id);
+    if(cont){
+      cont.innerHTML='<div style="background:var(--sur);border:1px solid var(--bd);border-radius:7px;padding:.5rem .65rem;display:flex;gap:.9rem;flex-wrap:wrap;align-items:center">'+
+        '<div style="font-size:.58rem;color:var(--tx3);text-transform:uppercase;letter-spacing:.05em">Resultados</div>'+
+        '<span style="font-size:.7rem;color:var(--tx2)">📦 <strong style="color:var(--tx)">'+(s.unidades||0)+'</strong> u</span>'+
+        '<span style="font-size:.7rem;color:var(--tx2)">🧾 <strong style="color:var(--tx)">'+(s.pedidos||0)+'</strong> pedidos</span>'+
+        '<span style="font-size:.7rem;color:var(--tx2)">💰 <strong style="color:#9ee2b8">$'+Number(s.facturado||0).toLocaleString("es-AR")+'</strong></span>'+
+      '</div>';
+    }
+  }).catch(function(e){
+    console.error('[resultados campaña]',e);
+    if(btn){ btn.disabled=false; btn.textContent='📊 Ver resultados'; }
+  });
+}
+
 // ─── RENDER GRID DE CAMPAÑAS ───────────────────────────────────────
 function renderCampaniasGrid(){
   var grid = document.getElementById('campaniasGrid');
@@ -12904,7 +12983,7 @@ function renderCampaniasGrid(){
            (c.descripcion||'').toLowerCase().indexOf(srch) >= 0;
   });
   if(!data.length){
-    grid.innerHTML = '<div class="empty" style="padding:2.5rem;text-align:center;color:var(--tx3);background:var(--sur2);border-radius:10px;border:1px dashed var(--bd)">'+
+    grid.innerHTML = _ofResumenHTML() + '<div class="empty" style="padding:2.5rem;text-align:center;color:var(--tx3);background:var(--sur2);border-radius:10px;border:1px dashed var(--bd)">'+
       '<div style="font-size:2rem;margin-bottom:.5rem;opacity:.5">🔥</div>'+
       '<div style="margin-bottom:.5rem">Todavía no creaste ninguna campaña</div>'+
       '<button class="btn btn-a" onclick="abrirModalCampania(null)">➕ Crear primera campaña</button>'+
@@ -12915,6 +12994,7 @@ function renderCampaniasGrid(){
   data.forEach(function(c){
     var oferta = (window._ofertasDeCampanias||[]).find(function(o){return o.campania_id === c.id;});
     var prodsAsig = (window._ofertasCampaniaProductos||{})[c.id] || [];
+    var _alertas = _ofAlertasCampania(c, oferta, prodsAsig);
     var pestana = c.pestana_id
       ? (window._pestanasParaCampanias||[]).find(function(t){return t.id === c.pestana_id;})
       : null;
@@ -12961,6 +13041,10 @@ function renderCampaniasGrid(){
         (pestana?'<span>📂 Pestaña: <strong style="color:var(--tx)">'+_ofEsc(pestana.nombre)+'</strong></span>':'')+
         (c.abrir_pestana_al_entrar?'<span style="color:#5b8dee">🚪 Abre al entrar</span>':'')+
       '</div>'+
+      // Resultados (Ola 2): botón que carga las ventas de la campaña en su vigencia
+      '<div id="ofRes_'+c.id+'" style="margin-bottom:.5rem"><button class="btn btn-g" onclick="verResultadosCampania(\''+c.id+'\',this)" style="font-size:.7rem;width:100%">📊 Ver resultados</button></div>'+
+      // Alertas (Ola 1)
+      (_alertas.length ? '<div style="background:rgba(255,180,80,.08);border:1px solid rgba(255,180,80,.3);border-radius:6px;padding:.4rem .55rem;margin-bottom:.5rem;font-size:.63rem;color:#e8c089;line-height:1.55">'+_alertas.map(function(a){return '⚠ '+_ofEsc(a);}).join('<br>')+'</div>' : '')+
       // Acciones
       '<div style="display:flex;gap:.35rem;flex-wrap:wrap">'+
         '<button class="btn btn-a" onclick="abrirModalCampania(\''+c.id+'\')" style="font-size:.7rem;flex:1">✏ Editar</button>'+
@@ -12982,7 +13066,7 @@ function renderCampaniasGrid(){
     '</div>';
   });
   html += '</div>';
-  grid.innerHTML = html;
+  grid.innerHTML = _ofResumenHTML() + html;
 }
 
 // ─── RENDER GRID DE OFERTAS INDIVIDUALES ───────────────────────────
@@ -13020,11 +13104,12 @@ function renderOfertasIndividualesGrid(){
   data.forEach(function(o){
     var p = (typeof prods!=='undefined'?prods:[]).find(function(x){return x.id === o.producto_id;});
     var nomProd = p ? p.nombre : '#'+o.producto_id+' (producto eliminado)';
+    var _alI = _ofAlertasIndividual(o);
     html += '<tr style="border-bottom:1px solid var(--bd)">'+
       '<td style="padding:.5rem .55rem;color:var(--tx);font-weight:500">'+_ofEsc(nomProd)+'</td>'+
       '<td style="padding:.5rem .55rem;color:var(--acc);font-weight:600">'+_ofEsc(_ofertaDescripcionCorta(o))+'</td>'+
       '<td style="padding:.5rem .55rem;color:var(--tx3);font-size:.7rem">'+_ofertaFormatFechas(o)+'</td>'+
-      '<td style="padding:.5rem .55rem">'+_ofertaBadgeEstado(o)+'</td>'+
+      '<td style="padding:.5rem .55rem">'+_ofertaBadgeEstado(o)+(_alI.length?' <span title="'+_ofEsc(_alI.join(' · '))+'" style="cursor:help;color:#ffcc66;font-weight:700">⚠</span>':'')+'</td>'+
       '<td style="padding:.5rem .55rem">'+
         (p?'<button class="btn btn-g" onclick="openProdModal('+o.producto_id+')" style="font-size:.68rem">✏ Editar producto</button>':'')+
       '</td>'+
