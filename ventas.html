@@ -3598,7 +3598,7 @@ window.ccGenerarCuotasParaPedido = function(pedidoId, clienteId, planId, totalPe
 
 window.ccAbrirSelectorPlan = function(pedidoId, clienteId, totalPedido, callback){
   Promise.all([
-    apiGet('clientes','select=*&id=eq.'+clienteId+'&limit=1'),
+    apiGet('clientes','select=*&id=eq.'+clienteId+'&limit=1').catch(function(){return [];}),
     apiGet('cc_planes_cliente','select=*&cliente_id=eq.'+clienteId+'&activo=eq.true&order=nro_cuotas.asc').catch(function(){return [];})
   ]).then(function(res){
     var cli = (res[0] && res[0][0]) || null;
@@ -3613,6 +3613,7 @@ window.ccAbrirSelectorPlan = function(pedidoId, clienteId, totalPedido, callback
       return;
     }
     if(!planes.length){
+      toast('Este cliente no tiene planes de cuotas configurados. Configurá uno en la CC del cliente.','twarn',5000);
       if(callback) callback(null);
       return;
     }
@@ -4050,6 +4051,7 @@ window._ccVerificarYConsolidarPedidoCC = function(pedidoId){
 
 // ── Ver cuenta corriente del cliente ──────────────────────────
 function vcVerCC(clienteId, clienteNombre){
+  var _prev=document.getElementById("_moVcCC"); if(_prev) _prev.remove();
   var mo=document.createElement("div");mo.className="mo open";mo.id="_moVcCC";
     mo.style.zIndex="99999";
   mo.innerHTML="<div class='md' style='max-width:560px;width:95%;max-height:90vh;display:flex;flex-direction:column'>"+
@@ -4064,8 +4066,8 @@ function vcVerCC(clienteId, clienteNombre){
   document.body.appendChild(mo);
   // Cargar todo: cliente entero, pedidos activos, pagos nuevos, movimientos viejos
   Promise.all([
-    apiGet("clientes","select=*&id=eq."+clienteId+"&limit=1"),
-    apiGet("pedidos_catalogo","select=id,nro_orden,total,cobrado_total,estado,created_at,vendedor_id,transferida_por_id,items,cc_fecha_vencimiento,cc_ciclo,cc_recargo_mora,cc_nro_cuotas&cliente_id=eq."+clienteId+"&estado=neq.cancelado&estado=neq.cobrado&order=created_at.asc"),
+    apiGet("clientes","select=*&id=eq."+clienteId+"&limit=1").catch(function(){return [];}),
+    apiGet("pedidos_catalogo","select=id,nro_orden,total,cobrado_total,estado,created_at,vendedor_id,transferida_por_id,items,cc_fecha_vencimiento,cc_ciclo,cc_recargo_mora,cc_nro_cuotas&cliente_id=eq."+clienteId+"&estado=neq.cancelado&estado=neq.cobrado&order=created_at.asc").catch(function(){return [];}),
     apiGet("cc_pagos","select=*&cliente_id=eq."+clienteId+"&order=fecha.desc,created_at.desc&limit=10").catch(function(){return [];}),
     apiGet("cuenta_corriente_movimientos","select=*&cliente_id=eq."+clienteId+"&order=created_at.desc&limit=10").catch(function(){return [];})
   ]).then(function(res){
@@ -5521,6 +5523,10 @@ function executeVenta(items,reservaDecs){
         if(diff===0)return;
         var pid=parseInt(pidStr);
         stockProms.push(patchStockFresco(pid,{stock_actual:-diff,reserva:+diff},'Editar pedido diff'));
+        try{
+          var _pn=(prods.find(function(p){return p.id===pid;})||{}).nombre||null;
+          _logMovStock({pid:pid,nombre:_pn,tipo:(diff>0?'reserva':'reserva_cancelada'),cantidad:Math.abs(diff),motivo:'Edición pedido '+(window._editandoPedidoOrden||'')+' ('+(diff>0?'+':'')+diff+' u)'});
+        }catch(_eLog){}
       });
     }
     // Ajustar stock de combos nuevos y eliminados
@@ -5534,7 +5540,10 @@ function executeVenta(items,reservaDecs){
           var chain=Promise.resolve();
           ci.forEach(function(it){
             var cant=(it.cantidad||1)*(combo.qty||1);
-            chain=chain.then(function(){return patchStockFresco(it.producto_id,{stock_actual:-cant,reserva:+cant},"Editar pedido - combo nuevo");});
+            chain=chain.then(function(){
+              try{var _pn=(prods.find(function(p){return p.id===it.producto_id;})||{}).nombre||it.producto_nombre||null;_logMovStock({pid:it.producto_id,nombre:_pn,tipo:'reserva',cantidad:cant,motivo:'Edición pedido '+(window._editandoPedidoOrden||'')+' - combo nuevo'});}catch(_e){}
+              return patchStockFresco(it.producto_id,{stock_actual:-cant,reserva:+cant},"Editar pedido - combo nuevo");
+            });
           });
           return chain;
         })
@@ -5547,7 +5556,10 @@ function executeVenta(items,reservaDecs){
           var chain=Promise.resolve();
           ci.forEach(function(it){
             var cant=(it.cantidad||1)*(combo.qty||1);
-            chain=chain.then(function(){return patchStockFresco(it.producto_id,{stock_actual:+cant,reserva:-cant},"Editar pedido - combo eliminado");});
+            chain=chain.then(function(){
+              try{var _pn=(prods.find(function(p){return p.id===it.producto_id;})||{}).nombre||it.producto_nombre||null;_logMovStock({pid:it.producto_id,nombre:_pn,tipo:'reserva_cancelada',cantidad:cant,motivo:'Edición pedido '+(window._editandoPedidoOrden||'')+' - combo eliminado'});}catch(_e){}
+              return patchStockFresco(it.producto_id,{stock_actual:+cant,reserva:-cant},"Editar pedido - combo eliminado");
+            });
           });
           return chain;
         })
@@ -5726,13 +5738,23 @@ function loadPedidosWeb(){
     apiGet("pedidos_catalogo","select=*&estado=eq.cancelado&order=created_at.desc&limit=50"),
     // UNIFICADO: las "transferidas" ahora son los pedidos_catalogo con transferida_por_id (sistema único).
     // Marcela escribe acá ahora; David/Facu transfieren acá. Una sola fuente.
-    apiGet("pedidos_catalogo","select=*&transferida_por_id=not.is.null&order=transferida_at.desc.nullslast,created_at.desc&limit=200")
+    apiGet("pedidos_catalogo","select=*&transferida_por_id=not.is.null&order=transferida_at.desc.nullslast,created_at.desc&limit=200"),
+    // Stock fresco: para que los badges R/! reflejen la reserva real (evita falsos "!")
+    apiGet("productos","select=id,stock_actual,reserva&activo=is.true&limit=2000").catch(function(){return [];})
   ]).then(function(res){
     var sinCobrar=(Array.isArray(res[0])?res[0]:[]).concat(Array.isArray(res[1])?res[1]:[]);
     var seen={}; sinCobrar=sinCobrar.filter(function(p){if(seen[p.id])return false;seen[p.id]=true;return true;});
     var pedidos=sinCobrar.concat(Array.isArray(res[2])?res[2]:[]).concat(Array.isArray(res[3])?res[3]:[]);
     // Las transferidas ya son pedidos_catalogo, no necesitan flag _esTransf
     var transferidas=Array.isArray(res[4])?res[4]:[];
+    // Refrescar cache prods (stock_actual/reserva) — corrige el badge desactualizado
+    try{
+      var _fp=Array.isArray(res[5])?res[5]:[];
+      if(_fp.length && Array.isArray(prods) && prods.length){
+        var _pm={}; _fp.forEach(function(p){_pm[p.id]=p;});
+        prods.forEach(function(p){var f=_pm[p.id]; if(f){p.stock_actual=f.stock_actual; p.reserva=f.reserva;}});
+      }
+    }catch(_e){}
     window._pedidosData=pedidos;
     window._transfData=transferidas;
     _renderPedidosFiltrados(window._pedFiltroEstado||"todos");

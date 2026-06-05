@@ -3899,6 +3899,58 @@ function patchStockFresco(prodId, delta, motivo){
   });
 }
 
+// ═══ Reconciliación de stock al EDITAR items de un pedido (2026-06-04) ═══
+// Aplica SOLO la diferencia (nuevo - viejo) de cantidades por producto, reusando patchStockFresco.
+// Expande combos a sus componentes, saltea decants/placeholders, y distingue fase reserva vs cobrado.
+// Misma lógica probada que _adminCancelarPedido, pero por delta. Devuelve promesa; nunca tira.
+function _reconciliarStockEdicion(oldItems, newItems, estabaCobrado, vendedorId, nroOrden){
+  try{
+    var netoProd={};      // producto_id real -> cantidad neta (nuevo - viejo)
+    var combosNetos={};   // combo_id -> cantidad neta
+    function acumular(items, signo){
+      (items||[]).forEach(function(it){
+        if(!it || it.isDecan) return;
+        var qty=(parseInt(it.qty)||parseInt(it.cantidad)||1)*signo;
+        if(!qty) return;
+        var cid=comboIdDeItem(it);
+        if(cid){ combosNetos[cid]=(combosNetos[cid]||0)+qty; return; }
+        if(!_esProductoNumerico(it.producto_id)) return;
+        var pid=parseInt(it.producto_id,10);
+        netoProd[pid]=(netoProd[pid]||0)+qty;
+      });
+    }
+    acumular(oldItems,-1);
+    acumular(newItems,+1);
+    var comboIds=Object.keys(combosNetos).filter(function(c){return combosNetos[c]!==0;});
+    var prep = comboIds.length ? Promise.all(comboIds.map(function(cid){
+      return apiGet('combo_items','select=producto_id,cantidad&combo_id=eq.'+cid).then(function(ci){
+        if(!Array.isArray(ci))return;
+        ci.forEach(function(c){
+          if(!c.producto_id)return;
+          var pid=parseInt(c.producto_id,10); if(!pid)return;
+          netoProd[pid]=(netoProd[pid]||0)+(parseInt(c.cantidad)||1)*combosNetos[cid];
+        });
+      }).catch(function(e){console.error('[reconcil combo]',cid,e);});
+    })) : Promise.resolve();
+    return prep.then(function(){
+      var ops=[];
+      Object.keys(netoProd).forEach(function(pidStr){
+        var pid=parseInt(pidStr,10); var d=netoProd[pid]; if(!pid||!d)return;
+        // d>0 = se agregaron unidades (descontar); d<0 = se quitaron (devolver).
+        var delta = estabaCobrado ? _dV(vendedorId, d, {stock_actual:-d}) : {stock_actual:-d, reserva:d};
+        ops.push(patchStockFresco(pid, delta, 'Ajuste edición pedido '+(nroOrden||'')));
+        // Registro de auditoría (best-effort): deja rastro del ajuste por edición.
+        try{
+          var _pn=(typeof prods!=='undefined'&&prods)?((prods.find(function(p){return p.id===pid;})||{}).nombre||null):null;
+          var _tipo=estabaCobrado?(d>0?'venta':'devolucion'):(d>0?'reserva':'reserva_cancelada');
+          _logMovStock({pid:pid,nombre:_pn,tipo:_tipo,cantidad:Math.abs(d),motivo:'Edición pedido '+(nroOrden||'')+' ('+(d>0?'+':'')+d+' u)'});
+        }catch(_eLog){}
+      });
+      return Promise.all(ops);
+    });
+  }catch(e){ console.error('[_reconciliarStockEdicion]',e); return Promise.resolve(); }
+}
+
 // comboIdDeItem (2026-06-03 auditoría stock): resuelve el combo_id de un item de pedido, sea cual sea su formato.
 //  · Formato A (nuevo):     {isCombo:true, combo_id:"11"}  → 11
 //  · Formato B (viejo):     {producto_id:"combo_10"}        → 10
@@ -8025,6 +8077,7 @@ function _adminEditarItemsPedido(id){
     var items=[];try{items=typeof p.items==='string'?JSON.parse(p.items):p.items||[];}catch(e){items=[];}
     if(!Array.isArray(items))items=[];
     window._editPedItems=items.map(function(it){return Object.assign({},it);});
+    window._editPedItemsOriginal=items.map(function(it){return Object.assign({},it);});
     window._editPedId=id;
     window._editPedNro=p.nro_orden||('#'+id);
     _adminEditarItemsUI();
@@ -8190,7 +8243,7 @@ function _adminGuardarEditItems(){
     return s+(prec*qty);
   },0);
   // FIX 2026-05-18 BUG #9: chequear si pedido está cobrado (para avisar al admin)
-  apiGet('pedidos_catalogo','select=estado,confirmado_cobro,cobrado_total,total,nro_orden&id=eq.'+id).then(function(pedRows){
+  apiGet('pedidos_catalogo','select=estado,confirmado_cobro,cobrado_total,total,nro_orden,vendedor_id&id=eq.'+id).then(function(pedRows){
     var pedActual = (pedRows && pedRows[0]) || {};
     var teniaCobro = (pedActual.estado==='cobrado' || pedActual.estado==='cobrado_parcial' || pedActual.confirmado_cobro || (parseFloat(pedActual.cobrado_total)||0) > 0);
     var totalAnt = parseFloat(pedActual.total) || 0;
@@ -8207,7 +8260,11 @@ function _adminGuardarEditItems(){
       if(diffTotal !== 0){
         msgConfirm += '\nDiferencia: ' + (diffTotal > 0 ? '+' : '') + fmt(diffTotal);
       }
-      msgConfirm += '\n\n⚠️ Atención: el stock NO se ajusta automáticamente al editar items.';
+      if(teniaCobro){
+        msgConfirm += '\n\n⚠️ El stock NO se ajusta automáticamente en pedidos ya cobrados (la venta ya está registrada).';
+      } else {
+        msgConfirm += '\n\n✅ El stock se ajustará automáticamente según los cambios de items.';
+      }
 
       // FIX 2026-05-18 BUG #9: avisos específicos si está cobrado
       if(teniaCobro){
@@ -8241,6 +8298,11 @@ function _adminGuardarEditItems(){
       }
 
       return Promise.all(promesas).then(function(){
+        // Reconciliar stock por la diferencia de items (solo pedidos NO cobrados).
+        return (teniaCobro ? Promise.resolve()
+          : _reconciliarStockEdicion(window._editPedItemsOriginal||[], items, false, pedActual.vendedor_id, nroOrd));
+      }).then(function(){
+        if(!teniaCobro && typeof loadProds==='function') loadProds();
         var notaLog = 'Items editados por admin (nuevo total '+fmt(totalNuevo)+')';
         if(teniaCobro) notaLog += ' — PEDIDO YA COBRADO: ventas viejas no se modifican' + (diffTotal !== 0 ? ', diff ' + (diffTotal > 0 ? '+' : '') + fmt(diffTotal) : '');
         if(tieneCuotas && !tienePagos) notaLog += ' — cuotas borradas para regenerar';
@@ -8539,7 +8601,8 @@ function _adminRevertirCobro(id){
       cobrado_total:0,
       cobrado_parcial:0,
       confirmado_at:null,
-      forma_pago:null
+      forma_pago:null,
+      items_cobrados:'[]'
     },'id=eq.'+id));
 
     // === [B] Devolver stock vendido → reserva (revertir el descuento del cobro) ===
@@ -17005,7 +17068,7 @@ window.ccGenerarCuotasParaPedido = function(pedidoId, clienteId, planId, totalPe
 // pedidoId, clienteId, totalPedido, callback(planId)
 window.ccAbrirSelectorPlan = function(pedidoId, clienteId, totalPedido, callback){
   Promise.all([
-    apiGet('clientes','select=*&id=eq.'+clienteId+'&limit=1'),
+    apiGet('clientes','select=*&id=eq.'+clienteId+'&limit=1').catch(function(){return [];}),
     apiGet('cc_planes_cliente','select=*&cliente_id=eq.'+clienteId+'&activo=eq.true&order=nro_cuotas.asc').catch(function(){return [];})
   ]).then(function(res){
     var cli = (res[0] && res[0][0]) || null;
@@ -17021,7 +17084,7 @@ window.ccAbrirSelectorPlan = function(pedidoId, clienteId, totalPedido, callback
       return;
     }
     if(!planes.length){
-      // No tiene planes habilitados → tratar como pago único (1 cuota)
+      toast('Este cliente no tiene planes de cuotas configurados. Configurá uno en la CC del cliente.','twarn',5000);
       if(callback) callback(null);
       return;
     }
@@ -17462,6 +17525,7 @@ window.ccCrearCuotas = function(pedidoId, nroCuotas, montoTotal, fechaInicial, d
 function _adminVerCC(clienteId, clienteNombre){
   // Guardar referencia al nombre actual para uso de funciones internas (export, borrar pago)
   window._admCCNombreActual = clienteNombre || "";
+  var _prev=document.getElementById("_moAdminCC"); if(_prev) _prev.remove();
   var mo=document.createElement("div");mo.className="mo open";mo.id="_moAdminCC";
     mo.style.zIndex="99999";
   mo.innerHTML="<div class='md' style='max-width:560px;width:95%;max-height:90vh;display:flex;flex-direction:column'>"+
@@ -17478,8 +17542,8 @@ function _adminVerCC(clienteId, clienteNombre){
     "</div></div>";
   document.body.appendChild(mo);
   Promise.all([
-    apiGet("clientes","select=*&id=eq."+clienteId+"&limit=1"),
-    apiGet("pedidos_catalogo","select=id,nro_orden,total,cobrado_total,estado,created_at,cc_fecha_vencimiento,cc_ciclo,cc_recargo_mora,cc_nro_cuotas&cliente_id=eq."+clienteId+"&estado=neq.cancelado&estado=neq.cobrado&order=created_at.asc"),
+    apiGet("clientes","select=*&id=eq."+clienteId+"&limit=1").catch(function(){return [];}),
+    apiGet("pedidos_catalogo","select=id,nro_orden,total,cobrado_total,estado,created_at,cc_fecha_vencimiento,cc_ciclo,cc_recargo_mora,cc_nro_cuotas&cliente_id=eq."+clienteId+"&estado=neq.cancelado&estado=neq.cobrado&order=created_at.asc").catch(function(){return [];}),
     apiGet("cc_pagos","select=*&cliente_id=eq."+clienteId+"&order=fecha.desc,created_at.desc&limit=200").catch(function(){return [];})
   ]).then(function(res){
     var el=document.getElementById("_adminCCContenido"); if(!el) return;
