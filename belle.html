@@ -12820,9 +12820,12 @@ function loadOfertasAdmin(){
     window._ofertasDeCampanias       = todasOfertas.filter(function(o){return o.campania_id;});
     // Indexar asignaciones por campaña
     window._ofertasCampaniaProductos = {};
+    window._ofertasCampaniaProductosVal = {}; // {campId:{pid:{precio_unico,descuento_pct}}}
     asignaciones.forEach(function(a){
       if(!window._ofertasCampaniaProductos[a.campania_id]) window._ofertasCampaniaProductos[a.campania_id] = [];
       window._ofertasCampaniaProductos[a.campania_id].push(a.producto_id);
+      if(!window._ofertasCampaniaProductosVal[a.campania_id]) window._ofertasCampaniaProductosVal[a.campania_id] = {};
+      window._ofertasCampaniaProductosVal[a.campania_id][a.producto_id] = { precio_unico: a.precio_unico, descuento_pct: a.descuento_pct };
     });
     renderCampaniasGrid();
     renderOfertasIndividualesGrid();
@@ -13143,7 +13146,8 @@ function abrirModalCampania(id){
   var pestanasOpts = '<option value="">— Sin pestaña asignada —</option>' +
     (window._pestanasParaCampanias||[]).map(function(t){
       return '<option value="'+t.id+'"'+(camp&&camp.pestana_id===t.id?' selected':'')+'>'+_ofEsc(t.nombre)+'</option>';
-    }).join('');
+    }).join('') +
+    '<option value="__nueva__">➕ Crear pestaña nueva…</option>';
 
   function localISO(iso){
     if(!iso) return '';
@@ -13196,7 +13200,7 @@ function abrirModalCampania(id){
       '<hr style="border:0;border-top:1px solid var(--bd);margin:.8rem 0">'+
       '<div style="font-weight:600;color:var(--acc);margin-bottom:.5rem;font-size:.85rem">📂 Pestaña asociada (opcional)</div>'+
       '<div class="fg" style="margin-bottom:.5rem"><label>Asignar a pestaña del catálogo</label>'+
-        '<select class="fi" id="campPestanaId" onchange="campRefreshPreview();campProdCargar();">'+pestanasOpts+'</select></div>'+
+        '<select class="fi" id="campPestanaId" onchange="campPestanaChange(this)">'+pestanasOpts+'</select></div>'+
       '<div id="campAvisoPestana" style="display:none;background:rgba(255,193,7,.12);border:1px solid rgba(255,193,7,.5);border-radius:6px;padding:.5rem .7rem;margin-top:.4rem;font-size:.7rem;color:#b58900;line-height:1.5">'+
         '⚠️ <b>Tenés apariencia visual configurada pero sin pestaña asignada.</b> Sin pestaña, los cambios visuales no se verán. '+
         'Al guardar, te ofreceré crear una pestaña automáticamente con el nombre de la campaña.'+
@@ -13356,7 +13360,11 @@ function abrirModalCampania(id){
       '<div class="fg" style="margin-top:.4rem">'+
         '<label>Texto explicativo (visible al cliente)</label>'+
         '<input class="fi" id="campCondicionesPago" type="text" placeholder="Ej: Solo pago en efectivo. Sin transferencia ni tarjeta." value="'+_ofEsc(camp&&camp.condiciones_pago?camp.condiciones_pago:'')+'">'+
-        '<div style="font-size:.6rem;color:var(--tx3);margin-top:.25rem;line-height:1.4">Aparece al cliente al ver productos de esta campaña.</div>'+
+        '<div style="display:flex;gap:.3rem;flex-wrap:wrap;margin-top:.4rem;align-items:center">'+
+          '<span style="font-size:.58rem;color:var(--tx3)">Modelos rápidos:</span>'+
+          CAMP_TEXTOS_MODELO.map(function(t,i){return '<button type="button" onclick="campSetTexto('+i+')" style="padding:.22rem .55rem;border:1px solid var(--bd);background:var(--sur2);color:var(--tx2);border-radius:20px;font-size:.62rem;cursor:pointer">'+_ofEsc(t.label)+'</button>';}).join('')+
+        '</div>'+
+        '<div style="font-size:.6rem;color:var(--tx3);margin-top:.25rem;line-height:1.4">Tocá un modelo para cargarlo y editalo, o escribí el tuyo. Aparece al cliente al ver productos de esta campaña.</div>'+
       '</div>'+
 
       // ════════ PRODUCTOS DE LA CAMPAÑA ════════
@@ -13721,6 +13729,45 @@ var CAMP_PRESETS_VISUAL = {
   }
 };
 
+function campPestanaChange(sel){
+  if(sel.value === '__nueva__'){
+    var nombre = (prompt('Nombre de la nueva pestaña del catálogo:')||'').trim();
+    if(!nombre){ sel.value=''; campRefreshPreview(); return; }
+    var base = nombre.toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g,'').replace(/[^a-z0-9]+/g,'-').replace(/^-+|-+$/g,'').slice(0,40) || 'pestana';
+    var slugs = (window._pestanasParaCampanias||[]).map(function(t){return t.slug;});
+    var slug = base, i=1; while(slugs.indexOf(slug)>=0){ i++; slug = base+'-'+i; }
+    var maxOrden = 0; (window._pestanasParaCampanias||[]).forEach(function(t){ if((t.orden||0)>maxOrden) maxOrden=t.orden||0; });
+    sel.disabled = true;
+    apiPost('pestanas_catalogo', { nombre:nombre, slug:slug, orden:maxOrden+1, activa:true }).then(function(res){
+      sel.disabled = false;
+      var nueva = (Array.isArray(res)&&res.length) ? res[0] : res;
+      if(!nueva || !nueva.id){ toast('No se pudo crear la pestaña','terr'); sel.value=''; return; }
+      (window._pestanasParaCampanias = window._pestanasParaCampanias||[]).push(nueva);
+      var opt = document.createElement('option'); opt.value = nueva.id; opt.textContent = nueva.nombre;
+      var optNueva = sel.querySelector('option[value="__nueva__"]');
+      if(optNueva) sel.insertBefore(opt, optNueva); else sel.appendChild(opt);
+      sel.value = nueva.id;
+      toast('Pestaña "'+nueva.nombre+'" creada y asignada ✨','tok');
+      campRefreshPreview(); if(typeof campProdCargar==='function') campProdCargar();
+    }).catch(function(e){ sel.disabled=false; sel.value=''; toast('Error al crear pestaña: '+((e&&e.message)||''),'terr'); });
+    return;
+  }
+  campRefreshPreview(); if(typeof campProdCargar==='function') campProdCargar();
+}
+
+// Modelos de texto explicativo (visible al cliente) — editables, se cargan al campo.
+var CAMP_TEXTOS_MODELO = [
+  { label: '⏳ Tiempo limitado', texto: 'Promoción válida por tiempo limitado y hasta agotar stock.' },
+  { label: '🚫 No acumulable', texto: 'Oferta no acumulable con otras promociones ni descuentos.' },
+  { label: '✨ Aprovechá', texto: 'Aprovechá estos precios especiales mientras dure la campaña.' },
+  { label: '💵 Pago', texto: 'Precios de campaña válidos abonando en efectivo o transferencia.' }
+];
+function campSetTexto(i){
+  var t = CAMP_TEXTOS_MODELO[i]; if(!t) return;
+  var inp = document.getElementById('campCondicionesPago');
+  if(inp){ inp.value = t.texto; inp.focus(); }
+}
+
 function campAplicarPreset(presetKey){
   var p = CAMP_PRESETS_VISUAL[presetKey];
   if(!p) return;
@@ -13782,12 +13829,29 @@ function campRefreshPreview(){
     ? '<img src="'+_ofEsc(logoUrl)+'" style="height:96px;max-width:240px;object-fit:contain;margin:-32px -8px;filter:drop-shadow(0 4px 8px rgba(0,0,0,.25))" onerror="this.outerHTML=\'<span style=&quot;color:'+texto+';font-weight:700;font-size:.85rem&quot;>'+_ofEsc(nombreCamp)+'</span>\'">'
     : '<span style="color:'+texto+';font-weight:700;font-size:.85rem;text-shadow:0 1px 2px rgba(0,0,0,.15)">'+_ofEsc(nombreCamp)+'</span>';
   var animClass = destacada ? 'campTabPulse' : '';
+  // Colores del catálogo (con fallback a la identidad de Belle)
+  var pFondo   = (document.getElementById('campColorFondoPagina') ||{value:''}).value || '#faf8f4';
+  var pFiltros = (document.getElementById('campColorFondoFiltros')||{value:''}).value || '#efe7d6';
+  var pCards   = (document.getElementById('campColorFondoCards')  ||{value:''}).value || '#ffffff';
+  var pBorde   = (document.getElementById('campColorBordeCards')  ||{value:''}).value || (fondo||'#c4965a');
+  var pBtn     = (document.getElementById('campColorBotones')     ||{value:''}).value || (fondo||'#c4965a');
+  var _card = function(){
+    return '<div style="flex:1;background:'+pCards+';border:1.5px solid '+pBorde+';border-radius:8px;padding:.45rem;min-width:0">'+
+      '<div style="background:rgba(0,0,0,.06);border-radius:5px;height:46px;margin-bottom:.35rem"></div>'+
+      '<div style="font-size:.58rem;color:#333;font-weight:600;margin-bottom:.1rem;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">Perfume Ejemplo</div>'+
+      '<div style="font-size:.66rem;color:'+pBtn+';font-weight:800;margin-bottom:.35rem">$25.000</div>'+
+      '<div style="background:'+pBtn+';color:#fff;text-align:center;border-radius:5px;font-size:.56rem;padding:.28rem 0;font-weight:700">Agregar</div>'+
+    '</div>';
+  };
   wrap.innerHTML =
-    '<div style="display:flex;gap:.4rem;align-items:center;width:100%;background:#f6f0e6;border-radius:6px;padding:2.4rem .6rem;overflow:visible">'+
-      '<div style="background:#fff;color:#888;padding:.4rem .7rem;border-radius:4px;font-size:.7rem;border:1px solid #ddd">🏠 Inicio</div>'+
-      '<div class="'+animClass+'" style="background:linear-gradient(135deg,'+fondo+','+acento+');padding:.4rem .8rem;border-radius:4px;display:flex;align-items:center;justify-content:center;min-width:90px;min-height:38px;box-shadow:0 2px 6px '+_hexToRgba(fondo, 0.4)+';overflow:visible;position:relative">'+contenidoTab+'</div>'+
-      '<div style="background:#fff;color:#888;padding:.4rem .7rem;border-radius:4px;font-size:.7rem;border:1px solid #ddd">Arabes</div>'+
-      '<div style="background:#fff;color:#888;padding:.4rem .7rem;border-radius:4px;font-size:.7rem;border:1px solid #ddd">Internacionales</div>'+
+    '<div style="background:'+pFondo+';border-radius:8px;padding:.6rem;border:1px solid rgba(0,0,0,.08)">'+
+      '<div style="display:flex;gap:.35rem;align-items:center;overflow:visible;padding:1.4rem .1rem .2rem">'+
+        '<div style="background:#fff;color:#888;padding:.35rem .6rem;border-radius:4px;font-size:.62rem;border:1px solid #ddd">🏠 Inicio</div>'+
+        '<div class="'+animClass+'" style="background:linear-gradient(135deg,'+fondo+','+acento+');padding:.35rem .7rem;border-radius:4px;display:flex;align-items:center;justify-content:center;min-width:80px;min-height:34px;box-shadow:0 2px 6px '+_hexToRgba(fondo, 0.4)+';overflow:visible;position:relative">'+contenidoTab+'</div>'+
+        '<div style="background:#fff;color:#888;padding:.35rem .6rem;border-radius:4px;font-size:.62rem;border:1px solid #ddd">Árabes</div>'+
+      '</div>'+
+      '<div style="background:'+pFiltros+';border-radius:6px;padding:.4rem .55rem;font-size:.6rem;color:#5b5347;margin:.5rem 0;font-weight:500">Filtros · Marca · Género · Precio</div>'+
+      '<div style="display:flex;gap:.5rem">'+_card()+_card()+_card()+'</div>'+
     '</div>';
 }
 
@@ -14037,6 +14101,11 @@ function abrirSelectorProductosCampania(campId){
     if(existing) existing.remove();
     window._campProdsAsignados = asignados.slice();
     window._campProdsId = campId;
+    var _ofCamp = (window._ofertasDeCampanias||[]).find(function(o){return o.campania_id === campId;});
+    window._campProdsTipo = _ofCamp ? _ofCamp.tipo : null;
+    window._campProdPrecios = {}; // {pid:{precio_unico,descuento_pct}}
+    var _vals = (window._ofertasCampaniaProductosVal||{})[campId] || {};
+    Object.keys(_vals).forEach(function(pid){ window._campProdPrecios[pid] = { precio_unico:_vals[pid].precio_unico, descuento_pct:_vals[pid].descuento_pct }; });
     var mo = document.createElement('div');
     mo.id = 'moCampProds';
     mo.className = 'mo';
@@ -14055,6 +14124,14 @@ function abrirSelectorProductosCampania(campId){
         '<div id="campProdContador" style="font-size:.72rem;color:var(--acc);font-weight:600">'+
           window._campProdsAsignados.length+' producto'+(window._campProdsAsignados.length===1?'':'s')+' seleccionado'+(window._campProdsAsignados.length===1?'':'s')+
         '</div>'+
+        ((window._campProdsTipo==='precio_unico'||window._campProdsTipo==='descuento_pct')?
+          '<div style="display:flex;gap:.4rem;align-items:center;background:rgba(196,150,90,.1);border:1px solid var(--bd);border-radius:6px;padding:.45rem .55rem;flex-wrap:wrap">'+
+            '<span style="font-size:.7rem;color:var(--tx2);font-weight:600">'+(window._campProdsTipo==='descuento_pct'?'⚡ Aplicar % OFF a todos los seleccionados:':'⚡ Poner % OFF sobre el precio normal a todos:')+'</span>'+
+            '<input type="number" min="0" max="95" id="campProdBulkVal" style="width:75px;padding:.3rem .4rem;background:var(--sur);border:1px solid var(--bd);border-radius:5px;color:var(--tx);font-size:.72rem;text-align:right" placeholder="%">'+
+            '<button class="btn btn-g" onclick="campProdAplicarTodos()" style="font-size:.7rem">Aplicar</button>'+
+            '<span style="font-size:.6rem;color:var(--tx3);width:100%;line-height:1.3">'+(window._campProdsTipo==='precio_unico'?'Calcula el precio único de cada producto restándole ese % a su precio normal. Después podés ajustar uno por uno.':'Después podés cambiar el % de productos puntuales.')+'</span>'+
+          '</div>'
+          : '')+
         '<div id="campProdLista" style="border:1px solid var(--bd);border-radius:8px;overflow-y:auto;max-height:55vh;background:var(--sur)"></div>'+
       '</div>'+
       '<div class="mf">'+
@@ -14075,7 +14152,7 @@ function abrirSelectorProductosCampania(campId){
   }
   if(listaProds){ _abrir(listaProds); }
   else {
-    apiGet('productos','select=id,nombre,empresa,stock_actual,activo&activo=is.true&order=empresa,nombre&limit=2000')
+    apiGet('productos','select=*&activo=is.true&order=empresa,nombre&limit=2000')
       .then(function(d){ _abrir(Array.isArray(d)?d:[]); })
       .catch(function(){ toast('No se pudieron cargar los productos','terr'); });
   }
@@ -14096,15 +14173,41 @@ function renderCampProductosSelector(){
     return;
   }
   var html = '';
+  var tipo = window._campProdsTipo;
   arr.slice(0,500).forEach(function(p){
     var checked = window._campProdsAsignados.indexOf(p.id) >= 0;
+    var cp=null; try{ cp=calcP(p); }catch(e){}
+    var pi = cp ? cp.pi : 0;
+    var derecha;
+    if(checked && (tipo==='precio_unico' || tipo==='descuento_pct')){
+      var vals = window._campProdPrecios[p.id] || {};
+      if(tipo==='precio_unico'){
+        var puv = (vals.precio_unico==null?'':vals.precio_unico);
+        derecha = '<div style="display:flex;flex-direction:column;align-items:flex-end;gap:.12rem">'+
+          (pi?'<span style="font-size:.58rem;color:var(--tx3)">Normal: <span style="text-decoration:line-through">'+fmt(pi)+'</span></span>':'')+
+          '<div style="display:flex;align-items:center;gap:.2rem"><span style="font-size:.65rem;color:var(--tx3)">$</span>'+
+          '<input type="number" min="0" value="'+puv+'" placeholder="precio único" onclick="event.stopPropagation()" oninput="campProdSetVal('+p.id+',\'precio_unico\',this.value)" style="width:100px;padding:.25rem .35rem;background:var(--sur2);border:1px solid var(--acc);border-radius:5px;color:var(--tx);font-size:.74rem;text-align:right;font-weight:600"></div>'+
+        '</div>';
+      } else {
+        var dpv = (vals.descuento_pct==null?'':vals.descuento_pct);
+        var res = (dpv!==''&&pi)?fmt(Math.round(pi*(1-dpv/100))):'';
+        derecha = '<div style="display:flex;flex-direction:column;align-items:flex-end;gap:.12rem">'+
+          (pi?'<span style="font-size:.58rem;color:var(--tx3)">Normal: '+fmt(pi)+(res?' → <b style="color:#1f9d57">'+res+'</b>':'')+'</span>':'')+
+          '<div style="display:flex;align-items:center;gap:.2rem">'+
+          '<input type="number" min="0" max="95" value="'+dpv+'" placeholder="%" onclick="event.stopPropagation()" oninput="campProdSetVal('+p.id+',\'descuento_pct\',this.value)" style="width:62px;padding:.25rem .35rem;background:var(--sur2);border:1px solid var(--acc);border-radius:5px;color:var(--tx);font-size:.74rem;text-align:right;font-weight:600">'+
+          '<span style="font-size:.62rem;color:var(--tx3)">% OFF</span></div>'+
+        '</div>';
+      }
+    } else {
+      derecha = '<span style="font-size:.65rem;color:'+((p.stock_actual||0)>0?'#7dd3a3':'#e88')+';font-weight:600;white-space:nowrap">'+(p.stock_actual||0)+' u.</span>';
+    }
     html += '<label style="display:flex;align-items:center;gap:.5rem;padding:.4rem .65rem;border-bottom:1px solid var(--bd);cursor:pointer;'+(checked?'background:rgba(196,90,58,.06)':'')+'" onclick="event.stopPropagation()">'+
       '<input type="checkbox" data-pid="'+p.id+'" onchange="campProdToggle('+p.id+',this.checked)" '+(checked?'checked':'')+'>'+
       '<div style="flex:1;min-width:0">'+
         (p.empresa?'<div style="font-size:.6rem;color:var(--acc);text-transform:uppercase;letter-spacing:.05em">'+_ofEsc(p.empresa)+'</div>':'')+
         '<div style="font-size:.78rem;color:var(--tx);line-height:1.3">'+_ofEsc((p.nombre||'').replace((p.empresa||'')+' - ',''))+'</div>'+
       '</div>'+
-      '<span style="font-size:.65rem;color:'+((p.stock_actual||0)>0?'#7dd3a3':'#e88')+';font-weight:600">'+(p.stock_actual||0)+' u.</span>'+
+      derecha+
     '</label>';
   });
   if(arr.length > 500){
@@ -14119,6 +14222,35 @@ function campProdToggle(pid, checked){
   if(!checked && idx >= 0) window._campProdsAsignados.splice(idx, 1);
   var c = document.getElementById('campProdContador');
   if(c) c.textContent = window._campProdsAsignados.length+' producto'+(window._campProdsAsignados.length===1?'':'s')+' seleccionado'+(window._campProdsAsignados.length===1?'':'s');
+  // Re-render para mostrar/ocultar el input de precio del producto (solo si el tipo lo usa)
+  if(window._campProdsTipo==='precio_unico' || window._campProdsTipo==='descuento_pct') renderCampProductosSelector();
+}
+
+// Captura el precio/descuento por producto (no re-renderiza para no perder el foco al tipear)
+function campProdSetVal(pid, campo, valor){
+  if(!window._campProdPrecios[pid]) window._campProdPrecios[pid] = {};
+  window._campProdPrecios[pid][campo] = (valor==='' ? null : parseFloat(valor));
+}
+
+// Aplica un % OFF a todos los seleccionados (descuento → %; precio único → calcula precio = normal − %)
+function campProdAplicarTodos(){
+  var tipo = window._campProdsTipo;
+  var v = parseFloat((document.getElementById('campProdBulkVal')||{}).value);
+  if(isNaN(v)){ toast('Ingresá un porcentaje','twarn'); return; }
+  var sel = window._campProdsAsignados || [];
+  if(!sel.length){ toast('No hay productos seleccionados','twarn'); return; }
+  sel.forEach(function(pid){
+    if(!window._campProdPrecios[pid]) window._campProdPrecios[pid] = {};
+    if(tipo==='descuento_pct'){
+      window._campProdPrecios[pid].descuento_pct = v;
+    } else if(tipo==='precio_unico'){
+      var p = (window._campProdsAll||[]).find(function(x){return x.id===pid;});
+      var pi = 0; try{ pi = calcP(p).pi; }catch(e){}
+      window._campProdPrecios[pid].precio_unico = pi ? Math.round(pi*(1-v/100)) : null;
+    }
+  });
+  renderCampProductosSelector();
+  toast('Aplicado a '+sel.length+' producto'+(sel.length===1?'':'s'),'tok');
 }
 
 function campProdSeleccionarTodos(visible){
@@ -14150,15 +14282,35 @@ function guardarProductosCampania(){
   var aAgregar = nuevos.filter(function(id){return actuales.indexOf(id) < 0;});
   var aQuitar  = actuales.filter(function(id){return nuevos.indexOf(id) < 0;});
   var ops = [];
+  var precios = window._campProdPrecios || {};
+  var origVals = (window._ofertasCampaniaProductosVal||{})[campId] || {};
+  var _num = function(x){ return (x==null||x==='') ? null : (isNaN(parseFloat(x))?null:parseFloat(x)); };
+  // Nuevos: POST con sus valores
   if(aAgregar.length){
-    var rows = aAgregar.map(function(pid){return {campania_id: campId, producto_id: pid};});
+    var rows = aAgregar.map(function(pid){
+      var v = precios[pid] || {};
+      return { campania_id: campId, producto_id: pid, precio_unico: _num(v.precio_unico), descuento_pct: _num(v.descuento_pct) };
+    });
     ops.push(apiPost('ofertas_campania_productos', rows));
   }
+  // Existentes que siguen: PATCH solo si cambió el precio/descuento
+  var aActualizar = 0;
+  nuevos.forEach(function(pid){
+    if(actuales.indexOf(pid) < 0) return; // es nuevo, ya lo maneja aAgregar
+    var nv = precios[pid] || {};
+    var ov = origVals[pid] || {};
+    var puNew = _num(nv.precio_unico), dpNew = _num(nv.descuento_pct);
+    var puOld = _num(ov.precio_unico), dpOld = _num(ov.descuento_pct);
+    if(puNew !== puOld || dpNew !== dpOld){
+      aActualizar++;
+      ops.push(apiPatch('ofertas_campania_productos', {precio_unico:puNew, descuento_pct:dpNew}, 'campania_id=eq.'+campId+'&producto_id=eq.'+pid));
+    }
+  });
   aQuitar.forEach(function(pid){
     ops.push(apiDelete('ofertas_campania_productos','campania_id=eq.'+campId+'&producto_id=eq.'+pid));
   });
   Promise.all(ops).then(function(){
-    toast('✅ Productos actualizados ('+aAgregar.length+' agregados, '+aQuitar.length+' quitados)','tok');
+    toast('✅ Guardado ('+aAgregar.length+' agregados, '+aActualizar+' actualizados, '+aQuitar.length+' quitados)','tok');
     cerrarSelectorProductosCampania();
     loadOfertasAdmin();
   }).catch(function(e){
