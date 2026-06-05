@@ -1680,6 +1680,25 @@ function _badgeReserva(prodId,qty){
     : "<span title='Sin reserva' style='display:inline-flex;align-items:center;justify-content:center;width:16px;height:16px;border-radius:50%;background:var(--red);color:#fff;font-size:.52rem;font-weight:900;margin-right:.2rem;flex-shrink:0'>!</span>";
 }
 
+// Badge de reserva para COMBOS (igual que ventas): R verde si todos los componentes
+// están reservados, ! rojo si falta alguno, C neutro si no hay cache de componentes.
+function _badgeReservaCombo(comboId,qty){
+  qty=qty||1;
+  var comps=(window._comboCompCache&&window._comboCompCache[comboId])||null;
+  var base='display:inline-flex;align-items:center;justify-content:center;width:16px;height:16px;border-radius:50%;font-size:.52rem;font-weight:900;margin-right:.2rem;flex-shrink:0';
+  if(!comps||!comps.length){
+    return "<span title='Combo' style='"+base+";background:var(--cyan);color:#000'>C</span>";
+  }
+  var todosOk=comps.every(function(it){
+    var p=prods.find(function(x){return x.id===it.producto_id;});
+    var reserva=p?p.reserva||0:0;
+    return reserva>=(it.cantidad||1)*qty;
+  });
+  return todosOk
+    ? "<span title='Combo reservado (todos sus componentes)' style='"+base+";background:var(--cyan);color:#000'>R</span>"
+    : "<span title='Combo: falta reservar algún componente' style='"+base+";background:var(--red);color:#fff'>!</span>";
+}
+
 // ── REMOVIDA: confirmarVenta — Marcela no puede vender directo, solo transferir a David ──
 
 var reservaDecisions={};
@@ -1715,12 +1734,26 @@ function loadPedidosWeb(){
     apiGet("pedidos_catalogo","select=*&confirmado_cobro=eq.true&order=created_at.desc&limit=50"+filtVend),
     apiGet("pedidos_catalogo","select=*&estado=eq.cancelado&order=created_at.desc&limit=30"+filtVend),
     // UNIFICADO: las transferidas son pedidos_catalogo con transferida_por_id
-    apiGet("pedidos_catalogo","select=*&transferida_por_id=not.is.null&order=transferida_at.desc.nullslast,created_at.desc&limit=200")
+    apiGet("pedidos_catalogo","select=*&transferida_por_id=not.is.null&order=transferida_at.desc.nullslast,created_at.desc&limit=200"),
+    apiGet("productos","select=id,stock_actual,reserva&activo=is.true&limit=2000").catch(function(){return [];}),
+    apiGet("combos","select=id,combo_items(producto_id,cantidad)&activo=is.true").catch(function(){return [];})
   ]).then(function(res){
     var sinCobrar=(Array.isArray(res[0])?res[0]:[]).concat(Array.isArray(res[1])?res[1]:[]);
     var seen={}; sinCobrar=sinCobrar.filter(function(p){if(seen[p.id])return false;seen[p.id]=true;return true;});
     var pedidos=sinCobrar.concat(Array.isArray(res[2])?res[2]:[]).concat(Array.isArray(res[3])?res[3]:[]);
     var transferidas=Array.isArray(res[4])?res[4]:[];
+    try{
+      var _fp=Array.isArray(res[5])?res[5]:[];
+      if(_fp.length && Array.isArray(prods) && prods.length){
+        var _pm={}; _fp.forEach(function(p){_pm[p.id]=p;});
+        prods.forEach(function(p){var f=_pm[p.id]; if(f){p.stock_actual=f.stock_actual; p.reserva=f.reserva;}});
+      }
+    }catch(_e){}
+    try{
+      var _fc=Array.isArray(res[6])?res[6]:[];
+      window._comboCompCache={};
+      _fc.forEach(function(c){ if(c && c.id!=null) window._comboCompCache[c.id]=c.combo_items||[]; });
+    }catch(_e2){}
     window._pedidosData=pedidos;
     window._transfData=transferidas;
     _renderPedidosFiltrados("todos");
@@ -1848,8 +1881,13 @@ function renderPedCard(ped,cobrado){
     var _isCobItem=_cobIdx.indexOf(_ii)>=0;
     var _tacho=_isCobItem?"text-decoration:line-through;opacity:.45;":"";
     var _resB='';
-    if(!_isCobItem&&!it.isDecan&&!it.isCombo&&it.producto_id){
-      _resB=_badgeReserva(it.producto_id,it.qty||1);
+    if(!_isCobItem&&!it.isDecan){
+      var _cmbId=comboIdDeItem(it);
+      if(_cmbId){
+        _resB=_badgeReservaCombo(_cmbId,it.qty||1);
+      } else if(it.producto_id&&/^\d+$/.test(String(it.producto_id))){
+        _resB=_badgeReserva(it.producto_id,it.qty||1);
+      }
     }
     html+="<div style='display:flex;justify-content:space-between;align-items:center;padding:.05rem 0;"+_tacho+"'>"+(_cobIdx.indexOf(_ii)>=0?"\u2713 ":"")+"<span>"+_resB+_itBadge+it.nombre+" x"+(it.qty||1)+(_itPrecio>0?" <span style='font-size:.62rem;color:var(--tx3)'>— "+fmt(_itPrecio)+"/u</span>":"")+"</span><span style='font-weight:600'>"+fmt(it.total||0)+"</span></div>";
   });
