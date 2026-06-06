@@ -14040,20 +14040,30 @@ function _campOnChangePestana(){
 function toggleCampaniaActiva(id, activar){
   // [BUG #3 fix] Antes solo cambiaba ofertas_campanias.activa, dejando ofertas.activa
   // desincronizada. Ahora sincronizamos ambas tablas en paralelo.
+  var c = (window._campaniasData||[]).find(function(x){return x.id === id;});
   var ofExistente = (window._ofertasDeCampanias||[]).find(function(o){return o.campania_id === id;});
   var promesas = [apiPatch('ofertas_campanias', {activa: activar}, 'id=eq.'+id)];
   if(ofExistente){
     promesas.push(apiPatch('ofertas', {activa: activar}, 'id=eq.'+ofExistente.id));
   }
+  // La pestaña sigue la suerte de la campaña: pausar campaña → ocultar pestaña; reanudar → mostrarla.
+  if(c && c.pestana_id){
+    promesas.push(apiPatch('pestanas_catalogo', {activa: activar}, 'id=eq.'+c.pestana_id));
+  }
   Promise.all(promesas).then(function(){
-    toast(activar ? 'Campaña activada' : 'Campaña pausada','tok');
+    toast(activar ? 'Campaña activada (pestaña visible)' : 'Campaña pausada (pestaña oculta)','tok');
     loadOfertasAdmin();
   }).catch(function(e){ toast('Error: '+e.message,'terr'); });
 }
 
 function toggleMostrarPestanaCamp(id, mostrar){
-  apiPatch('ofertas_campanias', {mostrar_pestana: mostrar}, 'id=eq.'+id).then(function(){
-    toast(mostrar ? '👁 Pestaña visible en el catálogo' : '👁‍🗨 Pestaña oculta del catálogo (oferta sigue activa)','tok');
+  var c = (window._campaniasData||[]).find(function(x){return x.id === id;});
+  var proms = [apiPatch('ofertas_campanias', {mostrar_pestana: mostrar}, 'id=eq.'+id)];
+  if(c && c.pestana_id){
+    proms.push(apiPatch('pestanas_catalogo', {activa: mostrar}, 'id=eq.'+c.pestana_id));
+  }
+  Promise.all(proms).then(function(){
+    toast(mostrar ? '👁 Pestaña visible en el catálogo' : '👁‍🗨 Pestaña oculta del catálogo','tok');
     loadOfertasAdmin();
   }).catch(function(e){ toast('Error: '+e.message,'terr'); });
 }
@@ -14084,6 +14094,7 @@ function abrirSelectorProductosCampania(campId){
     var _ofCamp = (window._ofertasDeCampanias||[]).find(function(o){return o.campania_id === campId;});
     window._campProdsTipo = _ofCamp ? _ofCamp.tipo : null;
     window._campProdPrecios = {}; // {pid:{precio_unico,descuento_pct}}
+    window._campProdEdit = {};    // {pid:true} filas en modo edición
     var _vals = (window._ofertasCampaniaProductosVal||{})[campId] || {};
     Object.keys(_vals).forEach(function(pid){ window._campProdPrecios[pid] = { precio_unico:_vals[pid].precio_unico, descuento_pct:_vals[pid].descuento_pct }; });
     var mo = document.createElement('div');
@@ -14204,13 +14215,29 @@ function renderCampProductosSelector(){
     var incluido, control;
     if(porValor){
       var val = porPrecio ? vals.precio_unico : vals.descuento_pct;
-      incluido = (val!=null && val!=='' && !isNaN(val));
-      var bordeCol = incluido ? '#1f9d57' : 'var(--bd)';
-      var resultante = porPrecio ? (incluido?val:null) : (incluido && pi ? Math.round(pi*(1-val/100)) : null);
-      var inputHTML = porPrecio
-        ? '<div style="display:flex;align-items:center;gap:.25rem;justify-content:flex-end"><span style="font-size:.72rem;color:var(--tx3)">$</span><input type="number" min="0" inputmode="numeric" value="'+(val==null?'':val)+'" placeholder="precio oferta" oninput="campProdSetVal('+p.id+',\'precio_unico\',this.value)" style="width:120px;padding:.34rem .45rem;background:var(--sur2);border:1.5px solid '+bordeCol+';border-radius:6px;color:var(--tx);font-size:.82rem;text-align:right;font-weight:700"></div>'
-        : '<div style="display:flex;align-items:center;gap:.25rem;justify-content:flex-end"><input type="number" min="0" max="95" inputmode="numeric" value="'+(val==null?'':val)+'" placeholder="%" oninput="campProdSetVal('+p.id+',\'descuento_pct\',this.value)" style="width:72px;padding:.34rem .45rem;background:var(--sur2);border:1.5px solid '+bordeCol+';border-radius:6px;color:var(--tx);font-size:.82rem;text-align:right;font-weight:700"><span style="font-size:.72rem;color:var(--tx3)">% OFF</span></div>';
-      control = '<div style="display:flex;flex-direction:column;align-items:flex-end;gap:.32rem">'+ _campMiniPrecios(cp, resultante) + inputHTML + '</div>';
+      var confirmado = window._campProdsAsignados.indexOf(p.id) >= 0;
+      var enEdit = (window._campProdEdit && window._campProdEdit[p.id]) || !confirmado || (val==null || isNaN(val));
+      incluido = confirmado;
+      var resultante = (val!=null && !isNaN(val)) ? (porPrecio ? val : (pi?Math.round(pi*(1-val/100)):null)) : null;
+      var mini = '<div id="campMini_'+p.id+'">'+_campMiniPrecios(cp, resultante)+'</div>';
+      var zona;
+      if(enEdit){
+        var inputCommon = 'value="'+(val==null?'':val)+'" onkeydown="if(event.key===\'Enter\'){event.preventDefault();campProdConfirmar('+p.id+');}" style="width:'+(porPrecio?'112px':'66px')+';padding:.34rem .45rem;background:var(--sur2);border:1.5px solid var(--acc);border-radius:6px;color:var(--tx);font-size:.82rem;text-align:right;font-weight:700"';
+        var inputHTML = porPrecio
+          ? '<span style="font-size:.72rem;color:var(--tx3)">$</span><input type="number" min="0" inputmode="numeric" placeholder="precio" oninput="campProdLive('+p.id+',\'precio_unico\',this.value)" '+inputCommon+'>'
+          : '<input type="number" min="0" max="95" inputmode="numeric" placeholder="%" oninput="campProdLive('+p.id+',\'descuento_pct\',this.value)" '+inputCommon+'><span style="font-size:.72rem;color:var(--tx3)">%</span>';
+        zona = '<div style="display:flex;align-items:center;gap:.3rem;justify-content:flex-end">'+inputHTML+
+          '<button onclick="campProdConfirmar('+p.id+')" title="Confirmar precio" style="background:#1f9d57;color:#fff;border:none;border-radius:6px;width:30px;height:30px;font-size:.95rem;cursor:pointer;flex-shrink:0">✓</button>'+
+        '</div>';
+      } else {
+        var disp = porPrecio ? fmt(val) : (val+'% OFF');
+        zona = '<div style="display:flex;align-items:center;gap:.4rem;justify-content:flex-end">'+
+          '<span style="color:#1f9d57;font-weight:800;font-size:.92rem">✓ '+disp+'</span>'+
+          '<button onclick="campProdEditar('+p.id+')" title="Editar precio" style="background:var(--sur2);color:var(--tx2);border:1px solid var(--bd);border-radius:6px;width:30px;height:30px;font-size:.8rem;cursor:pointer">✎</button>'+
+          '<button onclick="campProdQuitar('+p.id+')" title="Quitar de la campaña" style="background:var(--sur2);color:#c0392b;border:1px solid var(--bd);border-radius:6px;width:30px;height:30px;font-size:.8rem;cursor:pointer">✕</button>'+
+        '</div>';
+      }
+      control = '<div style="display:flex;flex-direction:column;align-items:flex-end;gap:.35rem">'+ mini + zona + '</div>';
     } else {
       incluido = window._campProdsAsignados.indexOf(p.id) >= 0;
       control = '<label style="display:flex;align-items:center;gap:.35rem;cursor:pointer;font-size:.68rem;color:var(--tx2);white-space:nowrap"><input type="checkbox" onchange="campProdToggle('+p.id+',this.checked)" '+(incluido?'checked':'')+'> incluir</label>'+
@@ -14247,16 +14274,44 @@ function _campProdContadorRefresh(){
   if(c) c.textContent = n+' producto'+(n===1?'':'s')+' en la campaña';
 }
 
-// Captura el precio/% por producto. Si tiene valor → entra a la campaña; si lo borra → sale.
-// No re-renderiza al tipear para no perder el foco; solo refresca el contador.
-function campProdSetVal(pid, campo, valor){
+// En vivo: guarda el valor (borrador) y actualiza la mini-tabla de esa fila SIN re-render (no pierde foco).
+function campProdLive(pid, campo, valor){
   if(!window._campProdPrecios[pid]) window._campProdPrecios[pid] = {};
   var v = (valor==='' ? null : parseFloat(valor));
   window._campProdPrecios[pid][campo] = (v!=null && !isNaN(v)) ? v : null;
-  var idx = window._campProdsAsignados.indexOf(pid);
-  if(v!=null && !isNaN(v)){ if(idx<0) window._campProdsAsignados.push(pid); }
-  else { if(idx>=0) window._campProdsAsignados.splice(idx,1); }
+  var cont = document.getElementById('campMini_'+pid);
+  if(cont){
+    var p = (window._campProdsAll||[]).find(function(x){return x.id===pid;});
+    var cp=null; try{ cp=calcP(p); }catch(e){}
+    var resultante = (v!=null && !isNaN(v)) ? (campo==='precio_unico' ? v : (cp&&cp.pi?Math.round(cp.pi*(1-v/100)):null)) : null;
+    cont.innerHTML = _campMiniPrecios(cp, resultante);
+  }
+}
+// Confirmar (✓): el producto entra a la campaña con el valor cargado y queda fijo.
+function campProdConfirmar(pid){
+  var tipo = window._campProdsTipo;
+  var vals = window._campProdPrecios[pid] || {};
+  var v = (tipo==='precio_unico') ? vals.precio_unico : vals.descuento_pct;
+  if(v==null || isNaN(v) || v<=0){ toast('Poné un '+(tipo==='precio_unico'?'precio':'porcentaje')+' válido','twarn'); return; }
+  if(window._campProdsAsignados.indexOf(pid)<0) window._campProdsAsignados.push(pid);
+  if(window._campProdEdit) delete window._campProdEdit[pid];
   _campProdContadorRefresh();
+  renderCampProductosSelector();
+}
+// Editar (✎): vuelve la fila al modo input.
+function campProdEditar(pid){
+  if(!window._campProdEdit) window._campProdEdit = {};
+  window._campProdEdit[pid] = true;
+  renderCampProductosSelector();
+}
+// Quitar (✕): saca el producto de la campaña.
+function campProdQuitar(pid){
+  var i = window._campProdsAsignados.indexOf(pid);
+  if(i>=0) window._campProdsAsignados.splice(i,1);
+  if(window._campProdPrecios[pid]){ window._campProdPrecios[pid].precio_unico=null; window._campProdPrecios[pid].descuento_pct=null; }
+  if(window._campProdEdit) delete window._campProdEdit[pid];
+  _campProdContadorRefresh();
+  renderCampProductosSelector();
 }
 
 // Aplica a TODOS los productos de la lista visible (filtrá por marca/búsqueda para acotar).
@@ -14282,6 +14337,7 @@ function campProdAplicarTodos(){
     if(tipo==='descuento_pct'){ window._campProdPrecios[p.id].descuento_pct = v; nv=v; }
     else { var pi=0; try{pi=calcP(p).pi;}catch(e){} nv = pi?Math.round(pi*(1-v/100)):null; window._campProdPrecios[p.id].precio_unico = nv; }
     if(nv!=null && window._campProdsAsignados.indexOf(p.id)<0) window._campProdsAsignados.push(p.id);
+    if(window._campProdEdit) delete window._campProdEdit[p.id];
     n++;
   });
   renderCampProductosSelector();
@@ -15645,6 +15701,13 @@ function guardarPestana(){
 // P3 fix: togglePestana con catch
 function togglePestana(id,activa){
   apiPatch("pestanas_catalogo",{activa:activa},"id=eq."+id).then(function(){
+    // Si esta pestaña pertenece a una campaña, la campaña sigue su suerte (sincroniza visibilidad).
+    return apiGet('ofertas_campanias','select=id&pestana_id=eq.'+id).then(function(camps){
+      if(camps && camps.length){
+        return Promise.all(camps.map(function(cc){ return apiPatch('ofertas_campanias',{mostrar_pestana:activa},'id=eq.'+cc.id); }));
+      }
+    }).catch(function(){});
+  }).then(function(){
     toast(activa?"Pestaña activada":"Pestaña oculta","tok");
     loadPestanas();
   }).catch(function(e){
