@@ -2262,6 +2262,9 @@ function _vcFiltrar(q){
   if(!pg)return;
   pg._busq=q;
   _renderClientesVend(pg);
+  // Restaurar el foco y el cursor al final — el render reemplaza el input y si no, "se sale"
+  var _si=document.getElementById('vcSrch');
+  if(_si){ _si.focus(); try{ var _v=_si.value; _si.setSelectionRange(_v.length,_v.length); }catch(e){} }
 }
 
 // ── Tomar cliente sin asignar ──
@@ -8796,18 +8799,34 @@ function recSwitchVista(v){
   }
 }
 
+// Mapa nro_orden -> "Nombre Apellido" del cliente (las ventas no guardan el nombre;
+// se arma cruzando pedidos_catalogo.cliente_id con clientes). Usado por reclamos y devoluciones.
+window._ordenClienteMap={};
+function _buildOrdenClienteMap(peds, clis){
+  var cliById={};
+  (Array.isArray(clis)?clis:[]).forEach(function(c){ cliById[c.id]=((c.nombre||'')+' '+(c.apellido||'')).trim(); });
+  var m={};
+  (Array.isArray(peds)?peds:[]).forEach(function(p){
+    if(p.nro_orden && p.cliente_id && cliById[p.cliente_id]) m[p.nro_orden]=cliById[p.cliente_id];
+  });
+  window._ordenClienteMap=m;
+}
+
 function loadReclamo(){
   var pg=document.getElementById('pg-reclamo');
   pg.innerHTML="<div class='loading'><div class='spin'></div>Cargando...</div>";
   // Cargar ventas (todas las del vendedor), gastos y rendiciones
   Promise.all([
-    apiGetAll('ventas','select=id,producto_id,producto_nombre,cantidad,precio_unitario,total,segmento,nro_orden,cliente_nombre,created_at,forma_cobro&vendedor_id=eq.'+VENDEDOR_ID+'&order=created_at.desc&limit=5000'),
+    apiGetAll('ventas','select=id,producto_id,producto_nombre,cantidad,precio_unitario,total,segmento,nro_orden,created_at,forma_cobro&vendedor_id=eq.'+VENDEDOR_ID+'&order=created_at.desc&limit=5000'),
     api('GET','gastos_vendedor',null,'vendedor_id=eq.'+VENDEDOR_ID+'&order=created_at.desc&limit=50&select=id,concepto,monto,created_at'),
-    api('GET','rendiciones',null,'vendedor_id=eq.'+VENDEDOR_ID+'&tipo=neq.reclamo&order=created_at.desc&limit=50&select=id,concepto,monto,created_at')
+    api('GET','rendiciones',null,'vendedor_id=eq.'+VENDEDOR_ID+'&tipo=neq.reclamo&order=created_at.desc&limit=50&select=id,concepto,monto,created_at'),
+    apiGetAll('pedidos_catalogo','select=nro_orden,cliente_id'),
+    apiGet('clientes','select=id,nombre,apellido&limit=3000')
   ]).then(function(res){
     _recVentas=Array.isArray(res[0])?res[0]:[];
     _recGastos=Array.isArray(res[1])?res[1]:[];
     _recRendiciones=Array.isArray(res[2])?res[2]:[];
+    _buildOrdenClienteMap(res[3], res[4]);
     // Agrupar ventas por nro_orden
     _recAgruparVentas();
     // Resetear selección
@@ -8827,7 +8846,7 @@ function _recAgruparVentas(){
     if(!mapa[k]){
       mapa[k]={
         nro_orden: v.nro_orden||null,
-        cliente_nombre: v.cliente_nombre||'(sin cliente)',
+        cliente_nombre: (window._ordenClienteMap && v.nro_orden && window._ordenClienteMap[v.nro_orden]) || '(sin cliente)',
         created_at: v.created_at,
         total: 0,
         productos: [],
@@ -9226,7 +9245,7 @@ function enviarReclamo(){
 function loadReclamosList(){
   var el=document.getElementById('reclamosList');
   if(!el) return;
-  api('GET','reclamos',null,'vendedor_id=eq.'+VENDEDOR_ID+'&order=created_at.desc').then(function(data){
+  api('GET','reclamos',null,'vendedor_id=eq.'+VENDEDOR_ID+'&created_at=gte.'+encodeURIComponent(_getPeriodoDesde())+'&order=created_at.desc').then(function(data){
     if(!Array.isArray(data)||!data.length){
       el.innerHTML="<div class='empty'>Sin reclamos enviados aún</div>";return;
     }
@@ -9833,13 +9852,16 @@ function loadDevoluciones(){
   if(!pg)return;
   pg.innerHTML="<div class='loading'><div class='spin'></div>Cargando...</div>";
   Promise.all([
-    apiGetAll("ventas","select=id,producto_id,producto_nombre,cantidad,precio_unitario,total,segmento,nro_orden,cliente_nombre,created_at,estado&vendedor_id=eq."+VENDEDOR_ID+"&order=created_at.desc&limit=5000"),
+    apiGetAll("ventas","select=id,producto_id,producto_nombre,cantidad,precio_unitario,total,segmento,nro_orden,created_at,estado&vendedor_id=eq."+VENDEDOR_ID+"&order=created_at.desc&limit=5000"),
     apiGet("reclamos","select=*&vendedor_id=eq."+VENDEDOR_ID+"&clase=eq.devolucion&order=created_at.desc&limit=100").catch(function(){return [];}),
-    apiGet("incidencias","select=*&vendedor_id=eq."+VENDEDOR_ID+"&tipo=eq.devolucion&order=created_at.desc&limit=100").catch(function(){return [];})
+    apiGet("incidencias","select=*&vendedor_id=eq."+VENDEDOR_ID+"&tipo=eq.devolucion&order=created_at.desc&limit=100").catch(function(){return [];}),
+    apiGetAll("pedidos_catalogo","select=nro_orden,cliente_id"),
+    apiGet("clientes","select=id,nombre,apellido&limit=3000")
   ]).then(function(res){
     var ventas=Array.isArray(res[0])?res[0]:[];
     var histNuevo=Array.isArray(res[1])?res[1]:[];
     var histViejo=Array.isArray(res[2])?res[2]:[];
+    _buildOrdenClienteMap(res[3], res[4]);
     _dvAgrupar(ventas);
     _dvMode='ultimas'; _dvSelOrden=null; _dvSel={}; _dvDinero=false; _dvMonto=0;
     _dvRenderPage(pg, histNuevo, histViejo);
@@ -9850,7 +9872,7 @@ function _dvAgrupar(ventas){
   var mapa={};
   ventas.forEach(function(v){
     var k=v.nro_orden||('s_'+v.id);
-    if(!mapa[k]) mapa[k]={nro_orden:v.nro_orden||null, cliente_nombre:v.cliente_nombre||'(sin cliente)', created_at:v.created_at, total:0, productos:[]};
+    if(!mapa[k]) mapa[k]={nro_orden:v.nro_orden||null, cliente_nombre:(window._ordenClienteMap && v.nro_orden && window._ordenClienteMap[v.nro_orden])||'(sin cliente)', created_at:v.created_at, total:0, productos:[]};
     mapa[k].total += parseFloat(v.total)||0;
     mapa[k].productos.push({id:v.id, producto_id:v.producto_id, producto_nombre:v.producto_nombre, cantidad:v.cantidad, precio_unitario:v.precio_unitario, segmento:v.segmento, total:parseFloat(v.total)||0});
     if(new Date(v.created_at)<new Date(mapa[k].created_at)) mapa[k].created_at=v.created_at;
