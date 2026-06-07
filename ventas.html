@@ -8772,14 +8772,14 @@ var _recVentasGrupos=[];   // ventas agrupadas por nro_orden
 var _recClientesUnicos=[]; // lista única de clientes (para autocomplete)
 var _recSelMode='ultimas'; // ultimas | nroorden | cliente
 var _recSelVenta=null;     // venta agrupada seleccionada
-var _recSelProducto=null;  // producto específico dentro de la venta (null = toda la venta)
+var _recSelProductos=[];  // line ids de productos marcados (vacío = toda la venta)
 
 function loadReclamo(){
   var pg=document.getElementById('pg-reclamo');
   pg.innerHTML="<div class='loading'><div class='spin'></div>Cargando...</div>";
   // Cargar ventas (todas las del vendedor), gastos y rendiciones
   Promise.all([
-    api('GET','ventas',null,'vendedor_id=eq.'+VENDEDOR_ID+'&order=created_at.desc&limit=500&select=id,producto_id,producto_nombre,cantidad,precio_unitario,total,segmento,nro_orden,cliente_nombre,created_at,forma_cobro'),
+    apiGetAll('ventas','select=id,producto_id,producto_nombre,cantidad,precio_unitario,total,segmento,nro_orden,cliente_nombre,created_at,forma_cobro&vendedor_id=eq.'+VENDEDOR_ID+'&order=created_at.desc&limit=5000'),
     api('GET','gastos_vendedor',null,'vendedor_id=eq.'+VENDEDOR_ID+'&order=created_at.desc&limit=50&select=id,concepto,monto,created_at'),
     api('GET','rendiciones',null,'vendedor_id=eq.'+VENDEDOR_ID+'&tipo=neq.reclamo&order=created_at.desc&limit=50&select=id,concepto,monto,created_at')
   ]).then(function(res){
@@ -8791,7 +8791,7 @@ function loadReclamo(){
     // Resetear selección
     _recSelMode='ultimas';
     _recSelVenta=null;
-    _recSelProducto=null;
+    _recSelProductos=[];
     renderReclamoForm();
     loadReclamosList();
   });
@@ -8917,7 +8917,7 @@ function recActualizarObjeto(){
   var wrap=document.getElementById('recObjetoWrap');
   // Resetear selección al cambiar tipo
   _recSelVenta=null;
-  _recSelProducto=null;
+  _recSelProductos=[];
   if(tipo==='otro'){
     wrap.innerHTML='';
     return;
@@ -9061,7 +9061,7 @@ function _recSeleccionarVenta(idx){
   var g = grupos[idx];
   if(!g) return;
   _recSelVenta = g;
-  _recSelProducto = null; // Reset producto al cambiar venta
+  _recSelProductos = []; // Reset productos al cambiar venta
   // Re-renderizar la lista para marcar el seleccionado
   _recRenderResultados();
   _recRenderProductos();
@@ -9072,34 +9072,30 @@ function _recRenderProductos(){
   if(!box) return;
   if(!_recSelVenta){box.innerHTML = ''; return;}
   var prods = _recSelVenta.productos;
+  var n = _recSelProductos.length;
   var h = "<div style='background:var(--bg-soft);border:1px solid var(--bd);border-radius:6px;padding:.55rem .7rem'>"+
-    "<div style='font-size:.7rem;color:var(--tx-soft);font-weight:600;margin-bottom:.4rem'>¿El reclamo es por toda la venta o por un producto específico?</div>"+
+    "<div style='font-size:.7rem;color:var(--tx-soft);font-weight:600;margin-bottom:.4rem'>Marcá el o los productos del reclamo (si no marcás ninguno, es por toda la venta)</div>"+
     "<div style='display:flex;flex-direction:column;gap:.3rem'>";
-  // Opción "toda la venta"
-  var selTotal = _recSelProducto === null;
-  var bgT = selTotal ? 'var(--accent-light)' : '#fff';
-  var bdT = selTotal ? 'var(--accent)' : 'var(--bd)';
-  h += "<label style='display:flex;align-items:center;gap:.5rem;padding:.45rem .55rem;background:"+bgT+";border:1px solid "+bdT+";border-radius:5px;cursor:pointer;font-size:.78rem'>"+
-    "<input type='radio' name='recProdSel' "+(selTotal?'checked':'')+" onchange='_recSelProducto=null;_recRenderProductos()' style='margin:0'>"+
-    "<span style='font-weight:600'>Toda la venta ("+fmt(_recSelVenta.total)+")</span>"+
-  "</label>";
-  // Productos
   prods.forEach(function(p){
-    var sel = _recSelProducto && _recSelProducto.id === p.id;
+    var sel = _recSelProductos.indexOf(p.id) >= 0;
     var bg = sel ? 'var(--accent-light)' : '#fff';
     var bd = sel ? 'var(--accent)' : 'var(--bd)';
     h += "<label style='display:flex;align-items:center;gap:.5rem;padding:.45rem .55rem;background:"+bg+";border:1px solid "+bd+";border-radius:5px;cursor:pointer;font-size:.78rem'>"+
-      "<input type='radio' name='recProdSel' "+(sel?'checked':'')+" onchange='_recElegirProducto("+p.id+")' style='margin:0'>"+
+      "<input type='checkbox' "+(sel?'checked':'')+" onchange='_recToggleProducto("+p.id+")' style='margin:0'>"+
       "<span style='flex:1;white-space:nowrap;overflow:hidden;text-overflow:ellipsis'>"+_recEsc(p.producto_nombre)+(p.cantidad>1?" × "+p.cantidad:"")+" — "+fmt(p.total)+"</span>"+
     "</label>";
   });
-  h += "</div></div>";
+  h += "</div>"+
+    "<div style='font-size:.68rem;color:var(--tx-soft);margin-top:.4rem'>"+(n>0 ? n+" producto"+(n!==1?'s':'')+" marcado"+(n!==1?'s':'') : "Reclamo por toda la venta ("+fmt(_recSelVenta.total)+")")+"</div>"+
+  "</div>";
   box.innerHTML = h;
 }
 
-function _recElegirProducto(prodLineaId){
+function _recToggleProducto(prodLineaId){
   if(!_recSelVenta) return;
-  _recSelProducto = _recSelVenta.productos.find(function(p){return p.id===prodLineaId;}) || null;
+  var i = _recSelProductos.indexOf(prodLineaId);
+  if(i>=0) _recSelProductos.splice(i,1);
+  else _recSelProductos.push(prodLineaId);
   _recRenderProductos();
 }
 
@@ -9116,24 +9112,25 @@ function enviarReclamo(){
   // Determinar objeto_id y objeto_desc según tipo
   var objetoId = null;
   var objetoDesc = '';
+  var itemsArr = [];
   if(tipoObjeto === 'venta'){
     if(!_recSelVenta){
       toast('Seleccioná la venta a la que se refiere el reclamo','twarn');
       return;
     }
-    if(_recSelProducto){
-      // Reclamo por producto específico → ID de esa línea de venta
-      objetoId = _recSelProducto.id;
-      objetoDesc = (_recSelVenta.nro_orden ? '#'+_recSelVenta.nro_orden+' · ' : '') +
-                   _recSelVenta.cliente_nombre + ' · ' +
-                   _recSelProducto.producto_nombre +
-                   (_recSelProducto.cantidad > 1 ? ' × '+_recSelProducto.cantidad : '') +
-                   ' (' + fmt(_recSelProducto.total) + ')';
+    var nroPre = _recSelVenta.nro_orden ? '#'+_recSelVenta.nro_orden+' · ' : '';
+    var selProds = _recSelVenta.productos.filter(function(p){ return _recSelProductos.indexOf(p.id)>=0; });
+    if(selProds.length){
+      // Reclamo por uno o varios productos
+      itemsArr = selProds.map(function(p){ return {linea_id:p.id, producto_id:p.producto_id, producto_nombre:p.producto_nombre, cantidad:p.cantidad, reingresa_stock:false}; });
+      objetoId = selProds[0].id;
+      objetoDesc = nroPre + _recSelVenta.cliente_nombre + ' · ' +
+                   selProds.map(function(p){return p.producto_nombre+(p.cantidad>1?' ×'+p.cantidad:'');}).join(', ');
     } else {
-      // Reclamo por toda la venta → ID representativo (primer producto)
+      // Reclamo por toda la venta
+      itemsArr = _recSelVenta.productos.map(function(p){ return {linea_id:p.id, producto_id:p.producto_id, producto_nombre:p.producto_nombre, cantidad:p.cantidad, reingresa_stock:false}; });
       objetoId = _recSelVenta.id_principal;
-      objetoDesc = (_recSelVenta.nro_orden ? '#'+_recSelVenta.nro_orden+' · ' : '') +
-                   _recSelVenta.cliente_nombre + ' · ' +
+      objetoDesc = nroPre + _recSelVenta.cliente_nombre + ' · ' +
                    _recSelVenta.productos.length + ' producto' + (_recSelVenta.productos.length!==1?'s':'') +
                    ' (' + fmt(_recSelVenta.total) + ')';
     }
@@ -9163,6 +9160,8 @@ function enviarReclamo(){
       imagen_url:imgUrl||null,
       estado:'pendiente',
       prioridad:'normal',
+      clase:'reclamo',
+      items:itemsArr,
       nro_operacion:'RECLA-'+Math.floor(10000+Math.random()*90000)
     }).then(function(res){
       var recId=Array.isArray(res)&&res[0]?res[0].id:null;
@@ -9179,7 +9178,7 @@ function enviarReclamo(){
       toast('Reclamo enviado correctamente','tok');
       // Reset selecciones y form
       _recSelVenta = null;
-      _recSelProducto = null;
+      _recSelProductos = [];
       document.getElementById('recTitulo').value='';
       document.getElementById('recDesc').value='';
       document.getElementById('recFoto').value='';
@@ -9801,377 +9800,231 @@ var _devVentas = [];        // ventas cargadas para seleccionar
 var _devVentaSelId = null;  // venta seleccionada
 var _devVentaItems = [];    // items de esa venta
 
+// ============ DEVOLUCIONES (rehecho 2026-06) ============
+var _dvGrupos=[], _dvClientes=[], _dvMode='ultimas', _dvSelOrden=null;
+var _dvSel={};                 // line_id -> {cantidad, reingresa, max, producto_id, producto_nombre}
+var _dvDinero=false, _dvMonto=0;
+
 function loadDevoluciones(){
   var pg=document.getElementById("pg-devoluciones");
   if(!pg)return;
   pg.innerHTML="<div class='loading'><div class='spin'></div>Cargando...</div>";
-  // Cargar ventas confirmadas y historial de devoluciones enviadas
   Promise.all([
-    apiGet("ventas","select=id,nro_orden,producto_nombre,cantidad,precio_unitario,total,created_at,estado&vendedor_id=eq."+VENDEDOR_ID+"&estado=in.(confirmada,dev_parcial)&order=created_at.desc&limit=200"),
-    apiGet("incidencias","select=*&vendedor_id=eq."+VENDEDOR_ID+"&tipo=eq.devolucion&order=created_at.desc&limit=100")
+    apiGetAll("ventas","select=id,producto_id,producto_nombre,cantidad,precio_unitario,total,segmento,nro_orden,cliente_nombre,created_at,estado&vendedor_id=eq."+VENDEDOR_ID+"&order=created_at.desc&limit=5000"),
+    apiGet("reclamos","select=*&vendedor_id=eq."+VENDEDOR_ID+"&clase=eq.devolucion&order=created_at.desc&limit=100").catch(function(){return [];}),
+    apiGet("incidencias","select=*&vendedor_id=eq."+VENDEDOR_ID+"&tipo=eq.devolucion&order=created_at.desc&limit=100").catch(function(){return [];})
   ]).then(function(res){
-    _devVentas=Array.isArray(res[0])?res[0]:[];
-    var historial=Array.isArray(res[1])?res[1]:[];
-    renderDevolucionesPage(pg, historial);
-  }).catch(function(e){
-    pg.innerHTML="<div class='empty'>Error: "+e.message+"</div>";
-  });
+    var ventas=Array.isArray(res[0])?res[0]:[];
+    var histNuevo=Array.isArray(res[1])?res[1]:[];
+    var histViejo=Array.isArray(res[2])?res[2]:[];
+    _dvAgrupar(ventas);
+    _dvMode='ultimas'; _dvSelOrden=null; _dvSel={}; _dvDinero=false; _dvMonto=0;
+    _dvRenderPage(pg, histNuevo, histViejo);
+  }).catch(function(e){ pg.innerHTML="<div class='empty'>Error: "+(e&&e.message||e)+"</div>"; });
 }
 
-function renderDevolucionesPage(pg, historial){
+function _dvAgrupar(ventas){
+  var mapa={};
+  ventas.forEach(function(v){
+    var k=v.nro_orden||('s_'+v.id);
+    if(!mapa[k]) mapa[k]={nro_orden:v.nro_orden||null, cliente_nombre:v.cliente_nombre||'(sin cliente)', created_at:v.created_at, total:0, productos:[]};
+    mapa[k].total += parseFloat(v.total)||0;
+    mapa[k].productos.push({id:v.id, producto_id:v.producto_id, producto_nombre:v.producto_nombre, cantidad:v.cantidad, precio_unitario:v.precio_unitario, segmento:v.segmento, total:parseFloat(v.total)||0});
+    if(new Date(v.created_at)<new Date(mapa[k].created_at)) mapa[k].created_at=v.created_at;
+  });
+  _dvGrupos=Object.keys(mapa).map(function(k){return mapa[k];});
+  _dvGrupos.sort(function(a,b){return new Date(b.created_at)-new Date(a.created_at);});
+  var cs={}; _dvGrupos.forEach(function(g){ if(g.cliente_nombre && g.cliente_nombre!=='(sin cliente)'){var key=g.cliente_nombre.toLowerCase().trim(); if(!cs[key])cs[key]=g.cliente_nombre;} });
+  _dvClientes=Object.keys(cs).map(function(k){return cs[k];}).sort();
+}
+
+function _dvRenderPage(pg, histNuevo, histViejo){
+  var hist=(histNuevo||[]).map(function(r){
+    var its=Array.isArray(r.items)?r.items:[];
+    var nom=its.length?its.map(function(i){return i.producto_nombre+(i.cantidad>1?' x'+i.cantidad:'');}).join(', '):(r.objeto_desc||r.titulo||'Devolución');
+    return {nombre:nom, estado:r.estado, created_at:r.created_at, monto:r.monto_devuelto_cliente||0};
+  }).concat((histViejo||[]).map(function(i){
+    return {nombre:(i.producto_nombre||'Producto')+' x'+(i.cantidad||1), estado:i.estado, created_at:i.created_at, monto:i.monto_original||0};
+  }));
+  hist.sort(function(a,b){return new Date(b.created_at)-new Date(a.created_at);});
+
   var html=
-    "<div style='font-size:.8rem;color:var(--tx2);margin-bottom:1rem'>Registrá una devolución. El admin revisará y decidirá qué pasa con el stock y el monto.</div>"+
-
-    // PASO 1: Seleccionar orden
+    "<div style='font-size:.8rem;color:var(--tx2);margin-bottom:1rem'>Registrá una devolución: elegí la orden, marcá los productos, indicá si vuelven al stock y si devolviste plata. El admin la aprueba.</div>"+
     "<div class='tbl-wrap' style='padding:.9rem 1rem;margin-bottom:.8rem'>"+
-      "<div style='font-size:.72rem;font-weight:700;color:var(--tx3);text-transform:uppercase;margin-bottom:.6rem'>1. Seleccionar venta</div>"+
-      "<input id='devBuscar' oninput='filtrarDevVentas()' placeholder='Buscar por producto o nro orden...' class='fi' style='width:100%;margin-bottom:.6rem'>"+
-      "<div id='devVentasList' style='max-height:220px;overflow-y:auto'></div>"+
-    "</div>"+
-
-    // PASO 2: Detalle de devolución (oculto hasta seleccionar)
-    "<div id='devStep2' style='display:none'>"+
-      "<div class='tbl-wrap' style='padding:.9rem 1rem;margin-bottom:.8rem'>"+
-        "<div style='font-size:.72rem;font-weight:700;color:var(--tx3);text-transform:uppercase;margin-bottom:.6rem'>2. Detalle de la devolución</div>"+
-        "<div id='devVentaInfo' style='background:var(--sur3);border-radius:var(--rs);padding:.6rem .8rem;margin-bottom:.7rem;font-size:.78rem'></div>"+
-        // Cantidad
-        "<div style='margin-bottom:.7rem'>"+
-          "<label style='font-size:.72rem;color:var(--tx3);display:block;margin-bottom:.3rem'>Cantidad a devolver:</label>"+
-          "<div style='display:flex;align-items:center;gap:.5rem'>"+
-            "<button onclick='devCambiarCant(-1)' class='btn btn-g' style='font-size:.9rem;padding:.2rem .6rem'>−</button>"+
-            "<span id='devCantLabel' style='font-size:1rem;font-weight:700;min-width:30px;text-align:center'>1</span>"+
-            "<button onclick='devCambiarCant(1)' class='btn btn-g' style='font-size:.9rem;padding:.2rem .6rem'>+</button>"+
-          "</div>"+
-        "</div>"+
-        // Motivo
-        "<div style='margin-bottom:.7rem'>"+
-          "<label style='font-size:.72rem;color:var(--tx3);display:block;margin-bottom:.4rem'>Motivo:</label>"+
-          "<div style='display:flex;flex-direction:column;gap:.3rem'>"+
-            "<label style='display:flex;align-items:center;gap:.5rem;font-size:.78rem'><input type='radio' name='devMotivo' value='buen_estado' checked> Producto en buen estado (cliente no quiso)</label>"+
-            "<label style='display:flex;align-items:center;gap:.5rem;font-size:.78rem'><input type='radio' name='devMotivo' value='roto'> Producto roto o defectuoso</label>"+
-            "<label style='display:flex;align-items:center;gap:.5rem;font-size:.78rem'><input type='radio' name='devMotivo' value='equivocado'> Producto equivocado</label>"+
-            "<label style='display:flex;align-items:center;gap:.5rem;font-size:.78rem'><input type='radio' name='devMotivo' value='otro'> Otro motivo</label>"+
-          "</div>"+
-        "</div>"+
-        // Observaciones
-        "<div style='margin-bottom:.9rem'>"+
-          "<label style='font-size:.72rem;color:var(--tx3);display:block;margin-bottom:.3rem'>Observaciones (opcional):</label>"+
-          "<textarea id='devObs' class='fi' rows='2' style='width:100%;resize:vertical' placeholder='Describí el problema...'></textarea>"+
-        "</div>"+
-        // Info monto
-        "<div id='devMontoInfo' style='background:rgba(var(--acc-rgb),.08);border-radius:var(--rs);padding:.6rem .8rem;margin-bottom:.7rem;font-size:.78rem;border-left:3px solid var(--acc)'>"+
-          "💡 El monto exacto a reintegrar lo decide el administrador."+
-        "</div>"+
-        "<button onclick='enviarDevolucion()' class='btn btn-a' style='width:100%;font-weight:700'>📤 Enviar devolución al admin</button>"+
+      "<div style='font-size:.72rem;font-weight:700;color:var(--tx3);text-transform:uppercase;margin-bottom:.6rem'>1. Elegí la venta</div>"+
+      "<div style='display:flex;gap:.4rem;margin-bottom:.5rem;flex-wrap:wrap'>"+
+        _dvBtnModo('ultimas','&#128336; Últimas')+_dvBtnModo('nroorden','&#128269; Nro orden')+_dvBtnModo('cliente','&#128100; Cliente')+
       "</div>"+
+      "<div id='dvBusqBox'></div>"+
+      "<div id='dvResultado' style='margin-top:.5rem'></div>"+
     "</div>"+
-
-    // HISTORIAL
-    (historial&&historial.length?
+    "<div id='dvStep2'></div>"+
+    (hist.length?
       "<div class='tbl-wrap' style='padding:.9rem 1rem;margin-top:.8rem'>"+
         "<div style='font-size:.72rem;font-weight:700;color:var(--tx3);text-transform:uppercase;margin-bottom:.6rem'>Mis devoluciones enviadas</div>"+
-        historial.map(function(inc){
-          var estadoColor={pendiente:'var(--yel)',resuelto:'var(--green)',descartado:'var(--tx3)'}[inc.estado]||'var(--tx3)';
-          var estadoLabel={pendiente:'⏳ Pendiente revisión admin',resuelto:'✅ Resuelto',descartado:'❌ Descartado'}[inc.estado]||inc.estado;
-          var fecha=new Date(inc.created_at).toLocaleDateString('es-AR',{day:'2-digit',month:'2-digit',year:'2-digit',timeZone:'America/Argentina/Buenos_Aires'});
+        hist.map(function(d){
+          var col={pendiente:'var(--yel)',en_revision:'var(--cyan)',aceptado:'var(--green)',resuelto:'var(--green)',rechazado:'var(--tx3)',descartado:'var(--tx3)'}[d.estado]||'var(--tx3)';
+          var lbl={pendiente:'Pendiente',en_revision:'En revisión',aceptado:'Aprobado',resuelto:'Resuelto',rechazado:'Rechazado',descartado:'Descartado'}[d.estado]||d.estado;
+          var f=new Date(d.created_at).toLocaleDateString('es-AR',{day:'2-digit',month:'2-digit',year:'2-digit',timeZone:'America/Argentina/Buenos_Aires'});
           return "<div style='border-bottom:1px solid var(--bd);padding:.5rem 0;font-size:.75rem'>"+
-            "<div style='display:flex;justify-content:space-between;align-items:center'>"+
-              "<div>"+
-                "<b>"+inc.producto_nombre+"</b> &times;"+inc.cantidad+"u"+
-                "<span style='color:var(--tx3);font-size:.65rem;margin-left:.4rem'>&bull; "+fecha+"</span>"+
-              "</div>"+
-              "<span style='color:"+estadoColor+";font-size:.65rem;font-weight:600'>"+estadoLabel+"</span>"+
+            "<div style='display:flex;justify-content:space-between;gap:.5rem;align-items:center'>"+
+              "<div style='flex:1;min-width:0'><b>"+_recEsc(d.nombre)+"</b><span style='color:var(--tx3);font-size:.65rem;margin-left:.4rem'>&bull; "+f+"</span></div>"+
+              "<span style='color:"+col+";font-size:.65rem;font-weight:600;white-space:nowrap'>"+lbl+"</span>"+
             "</div>"+
-            "<div style='color:var(--tx3);font-size:.65rem'>Motivo: "+({buen_estado:'Buen estado',roto:'Roto/defectuoso',equivocado:'Equivocado',otro:'Otro'}[inc.motivo]||inc.motivo)+"</div>"+
-            (inc.decision_nota?"<div style='color:var(--acc);font-size:.65rem;margin-top:.2rem'>Admin: "+inc.decision_nota+"</div>":"")+
-            (inc.estado==='resuelto'?"<div style='color:var(--green);font-size:.65rem'>Reintegro: $"+(inc.decision_monto||0).toLocaleString('es-AR')+"</div>":"")+
+            (d.monto?"<div style='color:var(--tx3);font-size:.65rem'>Dinero devuelto: $"+Number(d.monto).toLocaleString('es-AR')+"</div>":"")+
           "</div>";
         }).join('')+
       "</div>"
     :"");
-
   pg.innerHTML=html;
-
-  // Renderizar lista de ventas
-  filtrarDevVentas();
+  _dvRenderBusqBox();
+  _dvRenderResultado();
 }
 
-var _devVentaSelId=null, _devCant=1, _devVentas=[], _devMaxCant=1;
+function _dvBtnModo(modo,label){
+  var sel=_dvMode===modo;
+  return "<button type='button' onclick='_dvCambiarModo(\""+modo+"\")' style='flex:1;min-width:90px;padding:.45rem .5rem;background:"+(sel?'var(--acc)':'var(--sur3)')+";color:"+(sel?'#fff':'var(--tx)')+";border:1px solid "+(sel?'var(--acc)':'var(--bd)')+";border-radius:6px;font-size:.78rem;font-weight:600;cursor:pointer;font-family:inherit'>"+label+"</button>";
+}
+function _dvCambiarModo(m){ _dvMode=m; _dvRenderBusqBox(); _dvRenderResultado(); }
+function _dvRenderBusqBox(){
+  var box=document.getElementById('dvBusqBox'); if(!box)return;
+  if(_dvMode==='ultimas') box.innerHTML="<div style='font-size:.7rem;color:var(--tx3)'>Mostrando las últimas 20 ventas</div>";
+  else if(_dvMode==='nroorden') box.innerHTML="<input class='fi' id='devBuscar' type='text' placeholder='Ej: 1234' oninput='_dvRenderResultado()' style='width:100%' inputmode='numeric'>";
+  else box.innerHTML="<input class='fi' id='devBuscar' type='text' placeholder='Nombre del cliente' oninput='_dvRenderResultado()' list='dvClientesDL' style='width:100%'><datalist id='dvClientesDL'>"+_dvClientes.map(function(c){return "<option value=\""+_recEsc(c)+"\">";}).join('')+"</datalist>";
+}
+// alias para el registro de inputs externo (debounce de devBuscar)
+function filtrarDevVentas(){ _dvRenderResultado(); }
 
-function filtrarDevVentas(){
-  var q=(document.getElementById('devBuscar')||{value:''}).value.toLowerCase();
-  var lista=_devVentas.filter(function(v){
-    return !q||(v.producto_nombre||'').toLowerCase().indexOf(q)>=0||(v.nro_orden||'').toLowerCase().indexOf(q)>=0;
-  });
-  var el=document.getElementById('devVentasList');
-  if(!el)return;
-  if(!lista.length){el.innerHTML="<div class='empty' style='font-size:.75rem'>Sin ventas encontradas</div>";return;}
-  el.innerHTML=lista.map(function(v){
-    var fecha=new Date(v.created_at).toLocaleDateString('es-AR',{day:'2-digit',month:'2-digit',timeZone:'America/Argentina/Buenos_Aires'});
-    var sel=v.id===_devVentaSelId;
-    return "<div onclick='devSeleccionarVenta("+v.id+")' style='padding:.45rem .7rem;border-radius:var(--rs);cursor:pointer;border:1px solid "+(sel?'var(--acc)':'var(--bd)')+";background:"+(sel?'rgba(var(--acc-rgb),.08)':'var(--sur3)')+";margin-bottom:.3rem;font-size:.75rem'>"+
-      "<div style='display:flex;justify-content:space-between'>"+
-        "<b style='color:var(--tx)'>"+v.producto_nombre+"</b>"+
-        "<span style='color:var(--green);font-weight:600'>$"+Number(v.total||0).toLocaleString('es-AR')+"</span>"+
+function _dvRenderResultado(){
+  var box=document.getElementById('dvResultado'); if(!box)return;
+  var grupos=_dvGrupos;
+  if(_dvMode==='ultimas') grupos=grupos.slice(0,20);
+  else if(_dvMode==='nroorden'){
+    var q=(document.getElementById('devBuscar')||{value:''}).value.trim();
+    if(!q){box.innerHTML="<div style='font-size:.72rem;color:var(--tx3);padding:.5rem;background:var(--sur3);border-radius:6px;text-align:center'>Escribí un nro de orden</div>";return;}
+    grupos=grupos.filter(function(g){return g.nro_orden&&String(g.nro_orden).indexOf(q)>=0;});
+  } else {
+    var qc=(document.getElementById('devBuscar')||{value:''}).value.trim().toLowerCase();
+    if(!qc){box.innerHTML="<div style='font-size:.72rem;color:var(--tx3);padding:.5rem;background:var(--sur3);border-radius:6px;text-align:center'>Escribí parte del nombre del cliente</div>";return;}
+    grupos=grupos.filter(function(g){return g.cliente_nombre&&g.cliente_nombre.toLowerCase().indexOf(qc)>=0;});
+  }
+  if(!grupos.length){box.innerHTML="<div style='font-size:.72rem;color:var(--tx3);padding:.5rem;background:var(--sur3);border-radius:6px;text-align:center'>Sin resultados</div>";return;}
+  var lim=(_dvMode==='ultimas')?grupos:grupos.slice(0,30);
+  window._dvFiltrados=lim;
+  box.innerHTML="<div style='max-height:240px;overflow-y:auto;border:1px solid var(--bd);border-radius:6px'>"+lim.map(function(g,idx){
+    var f=new Date(g.created_at).toLocaleDateString('es-AR',{timeZone:'America/Argentina/Buenos_Aires'});
+    var sel=_dvSelOrden && _dvSelOrden.nro_orden===g.nro_orden && _dvSelOrden.productos[0] && g.productos[0] && _dvSelOrden.productos[0].id===g.productos[0].id;
+    return "<div onclick='_dvSeleccionar("+idx+")' style='padding:.55rem .7rem;border-bottom:1px solid var(--bd);cursor:pointer;"+(sel?'background:rgba(var(--acc-rgb),.08)':'')+"'>"+
+      "<div style='display:flex;justify-content:space-between;gap:.5rem'>"+
+        "<div style='flex:1;min-width:0'><div style='font-size:.78rem;font-weight:600;color:var(--tx);white-space:nowrap;overflow:hidden;text-overflow:ellipsis'>"+(g.nro_orden?'#'+g.nro_orden+' &middot; ':'')+_recEsc(g.cliente_nombre)+"</div><div style='font-size:.65rem;color:var(--tx3)'>"+f+" &middot; "+g.productos.length+" producto"+(g.productos.length!==1?'s':'')+"</div></div>"+
+        "<div style='font-size:.78rem;font-weight:700;color:var(--acc);white-space:nowrap'>"+fmt(g.total)+"</div>"+
       "</div>"+
-      "<div style='color:var(--tx3);font-size:.65rem'>"+(v.nro_orden||'Orden #'+v.id)+" &bull; "+v.cantidad+"u &bull; "+fecha+"</div>"+
     "</div>";
-  }).join('');
+  }).join('')+"</div>";
 }
 
-function devSeleccionarVenta(id){
-  _devVentaSelId=id;
-  var v=_devVentas.find(function(x){return x.id===id;});
-  if(!v)return;
-  _devMaxCant=v.cantidad;
-  _devCant=1;
-  var step2=document.getElementById('devStep2');
-  if(step2)step2.style.display='block';
-  var info=document.getElementById('devVentaInfo');
-  if(info)info.innerHTML="<b>"+v.producto_nombre+"</b> &times;"+v.cantidad+"u &bull; $"+Number(v.total||0).toLocaleString('es-AR')+(v.nro_orden?" &bull; "+v.nro_orden:"");
-  var cantLabel=document.getElementById('devCantLabel');
-  if(cantLabel)cantLabel.textContent='1';
-  filtrarDevVentas(); // re-render para marcar seleccionada
+function _dvSeleccionar(idx){
+  var g=(window._dvFiltrados||[])[idx]; if(!g)return;
+  _dvSelOrden=g; _dvSel={}; _dvDinero=false; _dvMonto=0;
+  _dvRenderResultado();
+  _dvRenderStep2();
 }
 
-function devCambiarCant(delta){
-  _devCant=Math.max(1,Math.min(_devMaxCant,_devCant+delta));
-  var cantLabel=document.getElementById('devCantLabel');
-  if(cantLabel)cantLabel.textContent=_devCant;
+function _dvRenderStep2(){
+  var box=document.getElementById('dvStep2'); if(!box)return;
+  if(!_dvSelOrden){box.innerHTML='';return;}
+  var prods=_dvSelOrden.productos;
+  var h="<div class='tbl-wrap' style='padding:.9rem 1rem;margin-bottom:.8rem'>"+
+    "<div style='font-size:.72rem;font-weight:700;color:var(--tx3);text-transform:uppercase;margin-bottom:.6rem'>2. Productos a devolver</div>"+
+    "<div style='display:flex;flex-direction:column;gap:.4rem'>";
+  prods.forEach(function(p){
+    var s=_dvSel[p.id]; var on=!!s;
+    h+="<div style='border:1px solid "+(on?'var(--acc)':'var(--bd)')+";border-radius:6px;padding:.5rem .6rem;background:"+(on?'rgba(var(--acc-rgb),.06)':'var(--sur3)')+"'>"+
+      "<label style='display:flex;align-items:center;gap:.5rem;cursor:pointer;font-size:.78rem'>"+
+        "<input type='checkbox' "+(on?'checked':'')+" onchange='_dvToggle("+p.id+")'>"+
+        "<span style='flex:1;white-space:nowrap;overflow:hidden;text-overflow:ellipsis'>"+_recEsc(p.producto_nombre)+" &mdash; "+fmt(p.total)+"</span>"+
+      "</label>"+
+      (on?
+        "<div style='display:flex;align-items:center;gap:.8rem;margin-top:.5rem;flex-wrap:wrap'>"+
+          "<div style='display:flex;align-items:center;gap:.4rem'><span style='font-size:.68rem;color:var(--tx3)'>Cantidad:</span>"+
+            "<button onclick='_dvCant("+p.id+",-1)' class='btn btn-g' style='padding:.1rem .55rem'>&minus;</button>"+
+            "<span style='min-width:24px;text-align:center;font-weight:700'>"+s.cantidad+"</span>"+
+            "<button onclick='_dvCant("+p.id+",1)' class='btn btn-g' style='padding:.1rem .55rem'>+</button>"+
+            "<span style='font-size:.62rem;color:var(--tx3)'>de "+p.cantidad+"u</span>"+
+          "</div>"+
+          "<label style='display:flex;align-items:center;gap:.35rem;font-size:.72rem;cursor:pointer'><input type='checkbox' "+(s.reingresa?'checked':'')+" onchange='_dvReingreso("+p.id+")'> Reingresa a stock</label>"+
+        "</div>"
+      :"")+
+    "</div>";
+  });
+  h+="</div>";
+  h+="<div style='margin-top:.8rem;border-top:1px solid var(--bd);padding-top:.7rem'>"+
+    "<label style='display:flex;align-items:center;gap:.45rem;font-size:.78rem;cursor:pointer'><input type='checkbox' "+(_dvDinero?'checked':'')+" onchange='_dvToggleDinero()'> &iquest;Le devolviste dinero al cliente?</label>"+
+    (_dvDinero?"<div style='margin-top:.5rem;display:flex;align-items:center;gap:.4rem'><span style='font-size:.72rem;color:var(--tx3)'>$</span><input id='dvMonto' type='number' min='0' value='"+(_dvMonto||'')+"' oninput='_dvMonto=parseFloat(this.value)||0' placeholder='monto devuelto' class='fi' style='max-width:170px'></div><div style='font-size:.62rem;color:var(--tx3);margin-top:.3rem'>Ese monto se te descuenta del saldo cuando el admin lo apruebe.</div>":"")+
+  "</div>";
+  h+="<div style='margin-top:.7rem'>"+
+    "<label style='font-size:.72rem;color:var(--tx3);display:block;margin-bottom:.3rem'>Motivo:</label>"+
+    "<select id='dvMotivo' class='sel' style='width:100%'><option value='no_quiso'>Cliente no lo quiso</option><option value='roto'>Roto / fallado</option><option value='equivocado'>Producto equivocado</option><option value='otro'>Otro</option></select>"+
+  "</div>"+
+  "<div style='margin-top:.6rem'>"+
+    "<label style='font-size:.72rem;color:var(--tx3);display:block;margin-bottom:.3rem'>Observaciones (opcional):</label>"+
+    "<textarea id='dvObs' class='fi' rows='2' style='width:100%;resize:vertical' placeholder='Detalle...'></textarea>"+
+  "</div>"+
+  "<button onclick='_dvEnviar()' class='btn btn-a' style='width:100%;font-weight:700;margin-top:.8rem'>&#128228; Enviar devolución al admin</button>"+
+  "</div>";
+  box.innerHTML=h;
 }
 
-function enviarDevolucion(){
-  if(!_devVentaSelId){toast('Seleccioná una venta primero','twarn');return;}
-  var venta=_devVentas.find(function(x){return x.id===_devVentaSelId;});
-  if(!venta)return;
-  var motivoEl=document.querySelector("input[name='devMotivo']:checked");
-  var motivo=motivoEl?motivoEl.value:'otro';
-  var obs=(document.getElementById('devObs')||{}).value||'';
-  var ppu=venta.total/venta.cantidad;
-  var montoOrig=Math.round(ppu*_devCant);
+function _dvToggle(lineId){
+  if(_dvSel[lineId]) delete _dvSel[lineId];
+  else { var p=_dvSelOrden.productos.find(function(x){return x.id===lineId;}); if(p) _dvSel[lineId]={cantidad:1,reingresa:true,max:p.cantidad,producto_id:p.producto_id,producto_nombre:p.producto_nombre}; }
+  _dvRenderStep2();
+}
+function _dvCant(lineId,delta){
+  var s=_dvSel[lineId]; if(!s)return;
+  s.cantidad=Math.max(1,Math.min(s.max,s.cantidad+delta));
+  _dvRenderStep2();
+}
+function _dvReingreso(lineId){ var s=_dvSel[lineId]; if(s){s.reingresa=!s.reingresa;_dvRenderStep2();} }
+function _dvToggleDinero(){ _dvDinero=!_dvDinero; if(!_dvDinero)_dvMonto=0; _dvRenderStep2(); }
 
-  if(!confirm('Enviar devolución al admin:\n• '+venta.producto_nombre+' ×'+_devCant+'u\n• Motivo: '+motivo+'\n• Monto original: $'+montoOrig.toLocaleString('es-AR')+'\n\nEl admin decidirá el reintegro y si vuelve al stock.'))return;
-
-  apiPost('incidencias',{
-    tipo:'devolucion',
-    estado:'pendiente',
+function _dvEnviar(){
+  if(!_dvSelOrden){toast('Elegí una venta','twarn');return;}
+  var ids=Object.keys(_dvSel);
+  if(!ids.length){toast('Marcá al menos un producto','twarn');return;}
+  var motivo=(document.getElementById('dvMotivo')||{value:'otro'}).value;
+  var obs=(document.getElementById('dvObs')||{value:''}).value;
+  var items=ids.map(function(k){var s=_dvSel[k];return {linea_id:parseInt(k,10),producto_id:s.producto_id,producto_nombre:s.producto_nombre,cantidad:s.cantidad,reingresa_stock:!!s.reingresa};});
+  var algReingresa=items.some(function(i){return i.reingresa_stock;});
+  var monto=_dvDinero?(_dvMonto||0):0;
+  var nro=_dvSelOrden.nro_orden?'#'+_dvSelOrden.nro_orden+' &middot; ':'';
+  var nroTxt=_dvSelOrden.nro_orden?'#'+_dvSelOrden.nro_orden:'';
+  var resumen=items.map(function(i){return i.producto_nombre+' x'+i.cantidad+(i.reingresa_stock?' (a stock)':'');}).join(', ');
+  if(!confirm('Enviar devolución al admin:\n\u2022 '+resumen+'\n\u2022 Dinero devuelto: $'+monto.toLocaleString('es-AR')+'\n\nEl admin la aprueba: te descuenta la plata y suma el stock que marcaste.'))return;
+  var VNOMBRE={1:'David',2:'Facu',3:'Marcela'};
+  apiPost('reclamos',{
     vendedor_id:VENDEDOR_ID,
-    vendedor_nombre:VENDEDOR_NOMBRE||('Vendedor '+VENDEDOR_ID),
-    venta_id:venta.id,
-    producto_id:venta.producto_id||null,
-    producto_nombre:venta.producto_nombre,
-    cantidad:_devCant,
-    motivo:motivo,
-    observacion:obs,
-    monto_original:montoOrig,
-    periodo:periodoActual||''
-  }).then(function(){
+    vendedor_nombre:VNOMBRE[VENDEDOR_ID]||VENDEDOR_NOMBRE||'Vendedor',
+    tipo_objeto:'venta',
+    objeto_id:items[0].linea_id,
+    objeto_desc:nroTxt+(nroTxt?' · ':'')+_dvSelOrden.cliente_nombre+' · '+resumen,
+    categoria:'devolucion',
+    clase:'devolucion',
+    items:items,
+    monto_devuelto_cliente:monto,
+    reingreso_stock:algReingresa,
+    titulo:'Devolución '+nroTxt,
+    descripcion:'Motivo: '+motivo+(obs?' — '+obs:'')+'. Productos: '+resumen,
+    estado:'pendiente',
+    prioridad:'normal',
+    nro_operacion:'DEVO-'+Math.floor(10000+Math.random()*90000)
+  }).then(function(res){
+    var recId=Array.isArray(res)&&res[0]?res[0].id:null;
+    if(recId){ apiPost('reclamos_mensajes',{reclamo_id:recId,autor:VNOMBRE[VENDEDOR_ID]||'Vendedor',rol:'vendedor',mensaje:'Devolución: '+resumen+(monto?(' · Dinero devuelto $'+monto):'')}); }
     toast('Devolución enviada al admin ✅','tok');
-    _devVentaSelId=null;_devCant=1;
     loadDevoluciones();
-  }).catch(function(e){toast('Error: '+e.message,'terr');});
+  }).catch(function(e){toast('Error: '+(e&&e.message||e),'terr');});
 }
-
-
-// filtrarDevVentas — ver definición anterior
-
-var _devCant=1;
-
-function seleccionarDevVenta(id){
-  _devVentaSelId=id;
-  _devCant=1;
-  var v=_devVentas.find(function(x){return x.id===id;});
-  if(!v)return;
-
-  // Re-render list to show selection
-  var q=(document.getElementById("devBuscar")||{}).value||"";
-  filtrarDevVentas();
-
-  // Show step 2
-  var step2=document.getElementById("devStep2");
-  if(step2)step2.style.display="block";
-
-  // Fill venta info
-  var fecha=new Date(v.created_at).toLocaleDateString("es-AR",{day:"2-digit",month:"2-digit",year:"2-digit",timeZone:"America/Argentina/Buenos_Aires"});
-  var hora=new Date(v.created_at).toLocaleTimeString("es-AR",{hour:"2-digit",minute:"2-digit",timeZone:"America/Argentina/Buenos_Aires"});
-  var infoEl=document.getElementById("devVentaInfo");
-  if(infoEl)infoEl.innerHTML=
-    "<div style='display:flex;justify-content:space-between;flex-wrap:wrap;gap:.4rem'>"+
-      "<div>"+
-        "<div style='font-size:.88rem;font-weight:600;color:var(--tx)'>"+v.producto_nombre+"</div>"+
-        "<div style='font-size:.7rem;color:var(--tx3)'>"+fecha+" "+hora+" &bull; Segmento: <b style='color:var(--acc)'>"+v.segmento.toUpperCase()+"</b></div>"+
-        "<div style='font-size:.7rem;color:var(--tx3)'>Cantidad vendida: <b>"+v.cantidad+"u</b> &bull; Precio unit.: <b>u$d "+parseFloat(v.precio_unitario||0).toFixed(2)+"</b></div>"+
-      "</div>"+
-      "<div style='text-align:right'>"+
-        "<div style='font-size:1.1rem;font-weight:700;color:var(--acc)'>$"+Math.round(v.total).toLocaleString("es-AR",{timeZone:"America/Argentina/Buenos_Aires"})+"</div>"+
-        "<div style='font-size:.65rem;color:var(--tx3)'>total venta</div>"+
-      "</div>"+
-    "</div>";
-
-  // Update cant display
-  var cantEl=document.getElementById("devCantDisplay");
-  var maxEl=document.getElementById("devCantMax");
-  if(cantEl)cantEl.textContent=_devCant;
-  if(maxEl)maxEl.textContent="(max: "+v.cantidad+"u)";
-
-  devCalcularMonto();
-}
-
-function devCantChange(delta){
-  var v=_devVentas.find(function(x){return x.id===_devVentaSelId;});
-  if(!v)return;
-  _devCant=Math.max(1,Math.min(v.cantidad,_devCant+delta));
-  var el=document.getElementById("devCantDisplay");
-  if(el)el.textContent=_devCant;
-  devCalcularMonto();
-}
-
-function devMotivoChange(){
-  devCalcularMonto();
-}
-
-function devCalcularMonto(){
-  var v=_devVentas.find(function(x){return x.id===_devVentaSelId;});
-  if(!v)return;
-
-  // Precio por unidad real = total_venta / cantidad_vendida
-  // Esto captura el segmento (x1/x3/x10) correctamente
-  var precioPorUnidad=v.total/v.cantidad;
-  var montoReintegro=Math.round(precioPorUnidad*_devCant);
-
-  var el=document.getElementById("devMontoCalc");
-  var desc=document.getElementById("devMontoDesc");
-  if(el)el.textContent="$"+montoReintegro.toLocaleString("es-AR",{timeZone:"America/Argentina/Buenos_Aires"});
-  if(desc)desc.textContent=
-    "Precio real x unidad: $"+Math.round(precioPorUnidad).toLocaleString("es-AR",{timeZone:"America/Argentina/Buenos_Aires"})+
-    " (segmento "+v.segmento.toUpperCase()+", "+v.cantidad+"u vendidas) × "+_devCant+"u devueltas";
-}
-
-function confirmarDevolucion(){
-  if(!_devVentaSelId){toast("Selecciona una venta primero","twarn");return;}
-  var v=_devVentas.find(function(x){return x.id===_devVentaSelId;});
-  if(!v)return;
-
-  var motivoEl=document.querySelector("input[name='devMotivo']:checked");
-  var motivo=motivoEl?motivoEl.value:"ok";
-  var volverAlStock=motivo==="ok";
-  var obs=(document.getElementById("devObs")||{}).value||"";
-
-  var precioPorUnidad=v.total/v.cantidad;
-  var montoReintegro=Math.round(precioPorUnidad*_devCant);
-
-  if(!confirm("Confirmar devolucion:\n"+
-    "• Producto: "+v.producto_nombre+"\n"+
-    "• Cantidad: "+_devCant+"u\n"+
-    "• Monto a reintegrar: $"+montoReintegro.toLocaleString("es-AR",{timeZone:"America/Argentina/Buenos_Aires"})+"\n"+
-    "• Vuelve al stock: "+(volverAlStock?"SI":"NO (roto/fallado)")
-  ))return;
-
-  // Columna vendido_X según vendedor de la venta original (a quien hay que restarle la venta)
-  var vendVenta = v.vendedor_id || VENDEDOR_ID;
-  var colVendido = 'vendido_david';
-  if(vendVenta === 2) colVendido = 'vendido_facu';
-
-  var promises=[];
-
-  // 1. Mark original venta as returned (partially or fully)
-  var estadoVenta=_devCant>=v.cantidad?"devuelta":"dev_parcial";
-  promises.push(apiPatch("ventas",{estado:estadoVenta},"id=eq."+v.id));
-
-  // 2. Register devolucion record as a negative venta entry
-  promises.push(apiPost("ventas",{
-    vendedor_id: vendVenta,  // FIX 2026-05-18: usar vendedor de la venta original, no quien procesa la devolución
-    producto_id:v.producto_id||null,
-    producto_nombre:v.producto_nombre,
-    cantidad:_devCant,
-    precio_unitario:Math.round(precioPorUnidad),
-    segmento:v.segmento,
-    total:-montoReintegro,
-    periodo:periodoActual,
-    estado:"devolucion",
-    origen:"devolucion",
-    descuento:0,
-    descuento_motivo:obs||("Devolucion de venta #"+v.id+". Motivo: "+motivo),
-    venta_original_id:v.id
-  }));
-
-  // 3. Si vuelve al stock: devolver desde vendido_X (no david siempre)
-  if(volverAlStock && v.producto_id && v.segmento!=='decan' && v.segmento!=='combo'){
-    var delta = {stock_actual:+_devCant};
-    delta[colVendido] = -_devCant;
-    promises.push(patchStockFresco(v.producto_id, delta, 'Devolucion ('+colVendido+')')
-      .then(function(){
-        apiPost("movimientos_stock",{
-          producto_id:v.producto_id,
-          producto_nombre:v.producto_nombre,
-          tipo:"devolucion",
-          cantidad:_devCant,
-          motivo:"Devolución. Motivo: "+motivo+(obs?" — "+obs:""),
-          created_at:new Date().toISOString(),
-          usuario:VENDEDOR_NOMBRE
-        }).catch(function(e){console.error("[belle] error silencioso:",e);});
-      })
-    );
-  } else if(!volverAlStock && v.producto_id && v.segmento!=='decan' && v.segmento!=='combo'){
-    // FIX 2026-05-18: cuando NO vuelve al stock (roto), descontar de vendido_X sin sumar a stock_actual
-    var deltaRoto = {};
-    deltaRoto[colVendido] = -_devCant;
-    promises.push(patchStockFresco(v.producto_id, deltaRoto, 'Devolución roto/fallado ('+colVendido+')')
-      .then(function(){
-        apiPost("movimientos_stock",{
-          producto_id:v.producto_id,
-          producto_nombre:v.producto_nombre,
-          tipo:"ajuste",
-          cantidad:-_devCant,
-          motivo:"Devolución producto roto/fallado. Motivo: "+motivo+(obs?" — "+obs:""),
-          created_at:new Date().toISOString(),
-          usuario:VENDEDOR_NOMBRE
-        }).catch(function(e){console.error("[belle] error silencioso:",e);});
-      })
-    );
-  }
-
-  // FIX 2026-05-18 BUG #8: si la venta venía de un pedido CC, registrar nota de la devolución
-  // pero NO revertir cc_pagos automáticamente — el cliente queda con saldo a favor
-  // (decisión de negocio: la devolución no obliga a devolverle plata, queda como crédito)
-  if(v.nro_orden){
-    // Buscar el pedido al que pertenece esta venta
-    promises.push(apiGet('pedidos_catalogo','select=id,es_cc,cliente_id,saldo_cc&nro_orden=eq.'+encodeURIComponent(v.nro_orden)+'&limit=1').then(function(rows){
-      var p = rows && rows[0];
-      if(!p) return;
-      // Log en el pedido (para trazabilidad)
-      apiPost('pedidos_estados_log', {
-        pedido_id: p.id,
-        pedido_tabla: 'pedidos_catalogo',
-        estado: 'devolucion_parcial',
-        nota: 'Devolución de '+_devCant+' u. de "'+v.producto_nombre+'" ('+fmt(montoReintegro)+') por '+VENDEDOR_NOMBRE+(p.es_cc?' — generar saldo a favor del cliente':' — reintegro directo'),
-        usuario: VENDEDOR_NOMBRE
-      }).catch(function(e){console.error('[devolucion log]',e);});
-      // Si era CC, sumar el reintegro al saldo a favor del cliente
-      if(p.es_cc && p.cliente_id){
-        return apiGet('clientes','select=saldo_cc&id=eq.'+p.cliente_id+'&limit=1').then(function(rc){
-          var saldoActual = (rc && rc[0]) ? (parseFloat(rc[0].saldo_cc)||0) : 0;
-          return apiPatch('clientes', {
-            saldo_cc: saldoActual + montoReintegro
-          }, 'id=eq.'+p.cliente_id);
-        });
-      }
-    }).catch(function(e){console.error('[devolucion pedido]',e);}));
-  }
-
-  Promise.all(promises).then(function(){
-    toast("Devolucion registrada. Reintegro: $"+montoReintegro.toLocaleString("es-AR",{timeZone:"America/Argentina/Buenos_Aires"}),"tok");
-    _devVentaSelId=null;
-    _devCant=1;
-    loadDevoluciones();
-    loadDineroData(); // refresh saldo
-  }).catch(function(){
-    toast("Error al registrar devolucion","terr");
-  });
-}
-
-
-
 function verPestana(pg){
   var tabs=document.querySelectorAll('.tab');
   var tabEl=null;
