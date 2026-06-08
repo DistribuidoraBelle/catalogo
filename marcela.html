@@ -1226,7 +1226,14 @@ function renderProdCard(p,totalUnits){
   // Precio unico
   var _pUnico=p.precio_pestana||0;
   var segHtml;
-  if(_pUnico>0){
+  if(p.tipo==='cosmetico' && Array.isArray(p.escala_unidades) && p.escala_unidades.length){
+    // Cosmético: cada caja es un botón "+ Agregar" → addCosm
+    segHtml="<div class='segs'>"+p.escala_unidades.map(function(t){
+      var cant=t.cant||1,precio=t.precio||0;
+      var lbl=cant<=1?"1 unidad":("Caja x"+cant);
+      return "<button type='button' class='seg-btn' style='cursor:pointer;border:1px solid var(--acc)' onclick='addCosm("+id+","+cant+","+precio+")'><span class='sbl'>"+lbl+"</span><span class='sbv'>"+fmt(precio)+"</span><span style='font-size:.48rem;color:var(--acc);font-weight:800;letter-spacing:.03em'>+ AGREGAR</span></button>";
+    }).join("")+"</div>";
+  } else if(_pUnico>0){
     segHtml="<div class='segs'><div class='seg-btn lit' style='grid-column:1/-1'>"+
       "<span class='sbl'>Precio único</span><span class='sbv'>"+fmt(_pUnico)+"</span></div></div>";
   } else {
@@ -1283,12 +1290,13 @@ if(r.decan>0&&p.precio_decan!==-1){
     "<div class='pc-bottom'>"+
     segHtml+
     decanHtml+
+    (p.tipo==='cosmetico'?"":(
     "<div class='qty-wrap'>"+
     "<button class='qb' onclick='chgQty("+id+",-1)'>-</button>"+
     "<span class='qn' id='qty-"+id+"'>"+(st.qty||0)+"</span>"+
     "<button class='qb' onclick='chgQty("+id+",1)'>+</button>"+
-    "</div>"+
-    priceTagHtml+
+    "</div>"))+
+    (p.tipo==='cosmetico'?"":priceTagHtml)+
     (ic&&!ic.isDecan?"<span class='in-cart'>"+ic.qty+" en pedido</span>":"")+
     "</div>"+
     "</div>";
@@ -1335,6 +1343,119 @@ function addCart(id){
   updateCartBar();
   toast("Agregado: "+p.nombre.split(" - ").pop().slice(0,20),"tok");
   renderCat();
+}
+
+// ═══════════════════════════════════════════════════════════
+// VENTA DE COSMÉTICOS — cajas + optimizador + modal (igual catálogo)
+// ═══════════════════════════════════════════════════════════
+var _cosmDismiss={};
+function _cosmCajas(escala){ return (escala||[]).filter(function(e){return (e.cant||1)>1;}); }
+function _cosmFmtCombo(combo){
+  return Object.keys(combo).sort(function(a,b){return b-a;})
+    .map(function(k){ return combo[k]+"× caja de "+k; }).join(" + ");
+}
+function _cosmMinCajas(cajas,N){
+  var dp=new Array(N+1).fill(null); dp[0]={costo:0,combo:{}};
+  for(var u=1;u<=N;u++) for(var i=0;i<cajas.length;i++){
+    var c=cajas[i].cant,pp=cajas[i].precio;
+    if(c<=u && dp[u-c]){ var cand=dp[u-c].costo+pp;
+      if(dp[u]===null||cand<dp[u].costo){ var cb=Object.assign({},dp[u-c].combo); cb[c]=(cb[c]||0)+1; dp[u]={costo:cand,combo:cb}; } }
+  }
+  return dp[N];
+}
+function _cosmOptimizar(escala,U,C){
+  var cajas=_cosmCajas(escala); if(!cajas.length) return {auto:null,sugerencia:null};
+  var maxCaja=Math.max.apply(null,cajas.map(function(e){return e.cant;}));
+  var puActual=C/U; var out={auto:null,sugerencia:null};
+  var exacto=_cosmMinCajas(cajas,U);
+  if(exacto && exacto.costo<C) out.auto={costo:exacto.costo,combo:exacto.combo,ahorro:C-exacto.costo};
+  var costoBase=out.auto?out.auto.costo:C;
+  var masCant=null, mejorDesc=null;
+  for(var M=U+1;M<=U+maxCaja;M++){
+    var bm=_cosmMinCajas(cajas,M); if(!bm) continue;
+    var puNew=bm.costo/M;
+    if(bm.costo<=costoBase){ if(!masCant||M>masCant.unidades) masCant={unidades:M,costo:bm.costo,combo:bm.combo}; }
+    if(puNew<puActual){ var pct=(puActual-puNew)/puActual; if(!mejorDesc||pct>mejorDesc.pct) mejorDesc={unidades:M,costo:bm.costo,combo:bm.combo,pu:puNew,pct:pct}; }
+  }
+  if(masCant){ out.sugerencia={tipo:'mas_cantidad',unidades:masCant.unidades,costo:masCant.costo,combo:masCant.combo,extraU:masCant.unidades-U,ahorro:costoBase-masCant.costo}; }
+  else if(mejorDesc){ out.sugerencia={tipo:'mejor_unitario',unidades:mejorDesc.unidades,costo:mejorDesc.costo,combo:mejorDesc.combo,extraU:mejorDesc.unidades-U,extraCosto:mejorDesc.costo-costoBase,puNew:mejorDesc.pu,descPct:mejorDesc.pct}; }
+  return out;
+}
+function _cosmEstado(prodId){
+  var U=0,C=0;
+  Object.keys(cart).forEach(function(k){
+    if(k.indexOf("cosm_"+prodId+"_")===0){ var it=cart[k]; U+=(it.cajaCant||1)*it.qty; C+=it.price*it.qty; }
+  });
+  return {unidades:U,costo:C};
+}
+function _cosmAplicarCombo(prodId,combo){
+  var p=prods.find(function(x){return x.id===prodId;}); if(!p) return;
+  var esc=p.escala_unidades||[];
+  Object.keys(cart).forEach(function(k){ if(k.indexOf("cosm_"+prodId+"_")===0) delete cart[k]; });
+  Object.keys(combo).forEach(function(cantStr){
+    var cant=parseInt(cantStr,10); var nCajas=combo[cantStr];
+    var tier=esc.find(function(t){return (t.cant||1)===cant;});
+    var precio=tier?(tier.precio||0):0;
+    var key="cosm_"+prodId+"_"+cant;
+    cart[key]={id:key,prodId:prodId,nombre:p.nombre+" (Caja x"+cant+")",qty:nCajas,cajaCant:cant,cajaLabel:(cant<=1?"1 unidad":"Caja x"+cant),price:precio,isCosm:true};
+  });
+}
+function addCosm(prodId,cajaCant,cajaPrecio){
+  var p=prods.find(function(x){return x.id===prodId;}); if(!p) return;
+  var key="cosm_"+prodId+"_"+cajaCant;
+  if(cart[key]) cart[key].qty++;
+  else cart[key]={id:key,prodId:prodId,nombre:p.nombre+" (Caja x"+cajaCant+")",qty:1,cajaCant:cajaCant,cajaLabel:(cajaCant<=1?"1 unidad":"Caja x"+cajaCant),price:cajaPrecio,isCosm:true};
+  toast((cajaCant<=1?"1 unidad":"Caja x"+cajaCant)+" agregada","tok");
+  cosmOptimizar(prodId);
+  updateCartBar();
+  if(typeof renderDrawer==='function') renderDrawer();
+  if(typeof renderCat==='function') renderCat();
+}
+function cosmOptimizar(prodId){
+  var p=prods.find(function(x){return x.id===prodId;}); if(!p) return;
+  var est=_cosmEstado(prodId); if(est.unidades<=0) return;
+  var rr=_cosmOptimizar(p.escala_unidades||[],est.unidades,est.costo);
+  if(rr.auto){ _cosmAplicarCombo(prodId,rr.auto.combo); }
+  if(rr.sugerencia){ _cosmModalSugerencia(prodId,rr.sugerencia,est); }
+}
+function _cosmModalSugerencia(prodId,s,est){
+  var sig=prodId+":"+est.unidades;
+  if(_cosmDismiss[sig]) return;
+  var titulo,detalle;
+  if(s.tipo==='mas_cantidad'){
+    titulo="🎁 ¡Conviene llevar más!";
+    detalle="Llevando <b>"+s.unidades+" unidades</b> ("+_cosmFmtCombo(s.combo)+") paga <b>"+fmt(s.costo)+"</b>"+
+      (s.ahorro>0?" — son <b>"+s.extraU+" unidades más</b> y encima ahorra "+fmt(s.ahorro)+".":" — son <b>"+s.extraU+" unidades más</b> por el mismo precio.");
+  } else {
+    titulo="💡 Mejor precio por unidad";
+    detalle="Sumando un poco más lleva <b>"+s.unidades+" unidades</b> ("+_cosmFmtCombo(s.combo)+") a <b>"+fmt(s.puNew)+" c/u</b> "+
+      "(<b>"+Math.round(s.descPct*100)+"% menos</b> por unidad). Son "+s.extraU+" unidades más por solo "+fmt(s.extraCosto)+".";
+  }
+  var ov=document.getElementById("cosmModalOv");
+  if(!ov){ ov=document.createElement("div"); ov.id="cosmModalOv"; document.body.appendChild(ov); }
+  ov.style.cssText="position:fixed;inset:0;background:rgba(60,40,20,.45);z-index:99999;display:flex;align-items:center;justify-content:center;padding:1.2rem;backdrop-filter:blur(3px)";
+  ov.innerHTML=
+    "<div style='background:linear-gradient(160deg,#fffdf9,#faf3e6);border:1px solid #e6d2ad;border-radius:16px;max-width:380px;width:100%;padding:1.4rem 1.3rem;box-shadow:0 18px 50px rgba(120,80,30,.28)'>"+
+      "<div style='font-family:\"Cormorant Garamond\",serif;font-size:1.5rem;font-weight:700;color:#9a6b2f;margin-bottom:.5rem;line-height:1.15'>"+titulo+"</div>"+
+      "<div style='font-size:.9rem;color:#5a4a36;line-height:1.5;margin-bottom:1.15rem'>"+detalle+"</div>"+
+      "<div style='display:flex;gap:.6rem'>"+
+        "<button type='button' onclick='_cosmCerrarModal()' style='flex:1;padding:.7rem;border:1px solid #d8c39c;background:transparent;border-radius:10px;color:#8a7355;font-size:.85rem;font-weight:600;cursor:pointer'>No, gracias</button>"+
+        "<button type='button' onclick='_cosmAprovechar("+prodId+")' style='flex:1.4;padding:.7rem;border:none;border-radius:10px;background:linear-gradient(135deg,#c4965a,#a9793f);color:#fff;font-size:.85rem;font-weight:700;cursor:pointer;box-shadow:0 4px 12px rgba(169,121,63,.35)'>✨ Aprovechar</button>"+
+      "</div>"+
+    "</div>";
+  ov.style.display="flex";
+  window._cosmSugActual={prodId:prodId,combo:s.combo,sig:sig};
+}
+function _cosmCerrarModal(){
+  var ov=document.getElementById("cosmModalOv"); if(ov) ov.style.display="none";
+  if(window._cosmSugActual) _cosmDismiss[window._cosmSugActual.sig]=true;
+}
+function _cosmAprovechar(prodId){
+  var s=window._cosmSugActual; if(s&&s.combo) _cosmAplicarCombo(prodId,s.combo);
+  var ov=document.getElementById("cosmModalOv"); if(ov) ov.style.display="none";
+  updateCartBar(); toast("¡Combo aplicado!","tok");
+  if(typeof renderDrawer==='function') renderDrawer();
+  if(typeof renderCat==='function') renderCat();
 }
 
 function addDecan(id){
@@ -1442,12 +1563,12 @@ function closeDrawer(){document.getElementById("drawer").classList.remove("open"
 function renderDrawer(){
   var items=Object.values(cart);
   if(!items.length){document.getElementById("drawerBody").innerHTML="<div class='empty'>Pedido vacio</div>";return;}
-  var perfs=items.filter(function(i){return !i.isDecan&&!i.isCombo;});
+  var perfs=items.filter(function(i){return !i.isDecan&&!i.isCombo&&!i.isCosm;});
   var totalUnits=perfs.reduce(function(s,i){return s+i.qty;},0);
   var subtotal=0,totalDesc=0;
   var html=items.map(function(item){
     var sub,segLabel,priceUsed;
-    var p=item.isDecan
+    var p=(item.isDecan||item.isCosm)
       ?prods.find(function(x){return x.id===(item.prodId||item.id);})
       :(!item.isCombo?prods.find(function(x){return x.id===item.id;}):null);
     var r=p?calcP(p):{pm:0,pe:0,pi:item.price};
@@ -1455,6 +1576,8 @@ function renderDrawer(){
       priceUsed=item.price;sub=priceUsed*item.qty;segLabel="Decan 5ml";
     } else if(item.isCombo){
       priceUsed=item.price;sub=priceUsed*item.qty;segLabel="Combo";
+    } else if(item.isCosm){
+      priceUsed=item.price;sub=priceUsed*item.qty;segLabel=item.cajaLabel||"Caja";
     } else if(item.precioManual){
       priceUsed=item.price;sub=priceUsed*item.qty;
       segLabel="<span style='color:var(--cyan);font-size:.62rem'>MANUAL</span>";
@@ -2737,7 +2860,7 @@ function confirmarReservarPed(){
   var entregaHora=(document.getElementById("resEntregaHora")||{}).value||"";
   var entregaStr=entregaFecha?(entregaFecha+(entregaHora?" "+entregaHora:"")):"" ;
   var items=Object.values(cart);
-  var perfs=items.filter(function(i){return !i.isDecan;});
+  var perfs=items.filter(function(i){return !i.isDecan&&!i.isCosm;});
   var totalUnits=perfs.reduce(function(s,i){return s+i.qty;},0);
   var total=items.reduce(function(s,i){return s+(i.price*i.qty);},0);
   var nroOrden=genOrden();
@@ -2781,6 +2904,15 @@ function confirmarReservarPed(){
       isCombo:true,combo_id:c.comboId||null,
       descuento:c.descuento||0,descuento_motivo:c.descMotivo||""});
   });
+  // Agregar cosméticos al pedido (por caja)
+  var cosms=items.filter(function(i){return i.isCosm;});
+  cosms.forEach(function(c){
+    itemsData.push({producto_id:c.prodId||null,nombre:c.nombre,qty:c.qty,
+      segmento:c.cajaLabel||("Caja x"+(c.cajaCant||1)),precio:c.price,
+      total:(c.price*c.qty),
+      isCosm:true,cajaCant:c.cajaCant||1,
+      descuento:0,descuento_motivo:""});
+  });
   // Save as reserva_pedido
   apiPost("pedidos_catalogo",{
     items:JSON.stringify(itemsData),total:total,
@@ -2807,6 +2939,23 @@ function confirmarReservarPed(){
           });
       });
     });
+    // Reservar stock de cosméticos por UNIDADES
+    cosms.forEach(function(item){
+      reservaChain=reservaChain.then(function(){
+        var u=item.qty*(item.cajaCant||1);
+        var p=prods.find(function(x){return x.id===item.prodId;});
+        var stockAntes=p?p.stock_actual||0:0;
+        return patchStockFresco(item.prodId,{stock_actual:-u,reserva:+u},'Reserva pedido')
+          .then(function(){
+            return apiPost("movimientos_stock",{
+              producto_id:item.prodId,producto_nombre:item.nombre,tipo:"reserva",
+              cantidad:u,stock_antes:stockAntes,stock_despues:Math.max(0,stockAntes-u),
+              motivo:"Reserva pedido "+nroOrden,
+              usuario:"Marcela",periodo:periodoActual
+            });
+          });
+      });
+    });
     document.getElementById("moReservarPed").classList.remove("open");
     cart={};cstate={};decanState={};
     updateCartBar();closeDrawer();renderCat();
@@ -2820,7 +2969,7 @@ function confirmarReservarPed(){
 function getPresupuestoData(){
   var items=Object.values(cart);
   if(!items.length)return null;
-  var perfs=items.filter(function(i){return !i.isDecan;});
+  var perfs=items.filter(function(i){return !i.isDecan&&!i.isCosm;});
   var decans=items.filter(function(i){return i.isDecan;});
   var totalUnits=perfs.reduce(function(s,i){return s+i.qty;},0);
   var lineas=[];var subtotal=0;
@@ -2828,7 +2977,10 @@ function getPresupuestoData(){
     var p=prods.find(function(x){return x.id===(item.isDecan?item.prodId:item.id);});
     var r=p?calcP(p):{pm:0,pe:0,pi:item.price,decan:item.price};
     var precio,segLabel;
-    if(item.isDecan){
+    if(item.isCosm){
+      precio=item.price;
+      segLabel=item.cajaLabel||("Caja x"+(item.cajaCant||1));
+    } else if(item.isDecan){
       precio=(item.precioManual||item.price===0)?item.price:(item.price||r.decan);
       segLabel=item.price===0?"Bonificado":"Decan 5ml";
     } else if(item.precioManual){
@@ -4284,7 +4436,7 @@ function openTransferModal(){
 function ejecutarTransfer(targetId,targetNombre){
   var items=Object.values(cart);
   if(!items.length)return;
-  var perfs=items.filter(function(i){return !i.isDecan;});
+  var perfs=items.filter(function(i){return !i.isDecan&&!i.isCosm;});
   var totalUnits=perfs.reduce(function(s,i){return s+i.qty;},0);
   var total=items.reduce(function(s,i){return s+(i.price*i.qty);},0);
   var nroOrden=genOrden();
@@ -4293,7 +4445,9 @@ function ejecutarTransfer(targetId,targetNombre){
     var r=p?calcP(p):{pm:0,pe:0,pi:item.price};
     var _pu=p?p.precio_pestana||0:0;
     var seg,price;
-    if(item.isDecan){
+    if(item.isCosm){
+      seg=item.cajaLabel||("Caja x"+(item.cajaCant||1)); price=item.price;
+    } else if(item.isDecan){
       seg="decan"; price=item.price;
     } else if(item.precioManual){
       seg="especial"; price=item.price;
@@ -4305,10 +4459,11 @@ function ejecutarTransfer(targetId,targetNombre){
       if(Math.abs(item.price-precioCalc)>1){ seg="especial"; price=item.price; }
       else { seg=segCalc; price=precioCalc; }
     }
-    return{producto_id:item.isDecan?(item.prodId||null):item.id,
+    return{producto_id:(item.isDecan||item.isCosm)?(item.prodId||null):item.id,
       nombre:item.nombre,qty:item.qty,segmento:seg,precio:price,
       total:(price*item.qty)-(item.descuento||0),
       isDecan:item.isDecan||false,
+      cajaCant:item.cajaCant||1,isCosm:item.isCosm||false,
       descuento:item.descuento||0,descuento_motivo:item.descMotivo||""};
   });
   var conReserva=document.getElementById("transferConReserva")&&document.getElementById("transferConReserva").checked;
@@ -4317,15 +4472,17 @@ function ejecutarTransfer(targetId,targetNombre){
   var reservasTotal=0;
   if(conReserva){
     // FIX: sin prods.find() + reservaEjecutadaOk por producto
-    perfs.filter(function(i){return !i.isDecan;}).forEach(function(item){
+    items.filter(function(i){return !i.isDecan;}).forEach(function(item){
       if(!item.id)return;
+      var _tpid=item.isCosm?item.prodId:item.id;
+      var _tq=item.qty*(item.isCosm?(item.cajaCant||1):1);
       reservasTotal++;
       stockPromises.push(
-        apiGet("productos","select=id,stock_actual,reserva&id=eq."+item.id).then(function(rows){
+        apiGet("productos","select=id,stock_actual,reserva&id=eq."+_tpid).then(function(rows){
           var fp=rows&&rows[0];
           if(!fp){toast("Error: no se encontró "+item.nombre,"terr");return;}
           if((fp.stock_actual||0)<=0){toast("Sin stock para: "+item.nombre,"twarn");return;}
-          return patchStockFresco(item.id,{stock_actual:-item.qty,reserva:+item.qty},'Ejecutar transfer')
+          return patchStockFresco(_tpid,{stock_actual:-_tq,reserva:+_tq},'Ejecutar transfer')
             .then(function(r){if(r!==null)reservasOk++;});
         }).catch(function(e){toast("Error de red: "+item.nombre,"terr");})
       );
