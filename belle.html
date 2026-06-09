@@ -43415,13 +43415,12 @@ input[type="search"]{-webkit-appearance:textfield;appearance:textfield;}
    Pega lista WhatsApp → lista persistente (blessing_lista) →
    crea productos (cosmético, OCULTO, costo + markup) → pedido proveedor
    ════════════════════════════════════════════════════════════ */
-var blsItems=[];          // [{id,codigo,nombre,pu_usd,pm,qty,producto_id,sel,stock,precioSist,costoSist}]
+var blsItems=[];          // [{id,codigo,nombre,pu_usd,pm,qty,precioEdit,producto_id,sel,stock,precioSist,costoSist}]
 var BLS_MARKUP=40;
 var BLS_PESTANA_COSMETICOS=7;
 
 function blsNum(s){ s=String(s).trim(); if(s.indexOf(',')>=0) return parseFloat(s.replace(/\./g,'').replace(',','.')); return parseFloat(s); }
 function blsEsc(s){ return String(s||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;'); }
-// blsClean: saca el prefijo del export de WhatsApp "[8/6, 11:45] null:" + emojis + asteriscos
 function blsClean(l){
   return l.replace(/^\[\d{1,2}\/\d{1,2},?\s*\d{1,2}:\d{2}(?::\d{2})?\s*(?:a\.?\s?m\.?|p\.?\s?m\.?)?\]\s*[^:]*:\s*/i,'')
           .replace(/[\u{1F000}-\u{1FAFF}\u{2600}-\u{27BF}\u{2190}-\u{21FF}\u{2B00}-\u{2BFF}\u{FE0F}\u{200D}\u{2764}\u{1F3FB}-\u{1F3FF}]/gu,'')
@@ -43472,21 +43471,27 @@ function blsRowFromItem(it){
            pm_modo:pm.modo||'', pm_min:pm.min||0, pm_pack:pm.pack||0,
            pm_precio:(pm.modo==='pack_cerrado'?(pm.precio_pack||0):(pm.precio_unit||0)) };
 }
-// costo unitario MAYORISTA (para crear el producto, independiente de la cantidad)
-function blsCostoUnitBase(it){ var pm=it.pm||{}; if(pm.modo==='pack_cerrado') return pm.precio_unit||0; if(pm.modo==='por_unidad') return pm.precio_unit||0; return it.pu_usd||0; }
-// costo del pedido segun cantidad (si por_unidad y no llega al minimo => precio P.U)
-function blsCalc(it){
-  var pm=it.pm||{}, q=parseFloat(it.qty)||0;
-  if(pm.modo==='por_unidad'){ var retail=q<(pm.min||0); var cu=retail?(it.pu_usd||0):(pm.precio_unit||0); return {unidades:q, costoUnit:cu, subtotal:cu*q, retail:retail}; }
-  if(pm.modo==='pack_cerrado'){ var cajas=q, uni=cajas*(pm.pack||0), cu2=pm.precio_unit||0; return {unidades:uni, costoUnit:cu2, subtotal:cajas*(pm.precio_pack||0), retail:false}; }
-  return {unidades:q, costoUnit:(it.pu_usd||0), subtotal:(it.pu_usd||0)*q, retail:true};
-}
 function blsBoxSize(it){ var pm=it.pm||{}; return pm.modo==='pack_cerrado'?(pm.pack||0):(pm.modo==='por_unidad'?(pm.min||0):0); }
+// costo unitario MAYORISTA (para crear el producto, no depende de la cantidad)
+function blsCostoUnitBase(it){ var pm=it.pm||{}; if(pm.modo==='pack_cerrado') return pm.precio_unit||0; if(pm.modo==='por_unidad') return pm.precio_unit||0; return it.pu_usd||0; }
+
+// ── Helpers del PEDIDO (estilo ayudante de perfumes: cantidad x precio = subtotal) ──
+function blsOrderUnit(it){ return (it.pm&&it.pm.modo==='pack_cerrado')?'cajas':'unid'; }
+function blsOrderPriceDefault(it){
+  var pm=it.pm||{}, q=parseFloat(it.qty)||0;
+  if(pm.modo==='pack_cerrado') return pm.precio_pack||0;
+  if(pm.modo==='por_unidad') return (q<(pm.min||0))?(it.pu_usd||0):(pm.precio_unit||0);
+  return it.pu_usd||0;
+}
+function blsOrderPrice(it){ return (it.precioEdit!=null&&!isNaN(it.precioEdit))?it.precioEdit:blsOrderPriceDefault(it); }
+function blsOrderSubtotal(it){ var q=parseFloat(it.qty)||0; return q*blsOrderPrice(it); }
+function blsOrderUnidades(it){ var pm=it.pm||{}, q=parseFloat(it.qty)||0; return pm.modo==='pack_cerrado'? q*(pm.pack||0) : q; }
+function blsOrderCostoUnitario(it){ var pm=it.pm||{}, p=blsOrderPrice(it); return (pm.modo==='pack_cerrado'&&pm.pack)? p/pm.pack : p; }
 
 async function blessingInit(){
   try{
     var rows=await apiGet("blessing_lista","select=*&order=id.asc&limit=5000");
-    blsItems=(rows||[]).map(function(r){ return { id:r.id, codigo:r.codigo||'', nombre:r.nombre||'', pu_usd:r.pu_usd||0, pm:blsPmFromRow(r), qty:0, producto_id:r.producto_id||null, sel:false, stock:null, precioSist:null, costoSist:null }; });
+    blsItems=(rows||[]).map(function(r){ return { id:r.id, codigo:r.codigo||'', nombre:r.nombre||'', pu_usd:r.pu_usd||0, pm:blsPmFromRow(r), qty:0, precioEdit:null, producto_id:r.producto_id||null, sel:false, stock:null, precioSist:null, costoSist:null }; });
     var ids=blsItems.filter(function(x){return x.producto_id;}).map(function(x){return x.producto_id;});
     if(ids.length){
       var prods2=await apiGet("productos","select=id,stock_actual,precio_pestana,costo_ind&id=in.("+ids.join(',')+")&limit=5000");
@@ -43508,7 +43513,7 @@ async function blsParsear(){
     try{
       var ins=await apiPost("blessing_lista", blsRowFromItem(p));
       var row=(Array.isArray(ins)&&ins[0])?ins[0]:null;
-      blsItems.push({ id:row?row.id:null, codigo:p.codigo||'', nombre:p.nombre||'', pu_usd:p.pu_usd||0, pm:p.pm, qty:0, producto_id:null, sel:false, stock:null, precioSist:null, costoSist:null });
+      blsItems.push({ id:row?row.id:null, codigo:p.codigo||'', nombre:p.nombre||'', pu_usd:p.pu_usd||0, pm:p.pm, qty:0, precioEdit:null, producto_id:null, sel:false, stock:null, precioSist:null, costoSist:null });
       existentes[k]=1; nuevos++;
     }catch(e){ console.error("bls insert",e); }
   }
@@ -43517,6 +43522,9 @@ async function blsParsear(){
   blsRender();
 }
 function blsSetQty(idx,v){ if(blsItems[idx]){ blsItems[idx].qty=parseFloat(v)||0; blsRender(); } }
+function blsSetPrecioPedido(idx,v){ if(blsItems[idx]){ var n=parseFloat(v); blsItems[idx].precioEdit=isNaN(n)?null:n; blsRender(); } }
+function blsRemoveDelPedido(idx){ if(blsItems[idx]){ blsItems[idx].qty=0; blsItems[idx].precioEdit=null; blsRender(); } }
+function blsLimpiarPedido(){ blsItems.forEach(function(it){ it.qty=0; it.precioEdit=null; }); blsRender(); }
 function blsSetSel(idx,v){ if(blsItems[idx]) blsItems[idx].sel=v; blsRenderTotales(); }
 function blsSelTodos(scope,val){ blsItems.forEach(function(it){ if(scope==='nuevo'){ if(!it.producto_id) it.sel=val; } else it.sel=val; }); blsRender(); }
 function blsSetNombre(idx,v){ var it=blsItems[idx]; if(!it) return; it.nombre=v; if(it.id) apiPatch("blessing_lista",{nombre:v,updated_at:new Date().toISOString()},"id=eq."+it.id); }
@@ -43528,15 +43536,15 @@ async function blsBorrarFila(idx){
 }
 function blsRenderTotales(){
   var nSel=0,nNew=0,totU=0,totUSD=0,nPed=0;
-  blsItems.forEach(function(it){ if(it.sel){nSel++; if(!it.producto_id)nNew++;} var q=parseFloat(it.qty)||0; if(q>0){var c=blsCalc(it);totU+=c.unidades;totUSD+=c.subtotal;nPed++;} });
+  blsItems.forEach(function(it){ if(it.sel){nSel++; if(!it.producto_id)nNew++;} var q=parseFloat(it.qty)||0; if(q>0){ totU+=blsOrderUnidades(it); totUSD+=blsOrderSubtotal(it); nPed++; } });
   var el=document.getElementById('blsTotales');
   if(el) el.innerHTML="Lista: <b>"+blsItems.length+"</b> · Seleccionados: <b>"+nSel+"</b> (nuevos "+nNew+") · En pedido: <b>"+nPed+"</b> ítems · <b>"+Math.round(totU)+"</b> u · u$d <b>"+(Math.round(totUSD*100)/100).toFixed(2)+"</b>";
 }
 function blsFila(it,idx,cot){
-  var c=blsCalc(it);
   var pmTxt = it.pm.modo==='pack_cerrado' ? ('caja x'+(it.pm.pack||'?')+' · u$d '+(it.pm.precio_pack||0)) : (it.pm.modo==='por_unidad'? ('x unidad · u$d '+(it.pm.precio_unit||0)+(it.pm.min?(' (mín '+it.pm.min+')'):'')) : 'P.U');
-  var unitLabel = it.pm.modo==='pack_cerrado' ? 'cajas' : 'unid';
-  var retailWarn = (it.pm.modo==='por_unidad'&&c.retail&&it.qty>0)?" <span style='color:#c0392b;font-size:.6rem' title='Menos del mínimo: paga precio P.U'>⚠</span>":"";
+  var unitLabel = blsOrderUnit(it);
+  var costoUnit=blsOrderPrice(it), subtotal=blsOrderSubtotal(it);
+  var retailWarn = (it.pm.modo==='por_unidad'&&(parseFloat(it.qty)||0)<(it.pm.min||0)&&(parseFloat(it.qty)||0)>0)?" <span style='color:#c0392b;font-size:.6rem' title='Menos del mínimo: paga precio P.U'>⚠</span>":"";
   var precioVenta = Math.round(blsCostoUnitBase(it)*cot*(1+BLS_MARKUP/100));
   var hl=(parseFloat(it.qty)||0)>0 ? "background:rgba(196,150,90,.16);" : "";
   var stockTxt = it.producto_id ? ("<b style='color:"+((it.stock||0)>0?'#2e7d32':'#c0392b')+"'>"+(it.stock!=null?it.stock:'?')+"</b><div style='font-size:.55rem;color:#2e7d32'>$ "+((it.precioSist||0)).toLocaleString('es-AR')+"</div>") : "<span style='font-size:.56rem;color:#c4965a'>—</span>";
@@ -43546,8 +43554,8 @@ function blsFila(it,idx,cot){
     "<td style='padding:.35rem'><input value="+JSON.stringify(it.nombre)+" onchange='blsSetNombre("+idx+",this.value)' style='width:100%;min-width:150px;background:transparent;border:1px solid var(--bd2);border-radius:5px;padding:.25rem;color:var(--tx);font-size:.74rem'></td>"+
     "<td style='font-size:.62rem;color:var(--tx3);white-space:nowrap;padding:.35rem'>"+pmTxt+"</td>"+
     "<td style='padding:.35rem'><input type='number' min='0' step='1' value='"+(it.qty||'')+"' onchange='blsSetQty("+idx+",this.value)' style='width:60px;background:transparent;border:1px solid var(--bd2);border-radius:5px;padding:.25rem;color:var(--tx);text-align:center'> <span style='font-size:.56rem;color:var(--tx3)'>"+unitLabel+"</span>"+retailWarn+"</td>"+
-    "<td style='text-align:right;font-size:.7rem;padding:.35rem'>u$d "+(Math.round(c.costoUnit*100)/100).toFixed(2)+"</td>"+
-    "<td style='text-align:right;font-size:.7rem;font-weight:600;padding:.35rem'>u$d "+(Math.round(c.subtotal*100)/100).toFixed(2)+"</td>"+
+    "<td style='text-align:right;font-size:.7rem;padding:.35rem'>u$d "+(Math.round(costoUnit*100)/100).toFixed(2)+"</td>"+
+    "<td style='text-align:right;font-size:.7rem;font-weight:600;padding:.35rem'>u$d "+(Math.round(subtotal*100)/100).toFixed(2)+"</td>"+
     "<td style='text-align:right;font-size:.66rem;color:#2e7d32;padding:.35rem' title='Costo×cotiz×(1+"+BLS_MARKUP+"%)'>$ "+precioVenta.toLocaleString('es-AR')+"</td>"+
     "<td style='text-align:right;padding:.35rem'>"+stockTxt+"</td>"+
     "<td style='padding:.35rem'><button onclick='blsBorrarFila("+idx+")' title='Sacar de la lista' style='background:none;border:none;cursor:pointer;color:#c0392b;font-size:.85rem'>🗑</button></td>"+
@@ -43575,23 +43583,34 @@ function blsRenderPedido(){
   if(!ped.length){ panel.style.display='none'; body.innerHTML=''; return; }
   panel.style.display='block';
   var totUSD=0,totU=0;
-  var rows=ped.map(function(it,i){ var c=blsCalc(it); totUSD+=c.subtotal; totU+=c.unidades;
-    var unitLabel=it.pm.modo==='pack_cerrado'?'cajas':'unid';
-    return "<div style='display:flex;align-items:center;gap:.5rem;padding:.4rem .6rem;border-radius:7px;background:rgba(196,150,90,.13);margin-bottom:.3rem'>"+
-      "<span style='flex:1;font-size:.78rem;color:var(--tx)'>"+(i+1)+". "+blsEsc(it.nombre)+(it.codigo?" <span style='color:var(--tx3);font-size:.6rem'>("+blsEsc(it.codigo)+")</span>":"")+(it.producto_id?"":" <span style='background:#c4965a;color:#000;font-size:.5rem;padding:.05rem .25rem;border-radius:3px'>NUEVO</span>")+"</span>"+
-      "<span style='font-size:.74rem;color:var(--tx);white-space:nowrap'>"+(parseFloat(it.qty)||0)+" "+unitLabel+"</span>"+
-      "<span style='font-size:.7rem;color:var(--tx3);white-space:nowrap'>u$d "+(Math.round(c.costoUnit*100)/100).toFixed(2)+"</span>"+
-      "<span style='font-size:.8rem;font-weight:700;width:95px;text-align:right'>u$d "+(Math.round(c.subtotal*100)/100).toFixed(2)+"</span>"+
+  var rows=ped.map(function(it){ var idx=it._idx, sub=blsOrderSubtotal(it), pr=blsOrderPrice(it), un=blsOrderUnidades(it); totUSD+=sub; totU+=un;
+    var unitLabel=blsOrderUnit(it);
+    var stockBadge = it.producto_id ? "<span style='font-size:.56rem;padding:.05rem .3rem;border-radius:6px;background:rgba(0,0,0,.06);color:"+((it.stock||0)>0?'#2e7d32':'#c0392b')+";font-weight:700;flex-shrink:0'>"+(it.stock!=null?it.stock:'?')+"u</span>" : "<span style='font-size:.5rem;padding:.05rem .25rem;border-radius:6px;background:#c4965a;color:#000;font-weight:700;flex-shrink:0'>NUEVO</span>";
+    return "<div style='display:flex;justify-content:space-between;align-items:center;padding:.3rem .45rem;border-bottom:1px solid var(--bd2);gap:.4rem;background:rgba(196,150,90,.10);border-radius:6px;margin-bottom:.25rem'>"+
+      "<div style='flex:1;min-width:0;display:flex;align-items:center;gap:.3rem;overflow:hidden'>"+
+        "<span style='font-size:.76rem;color:var(--tx);overflow:hidden;text-overflow:ellipsis;white-space:nowrap'>"+blsEsc(it.nombre)+(it.codigo?" <span style='color:var(--tx3);font-size:.6rem'>("+blsEsc(it.codigo)+")</span>":"")+"</span>"+stockBadge+
+      "</div>"+
+      "<div style='display:flex;align-items:center;gap:.35rem;flex-shrink:0'>"+
+        "<input type='number' value='"+(parseFloat(it.qty)||0)+"' min='1' step='1' onchange='blsSetQty("+idx+",this.value)' style='width:48px;text-align:center;background:var(--sur,#faf8f4);border:1px solid var(--bd2);border-radius:4px;color:var(--tx);font-size:.72rem;padding:.15rem'>"+
+        "<span style='font-size:.56rem;color:var(--tx3)'>"+unitLabel+"</span>"+
+        "<div style='display:flex;flex-direction:column;align-items:flex-end;gap:.05rem'>"+
+          "<input type='number' value='"+(Math.round(pr*100)/100).toFixed(2)+"' min='0' step='0.01' onchange='blsSetPrecioPedido("+idx+",this.value)' title='Precio USD — editable' style='width:66px;text-align:right;background:var(--sur,#faf8f4);border:1px solid #c4965a;border-radius:4px;color:#c4965a;font-size:.72rem;padding:.15rem;font-weight:700'>"+
+          "<span style='font-size:.6rem;color:var(--tx3)'>= u$d "+(Math.round(sub*100)/100).toFixed(2)+"</span>"+
+        "</div>"+
+        "<button onclick='blsRemoveDelPedido("+idx+")' title='Quitar del pedido' style='color:#c0392b;background:transparent;border:none;cursor:pointer;font-size:.8rem'>✖</button>"+
+      "</div>"+
     "</div>";
   }).join('');
-  body.innerHTML=rows+"<div style='display:flex;justify-content:flex-end;gap:1.2rem;padding:.55rem .6rem;border-top:1px solid var(--bd2);margin-top:.3rem;font-size:.88rem'><span>Total: <b>"+Math.round(totU)+"</b> unidades</span><span>u$d <b>"+(Math.round(totUSD*100)/100).toFixed(2)+"</b></span></div>";
+  body.innerHTML=rows+"<div style='display:flex;justify-content:space-between;align-items:center;gap:1rem;padding:.55rem .45rem 0;margin-top:.3rem;font-size:.88rem'>"+
+    "<button onclick='blsLimpiarPedido()' class='btn btn-g' style='font-size:.66rem;padding:.25rem .6rem'>🧹 Limpiar pedido</button>"+
+    "<span>Total: <b>"+Math.round(totU)+"</b> u · u$d <b>"+(Math.round(totUSD*100)/100).toFixed(2)+"</b></span></div>";
 }
 function blsCopiarFallback(txt){ try{ var t=document.createElement('textarea'); t.value=txt; document.body.appendChild(t); t.select(); document.execCommand('copy'); document.body.removeChild(t); toast("📋 Copiado","tok"); }catch(e){ alert(txt); } }
 function blsCopiarWpp(){
   var ped=blsItems.filter(function(it){return (parseFloat(it.qty)||0)>0;});
   if(!ped.length){ toast("No hay ítems en el pedido","terr"); return; }
   var totUSD=0; var lines=["*PEDIDO BLESSING*",""];
-  ped.forEach(function(it,i){ var c=blsCalc(it); totUSD+=c.subtotal; var unitLabel=it.pm.modo==='pack_cerrado'?'cajas':'u'; lines.push((i+1)+") "+it.nombre+(it.codigo?" ("+it.codigo+")":"")+" — "+(parseFloat(it.qty)||0)+" "+unitLabel+" — u$d "+(Math.round(c.subtotal*100)/100).toFixed(2)); });
+  ped.forEach(function(it,i){ var sub=blsOrderSubtotal(it); totUSD+=sub; lines.push((i+1)+") "+it.nombre+(it.codigo?" ("+it.codigo+")":"")+" — "+(parseFloat(it.qty)||0)+" "+blsOrderUnit(it)+" — u$d "+(Math.round(sub*100)/100).toFixed(2)); });
   lines.push(""); lines.push("TOTAL: u$d "+(Math.round(totUSD*100)/100).toFixed(2));
   var txt=lines.join("\n");
   if(navigator.clipboard&&navigator.clipboard.writeText){ navigator.clipboard.writeText(txt).then(function(){toast("📲 Pedido copiado para WhatsApp","tok");},function(){blsCopiarFallback(txt);}); }
@@ -43601,12 +43620,12 @@ function blsImprimir(){
   var ped=blsItems.filter(function(it){return (parseFloat(it.qty)||0)>0;});
   if(!ped.length){ toast("No hay ítems en el pedido","terr"); return; }
   var totUSD=0;
-  var rows=ped.map(function(it,i){ var c=blsCalc(it); totUSD+=c.subtotal; var unitLabel=it.pm.modo==='pack_cerrado'?'cajas':'unid'; return "<tr><td>"+(i+1)+"</td><td>"+blsEsc(it.codigo||'')+"</td><td>"+blsEsc(it.nombre)+"</td><td style='text-align:center'>"+(parseFloat(it.qty)||0)+" "+unitLabel+"</td><td style='text-align:right'>u$d "+(Math.round(c.costoUnit*100)/100).toFixed(2)+"</td><td style='text-align:right'>u$d "+(Math.round(c.subtotal*100)/100).toFixed(2)+"</td></tr>"; }).join('');
+  var rows=ped.map(function(it,i){ var sub=blsOrderSubtotal(it), pr=blsOrderPrice(it); totUSD+=sub; return "<tr><td>"+(i+1)+"</td><td>"+blsEsc(it.codigo||'')+"</td><td>"+blsEsc(it.nombre)+"</td><td style='text-align:center'>"+(parseFloat(it.qty)||0)+" "+blsOrderUnit(it)+"</td><td style='text-align:right'>u$d "+(Math.round(pr*100)/100).toFixed(2)+"</td><td style='text-align:right'>u$d "+(Math.round(sub*100)/100).toFixed(2)+"</td></tr>"; }).join('');
   var w=window.open('','_blank'); if(!w){ toast("Permití pop-ups para imprimir","terr"); return; }
   var fecha=new Date().toLocaleDateString('es-AR');
   var html="<html><head><title>Pedido BLESSING</title><meta charset='utf-8'><style>body{font-family:Arial,sans-serif;padding:24px;color:#222}h1{font-size:20px;margin:0 0 4px}table{width:100%;border-collapse:collapse;margin-top:12px;font-size:13px}th,td{border:1px solid #ccc;padding:6px 8px}th{background:#f3ead9;text-align:left}tfoot td{font-weight:bold}</style></head><body>"+
     "<h1>Pedido a BLESSING</h1><div>Fecha: "+fecha+"</div>"+
-    "<table><thead><tr><th>#</th><th>Código</th><th>Producto</th><th>Cantidad</th><th>Costo unit.</th><th>Subtotal</th></tr></thead><tbody>"+rows+"</tbody>"+
+    "<table><thead><tr><th>#</th><th>Código</th><th>Producto</th><th>Cantidad</th><th>Precio</th><th>Subtotal</th></tr></thead><tbody>"+rows+"</tbody>"+
     "<tfoot><tr><td colspan='5' style='text-align:right'>TOTAL</td><td style='text-align:right'>u$d "+(Math.round(totUSD*100)/100).toFixed(2)+"</td></tr></tfoot></table>"+
     "<scr"+"ipt>window.onload=function(){window.print();}<\/scr"+"ipt></body></html>";
   w.document.write(html); w.document.close();
@@ -43648,15 +43667,15 @@ async function blsGenerarPedido(){
   if(!confirm("Generar el pedido «"+nroPedido+"» a BLESSING con "+ped.length+" ítem(s)?\n(Aparece en Pedidos al Proveedor.)")) return;
   var btn=document.getElementById('blsBtnPedido'); if(btn){btn.disabled=true;btn.textContent='Generando…';}
   try{
-    var totUSD=0; ped.forEach(function(it){ totUSD+=blsCalc(it).subtotal; });
+    var totUSD=0; ped.forEach(function(it){ totUSD+=blsOrderSubtotal(it); });
     var insPed=await apiPost("pedidos_proveedor",{ nro_pedido:nroPedido, proveedor:'BLESSING', total_usd:Math.round(totUSD*100)/100, estado:'pendiente', notas:'Generado desde Ayudante Cosméticos (Blessing)' });
     var pedRow=(Array.isArray(insPed)&&insPed[0])?insPed[0]:null;
     if(!pedRow) throw new Error("No se pudo crear el pedido");
-    for(var j=0;j<ped.length;j++){ var it2=ped[j], c2=blsCalc(it2);
-      await apiPost("pedidos_proveedor_items",{ pedido_id:pedRow.id, codigo_proveedor:it2.codigo||'', nombre_proveedor:it2.nombre, marca:'BLESSING', precio_usd:Math.round(c2.costoUnit*10000)/10000, cantidad_pedida:Math.round(c2.unidades), producto_id:it2.producto_id||null, es_nuevo:!it2.producto_id, estado_item:'pendiente' });
+    for(var j=0;j<ped.length;j++){ var it2=ped[j];
+      await apiPost("pedidos_proveedor_items",{ pedido_id:pedRow.id, codigo_proveedor:it2.codigo||'', nombre_proveedor:it2.nombre, marca:'BLESSING', precio_usd:Math.round(blsOrderCostoUnitario(it2)*10000)/10000, cantidad_pedida:Math.round(blsOrderUnidades(it2)), producto_id:it2.producto_id||null, es_nuevo:!it2.producto_id, estado_item:'pendiente' });
     }
     toast("✅ Pedido «"+nroPedido+"» generado a BLESSING ("+ped.length+" ítems)","tok");
-    blsItems.forEach(function(it){ it.qty=0; });
+    blsItems.forEach(function(it){ it.qty=0; it.precioEdit=null; });
     if(nro) nro.value='';
     blsRender();
   }catch(e){ console.error("blsGenerarPedido",e); toast("Error: "+((e&&e.message)||e),"terr"); }
