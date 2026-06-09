@@ -1640,6 +1640,7 @@ tr.row-hl:hover td{
           <button class="btn btn-g" onclick="blsParsear()" style="font-weight:600">📋 Parsear y agregar a la lista</button>
           <span style="flex:1"></span>
           <label style="font-size:.72rem;color:var(--tx3)">Ganancia % <input type="number" id="blsMarkup" value="40" min="0" step="1" onchange="blsRender()" style="width:62px;background:transparent;border:1px solid var(--bd2);border-radius:5px;padding:.25rem;color:var(--tx);text-align:center"></label>
+          <label style="font-size:.72rem;color:var(--tx3)" title="Al comprar 2 cajas, baja este % el precio por unidad (precio progresivo: más cajas = más barato)">Desc. 2ª caja % <input type="number" id="blsDisc2" value="10" min="0" max="90" step="1" onchange="blsSetDisc2(this.value)" style="width:54px;background:transparent;border:1px solid var(--bd2);border-radius:5px;padding:.25rem;color:var(--tx);text-align:center"></label>
           <label style="font-size:.72rem;color:var(--tx3)">N° pedido <input id="blsNro" placeholder="auto" style="width:150px;background:transparent;border:1px solid var(--bd2);border-radius:5px;padding:.25rem;color:var(--tx)"></label>
         </div>
       </div>
@@ -43434,7 +43435,7 @@ var blsItems=[];          // [{id,codigo,nombre,pu_usd,pm,qty,precioEdit,product
 var BLS_MARKUP=40;
 var BLS_PESTANA_COSMETICOS=7;
 var blsDrafts=[]; var blsActiveDraft=null; var _blsDraftTimer=null;
-var BLS_FILTER=''; var BLS_FILTERMODE='all'; var BLS_SORT='id'; var BLS_ROUND=0; var _blsProdNames={};
+var BLS_FILTER=''; var BLS_FILTERMODE='all'; var BLS_SORT='id'; var BLS_ROUND=0; var _blsProdNames={}; var BLS_DISC2=10;
 
 function blsNum(s){ s=String(s).trim(); if(s.indexOf(',')>=0) return parseFloat(s.replace(/\./g,'').replace(',','.')); return parseFloat(s); }
 function blsEsc(s){ return String(s||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;'); }
@@ -43508,6 +43509,7 @@ function blsOrderCostoUnitario(it){ var pm=it.pm||{}, p=blsOrderPrice(it); retur
 
 async function blessingInit(){
   try{ var _mk=localStorage.getItem('blsMarkup'); if(_mk){ BLS_MARKUP=parseFloat(_mk)||40; var _mke=document.getElementById('blsMarkup'); if(_mke)_mke.value=BLS_MARKUP; } }catch(e){}
+  try{ var _d2=localStorage.getItem('blsDisc2'); if(_d2!=null){ BLS_DISC2=parseFloat(_d2)||0; var _d2e=document.getElementById('blsDisc2'); if(_d2e)_d2e.value=BLS_DISC2; } }catch(e){}
   try{
     var rows=await apiGet("blessing_lista","select=*&order=id.asc&limit=5000");
     blsItems=(rows||[]).map(function(r){ return { id:r.id, codigo:r.codigo||'', nombre:r.nombre||'', pu_usd:r.pu_usd||0, pm:blsPmFromRow(r), qty:0, precioEdit:null, producto_id:r.producto_id||null, sel:false, stock:null, precioSist:null, costoSist:null }; });
@@ -43685,20 +43687,25 @@ function blsImprimir(){
 async function blsCrearProducto(it){
   var cot=(typeof cotizActual!=='undefined'&&cotizActual)?cotizActual:1520;
   var costoUnit=Math.round(blsCostoUnitBase(it)*10000)/10000;
-  var precioVenta=blsRoundPrice(costoUnit*cot*(1+BLS_MARKUP/100));
-  var escala=[{cant:1,precio:precioVenta}];
-  var box=blsBoxSize(it); if(box>1) escala.push({cant:box,precio:precioVenta*box});
-  var prodObj={ nombre:it.nombre, tipo:'cosmetico', oculto:true, activo:true, empresa:'BLESSING',
-                cat_catalogo:'cosmeticos', pestana_id:BLS_PESTANA_COSMETICOS,
-                costo_ind:costoUnit, precio_pestana:precioVenta, escala_unidades:escala, stock_actual:0, reserva:0 };
+  var unitSale=costoUnit*cot*(1+BLS_MARKUP/100);
+  var precio1=blsRoundPrice(unitSale);
+  var escala=[{cant:1,precio:precio1}];
+  if(it.pm&&it.pm.modo==='pack_cerrado'&&(it.pm.pack||0)>1){
+    var box=it.pm.pack, disc=(BLS_DISC2||0)/100;
+    escala.push({cant:box, precio:blsRoundPrice(unitSale*box)});                 // 1 caja
+    escala.push({cant:box*2, precio:blsRoundPrice(unitSale*box*2*(1-disc))});    // 2 cajas (mas barato por unidad)
+  }
+  var prodObj={ nombre:it.nombre, tipo:'cosmetico', oculto:true, activo:true, empresa:'BELLE',
+                cat_catalogo:'cosmeticos', pestana_id:BLS_PESTANA_COSMETICOS, markup_pct:BLS_MARKUP, cotiz_hist:cot,
+                costo_ind:costoUnit, precio_pestana:precio1, escala_unidades:escala, stock_actual:0, reserva:0 };
   var insP=await apiPost("productos", prodObj);
   var prow=(Array.isArray(insP)&&insP[0])?insP[0]:null;
-  if(prow){ it.producto_id=prow.id; it.precioSist=precioVenta; it.costoSist=costoUnit; it.stock=0;
+  if(prow){ it.producto_id=prow.id; it.precioSist=precio1; it.costoSist=costoUnit; it.stock=0;
     if(it.id) await apiPatch("blessing_lista",{producto_id:prow.id,updated_at:new Date().toISOString()},"id=eq."+it.id); }
   return it.producto_id;
 }
 async function blsSubirASistema(){
-  var mk=document.getElementById('blsMarkup'); BLS_MARKUP=mk?(parseFloat(mk.value)||40):40;
+  var mk=document.getElementById('blsMarkup'); BLS_MARKUP=mk?(parseFloat(mk.value)||40):40; var _d2x=document.getElementById('blsDisc2'); if(_d2x)BLS_DISC2=parseFloat(_d2x.value)||0;
   var sel=blsItems.filter(function(it){return it.sel && !it.producto_id;});
   if(!sel.length){ toast("Seleccioná productos NUEVOS para subir al sistema","terr"); return; }
   if(!confirm("Crear "+sel.length+" producto(s) NUEVO(S) como Cosmético (OCULTO, costo + "+BLS_MARKUP+"% de ganancia) en la pestaña Cosméticos?\n\nLos ya creados no se tocan. Después los editás desde Stock.")) return;
@@ -43805,6 +43812,7 @@ function blsSetFiltro(v){ BLS_FILTER=blsNorm(v); blsRender(); }
 function blsSetFM(m){ BLS_FILTERMODE=m; blsRender(); }
 function blsSetSort(v){ BLS_SORT=v; blsRender(); }
 function blsSetRound(v){ BLS_ROUND=parseInt(v,10)||0; blsRender(); }
+function blsSetDisc2(v){ BLS_DISC2=parseFloat(v)||0; try{localStorage.setItem('blsDisc2',BLS_DISC2);}catch(e){} }
 function blsEditPM(idx){
   var it=blsItems[idx]; if(!it) return; var pm=it.pm||{};
   var modo=prompt("Tipo de precio mayorista:\n1 = por unidad (a partir de un mínimo)\n2 = caja cerrada (pack)", pm.modo==='pack_cerrado'?'2':'1');
