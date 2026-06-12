@@ -4630,6 +4630,22 @@ function _adminRenderPie(formas,containerId){
   '</div>';
 }
 
+// Cobros de cuenta corriente del período actual cobrados por cada vendedor que NO están
+// contados como venta (la vista v_cobros_cc_saldo suma sólo aplicaciones cuyo pedido nunca
+// generó ventas). Se suman al "saldo encima" del vendedor, igual que en el panel vendedor.
+// Devuelve una promesa que resuelve a un map { vendedor_id: monto }.
+function _loadCobrosCCVend(){
+  return apiGet("v_cobros_cc_saldo","select=vendedor_id,monto_computar&pedido_tiene_venta=eq.false&periodo=eq."+encodeURIComponent(periodoActual))
+    .then(function(rows){
+      var map={};
+      (Array.isArray(rows)?rows:[]).forEach(function(r){
+        if(r.vendedor_id==null)return;
+        map[r.vendedor_id]=(map[r.vendedor_id]||0)+(parseFloat(r.monto_computar)||0);
+      });
+      return map;
+    }).catch(function(){return {};});
+}
+
 function loadDashboard(){
   var week=getCurrentWeek();
   var desde=isoDate(week.desde);
@@ -4659,6 +4675,8 @@ function loadDashboard(){
     apiGetAll("ventas","select=vendedor_id,total,estado&estado=eq.confirmada&limit=10000"),
     // [10] Ventas HOY propias
     apiGet("ventas","select=id,estado,created_at,origen&created_at=gte."+hoy+"T00:00:00"),
+    // [11] Cobros CC por vendedor no contados (período actual) — suman al saldo encima
+    _loadCobrosCCVend(),
   ]).then(function(res){
     var ventasSem   = Array.isArray(res[0])?res[0]:[];
     var rendPend    = Array.isArray(res[1])?res[1]:[];
@@ -4677,6 +4695,8 @@ function loadDashboard(){
     var pedProv     = Array.isArray(res[8])?res[8]:[];
     var todasVentas = Array.isArray(res[9])?res[9]:[];
     var ventasHoy   = Array.isArray(res[10])?res[10]:[];
+    var cobrosCCVend = res[11]||{};
+    var totalCobrosCC = Object.keys(cobrosCCVend).reduce(function(s,k){return s+(cobrosCCVend[k]||0);},0);
 
     var set=function(id,v){var el=document.getElementById(id);if(el)el.textContent=v;};
 
@@ -4687,8 +4707,8 @@ function loadDashboard(){
     var tgTotal=gastosAprobados.reduce(function(s,g){return s+(g.monto||0);},0);
     var trArrastradoTotal=rendArrastrado.reduce(function(s,r){return s+(r.monto||0);},0);
     var trEnvioTotal=rendEnvioDinero.reduce(function(s,r){return s+(r.monto||0);},0);
-    // Fórmula: vendido - rendido - gastos + arrastrado + dinero_enviado
-    var saldoTotal=tvTotal-trTotal-tgTotal+trArrastradoTotal+trEnvioTotal;
+    // Fórmula: vendido - rendido - gastos + arrastrado + dinero_enviado + cobros CC no contados
+    var saldoTotal=tvTotal-trTotal-tgTotal+trArrastradoTotal+trEnvioTotal+totalCobrosCC;
     set("dDinVendSem", fmt(tvSem));
     set("dDinSaldoTotal", fmt(saldoTotal));
 
@@ -5050,8 +5070,8 @@ function loadDashboard(){
           var trArrV=rendArrastrado.filter(function(x){return x.vendedor_id===v.id;}).reduce(function(s,x){return s+(x.monto||0);},0);
           var tgV=gastosAprobados.filter(function(x){return x.vendedor_id===v.id;}).reduce(function(s,x){return s+(x.monto||0);},0);
 
-          // Fórmula EXACTA de Vendedores línea 12149: ventas - rendido - gastos + arrastrado
-          var saldo=totalVendido - trV - tgV + trArrV;
+          // Fórmula EXACTA de Vendedores línea 12149: ventas - rendido - gastos + arrastrado + cobros CC
+          var saldo=totalVendido - trV - tgV + trArrV + (cobrosCCVend[v.id]||0);
 
           // === SEMANA (separado, solo para mostrar) ===
           var tvSem=ventasSem.filter(function(x){return x.vendedor_id===v.id;}).reduce(function(s,x){return s+(x.total||0);},0);
@@ -22727,6 +22747,7 @@ function loadVendedores(){
     apiGet("ventas_transferidas","select=*&estado=neq.cancelada&order=created_at.desc&limit=500"),
     apiGetAll("ventas","select=vendedor_id,total,estado,nro_orden,created_at,producto_nombre,cantidad&estado=in.(confirmada,dev_parcial,devuelta)&created_at=gte."+desde+"T00:00:00&created_at=lte."+hasta+"T23:59:59&limit=10000"),
     apiGetAll("ventas","select=vendedor_id,total,estado,nro_orden,created_at,producto_nombre,cantidad&origen=eq.catalogo&estado=in.(confirmada,pagada,completada)&created_at=gte."+desde+"T00:00:00&created_at=lte."+hasta+"T23:59:59&limit=10000"),
+    _loadCobrosCCVend(),
   ]).then(function(res){
     var todasVentas=Array.isArray(res[0])?res[0]:[];
     var gastos=Array.isArray(res[1])?res[1]:[];
@@ -22734,6 +22755,7 @@ function loadVendedores(){
     var transferencias=Array.isArray(res[3])?res[3]:[];
     var ventasSem=Array.isArray(res[4])?res[4]:[];
     var ventasCat=Array.isArray(res[5])?res[5]:[];
+    var cobrosCCVend=res[6]||{};
 
     var html="";
     window._vendExportData=[]; // acumular datos para el export Excel
@@ -22760,8 +22782,8 @@ function loadVendedores(){
       var totalGastosPend=gastosPend.reduce(function(s,x){return s+(x.monto||0);},0);
       var rendPend=rendiciones.filter(function(x){return x.vendedor_id===vid&&x.estado==="pendiente";});
       var totalRendPend=rendPend.reduce(function(s,x){return s+(x.monto||0);},0);
-      // Fórmula: vendido - rendido - gastos + arrastrado + dinero_enviado
-      var saldo=totalVendido-totalRendido-totalGastos+totalArrastrado+totalEnviado;
+      // Fórmula: vendido - rendido - gastos + arrastrado + dinero_enviado + cobros CC no contados
+      var saldo=totalVendido-totalRendido-totalGastos+totalArrastrado+totalEnviado+(cobrosCCVend[vid]||0);
 
       // Ventas semana propia
       var semPropias=ventasSem.filter(function(x){return x.vendedor_id===vid;});
@@ -35396,7 +35418,8 @@ function adminResetearSaldo(vendedorId,vendedorNombre){
   Promise.all([
     apiGetAll('ventas','select=total&vendedor_id=eq.'+vendedorId+'&estado=eq.confirmada&limit=5000'),
     apiGet('gastos_vendedor','select=monto,aprobado&vendedor_id=eq.'+vendedorId+'&periodo_cerrado=eq.false&limit=5000'),
-    apiGet('rendiciones','select=monto,tipo&vendedor_id=eq.'+vendedorId+'&estado=eq.aprobada&estado=neq.archivada&tipo=neq.reclamo&limit=5000')
+    apiGet('rendiciones','select=monto,tipo&vendedor_id=eq.'+vendedorId+'&estado=eq.aprobada&estado=neq.archivada&tipo=neq.reclamo&limit=5000'),
+    _loadCobrosCCVend()
   ]).then(function(res){
     var tv=(res[0]||[]).reduce(function(s,v){return s+(v.total||0);},0);
     var tg=(res[1]||[]).filter(function(g){return g.aprobado;}).reduce(function(s,g){return s+(g.monto||0);},0);
@@ -35407,8 +35430,9 @@ function adminResetearSaldo(vendedorId,vendedorNombre){
     var tr=rNormal.reduce(function(s,r){return s+(r.monto||0);},0);
     var ta=rArrastrado.reduce(function(s,r){return s+(r.monto||0);},0);
     var te=rEnvio.reduce(function(s,r){return s+(r.monto||0);},0);
-    // Fórmula: vendido - rendido - gastos + arrastrado + dinero_enviado
-    var saldo=tv-tr-tg+ta+te;
+    var tcc=((res[3]||{})[vendedorId])||0;
+    // Fórmula: vendido - rendido - gastos + arrastrado + dinero_enviado + cobros CC no contados
+    var saldo=tv-tr-tg+ta+te+tcc;
     if(saldo<=0){toast('El saldo ya esta en cero (o negativo)','twarn');return;}
     apiPost('rendiciones',{
       vendedor_id:vendedorId,monto:saldo,
@@ -35661,13 +35685,15 @@ function loadResumenPeriodoActual(){
     // Productos con sus costos (solo los que tienen costo cargado)
     apiGet('productos','select=id,costo_ind,costo_log&costo_ind=gt.0').catch(function(){return [];}),
     // Cotización actual
-    apiGet('configuracion','select=valor&clave=eq.cotizacion_usd').catch(function(){return [];})
+    apiGet('configuracion','select=valor&clave=eq.cotizacion_usd').catch(function(){return [];}),
+    _loadCobrosCCVend()
   ]).then(function(res){
     var todasVentas=res[0]||[];
     var todosGastos=res[1]||[];
     var todasRendics=res[2]||[];
     var productos=res[3]||[];
     var cfgCotiz=res[4]||[];
+    var cobrosCCVend=res[5]||{};
 
     // Actualizar cotización si viene de Supabase
     if(cfgCotiz.length&&cfgCotiz[0].valor) cotiz=parseFloat(cfgCotiz[0].valor)||cotiz;
@@ -35707,8 +35733,8 @@ function loadResumenPeriodoActual(){
       var ta=arrastrado.reduce(function(s,x){return s+(x.monto||0);},0);
       var te=envios.reduce(function(s,x){return s+(x.monto||0);},0);
       var tc=comis.reduce(function(s,x){return s+(x.monto||0);},0);
-      // Fórmula: vendido - rendido - gastos + arrastrado + dinero_enviado
-      var saldo=tv-tg-tr+ta+te;
+      // Fórmula: vendido - rendido - gastos + arrastrado + dinero_enviado + cobros CC no contados
+      var saldo=tv-tg-tr+ta+te+(cobrosCCVend[v.id]||0);
       return {id:v.id,n:v.n,tv:tv,tg:tg,tc:tc,tr:tr,ta:ta,te:te,saldo:saldo,
               nv:ventas.length,ng:gastos.length,nr:rendics.length};
     });
@@ -36074,7 +36100,8 @@ function loadCierrePreview(el) {
     return Promise.all([
       apiGetAll('ventas','select=total&vendedor_id=eq.'+v.id+'&estado=eq.confirmada&periodo=eq.'+encodeURIComponent(periodoActual)),
       apiGet('gastos_vendedor','select=monto,aprobado,concepto,vendedor_id&vendedor_id=eq.'+v.id+'&periodo_cerrado=eq.false'),
-      apiGet('rendiciones','select=monto,tipo&vendedor_id=eq.'+v.id+'&estado=eq.aprobada&periodo=eq.'+encodeURIComponent(periodoActual))
+      apiGet('rendiciones','select=monto,tipo&vendedor_id=eq.'+v.id+'&estado=eq.aprobada&periodo=eq.'+encodeURIComponent(periodoActual)),
+      apiGet('v_cobros_cc_saldo','select=monto_computar&vendedor_id=eq.'+v.id+'&pedido_tiene_venta=eq.false&periodo=eq.'+encodeURIComponent(periodoActual)).catch(function(){return [];})
     ]).then(function(r) {
       var tv=(r[0]||[]).reduce(function(s,x){return s+(x.total||0);},0);
       // Gastos: excluir los pendientes de pago a Marcela (vendedor_id=3)
@@ -36096,8 +36123,9 @@ function loadCierrePreview(el) {
       // Suman: arrastrado (período anterior) y envio_dinero (admin envió plata)
       var ta=rendAll.filter(function(x){return x.tipo==='saldo_arrastrado';}).reduce(function(s,x){return s+(x.monto||0);},0);
       var te=rendAll.filter(function(x){return x.tipo==='envio_dinero';}).reduce(function(s,x){return s+(x.monto||0);},0);
-      // Fórmula: vendido - gastos - rendido + arrastrado + dinero_enviado
-      return {id:v.id,n:v.n,tv:tv,tg:tg,tr:tr,ta:ta,te:te,saldo:tv-tg-tr+ta+te};
+      // Fórmula: vendido - gastos - rendido + arrastrado + dinero_enviado + cobros CC no contados
+      var tcc=(r[3]||[]).reduce(function(s,x){return s+(parseFloat(x.monto_computar)||0);},0);
+      return {id:v.id,n:v.n,tv:tv,tg:tg,tr:tr,ta:ta,te:te,tcc:tcc,saldo:tv-tg-tr+ta+te+tcc};
     });
   })).then(function(res) {
     var html = '<div style="font-size:.75rem;font-weight:700;color:var(--tx2);margin-bottom:.3rem">Resumen del periodo <span style="color:var(--acc)">'+periodoActual+'</span>:</div>';
@@ -36165,12 +36193,14 @@ async function adminEjecutarCierrePeriodo() {
       apiGetAll('ventas',          'select=total,id&vendedor_id=eq.'+v.id+'&estado=eq.confirmada&periodo=eq.'+encodeURIComponent(periodoActual)),
       apiGet('gastos_vendedor', 'select=monto,id,concepto,estado_comision,aprobado,vendedor_id&vendedor_id=eq.'+v.id+'&periodo_cerrado=eq.false'),
       apiGet('rendiciones',     'select=monto,id,tipo&vendedor_id=eq.'+v.id+'&estado=eq.aprobada&tipo=neq.saldo_arrastrado&periodo=eq.'+encodeURIComponent(periodoActual)),
-      apiGet('rendiciones',     'select=monto&vendedor_id=eq.'+v.id+'&estado=eq.aprobada&tipo=eq.saldo_arrastrado&periodo=eq.'+encodeURIComponent(periodoActual))
+      apiGet('rendiciones',     'select=monto&vendedor_id=eq.'+v.id+'&estado=eq.aprobada&tipo=eq.saldo_arrastrado&periodo=eq.'+encodeURIComponent(periodoActual)),
+      apiGet('v_cobros_cc_saldo','select=monto_computar&vendedor_id=eq.'+v.id+'&pedido_tiene_venta=eq.false&periodo=eq.'+encodeURIComponent(periodoActual)).catch(function(){return [];})
     ]).then(function(r) {
       var ventas    = Array.isArray(r[0]) ? r[0] : [];
       var gastos    = Array.isArray(r[1]) ? r[1] : [];
       var rendics   = Array.isArray(r[2]) ? r[2] : [];
       var arrastrado= Array.isArray(r[3]) ? r[3] : [];
+      var cobrosCC  = Array.isArray(r[4]) ? r[4] : [];
 
       // Todos los gastos aprobados entran al cierre — incluyendo comisiones de Marcela
       // Las comisiones de Marcela son gastos de David (vendedor_id=1) y él las rinde
@@ -36192,11 +36222,12 @@ async function adminEjecutarCierrePeriodo() {
       var tr = rendicsResta.reduce(function(s,x){return s+(x.monto||0);}, 0);
       var te = rendicsEnvio.reduce(function(s,x){return s+(x.monto||0);}, 0);
       var ta = arrastrado.reduce(function(s,x){return s+(x.monto||0);}, 0);
+      var tcc= cobrosCC.reduce(function(s,x){return s+(parseFloat(x.monto_computar)||0);}, 0);
 
       return {
         id: v.id, n: v.n,
-        tv: tv, tg: tg, tr: tr, ta: ta, te: te,
-        saldo: tv - tg - tr + ta + te,
+        tv: tv, tg: tg, tr: tr, ta: ta, te: te, tcc: tcc,
+        saldo: tv - tg - tr + ta + te + tcc,
         ventasIds:      ventas.map(function(x){return x.id;}),
         gastosCerrarIds:gastosCerrar.map(function(x){return x.id;}),
         rendicsIds:     rendics.map(function(x){return x.id;})
