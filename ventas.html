@@ -7509,20 +7509,27 @@ function loadDineroData(){
   Promise.all([
     apiGetAll("ventas","select=total,forma_cobro&vendedor_id=eq."+VENDEDOR_ID+"&estado=eq.confirmada"+pq+fq+"&limit=10000"),
     apiGet("gastos_vendedor","select=monto,aprobado&vendedor_id=eq."+VENDEDOR_ID+"&periodo_cerrado=eq.false"+pq+fq),
-    apiGet("rendiciones","select=monto,estado,tipo&vendedor_id=eq."+VENDEDOR_ID+"&tipo=neq.reclamo&estado=neq.archivada"+pq+fq)
+    apiGet("rendiciones","select=monto,estado,tipo&vendedor_id=eq."+VENDEDOR_ID+"&tipo=neq.reclamo&estado=neq.archivada"+pq+fq),
+    // Cobros de cuenta corriente cobrados por este vendedor que NO están contados como venta.
+    // La vista v_cobros_cc_saldo suma sólo aplicaciones cuyo pedido nunca generó ventas del vendedor,
+    // así nunca se duplica plata que ya entró por "Total vendido".
+    apiGet("v_cobros_cc_saldo","select=monto_computar&vendedor_id=eq."+VENDEDOR_ID+pq+"&pedido_tiene_venta=eq.false").catch(function(){return [];})
   ]).then(function(res){
     var ventas=Array.isArray(res[0])?res[0]:[];
     var gastos=Array.isArray(res[1])?res[1]:[];
     var rendics=Array.isArray(res[2])?res[2]:[];
+    var cobrosCC=Array.isArray(res[3])?res[3]:[];
     dineroData.vendido=ventas.reduce(function(s,v){return s+(v.total||0);},0);
     dineroData.gastos=gastos.filter(function(g){return g.aprobado;}).reduce(function(s,g){return s+(g.monto||0);},0);
+    dineroData.cobrosCC=cobrosCC.reduce(function(s,c){return s+(parseFloat(c.monto_computar)||0);},0);
     // Rendiciones normales (ya entregué)
     var rendNormales=rendics.filter(function(r){return r.estado==="aprobada"&&r.tipo!=="saldo_arrastrado";});
     // Saldo arrastrado del periodo anterior (plata que tengo en mano del período viejo)
     var rendArrastrado=rendics.filter(function(r){return r.estado==="aprobada"&&r.tipo==="saldo_arrastrado";});
     dineroData.entregado=rendNormales.reduce(function(s,r){return s+(r.monto||0);},0);
     dineroData.arrastrado=rendArrastrado.reduce(function(s,r){return s+(r.monto||0);},0);
-    dineroData.saldo=dineroData.vendido-dineroData.gastos-dineroData.entregado+dineroData.arrastrado;
+    // "Tengo encima" = lo vendido + lo cobrado de cuenta corriente (no vendido) - gastos - entregado + saldo anterior
+    dineroData.saldo=dineroData.vendido+dineroData.cobrosCC-dineroData.gastos-dineroData.entregado+dineroData.arrastrado;
     // Aggregate forma_cobro
     var formas={efectivo:0,transferencia:0,debito:0,credito:0,mixto:0,otro:0};
     ventas.forEach(function(v){
@@ -7575,15 +7582,23 @@ function _renderPieChart(formas,containerId){
 function renderDinero(){
   var pg=document.getElementById("pg-dinero");
   var arrastrado=dineroData.arrastrado||0;
+  var cobrosCC=dineroData.cobrosCC||0;
   var filaArrastrado=arrastrado>0
     ?"<div class='tot-row'><span class='tot-lbl'>+ Saldo periodo anterior</span><span style='color:var(--yel)'>+"+fmt(arrastrado)+"</span></div>"
     :"";
   var cardArrastrado=arrastrado>0
     ?"<div class='mcard' style='border-top:2px solid var(--yel)'><div class='mcard-lbl'>Periodo anterior</div><div class='mcard-val' style='color:var(--yel)'>"+fmt(arrastrado)+"</div><div class='mcard-sub'>Saldo arrastrado</div></div>"
     :"";
+  var filaCobrosCC=cobrosCC>0
+    ?"<div class='tot-row'><span class='tot-lbl'>+ Cobros cuenta corriente</span><span style='color:#34b3a0'>+"+fmt(cobrosCC)+"</span></div>"
+    :"";
+  var cardCobrosCC=cobrosCC>0
+    ?"<div class='mcard' style='border-top:2px solid #34b3a0'><div class='mcard-lbl'>Cobros cta. corriente</div><div class='mcard-val' style='color:#34b3a0'>"+fmt(cobrosCC)+"</div><div class='mcard-sub'>Cobrado, no vendido</div></div>"
+    :"";
   pg.innerHTML=
     "<div class='money-grid'>"+
     "<div class='mcard'><div class='mcard-lbl'>Total vendido</div><div class='mcard-val mv-green'>"+fmt(dineroData.vendido)+"</div><div class='mcard-sub'>Periodo actual</div></div>"+
+    cardCobrosCC+
     "<div class='mcard'><div class='mcard-lbl'>Mis gastos</div><div class='mcard-val mv-red'>"+fmt(dineroData.gastos)+"</div><div class='mcard-sub'>Aprobados</div></div>"+
     "<div class='mcard'><div class='mcard-lbl'>Ya entregue</div><div class='mcard-val mv-amb'>"+fmt(dineroData.entregado)+"</div><div class='mcard-sub'>Rendiciones aprobadas</div></div>"+
     cardArrastrado+
@@ -7592,6 +7607,7 @@ function renderDinero(){
     "<div class='form-card'><div class='form-title'>Desglose</div>"+
     "<div class='tot-box' style='margin:0'>"+
     "<div class='tot-row'><span class='tot-lbl'>Total vendido</span><span style='color:var(--green)'>"+fmt(dineroData.vendido)+"</span></div>"+
+    filaCobrosCC+
     "<div class='tot-row'><span class='tot-lbl'>Menos gastos</span><span style='color:var(--red)'>-"+fmt(dineroData.gastos)+"</span></div>"+
     "<div class='tot-row'><span class='tot-lbl'>Menos entregado</span><span style='color:var(--acc)'>-"+fmt(dineroData.entregado)+"</span></div>"+
     filaArrastrado+
