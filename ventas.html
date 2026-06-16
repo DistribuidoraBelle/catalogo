@@ -1195,7 +1195,7 @@ function calcAlertaPrecio(items){
 }
 
 
-function getCartTotalUnits(){return Object.values(cart).filter(function(i){return !i.isDecan;}).reduce(function(s,i){return s+i.qty;},0);}
+function getCartTotalUnits(){return Object.values(cart).filter(function(i){return !i.isDecan && !i.isBonificado;}).reduce(function(s,i){return s+i.qty;},0);}
 
 // Helper: detecta si el cliente del carrito tiene CC habilitada o precio mayorista
 // (usado para forzar precio mayorista en getBestSeg sin tocar 20 invocaciones)
@@ -1798,10 +1798,52 @@ function repriceCart(){
   });
 }
 
+// ── REGALO POR COMPRA (bonificado) — paridad con el catálogo del cliente ──
+function recomputarBonificados(){
+  Object.keys(cart).forEach(function(k){ if(k.indexOf('bonif_')===0) delete cart[k]; });
+  var ofs = window._ofertas || [];
+  if(!ofs.length) return;
+  var ahora = Date.now();
+  var subtotalPagado = 0;
+  Object.values(cart).forEach(function(i){ if(!i.isBonificado) subtotalPagado += (i.price||0)*(i.qty||0); });
+  function qtyProductoEnCart(pid){
+    var it = cart[pid];
+    return (it && !it.isDecan && !it.isBonificado) ? (it.qty||0) : 0;
+  }
+  ofs.forEach(function(o){
+    if(o.tipo!=='regalo' || !o.activa) return;
+    if(o.fecha_desde && new Date(o.fecha_desde).getTime() > ahora) return;
+    if(o.fecha_hasta && new Date(o.fecha_hasta).getTime() <= ahora) return;
+    if(!o.regalo_producto_id || !(parseInt(o.regalo_cantidad)||0)) return;
+    var porMonto = (parseFloat(o.regalo_min_monto)||0) > 0;
+    var veces = 0;
+    if(porMonto){
+      var minM = parseFloat(o.regalo_min_monto)||0;
+      if(subtotalPagado >= minM) veces = o.regalo_por_multiplo ? Math.floor(subtotalPagado/minM) : 1;
+    } else {
+      var minC = parseInt(o.regalo_min_cantidad)||1;
+      var tq = qtyProductoEnCart(o.producto_id);
+      if(tq >= minC) veces = o.regalo_por_multiplo ? Math.floor(tq/minC) : 1;
+    }
+    if(veces <= 0) return;
+    var cantRegalo = (parseInt(o.regalo_cantidad)||1) * veces;
+    var gp = prods.find(function(x){ return Number(x.id)===Number(o.regalo_producto_id); });
+    var stockGift = gp ? (gp.stock_actual||0) : 0;
+    if(stockGift <= 0) return;
+    if(cantRegalo > stockGift) cantRegalo = stockGift;
+    if(cantRegalo <= 0) return;
+    cart['bonif_'+o.id] = {
+      id:'bonif_'+o.id, ofertaId:o.id, prodId:Number(o.regalo_producto_id),
+      nombre:(gp ? gp.nombre : ('Producto #'+o.regalo_producto_id)),
+      qty:cantRegalo, price:0, seg:'bonificado', isBonificado:true, isDecan:false, precioManual:false, descuento:0, descMotivo:''
+    };
+  });
+}
+
 function updateCartBar(){
   var items=Object.values(cart);
-  var units=items.reduce(function(s,i){return s+i.qty;},0);
-  var total=items.reduce(function(s,i){return s+(i.price*i.qty)-(i.descuento||0);},0);
+  var units=items.reduce(function(s,i){return s+(i.isBonificado?0:i.qty);},0);
+  var total=items.reduce(function(s,i){return s+(i.isBonificado?0:((i.price*i.qty)-(i.descuento||0)));},0);
   var bar=document.getElementById("cartBar");
   if(units>0)bar.classList.add("show");else bar.classList.remove("show");
   document.getElementById("cbCount").textContent=units;
@@ -1853,13 +1895,29 @@ function renderDrawer(){
     if(cancelEditBtn)cancelEditBtn.style.display="none";
     if(formaCobroWrap)formaCobroWrap.closest("div").style.display="";
   }
+  recomputarBonificados();
   var items=Object.values(cart);
   if(!items.length){document.getElementById("drawerBody").innerHTML="<div class='empty'>Pedido vacio</div>";return;}
-  var perfs=items.filter(function(i){return !i.isDecan&&!i.isCombo&&!i.isCosm;});
+  var perfs=items.filter(function(i){return !i.isDecan&&!i.isCombo&&!i.isCosm&&!i.isBonificado;});
   var totalUnits=perfs.reduce(function(s,i){return s+i.qty;},0);
   var subtotal=0,totalDesc=0;
   var html=items.map(function(item){
     var sub,segLabel,priceUsed;
+    if(item.isBonificado){
+      var _bp=prods.find(function(x){return x.id===item.prodId;});
+      var _bimg=(_bp&&_bp.imagen_url)?_bp.imagen_url:'';
+      return "<div class='ci' data-cid='"+String(item.id)+"'>"+
+        "<div class='ci-img' style='width:50px;height:50px;border-radius:7px;overflow:hidden;flex-shrink:0;background:var(--sur2);display:flex;align-items:center;justify-content:center'>"+(_bimg?"<img src='"+_bimg+"' style='width:100%;height:100%;object-fit:contain'>":"<span style='font-size:1.1rem'>🎁</span>")+"</div>"+
+        "<div style='flex:1;min-width:0'>"+
+          "<div class='ci-name' style='margin-bottom:.18rem'>"+item.nombre+"</div>"+
+          "<div class='ci-row'>"+
+            "<span class='ci-seg' style='color:var(--blue)'>🎁 Bonificado</span>"+
+            "<span class='ci-sub' style='color:var(--blue)'>$0</span>"+
+            "<span class='ci-qty'>"+item.qty+"u</span>"+
+          "</div>"+
+        "</div>"+
+      "</div>";
+    }
     var p=(item.isDecan||item.isCosm)
       ?prods.find(function(x){return x.id===(item.prodId||item.id);})
       :(!item.isCombo?prods.find(function(x){return x.id===item.id;}):null);
@@ -5636,10 +5694,11 @@ function executeVenta(items,reservaDecs){
     });
     var combosCart=Object.values(cart).filter(function(i){return i.isCombo;});
     var allItems=items.filter(function(i){return !i.isCombo;}).concat(decans).concat(combosCart);
-    var totalUnidadesF=items.filter(function(i){return !i.isDecan&&!i.isCombo&&!i.isCosm;}).reduce(function(s,i){return s+i.qty;},0);
+    var totalUnidadesF=items.filter(function(i){return !i.isDecan&&!i.isCombo&&!i.isCosm&&!i.isBonificado;}).reduce(function(s,i){return s+i.qty;},0);
     // Respetar precios del carrito — si el precio difiere del calculado, es especial
     allItems.forEach(function(item){
       if(item.isDecan||item.isCombo)return;
+      if(item.isBonificado){item.seg="bonificado";item.price=0;item.total=0;return;}
       if(item.isCosm){item.seg=item.cajaLabel||("Caja x"+(item.cajaCant||1));item.total=(item.price*item.qty)-(item.descuento||0);return;}
       var p=prods.find(function(x){return x.id===item.id;});if(!p)return;
       if(item.precioManual||item.price===0){item.seg=item.price===0?"bonificado":"especial";item.total=(item.price*item.qty)-(item.descuento||0);return;}
@@ -5670,6 +5729,14 @@ function executeVenta(items,reservaDecs){
           total:(item.price*item.qty)-(item.descuento||0),
           isCombo:true,combo_id:item.comboId||null,
           descuento:item.descuento||0,descuento_motivo:item.descMotivo||""
+        };
+      }
+      if(item.isBonificado){
+        return{
+          producto_id:item.prodId,nombre:item.nombre,qty:item.qty,
+          segmento:"BONIFICADO",precio:0,total:0,
+          isDecan:false,cajaCant:1,isCosm:false,
+          descuento:0,descuento_motivo:"Regalo por compra",isBonificado:true
         };
       }
       return{
@@ -5782,6 +5849,23 @@ function executeVenta(items,reservaDecs){
   var nroOrden=genOrden(); // Un solo numero de orden para toda la venta
 
   allItems.forEach(function(item){
+    if(item.isBonificado){
+      // Regalo bonificado: línea a $0 + descuenta stock del producto regalado.
+      promises.push(apiPost("ventas",{
+        vendedor_id:VENDEDOR_ID,nro_orden:nroOrden,
+        producto_id:item.prodId,producto_nombre:item.nombre,cantidad:item.qty,
+        precio_unitario:0,segmento:"bonificado",total:0,periodo:periodoActual,estado:"confirmada",
+        origen:"vendedor",descuento:0,descuento_motivo:"Regalo por compra"
+      }));
+      promises.push(patchStockFresco(item.prodId,{stock_actual:-item.qty},'Bonificado'));
+      try{promises.push(api("POST","movimientos_stock",{
+        producto_id:item.prodId,producto_nombre:item.nombre,tipo:"venta",cantidad:item.qty,
+        motivo:"Bonificado (regalo por compra) — vendedor "+VENDEDOR_ID,
+        usuario:VENDEDOR_ID===1?"David":VENDEDOR_ID===2?"Facu":"Vendedor "+VENDEDOR_ID,
+        periodo:periodoActual||"general"
+      },null));}catch(e){}
+      return;
+    }
     if(item.isCombo){
       // ── COMBO: register venta + reduce stock of each component ──
       var sub=(item.price*item.qty)-(item.descuento||0);
