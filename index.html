@@ -8145,17 +8145,42 @@ function _dupeParec(f){
   var raw=f.inspirado_en ? String(f.inspirado_en) : '';
   return window._dupeCanonFromText ? window._dupeCanonFromText(raw) : '';
 }
+// 🆕 2026-06-17: devuelve TODAS las inspiraciones canónicas de una ficha (array).
+// Usa f.inspiraciones (multi-dupe) si existe; si no, cae al dupe principal (_dupeParec).
+function _dupesParec(f){
+  if(!f) return [];
+  var out=[];
+  function add(nombre){
+    var c = window._dupeCanonFromText ? window._dupeCanonFromText(nombre) : '';
+    if(c && out.indexOf(c)<0) out.push(c);
+  }
+  if(Array.isArray(f.inspiraciones) && f.inspiraciones.length){
+    f.inspiraciones.forEach(function(it){
+      if(it && it.nombre && String(it.nombre).trim()) add(String(it.nombre).trim());
+    });
+  }
+  // Fallback legacy: si inspiraciones no aportó nada, usar el dupe principal (con su cadena de fallbacks)
+  if(!out.length){
+    var d=_dupeParec(f);
+    if(d) out.push(d);
+  }
+  return out;
+}
 function _idxParecidos(){
   if(window._idxParec2) return window._idxParec2;
+  var liveReady = Array.isArray(window._fichasSB) && window._fichasSB.length>0;
   var idx=[];
   (window.allProds||[]).forEach(function(p){
     if(p.kit_componentes && p.kit_componentes.length) return;
     var f=fichaMatchProd(p.nombre, FICHAS_BELLE, p.id);
     if(!f || !f.familia_olfativa) return;
     idx.push({ id:p.id, nombre:(p.nombre||'').split('|')[0].trim(), img:p.imagen_url||'',
-               notas:_notasArrParec(f), fam:_famArrParec(f), dupe:_dupeParec(f) });
+               notas:_notasArrParec(f), fam:_famArrParec(f), dupes:_dupesParec(f) });
   });
-  window._idxParec2=idx; return idx;
+  // Solo cachear cuando ya cargaron las fichas vivas (que traen inspiraciones múltiples).
+  // Si todavía no llegaron, no cacheamos para que se reconstruya con los datos completos.
+  if(liveReady) window._idxParec2=idx;
+  return idx;
 }
 function _tieneSugeridos(p){ var s=p&&p.sugeridos_ids; if(typeof s==='string'){try{s=JSON.parse(s);}catch(e){return false;}} return Array.isArray(s)&&s.length>0; }
 function _sugeridosManuales(prod){
@@ -8174,13 +8199,17 @@ function perfumesParecidos(prod, f, max){
   var _man=_sugeridosManuales(prod);
   if(_man) return _man.slice(0, max||4);
   if(!f || !f.familia_olfativa) return [];
-  // 🆕 Orden automático: (1) mismo dupe / perfume inspirador, (2) más notas+familia en común.
-  var miN=_notasArrParec(f), miF=_famArrParec(f), miDupe=_dupeParec(f), sc=[];
+  // 🆕 Orden automático: (1) mismo dupe / perfume inspirador (cualquiera de los suyos), (2) más notas+familia en común.
+  var miN=_notasArrParec(f), miF=_famArrParec(f), miDupes=_dupesParec(f), sc=[];
   _idxParecidos().forEach(function(x){
     if(x.id===prod.id) return;
     var nc=0; x.notas.forEach(function(n){ if(miN.indexOf(n)>=0) nc++; });
     var fc=0; x.fam.forEach(function(t){ if(miF.indexOf(t)>=0) fc++; });
-    var mismoDupe=(miDupe && x.dupe && x.dupe===miDupe)?1:0;
+    // Comparten dupe si CUALQUIERA de mis inspiraciones coincide con CUALQUIERA de las del candidato
+    var mismoDupe=0;
+    if(miDupes.length && x.dupes && x.dupes.length){
+      for(var i=0;i<miDupes.length;i++){ if(x.dupes.indexOf(miDupes[i])>=0){ mismoDupe=1; break; } }
+    }
     var score=nc*3+fc*2;
     if(mismoDupe || score>0) sc.push({x:x,dupe:mismoDupe,score:score});
   });
@@ -8559,7 +8588,11 @@ function renderFichaModal(prod, f){
   var hayInspNombre = f.inspirado_en_nombre && String(f.inspirado_en_nombre).trim();
   var hayInspDesc = f.inspirado_en && String(f.inspirado_en).trim() &&
                     (!hayInspNombre || String(f.inspirado_en).trim() !== String(f.inspirado_en_nombre).trim());
-  if(hayInspNombre || hayInspDesc || f.inspirado_en_imagen_url){
+  // 🆕 2026-06-17: inspiraciones extra (las que van después de la principal en f.inspiraciones)
+  var inspExtras = (Array.isArray(f.inspiraciones) ? f.inspiraciones.slice(1) : []).filter(function(it){
+    return it && ((it.nombre&&String(it.nombre).trim()) || (it.texto&&String(it.texto).trim()) || (it.imagen_url&&String(it.imagen_url).trim()));
+  });
+  if(hayInspNombre || hayInspDesc || f.inspirado_en_imagen_url || inspExtras.length){
     var inspImgUrl = '';
     // Si hay producto vinculado, buscar su imagen en el catálogo
     if(f.inspirado_en_producto_id && Array.isArray(window.prods)){
@@ -8585,7 +8618,27 @@ function renderFichaModal(prod, f){
     if(hayInspDesc){
       html+='<div style="font-size:.7rem;color:#9a8060;margin-top:.25rem;line-height:1.4">'+f.inspirado_en+'</div>';
     }
-    html+='</div></div></div>';
+    html+='</div></div>'; // /text col /flex row (principal)
+    // 🆕 Inspiraciones adicionales (cada una con su imagen + nombre + descripción)
+    if(inspExtras.length){
+      var _ie=function(s){return String(s==null?'':s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');};
+      inspExtras.forEach(function(it){
+        var im=it.imagen_url?String(it.imagen_url):'';
+        html+='<div style="display:flex;gap:.7rem;align-items:flex-start;margin-top:.6rem;padding-top:.6rem;border-top:1px solid rgba(196,150,90,.12)">';
+        if(im){
+          html+='<img src="'+_ie(im)+'" style="width:60px;height:60px;object-fit:contain;border-radius:8px;background:#fff;border:1px solid rgba(196,150,90,.25);flex-shrink:0" onerror="this.style.display=\'none\'">';
+        }
+        html+='<div style="flex:1;min-width:0">';
+        if(it.nombre && String(it.nombre).trim()){
+          html+='<div style="font-size:.85rem;color:#6b5a3e;font-weight:600;line-height:1.3">≈ '+_ie(String(it.nombre).trim())+'</div>';
+        }
+        if(it.texto && String(it.texto).trim()){
+          html+='<div style="font-size:.7rem;color:#9a8060;margin-top:.25rem;line-height:1.4">'+_ie(String(it.texto).trim())+'</div>';
+        }
+        html+='</div></div>';
+      });
+    }
+    html+='</div>'; // /section
   }
   
   html+='</div></div>'; // /grid /body
