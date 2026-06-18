@@ -570,6 +570,7 @@ footer>div{flex-direction:column;text-align:center;}footer>div>div{text-align:ce
   <div id="catBotonesFila" style="display:contents">
     <button id="btnFiltrosMobile" onclick="toggleFiltrosMobile()" style="display:none;align-items:center;gap:.4rem;background:transparent;border:1.5px solid var(--accent);color:var(--accent);border-radius:20px;padding:.3rem .85rem;font-size:.72rem;cursor:pointer;white-space:nowrap">🔧 Filtros<span id="filtrosBadge" style="display:none;background:var(--accent);color:#fff;border-radius:10px;padding:.05rem .35rem;font-size:.62rem;font-weight:700;min-width:16px;text-align:center"></span></button>
     <button onclick="abrirModalComparador()" style="display:flex;align-items:center;gap:.4rem;background:transparent;border:1.5px solid rgba(77,150,255,.5);color:#4d96ff;border-radius:20px;padding:.3rem .85rem;font-size:.72rem;cursor:pointer;white-space:nowrap">⚖ Comparar</button>
+    <button onclick="abrirDupeFinder()" title="Buscá tu perfume de diseñador favorito y mirá su versión árabe" style="display:flex;align-items:center;gap:.4rem;background:linear-gradient(135deg,#c4965a,#b07f44);border:1.5px solid #b07f44;color:#fff;border-radius:20px;padding:.3rem .9rem;font-size:.72rem;font-weight:600;cursor:pointer;white-space:nowrap;box-shadow:0 2px 8px rgba(196,150,90,.35)">🎯 Tu versión árabe</button>
     <button id="btnAcordesPanel" onclick="toggleAcordesPanel()" style="display:flex;align-items:center;gap:.4rem;background:transparent;border:1.5px solid var(--accent);color:var(--accent);border-radius:20px;padding:.3rem .85rem;font-size:.72rem;cursor:pointer;white-space:nowrap">&#127800; Acordes<span id="acordesBadge" style="display:none;background:var(--accent);color:#fff;border-radius:10px;padding:.05rem .35rem;font-size:.62rem;font-weight:700;min-width:16px;text-align:center"></span></button>
   </div>
   <!-- Filtros que se colapsan en mobile (marcas + género/kit) -->
@@ -1269,9 +1270,9 @@ function abrirPestanaCampaniaSiCorresponde(){
 // Mantiene la lógica de filtrado de campañas pausadas y refresca las pestañas.
 function recargarOfertasYCampanias(){
   Promise.all([
-    apiGet('ofertas','select=*&activa=is.true').catch(function(){return [];}),
-    apiGet('ofertas_campanias','select=*').catch(function(){return [];}),
-    apiGet('ofertas_campania_productos','select=*').catch(function(){return [];})
+    apiGet('ofertas','select=*&activa=is.true&limit=5000').catch(function(){return [];}),
+    apiGet('ofertas_campanias','select=*&limit=5000').catch(function(){return [];}),
+    apiGet('ofertas_campania_productos','select=*&limit=5000').catch(function(){return [];})
   ]).then(function(pr){
     var todasCamps = Array.isArray(pr[1])?pr[1]:[];
     window._ofertaCampaniasTodas = todasCamps;
@@ -1406,9 +1407,9 @@ function loadProds(){
       // ── Cargar ofertas activas + TODAS las campañas (activas+inactivas) + asignaciones ──
       // Cargamos TODAS las campañas porque necesitamos saber cuáles están pausadas
       // para ocultar sus pestañas. Después filtramos las activas para uso normal.
-      apiGet('ofertas','select=*&activa=is.true').catch(function(){return [];}),
-      apiGet('ofertas_campanias','select=*').catch(function(){return [];}),
-      apiGet('ofertas_campania_productos','select=*').catch(function(){return [];})
+      apiGet('ofertas','select=*&activa=is.true&limit=5000').catch(function(){return [];}),
+      apiGet('ofertas_campanias','select=*&limit=5000').catch(function(){return [];}),
+      apiGet('ofertas_campania_productos','select=*&limit=5000').catch(function(){return [];})
     ]).then(function(pr){
       window._catPaneles=Array.isArray(pr[0])?pr[0]:[];
       window._catPanelesTimestamp=Date.now();
@@ -2979,6 +2980,166 @@ function agregarComboCarrito(comboId){
   renderCombosEnCatalogo();
 }
 
+
+// ════════════════════════════════════════════════════════════════════
+// 🎯 BUSCADOR "TU VERSIÓN ÁRABE" — 2026-06-17
+// El cliente escribe un perfume de diseñador (Sauvage, Baccarat, Aventus…)
+// y ve todos los árabes inspirados en él. Usa las fichas vivas (_fichasSB)
+// y la canonización de dupes (_dupeCanonFromText).
+// ════════════════════════════════════════════════════════════════════
+var _dfIndexCache=null, _dfPopCache=null;
+function _dfNorm(s){return String(s==null?'':s).toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g,'').replace(/\s+/g,' ').trim();}
+function _dfEsc(s){return String(s==null?'':s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');}
+function _dfInspNames(f){
+  var out=[];
+  if(f && Array.isArray(f.inspiraciones)){
+    f.inspiraciones.forEach(function(it){ if(it && it.nombre && String(it.nombre).trim()) out.push(String(it.nombre).trim()); });
+  }
+  if(f && f.inspirado_en_nombre && String(f.inspirado_en_nombre).trim() && out.indexOf(String(f.inspirado_en_nombre).trim())<0){
+    out.push(String(f.inspirado_en_nombre).trim());
+  }
+  return out;
+}
+function _dfBuildIndex(){
+  if(_dfIndexCache) return _dfIndexCache;
+  var fichas=window._fichasSB||[];
+  var prodById={}; (allProds||[]).forEach(function(p){prodById[p.id]=p;});
+  var idx=[];
+  fichas.forEach(function(f){
+    if(!f || !f.producto_id) return;
+    var p=prodById[f.producto_id]; if(!p) return; // solo productos activos/visibles del catálogo
+    var names=_dfInspNames(f);
+    if(!names.length) return;
+    idx.push({
+      id:p.id,
+      nombre:(p.nombre||'').split('|')[0].trim(),
+      img:p.imagen_url||'',
+      empresa:p.empresa||'',
+      inspNames:names,
+      inspNorm:names.map(_dfNorm)
+    });
+  });
+  _dfIndexCache=idx;
+  return idx;
+}
+function _dfPopulares(){
+  if(_dfPopCache) return _dfPopCache;
+  var idx=_dfBuildIndex();
+  var groups={};
+  idx.forEach(function(it){
+    it.inspNames.forEach(function(nm){
+      var canon=(typeof _dupeCanonFromText==='function')?_dupeCanonFromText(nm):_dfNorm(nm);
+      if(!canon) return; // descarta "composición propia", "creación original", etc.
+      if(!groups[canon]) groups[canon]={display:nm, ids:{}};
+      // preferir el nombre más corto y prolijo como display
+      if(nm.length < groups[canon].display.length) groups[canon].display=nm;
+      groups[canon].ids[it.id]=1;
+    });
+  });
+  var arr=Object.keys(groups).map(function(k){return {display:groups[k].display, n:Object.keys(groups[k].ids).length};});
+  arr.sort(function(a,b){return b.n-a.n;});
+  _dfPopCache=arr.slice(0,14);
+  return _dfPopCache;
+}
+function _dfBuild(){
+  if(document.getElementById('dfOverlay')) return;
+  var ov=document.createElement('div');
+  ov.id='dfOverlay';
+  ov.style.cssText='position:fixed;inset:0;z-index:9000;background:rgba(40,30,20,.55);display:none;align-items:flex-start;justify-content:center;padding:6vh 1rem 1rem;backdrop-filter:blur(3px)';
+  ov.innerHTML=
+    '<div style="width:min(620px,96vw);max-height:86vh;display:flex;flex-direction:column;background:#faf8f4;border-radius:16px;overflow:hidden;box-shadow:0 24px 70px rgba(0,0,0,.4)">'+
+      '<div style="padding:1.1rem 1.2rem .8rem;background:linear-gradient(135deg,#c4965a,#a9763f);color:#fff">'+
+        '<div style="display:flex;justify-content:space-between;align-items:flex-start;gap:.5rem">'+
+          '<div>'+
+            '<div style="font-family:\'Cormorant Garamond\',serif;font-size:1.45rem;font-weight:700;line-height:1.1">¿Te gusta un perfume?</div>'+
+            '<div style="font-size:.78rem;opacity:.92;margin-top:.15rem">Escribí el de diseñador y te muestro su versión árabe</div>'+
+          '</div>'+
+          '<button onclick="cerrarDupeFinder()" style="background:rgba(255,255,255,.2);border:none;color:#fff;width:30px;height:30px;border-radius:50%;font-size:1.2rem;cursor:pointer;line-height:1;flex-shrink:0">&times;</button>'+
+        '</div>'+
+        '<div style="position:relative;margin-top:.8rem">'+
+          '<span style="position:absolute;left:.7rem;top:50%;transform:translateY(-50%);font-size:.9rem">&#128269;</span>'+
+          '<input id="dfInput" autocomplete="off" placeholder="Ej: Sauvage, Baccarat, Aventus, Le Male…" oninput="_dfBuscar(this.value)" style="width:100%;box-sizing:border-box;padding:.7rem .8rem .7rem 2.1rem;border:none;border-radius:10px;font-size:.92rem;color:#1a1a1a;outline:none">'+
+        '</div>'+
+      '</div>'+
+      '<div id="dfChips" style="padding:.7rem 1.2rem 0;display:flex;flex-wrap:wrap;gap:.4rem"></div>'+
+      '<div id="dfResultados" style="padding:.8rem 1.2rem 1.2rem;overflow-y:auto"></div>'+
+    '</div>';
+  ov.addEventListener('click',function(e){ if(e.target===ov)cerrarDupeFinder(); });
+  document.body.appendChild(ov);
+}
+function abrirDupeFinder(){
+  _dfBuild();
+  var ov=document.getElementById('dfOverlay'); if(!ov) return;
+  _dfIndexCache=null; _dfPopCache=null; // refrescar por si cargaron fichas nuevas
+  ov.style.display='flex';
+  document.body.style.overflow='hidden';
+  var inp=document.getElementById('dfInput'); if(inp){inp.value='';setTimeout(function(){inp.focus();},50);}
+  _dfRenderChips();
+  _dfBuscar('');
+}
+function cerrarDupeFinder(){
+  var ov=document.getElementById('dfOverlay'); if(ov)ov.style.display='none';
+  document.body.style.overflow='';
+}
+function _dfRenderChips(){
+  var cont=document.getElementById('dfChips'); if(!cont) return;
+  var pop=_dfPopulares();
+  if(!pop.length){cont.innerHTML='';return;}
+  cont.innerHTML='<span style="font-size:.66rem;color:#9a8060;width:100%;margin-bottom:.1rem">Los más buscados:</span>'+
+    pop.map(function(g){
+      return '<button onclick="_dfChip(this.getAttribute(\'data-q\'))" data-q="'+_dfEsc(g.display)+'" style="background:#fff;border:1px solid #e8d9bf;color:#6b5a3e;border-radius:20px;padding:.25rem .7rem;font-size:.7rem;cursor:pointer">'+_dfEsc(g.display)+' <span style="color:#c4965a;font-weight:700">'+g.n+'</span></button>';
+    }).join('');
+}
+function _dfChip(q){
+  var inp=document.getElementById('dfInput'); if(inp)inp.value=q;
+  _dfBuscar(q);
+}
+function _dfBuscar(q){
+  var cont=document.getElementById('dfResultados'); if(!cont) return;
+  var nq=_dfNorm(q);
+  var chips=document.getElementById('dfChips');
+  if(!nq){
+    if(chips)chips.style.display='flex';
+    cont.innerHTML='<div style="text-align:center;color:#9a8060;font-size:.8rem;padding:1.5rem 1rem">Escribí un perfume de diseñador arriba, o tocá uno de los populares.</div>';
+    return;
+  }
+  if(chips)chips.style.display='none';
+  var idx=_dfBuildIndex();
+  var res=idx.filter(function(it){ return it.inspNorm.some(function(n){return n.indexOf(nq)>=0;}); });
+  // ordenar: match al inicio del nombre primero, después alfabético
+  res.sort(function(a,b){
+    var am=a.inspNorm.some(function(n){return n.indexOf(nq)===0;})?0:1;
+    var bm=b.inspNorm.some(function(n){return n.indexOf(nq)===0;})?0:1;
+    if(am!==bm)return am-bm;
+    return a.nombre.localeCompare(b.nombre);
+  });
+  if(!res.length){
+    cont.innerHTML='<div style="text-align:center;color:#9a8060;font-size:.82rem;padding:1.5rem 1rem">No encontré árabes inspirados en <strong>"'+_dfEsc(q)+'"</strong>.<br><span style="font-size:.72rem">Probá con el nombre del perfume original (ej: Sauvage, Aventus, Baccarat).</span></div>';
+    return;
+  }
+  res=res.slice(0,40);
+  cont.innerHTML='<div style="font-size:.72rem;color:#9a8060;margin-bottom:.5rem">'+res.length+' perfume'+(res.length>1?'s':'')+' inspirado'+(res.length>1?'s':'')+' que tenemos:</div>'+
+    res.map(function(it){
+      var matchName=it.inspNames.find(function(nm){return _dfNorm(nm).indexOf(nq)>=0;})||it.inspNames[0];
+      var img=it.img?('<img src="'+_dfEsc(it.img)+'" loading="lazy" style="width:52px;height:52px;object-fit:contain;border-radius:8px;background:#fff;border:1px solid #ece3d5;flex-shrink:0" onerror="this.style.visibility=\'hidden\'">'):'<div style="width:52px;height:52px;border-radius:8px;background:#f0e9dd;flex-shrink:0"></div>';
+      return '<div onclick="_dfGo('+it.id+')" style="display:flex;gap:.7rem;align-items:center;padding:.55rem;border-radius:10px;cursor:pointer;border-bottom:1px solid #f0e9dd" onmouseover="this.style.background=\'#f3ece0\'" onmouseout="this.style.background=\'\'">'+
+        img+
+        '<div style="flex:1;min-width:0">'+
+          '<div style="font-weight:600;color:#3a2f22;font-size:.85rem;line-height:1.2">'+_dfEsc(it.nombre)+'</div>'+
+          '<div style="font-size:.7rem;color:#a9763f;margin-top:.15rem">≈ inspirado en '+_dfEsc(matchName)+'</div>'+
+        '</div>'+
+        '<span style="color:#c4965a;font-size:1.1rem;flex-shrink:0">›</span>'+
+      '</div>';
+    }).join('');
+}
+function _dfGo(prodId){
+  cerrarDupeFinder();
+  if(typeof verFichaBelle==='function') verFichaBelle(prodId);
+}
+// Cerrar con Escape
+document.addEventListener('keydown',function(e){
+  if(e.key==='Escape'){var ov=document.getElementById('dfOverlay'); if(ov&&ov.style.display==='flex')cerrarDupeFinder();}
+});
 
 function applyFilters(){
   var q=norm(document.getElementById("srch").value||"");
@@ -8984,6 +9145,154 @@ function compRenderGraficos(){
     +'</div>';
   });
   html+='</div>';
+
+  // ════════ ⭐ PREMIUM 2026-06-17: veredicto · premios · precios · solapamiento · notas únicas ════════
+  (function(){
+    var nMap={};
+    fichas.forEach(function(f,i){
+      if(!f) return;
+      ['notas_salida','notas_corazon','notas_fondo'].forEach(function(k){
+        _compNotasArray(f[k]||'').forEach(function(n){
+          var key=n.toLowerCase().trim(); if(!key) return;
+          if(!nMap[key]) nMap[key]={original:n,perf:[]};
+          if(nMap[key].perf.indexOf(i)<0) nMap[key].perf.push(i);
+        });
+      });
+    });
+    var todas=Object.keys(nMap);
+    var enComun=todas.filter(function(k){return nMap[k].perf.length>=2;});
+    function nrm(s){return String(s||'').toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g,'').replace(/[^a-z0-9]/g,'');}
+    var atributos=[['familia_olfativa'],['genero'],['momento_dia'],['estacion'],['clima'],['ocasion'],['proyeccion'],['duracion'],['estela']];
+    var coincidenAttr=0, attrConDatos=0;
+    atributos.forEach(function(a){
+      var vals=fichas.map(function(f){return f?nrm(f[a[0]]):'';}).filter(Boolean);
+      if(vals.length<fichas.length) return;
+      attrConDatos++;
+      var primero=vals[0];
+      if(vals.every(function(v){return v===primero;})) coincidenAttr++;
+    });
+    var precios=prods.map(function(p){ try{var r=calcP(p);return (r&&r.pi)||0;}catch(e){return 0;} });
+    var preciosValidos=precios.filter(function(x){return x>0;});
+    var minPrecio=preciosValidos.length?Math.min.apply(null,preciosValidos):0;
+    function mapInt(val){
+      if(!val) return 0; var v=String(val).toLowerCase();
+      if(/nuclear|beast|bestial|extrem/.test(v)) return 5;
+      if(/muy (alta|larga)|intens/.test(v)) return 4;
+      if(/alta|larga/.test(v)) return 3;
+      if(/moderada|media|notable/.test(v)) return 2;
+      if(/baja|corta|discreta|leve/.test(v)) return 1;
+      return 0;
+    }
+    function versatilidad(f){ if(!f) return 0; var s=[f.estacion,f.momento_dia,f.clima,f.ocasion].join(' ').toLowerCase(); var c=0; if(/todo el a/.test(s))c++; if(/vers[aá]til/.test(s))c++; if(/\btodo\b/.test(s))c++; return c; }
+    function ganador(scoreFn){
+      var best=-1, bi=-1, tie=false;
+      fichas.forEach(function(f,i){ var s=scoreFn(f); if(s>best){best=s;bi=i;tie=false;} else if(s===best&&best>0){tie=true;} });
+      return best>0&&!tie?bi:-1;
+    }
+    var premios=[
+      {label:'Mayor proyección', emoji:'💨', i:ganador(function(f){return mapInt(f&&f.proyeccion);})},
+      {label:'Más duradero', emoji:'⏱️', i:ganador(function(f){return mapInt(f&&f.duracion);})},
+      {label:'Mayor estela', emoji:'🌫️', i:ganador(function(f){return mapInt(f&&f.estela);})},
+      {label:'Más versátil', emoji:'🔄', i:ganador(versatilidad)},
+      {label:'Más económico', emoji:'💲', i:(minPrecio>0?precios.indexOf(minPrecio):-1)}
+    ].filter(function(x){return x.i>=0;});
+
+    var h='';
+    // 1) Veredicto
+    h+='<div style="background:linear-gradient(135deg,#fff,'+coloresBg[0]+');border:1px solid var(--border-color);border-radius:16px;padding:1.1rem 1.2rem;margin-bottom:1.2rem">';
+    h+='<div style="display:flex;flex-wrap:wrap;gap:.8rem;justify-content:space-around;text-align:center">';
+    if(_compSelIds.length===2&&fichas[0]&&fichas[1]){
+      var sim=_compSimilitud(fichas[0],fichas[1]);
+      h+='<div><div style="font-size:1.8rem;font-weight:800;color:var(--accent);line-height:1">'+sim+'%</div><div style="font-size:.58rem;color:var(--tx-mid);text-transform:uppercase;letter-spacing:.05em">Similitud</div></div>';
+    }
+    h+='<div><div style="font-size:1.8rem;font-weight:800;color:var(--tx-main);line-height:1">'+enComun.length+'</div><div style="font-size:.58rem;color:var(--tx-mid);text-transform:uppercase;letter-spacing:.05em">Notas en común</div></div>';
+    h+='<div><div style="font-size:1.8rem;font-weight:800;color:var(--tx-main);line-height:1">'+coincidenAttr+'/'+attrConDatos+'</div><div style="font-size:.58rem;color:var(--tx-mid);text-transform:uppercase;letter-spacing:.05em">Atributos iguales</div></div>';
+    if(minPrecio>0){ h+='<div><div style="font-size:1.35rem;font-weight:800;color:#3a8a4a;line-height:1.3">$'+minPrecio.toLocaleString('es-AR')+'</div><div style="font-size:.58rem;color:var(--tx-mid);text-transform:uppercase;letter-spacing:.05em">Desde</div></div>'; }
+    h+='</div></div>';
+
+    // 2) Premios por categoría
+    if(premios.length){
+      h+='<div style="margin-bottom:1.2rem"><div style="font-size:.65rem;font-weight:700;color:var(--tx-mid);text-transform:uppercase;letter-spacing:.07em;margin-bottom:.7rem">🏆 Quién gana en cada cosa</div>';
+      h+='<div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(135px,1fr));gap:.6rem">';
+      premios.forEach(function(pr){
+        var p=prods[pr.i];
+        h+='<div style="background:'+coloresBg[pr.i]+';border:1px solid '+coloresBd[pr.i]+';border-radius:12px;padding:.7rem;text-align:center">'
+          +'<div style="font-size:1.3rem;margin-bottom:.15rem">'+pr.emoji+'</div>'
+          +'<div style="font-size:.56rem;color:var(--tx-mid);text-transform:uppercase;letter-spacing:.04em;margin-bottom:.2rem">'+pr.label+'</div>'
+          +'<div style="font-size:.72rem;font-weight:700;color:'+colores[pr.i]+';line-height:1.2">'+nomCorto(p,20)+'</div>'
+        +'</div>';
+      });
+      h+='</div></div>';
+    }
+
+    // 3) Precios lado a lado
+    if(preciosValidos.length){
+      h+='<div style="margin-bottom:1.2rem"><div style="font-size:.65rem;font-weight:700;color:var(--tx-mid);text-transform:uppercase;letter-spacing:.07em;margin-bottom:.7rem">💲 Precio por unidad (x1)</div>';
+      h+='<div style="display:grid;grid-template-columns:repeat('+prods.length+',1fr);gap:.6rem">';
+      prods.forEach(function(p,i){
+        var pr=precios[i];
+        var esMin=pr>0&&pr===minPrecio&&preciosValidos.length>1;
+        h+='<div style="text-align:center;background:'+coloresBg[i]+';border:1px solid '+coloresBd[i]+';border-radius:12px;padding:.8rem .5rem .7rem;position:relative">'
+          +(esMin?'<div style="position:absolute;top:-8px;left:50%;transform:translateX(-50%);background:#3a8a4a;color:#fff;font-size:.5rem;font-weight:700;padding:.1rem .5rem;border-radius:10px;white-space:nowrap">MÁS BARATO</div>':'')
+          +'<div style="font-size:.58rem;color:'+colores[i]+';font-weight:700;margin-bottom:.25rem">'+nomCorto(p,16)+'</div>'
+          +'<div style="font-size:1.05rem;font-weight:800;color:var(--tx-main)">'+(pr>0?'$'+pr.toLocaleString('es-AR'):'—')+'</div>'
+        +'</div>';
+      });
+      h+='</div></div>';
+    }
+
+    // 4) Solapamiento de notas
+    h+='<div style="background:var(--bg-header);border-radius:14px;padding:1rem;border:1px solid var(--border-color);margin-bottom:1.2rem">';
+    h+='<div style="font-size:.65rem;font-weight:700;color:var(--tx-mid);text-transform:uppercase;letter-spacing:.07em;margin-bottom:.8rem">🧩 Notas: en común vs propias</div>';
+    var maxTot=1;
+    var perfStats=prods.map(function(p,i){
+      var prop=0,com=0;
+      todas.forEach(function(k){ if(nMap[k].perf.indexOf(i)>=0){ if(nMap[k].perf.length>=2)com++; else prop++; } });
+      var t=prop+com; if(t>maxTot)maxTot=t;
+      return {prop:prop,com:com,tot:t};
+    });
+    prods.forEach(function(p,i){
+      var st=perfStats[i];
+      var comW=st.tot?Math.round(st.com/maxTot*100):0;
+      var propW=st.tot?Math.round(st.prop/maxTot*100):0;
+      h+='<div style="margin-bottom:.6rem">'
+        +'<div style="display:flex;justify-content:space-between;font-size:.62rem;color:var(--tx-mid);margin-bottom:.25rem"><span style="font-weight:600;color:'+colores[i]+'">'+nomCorto(p,22)+'</span><span>'+st.com+' en común · '+st.prop+' propias</span></div>'
+        +'<div style="display:flex;height:14px;border-radius:7px;overflow:hidden;background:var(--border-color)">'
+          +'<div style="width:'+comW+'%;background:repeating-linear-gradient(45deg,var(--accent),var(--accent) 6px,#d8b079 6px,#d8b079 12px)"></div>'
+          +'<div style="width:'+propW+'%;background:'+colores[i]+'"></div>'
+        +'</div>'
+      +'</div>';
+    });
+    h+='<div style="font-size:.55rem;color:var(--tx-mid);margin-top:.4rem"><span style="display:inline-block;width:10px;height:10px;background:var(--accent);border-radius:2px;vertical-align:middle"></span> rayado = comparten · <span style="display:inline-block;width:10px;height:10px;background:'+colores[0]+';border-radius:2px;vertical-align:middle"></span> liso = propias de cada uno</div>';
+    h+='</div>';
+
+    // 5) Notas únicas con fotos
+    var hayUnicas=prods.some(function(p,i){ return todas.some(function(k){return nMap[k].perf.length===1&&nMap[k].perf[0]===i;}); });
+    if(hayUnicas){
+      h+='<div style="margin-bottom:1.2rem"><div style="font-size:.65rem;font-weight:700;color:var(--tx-mid);text-transform:uppercase;letter-spacing:.07em;margin-bottom:.7rem">🔍 Lo que tiene cada uno (y el otro no)</div>';
+      h+='<div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:.7rem">';
+      prods.forEach(function(p,i){
+        var unicas=todas.filter(function(k){return nMap[k].perf.length===1&&nMap[k].perf[0]===i;}).map(function(k){return nMap[k].original;});
+        h+='<div style="border-radius:12px;border:1px solid '+coloresBd[i]+';background:'+coloresBg[i]+';padding:.7rem">'
+          +'<div style="font-size:.66rem;font-weight:700;color:'+colores[i]+';margin-bottom:.55rem">'+nomCorto(p,22)+'</div>';
+        if(unicas.length){
+          h+='<div style="display:flex;flex-wrap:wrap;gap:.3rem">';
+          unicas.slice(0,14).forEach(function(n){
+            var foto=(typeof getNotaFoto==='function')?getNotaFoto(n):'';
+            var ic=foto?'<img src="'+foto+'" style="width:18px;height:18px;border-radius:50%;object-fit:cover;flex-shrink:0;border:1px solid var(--border-color)" loading="lazy" onerror="if(typeof NOTAS_FOTOS!==\'undefined\')this.src=NOTAS_FOTOS._default;">':'<span style="font-size:.7rem">'+_compClasificarNota(n).emoji+'</span>';
+            h+='<span style="display:inline-flex;align-items:center;gap:.25rem;background:var(--bg-card);border:1px solid var(--border-color);border-radius:12px;padding:.12rem .45rem .12rem .15rem;font-size:.58rem;color:var(--tx-main);text-transform:capitalize">'+ic+n+'</span>';
+          });
+          h+='</div>';
+        } else {
+          h+='<div style="font-size:.62rem;color:var(--tx-mid);font-style:italic">Todas sus notas las comparte</div>';
+        }
+        h+='</div>';
+      });
+      h+='</div></div>';
+    }
+
+    html+=h;
+  })();
 
   // ── BLOQUE 2: SCORE DE SIMILITUD (solo si hay 2 perfumes) ──
   if(_compSelIds.length===2&&fichas[0]&&fichas[1]){
