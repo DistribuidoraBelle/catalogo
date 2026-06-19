@@ -7088,6 +7088,7 @@ function _sendWAOriginal(){
   var _planElegido = _esCCCheckout ? (window._catCCPlanElegido || null) : null;
 
   // Guardar pedido con todos los items
+  var _crearPedidoBelle=function(){
   apiPost("pedidos_catalogo",pedidoData).then(function(rows){
     // FEAT CC v2 (2026-05-14): si es CC y hay plan, generar cuotas automáticamente
     var pedCreado = Array.isArray(rows) && rows.length ? rows[0] : null;
@@ -7242,6 +7243,38 @@ function _sendWAOriginal(){
     // Notificar al modal del error
     try { window.dispatchEvent(new CustomEvent('belle:pedido-enviado', {detail:{exito:false, error:msgUsuario}})); } catch(ev){}
   });
+  }; // fin _crearPedidoBelle
+
+  // ── FIX 2026-06-19 ANTI-SOBREVENTA ──────────────────────────────────────
+  // Revalidar stock FRESCO de la BD justo antes de crear el pedido.
+  // allProds puede estar desactualizado (otro cliente reservó/compró después de cargar
+  // la página) y NO incluye productos ocultos. Si falta stock de algún ítem, se aborta
+  // el pedido y se avisa al cliente cuál no está disponible.
+  (function(){
+    var _req={};
+    perfs.forEach(function(it){ if(it.isCombo)return; var pid=parseInt(it.id); if(pid)_req[pid]=(_req[pid]||0)+(it.qty||1); });
+    combosEnCart.forEach(function(comboItem){
+      var cr=combosPublicos.find(function(c){return c.id===comboItem.comboId;});
+      if(cr&&cr.combo_items)cr.combo_items.forEach(function(ci2){ if(ci2.es_decan)return; var pid=ci2.producto_id; if(pid)_req[pid]=(_req[pid]||0)+((ci2.cantidad||1)*(comboItem.qty||1)); });
+    });
+    items.forEach(function(it){ if(it.isBonificado&&it.prodId){var pid=parseInt(it.prodId);if(pid)_req[pid]=(_req[pid]||0)+(it.qty||1);} });
+    var _ids=Object.keys(_req);
+    if(!_ids.length){ _crearPedidoBelle(); return; }
+    apiGet("productos","select=id,nombre,stock_actual&id=in.("+_ids.join(",")+")").then(function(_fr){
+      _fr=Array.isArray(_fr)?_fr:[];
+      var _m={}; _fr.forEach(function(p){_m[p.id]=p;});
+      var _falla=null;
+      for(var _k in _req){ var _fp=_m[_k]; var _disp=_fp?(_fp.stock_actual||0):0; if(_req[_k]>_disp){ _falla={nombre:(_fp&&_fp.nombre)||('Prod #'+_k), disp:_disp}; break; } }
+      if(_falla){
+        showToast("Sin stock disponible: "+String(_falla.nombre).split(" - ").pop()+(_falla.disp>0?(" — quedan solo "+_falla.disp):" — agotado")+". Quitalo del carrito para continuar.");
+        window._sendingOrder=false;
+        var wb=document.getElementById('waBtn'); if(wb){wb.disabled=false;wb.style.opacity='';}
+        try{window.dispatchEvent(new CustomEvent('belle:pedido-enviado',{detail:{exito:false,error:'Sin stock disponible'}}));}catch(e){}
+        return;
+      }
+      _crearPedidoBelle();
+    }).catch(function(){ _crearPedidoBelle(); }); // si la verificación falla por red, no bloquear (la RPC igual impide reservar de más)
+  })();
 }
 
 
