@@ -1000,7 +1000,7 @@ function loadProds(){
   Promise.all([
     apiGet("productos","select=*&activo=is.true&order=empresa,nombre&limit=2000"),
     apiGet('ofertas','select=*&activa=is.true').catch(function(){return [];}),
-    apiGet('ofertas_campania_productos','select=*').catch(function(){return [];}),
+    apiGet('ofertas_campania_productos','select=*&limit=5000').catch(function(){return [];}),
     apiGet('ofertas_campanias','select=id&activa=is.true').catch(function(){return [];})
   ]).then(function(r){
     var data=r[0];
@@ -1215,7 +1215,7 @@ function getBestSeg(total,r){
 
 
 function loadQuickPanels(){
-  apiGet("productos","select=id,nombre,empresa,deposito_m&activo=is.true&deposito_m=gt.0&order=empresa,nombre")
+  apiGet("productos","select=id,nombre,empresa,deposito_m&activo=is.true&deposito_m=gt.0&order=empresa,nombre&limit=5000")
   .then(function(data){
     var conDepo=Array.isArray(data)?data:[];
     var sec=document.getElementById("quickPanelsSec");
@@ -1693,17 +1693,19 @@ function addDecan(id){
 function chgQty(id,delta){
   if(!cstate[id])cstate[id]={qty:0};
   var p=prods.find(function(x){return x.id===id;});
-  // Stock disponible = stock_actual + reserva (las reservas son unidades fisicas)
+  // FIX 2026-06-18: tope para AGREGAR = stock_actual (libre). La reserva está comprometida
+  // a otros pedidos, no está disponible. No reducir por debajo de lo que ya está en el carrito
+  // (caso edición de un pedido cuyas unidades ya están reservadas).
   var sa=p?(p.stock_actual||0):0;
   var sr=p?(p.reserva||0):0;
-  var stockTotal=sa+sr; // total fisico disponible
   var nq=cstate[id].qty+delta;
   if(nq<0)return;
-  if(nq>stockTotal&&stockTotal>0){
-    var msg="Solo hay "+stockTotal+" unidades disponibles";
-    if(sr>0) msg+=" ("+sa+" libre + "+sr+" reservada"+(sr>1?"s":"")+")";
+  var cap=Math.max(sa, cstate[id].qty);
+  if(nq>cap){
+    var msg = sa>0 ? ("Solo hay "+sa+" disponible"+(sa>1?"s":"")+" para agregar") : "Sin stock libre para agregar";
+    if(sr>0) msg+=" ("+sr+" reservada"+(sr>1?"s":"")+" para otros pedidos)";
     toast(msg,"twarn");
-    nq=stockTotal;
+    nq=cap;
   }
   cstate[id].qty=nq;
   var el=document.getElementById("qty-"+id);if(el)el.textContent=nq;
@@ -2231,7 +2233,6 @@ function loadClientesVendedor(){
       return;
     }
     _vcData=data;
-    console.log("[belle] Clientes cargados:",_vcData.length);
     _renderClientesVend(pg);
   }).catch(function(e){
     console.error("[belle] loadClientesVendedor error:",e);
@@ -2296,7 +2297,6 @@ function _escNomJS(s){
 function _renderClientesVend(pg){
   if(!pg){console.error("[belle] _renderClientesVend: pg null");return;}
   // DEBUG: estado del pg antes de tocar nada
-  console.log("[belle] _renderClientesVend INICIO — pg.id:",pg.id,"display:",pg.style.display||"(default)","computed:",window.getComputedStyle(pg).display,"innerHTML.length antes:",pg.innerHTML.length);
   // Asegurar visibilidad del contenedor (a veces el navTo no lo deja en block)
   pg.style.display="block";
   try {
@@ -2304,7 +2304,6 @@ function _renderClientesVend(pg){
     var vista=window._vcVista||"mios";
     var data=Array.isArray(_vcData)?_vcData:[];
 
-    console.log("[belle] _renderClientesVend — total:",data.length,"vista:",vista,"VENDEDOR_ID:",VENDEDOR_ID);
 
     // Filtrar por vista
     var base;
@@ -2323,7 +2322,6 @@ function _renderClientesVend(pg){
       return ((c.nombre||"")+" "+(c.apellido||"")+" "+(c.telefono_principal||"")+" #"+c.id+" "+(c.email||"")).toLowerCase().indexOf(q)>=0;
     }):base;
 
-    console.log("[belle] _renderClientesVend — filtrados:",lista.length);
 
     // Contadores para chips
     var cMios=data.filter(function(c){return c&&c.vendedor_asignado_id===VENDEDOR_ID;}).length;
@@ -2373,10 +2371,8 @@ function _renderClientesVend(pg){
       }
       html+="<div class='empty' style='padding:2rem;text-align:center;color:var(--tx3)'>"+msg+"</div>";
       html+="</div>";
-      console.log("[belle] EMPTY branch — html length:",html.length,"vista:",vista);
       pg.innerHTML=html;
       pg._busq=q;
-      console.log("[belle] EMPTY innerHTML asignado OK");
       return;
     }
 
@@ -2463,7 +2459,6 @@ function _renderClientesVend(pg){
     html+="</div>";
     pg.innerHTML=html;
     pg._busq=q;
-    console.log("[belle] _renderClientesVend OK — HTML "+html.length+" chars");
   } catch(err){
     console.error("[belle] _renderClientesVend ERROR FATAL:",err);
     console.error("[belle] _vcData fue:",_vcData);
@@ -4158,6 +4153,7 @@ window._ccVerificarYConsolidarPedidoCC = function(pedidoId){
     proms.push(apiPatch('pedidos_catalogo', {
       confirmado_cobro: true,
       confirmado_at: new Date().toISOString(),
+      cobrado_at: new Date().toISOString(), // FIX 2026-06-18: el admin muestra cobrado_at como "fecha cobrado"
       estado: 'cobrado',
       cobrado_total: parseFloat(ped.total) || 0
     }, 'id=eq.'+pedidoId));
@@ -4719,7 +4715,7 @@ function _buscarClienteDrawer(){
     "or=(nombre.ilike.*"+encodeURIComponent(q)+"*,apellido.ilike.*"+encodeURIComponent(q)+"*,telefono_principal.ilike.*"+encodeURIComponent(q)+"*)&limit=10";
   // Query directa, simple — la tabla `clientes` no tiene columna `activo`
   // 🎯 FEAT 2026-05-22: traer también precio_mayorista para detectar clientes VIP
-  apiGet("clientes","select=id,nombre,apellido,telefono_principal,cuenta_corriente_habilitada,precio_mayorista&"+filtro+"&order=nombre").then(function(data){
+  apiGet("clientes","select=id,nombre,apellido,telefono_principal,cuenta_corriente_habilitada,precio_mayorista&"+filtro+"&order=nombre&limit=5000").then(function(data){
     if(!Array.isArray(data)||!data.length){
       el.innerHTML='<div style="font-size:.78rem;color:var(--tx3);text-align:center;padding:1rem">Sin resultados para "'+q+'"</div>';return;
     }
@@ -6824,6 +6820,7 @@ function confirmarCobro(pedId,btn){
       var patchFinal={
         confirmado_cobro:true,
         confirmado_at:new Date().toISOString(),
+        cobrado_at:new Date().toISOString(), // FIX 2026-06-18: el admin muestra cobrado_at como "fecha cobrado"
         estado:"cobrado",
         cobrado_total: totalPed,
         cobrado_parcial: totalPed,
