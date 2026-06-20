@@ -11461,6 +11461,7 @@ function _catRenderTabCatalogos(box){
       h+="<div style='font-size:.66rem;color:#aa9a80;margin-top:.15rem'>"+(nprod!=null?(nprod+" producto"+(nprod===1?'':'s')+" · "):"")+"editado "+fecha+"</div>";
       h+="<div style='display:flex;gap:.4rem;margin-top:.7rem;flex-wrap:wrap'>";
       h+="<button onclick='_catCatElegirProductos("+cat.id+")' style='flex:1;min-width:140px;background:linear-gradient(135deg,#c4965a,#a9763f);color:#fff;border:none;border-radius:8px;padding:.5rem;font-size:.74rem;font-weight:700;cursor:pointer;font-family:inherit'>Elegir productos →</button>";
+      h+="<button onclick='_catCatPdfGenerar("+cat.id+")' style='flex:1;min-width:120px;background:#fff;border:1.5px solid #c4965a;color:#a9763f;border-radius:8px;padding:.5rem;font-size:.74rem;font-weight:700;cursor:pointer;font-family:inherit'>📄 Descargar PDF</button>";
       h+="<button onclick='_catCatEditarFormato("+cat.id+")' style='background:#fff;border:1px solid #d4ba8a;color:#a9763f;border-radius:8px;padding:.5rem .7rem;font-size:.72rem;cursor:pointer;font-family:inherit'>Formato</button>";
       h+="<button onclick='_catCatDuplicar("+cat.id+")' title='Duplicar' style='background:#fff;border:1px solid #d4ba8a;color:#a9763f;border-radius:8px;padding:.5rem .65rem;font-size:.82rem;cursor:pointer;font-family:inherit'>&#128203;</button>";
       h+="<button onclick='_catCatBorrar("+cat.id+")' title='Borrar' style='background:#fff;border:1px solid #f0dad6;color:#cc6b62;border-radius:8px;padding:.5rem .65rem;font-size:.82rem;cursor:pointer;font-family:inherit'>&#128465;</button>";
@@ -11500,7 +11501,337 @@ function _catCatNuevo(){
   _catCatModal(null);
 }
 function _catCatEditarFormato(id){ var c=_catCatList.filter(function(x){return x.id===id;})[0]; if(c)_catCatModal(c); }
-function _catCatElegirProductos(id){ _catToast('Ya casi: el armado de productos y precios llega en la próxima actualización','tok'); }
+// ── Precio sugerido = precio_min * (1+pct/100) redondeado al múltiplo configurado
+function _catCatPrecioSugerido(precioMin,cfg){
+  cfg=cfg||{}; var pct=(cfg.precio_sugerido_pct!=null)?cfg.precio_sugerido_pct:7; var red=cfg.precio_redondeo?cfg.precio_redondeo:1000;
+  var v=(precioMin||0)*(1+pct/100); if(red>0)v=Math.round(v/red)*red; else v=Math.round(v); return v;
+}
+var _catCatProd=null;
+function _catCatElegirProductos(id){
+  var cat=_catCatList.filter(function(x){return x.id===id;})[0]; if(!cat){ _catToast('Catálogo no encontrado','twarn'); return; }
+  var cfg=_catCatConfig||{};
+  var modo=(cat.config&&cat.config.precio_modo)||'x1';
+  var perfumes=(allProds||[]).filter(function(p){return p.tipo==='perfume';});
+  if(!perfumes.length){ _catToast('Todavía no hay perfumes cargados','twarn'); return; }
+  apiGet('catalogos_cliente_productos','select=producto_id,precio,precio_manual&catalogo_id=eq.'+id+'&limit=5000').then(function(rows){
+    rows=Array.isArray(rows)?rows:[];
+    var sel={}, manual={};
+    if(rows.length){
+      rows.forEach(function(r){ sel[r.producto_id]=true; if(r.precio_manual && r.precio!=null) manual[r.producto_id]=String(r.precio); });
+    } else {
+      // Predeterminado: TODOS los perfumes elegidos
+      perfumes.forEach(function(p){ sel[p.id]=true; });
+    }
+    _catCatProd={ catId:id, modo:modo, cfg:cfg, perfumes:perfumes, sel:sel, manual:manual, nombre:cat.nombre||'Mi catálogo' };
+    _catCatProdAbrir();
+  }).catch(function(e){ console.error('[catcat prod load]',e); _catToast('No se pudieron cargar los productos','twarn'); });
+}
+function _catCatProdAbrir(){
+  var st=_catCatProd; if(!st)return;
+  var prev=document.getElementById('_catCatProdOv'); if(prev)prev.remove();
+  var modoLbl = st.modo==='manual'?'Vos ponés los precios':(st.modo==='sugerido'?'Precio sugerido':'Precio minorista Belle');
+  var ov=document.createElement('div'); ov.id='_catCatProdOv';
+  ov.style.cssText='position:fixed;inset:0;z-index:99990;background:#fdfbf7;display:flex;flex-direction:column';
+  var h="";
+  h+="<div style='background:linear-gradient(135deg,#c4965a,#a9763f);color:#fff;padding:.9rem 1rem;display:flex;align-items:center;gap:.6rem;flex-shrink:0'>";
+  h+="<button onclick='_catCatProdCerrar()' style='background:rgba(255,255,255,.2);color:#fff;border:none;border-radius:8px;width:34px;height:34px;font-size:1.3rem;line-height:1;cursor:pointer;flex-shrink:0'>‹</button>";
+  h+="<div style='flex:1;min-width:0'><div style='font-family:\"Cormorant Garamond\",serif;font-size:1.15rem;font-weight:700;line-height:1.1'>Elegí los perfumes</div>";
+  h+="<div style='font-size:.68rem;opacity:.92;white-space:nowrap;overflow:hidden;text-overflow:ellipsis'>"+_catEsc(st.nombre)+" · "+modoLbl+"</div></div></div>";
+  h+="<div style='padding:.7rem 1rem;background:#fff;border-bottom:1px solid #efe7d8;flex-shrink:0'>";
+  h+="<input id='_catCatProdSearch' type='text' placeholder='Buscar perfume o marca…' oninput='_catCatProdSearch(this.value)' style='width:100%;border:1px solid #e0d4bd;border-radius:9px;padding:.55rem .7rem;font-size:.85rem;font-family:inherit;box-sizing:border-box;margin-bottom:.5rem'>";
+  h+="<div style='display:flex;align-items:center;gap:.5rem'>";
+  h+="<button onclick='_catCatProdTodos(true)' style='background:#f3ead8;color:#8a6a3a;border:none;border-radius:7px;padding:.35rem .6rem;font-size:.7rem;font-weight:600;cursor:pointer;font-family:inherit'>Marcar todos</button>";
+  h+="<button onclick='_catCatProdTodos(false)' style='background:#f3ead8;color:#8a6a3a;border:none;border-radius:7px;padding:.35rem .6rem;font-size:.7rem;font-weight:600;cursor:pointer;font-family:inherit'>Ninguno</button>";
+  h+="<div style='flex:1'></div><div id='_catCatProdCount' style='font-size:.72rem;color:#6a5a40;font-weight:600'></div></div></div>";
+  if(st.modo==='manual'){
+    h+="<div style='padding:.45rem 1rem;background:#faf6ee;border-bottom:1px solid #f0e7d6;font-size:.68rem;color:#8a7a5a;flex-shrink:0'>Escribí el precio de cada perfume. Los que dejes vacíos los resolvés al guardar.</div>";
+  }
+  h+="<div id='_catCatProdList' style='flex:1;overflow-y:auto;padding:.2rem 1rem 1rem'></div>";
+  h+="<div style='padding:.8rem 1rem;background:#fff;border-top:1px solid #efe7d8;flex-shrink:0;display:flex;gap:.6rem'>";
+  h+="<button onclick='_catCatProdCerrar()' style='background:#fff;color:#8a6a3a;border:1.5px solid #d8c4a0;border-radius:10px;padding:.7rem 1rem;font-size:.82rem;font-weight:600;cursor:pointer;font-family:inherit'>Cancelar</button>";
+  h+="<button id='_catCatProdGuardarBtn' onclick='_catCatProdGuardar()' style='flex:1;background:linear-gradient(135deg,#c4965a,#a9763f);color:#fff;border:none;border-radius:10px;padding:.7rem;font-size:.85rem;font-weight:700;cursor:pointer;font-family:inherit'>Guardar productos</button></div>";
+  ov.innerHTML=h;
+  document.body.appendChild(ov);
+  _catCatProdRenderList();
+  _catCatProdCount();
+}
+function _catCatProdRenderList(){
+  var st=_catCatProd; var box=document.getElementById('_catCatProdList'); if(!st||!box)return;
+  var cfg=st.cfg; var h="";
+  st.perfumes.forEach(function(p){
+    var pid=p.id; var on=!!st.sel[pid];
+    var marca=(p.empresa||'').trim();
+    var ml=p.ml?(' · '+p.ml+' ml'):'';
+    var sug=_catCatPrecioSugerido(p.precio_min_ars,cfg);
+    var priceArea;
+    if(st.modo==='manual'){
+      var mv=(st.manual[pid]!=null)?_catEsc(String(st.manual[pid])):"";
+      priceArea="<div style='display:flex;align-items:center;gap:.2rem;flex-shrink:0'><span style='color:#b09a72;font-size:.8rem'>$</span><input type='number' inputmode='numeric' value='"+mv+"' placeholder='"+sug+"' oninput='_catCatProdManual("+pid+",this.value)' style='width:84px;border:1px solid #e0d4bd;border-radius:7px;padding:.35rem .4rem;font-size:.8rem;font-family:inherit;text-align:right;box-sizing:border-box'></div>";
+    } else {
+      var pr=(st.modo==='sugerido')?sug:(p.precio_min_ars||0);
+      priceArea="<div style='font-weight:700;color:#c4965a;font-size:.82rem;flex-shrink:0'>"+fmt(pr)+"</div>";
+    }
+    h+="<div class='_ccpRow' data-s='"+_catEsc(((p.nombre||'')+' '+marca).toLowerCase())+"' style='display:flex;align-items:center;gap:.55rem;padding:.5rem .1rem;border-bottom:1px solid #f0e8d8'>";
+    h+="<input type='checkbox' id='_ccpChk"+pid+"' "+(on?'checked':'')+" onchange='_catCatProdToggle("+pid+",this.checked)' style='width:19px;height:19px;accent-color:#c4965a;flex-shrink:0'>";
+    h+="<div style='flex:1;min-width:0' onclick='_catCatProdRowTap("+pid+")'><div style='font-weight:600;font-size:.8rem;color:#3a2f1c;white-space:nowrap;overflow:hidden;text-overflow:ellipsis'>"+_catEsc(p.nombre||'')+"</div><div style='font-size:.65rem;color:#9a8a6a;white-space:nowrap;overflow:hidden;text-overflow:ellipsis'>"+_catEsc(marca)+ml+"</div></div>";
+    h+=priceArea+"</div>";
+  });
+  box.innerHTML=h;
+}
+function _catCatProdRowTap(pid){ var st=_catCatProd; if(!st)return; var on=!st.sel[pid]; st.sel[pid]=on; var chk=document.getElementById('_ccpChk'+pid); if(chk)chk.checked=on; _catCatProdCount(); }
+function _catCatProdToggle(pid,checked){ var st=_catCatProd; if(!st)return; st.sel[pid]=checked; _catCatProdCount(); }
+function _catCatProdManual(pid,val){ var st=_catCatProd; if(!st)return; st.manual[pid]=val; }
+function _catCatProdTodos(val){ var st=_catCatProd; if(!st)return; st.perfumes.forEach(function(p){ st.sel[p.id]=val; }); _catCatProdRenderList(); _catCatProdCount(); }
+function _catCatProdSearch(q){ q=(q||'').trim().toLowerCase(); var rows=document.querySelectorAll('#_catCatProdList ._ccpRow'); for(var i=0;i<rows.length;i++){ var s=rows[i].getAttribute('data-s')||''; rows[i].style.display=(!q||s.indexOf(q)>=0)?'flex':'none'; } }
+function _catCatProdCount(){ var st=_catCatProd; if(!st)return; var n=0; st.perfumes.forEach(function(p){ if(st.sel[p.id])n++; }); var el=document.getElementById('_catCatProdCount'); if(el)el.textContent=n+' elegidos'; }
+function _catCatProdCerrar(){ var ov=document.getElementById('_catCatProdOv'); if(ov)ov.remove(); _catCatProd=null; }
+function _catCatProdGuardar(){
+  var st=_catCatProd; if(!st)return;
+  var seleccionados=st.perfumes.filter(function(p){ return st.sel[p.id]; });
+  if(!seleccionados.length){ _catToast('Elegí al menos un perfume','twarn'); return; }
+  if(st.modo==='manual'){
+    var faltan=seleccionados.filter(function(p){ var v=(st.manual[p.id]!=null?String(st.manual[p.id]):'').replace(/\D/g,''); return !(v && parseInt(v)>0); });
+    if(faltan.length){ _catCatProdResolverFaltantes(faltan.length, function(choice){ _catCatProdPersistir(seleccionados, choice); }); return; }
+  }
+  _catCatProdPersistir(seleccionados, null);
+}
+function _catCatProdPersistir(seleccionados, faltanChoice){
+  var st=_catCatProd; if(!st)return; var modo=st.modo, cfg=st.cfg;
+  var rows=[], orden=0;
+  seleccionados.forEach(function(p){
+    var precio=null, manual=false, incluir=true;
+    if(modo==='manual'){
+      var raw=(st.manual[p.id]!=null?String(st.manual[p.id]):'').replace(/\D/g,'');
+      var val=raw?parseInt(raw):0;
+      if(val>0){ precio=val; manual=true; }
+      else if(faltanChoice==='sugerido'){ precio=_catCatPrecioSugerido(p.precio_min_ars,cfg); manual=false; }
+      else { incluir=false; }
+    } else if(modo==='sugerido'){ precio=_catCatPrecioSugerido(p.precio_min_ars,cfg); manual=false; }
+    else { precio=p.precio_min_ars||0; manual=false; }
+    if(incluir){ rows.push({catalogo_id:st.catId, producto_id:p.id, precio:precio, precio_manual:manual, orden:orden++}); }
+  });
+  var btn=document.getElementById('_catCatProdGuardarBtn'); if(btn){btn.disabled=true;btn.textContent='Guardando...';}
+  apiDelete('catalogos_cliente_productos','catalogo_id=eq.'+st.catId).then(function(){
+    if(!rows.length) return null;
+    return apiPost('catalogos_cliente_productos', rows);
+  }).then(function(){
+    _catToast('Productos guardados ('+rows.length+')','tok');
+    var c=_catCatList.filter(function(x){return x.id===st.catId;})[0]; if(c)c._nprod=rows.length;
+    _catCatProdCerrar();
+    if(_catPanelTab==='catalogos'){ var b=document.getElementById('_catTabBody'); if(b)_catRenderTabCatalogos(b); }
+  }).catch(function(e){ console.error('[catcat prod save]',e); _catToast('No se pudo guardar','twarn'); if(btn){btn.disabled=false;btn.textContent='Guardar productos';} });
+}
+function _catCatProdResolverFaltantes(n, onChoice){
+  var ov=document.createElement('div');
+  ov.style.cssText='position:fixed;inset:0;z-index:100000;background:rgba(20,15,8,.55);display:flex;align-items:center;justify-content:center;padding:1.2rem';
+  var h="<div style='background:#fffdf9;border-radius:16px;max-width:380px;width:100%;padding:1.3rem;box-shadow:0 18px 50px rgba(0,0,0,.3)'>";
+  h+="<div style='font-family:\"Cormorant Garamond\",serif;font-size:1.3rem;font-weight:700;color:#3a2f1c;margin-bottom:.5rem'>Faltan precios</div>";
+  h+="<div style='font-size:.85rem;color:#6a5a40;line-height:1.45;margin-bottom:1.1rem'>Hay <b>"+n+"</b> perfume"+(n===1?'':'s')+" sin precio. ¿Qué hacemos con esos?</div>";
+  h+="<button id='_ccpFaltSug' style='width:100%;background:linear-gradient(135deg,#c4965a,#a9763f);color:#fff;border:none;border-radius:10px;padding:.7rem;font-size:.82rem;font-weight:700;cursor:pointer;font-family:inherit;margin-bottom:.5rem'>Mostrarlos con precio sugerido</button>";
+  h+="<button id='_ccpFaltOcu' style='width:100%;background:#fff;color:#8a6a3a;border:1.5px solid #d8c4a0;border-radius:10px;padding:.7rem;font-size:.82rem;font-weight:600;cursor:pointer;font-family:inherit;margin-bottom:.5rem'>No mostrarlos en el catálogo</button>";
+  h+="<button id='_ccpFaltCan' style='width:100%;background:transparent;color:#9a8a6a;border:none;padding:.4rem;font-size:.78rem;cursor:pointer;font-family:inherit'>Volver a editar</button></div>";
+  ov.innerHTML=h;
+  document.body.appendChild(ov);
+  ov.addEventListener('click',function(e){ if(e.target===ov) ov.remove(); });
+  document.getElementById('_ccpFaltSug').onclick=function(){ ov.remove(); onChoice('sugerido'); };
+  document.getElementById('_ccpFaltOcu').onclick=function(){ ov.remove(); onChoice('ocultar'); };
+  document.getElementById('_ccpFaltCan').onclick=function(){ ov.remove(); };
+}
+
+// ══════════════════════════════════════════════════════════════════
+// MIS CATÁLOGOS — Fase 4: generar PDF (jsPDF + html2canvas, página por página)
+// ══════════════════════════════════════════════════════════════════
+function _catCatPdfOverlay(show,msg){
+  var ov=document.getElementById('_catCatPdfOv');
+  if(!show){ if(ov)ov.remove(); return; }
+  if(!ov){
+    ov=document.createElement('div'); ov.id='_catCatPdfOv';
+    ov.style.cssText='position:fixed;inset:0;z-index:100001;background:rgba(253,251,247,.95);display:flex;flex-direction:column;align-items:center;justify-content:center;gap:1rem;padding:2rem;text-align:center';
+    ov.innerHTML="<div style='width:46px;height:46px;border:4px solid #ecdcc2;border-top-color:#c4965a;border-radius:50%;animation:_catSpin 1s linear infinite'></div><div id='_catCatPdfMsg' style='font-family:\"Cormorant Garamond\",serif;font-size:1.2rem;color:#5a4a30;font-weight:600'></div><div style='font-size:.72rem;color:#9a8a6a'>No cierres esta ventana</div>";
+    document.body.appendChild(ov);
+    if(!document.getElementById('_catSpinStyle')){ var st=document.createElement('style'); st.id='_catSpinStyle'; st.textContent='@keyframes _catSpin{to{transform:rotate(360deg)}}'; document.head.appendChild(st); }
+  }
+  var m=document.getElementById('_catCatPdfMsg'); if(m)m.textContent=msg||'Generando…';
+}
+function _catCatPdfPreload(urls, cb){
+  var uniq=[], seen={}; (urls||[]).forEach(function(u){ if(u && !seen[u]){seen[u]=1; uniq.push(u);} });
+  if(!uniq.length){ cb&&cb(); return; }
+  var done=0, total=uniq.length, finished=false;
+  function tick(){ done++; if(done>=total && !finished){ finished=true; cb&&cb(); } }
+  uniq.forEach(function(u){
+    var im=new Image(); try{ im.crossOrigin='anonymous'; }catch(e){}
+    var t=setTimeout(tick,6000);
+    im.onload=function(){ clearTimeout(t); tick(); };
+    im.onerror=function(){ clearTimeout(t); tick(); };
+    im.src=u;
+  });
+}
+function _catCatPdfNotasList(ficha){
+  var arr=[]; ['notas_salida','notas_corazon','notas_fondo'].forEach(function(k){
+    String((ficha&&ficha[k])||'').split(',').forEach(function(s){ s=s.trim(); if(s)arr.push(s); });
+  });
+  var seen={}, out=[]; arr.forEach(function(n){ var key=n.toLowerCase(); if(!seen[key]){seen[key]=1; out.push(n);} });
+  return out;
+}
+function _catCatPdfConc(p,ficha){
+  if(ficha && ficha.concentracion && String(ficha.concentracion).trim()) return String(ficha.concentracion).trim();
+  var m=String(p.nombre||'').match(/(Extrait de Parfum|Eau de Parfum|Parfum Intense|Extrait|Elixir|EDP|EDT|EDC|Parfum|Cologne)/i);
+  return m?m[1]:'';
+}
+function _catCatPdfAcordesHTML(p){
+  var ac=[]; try{ ac=Array.isArray(p.acordes)?p.acordes:(p.acordes?JSON.parse(p.acordes):[]); }catch(e){ ac=[]; }
+  if(!ac.length) return "<span style='font-size:9px;color:#c4b89c'>—</span>";
+  ac=ac.slice().sort(function(a,b){return (b.pct||0)-(a.pct||0);}).slice(0,4);
+  var maxp=Math.max.apply(null, ac.map(function(a){return a.pct||0;}).concat([1]));
+  var h="";
+  ac.forEach(function(a){
+    var w=Math.max(12, Math.round((a.pct||0)/maxp*58));
+    var col=a.color||'#c4965a';
+    h+="<div style='display:flex;align-items:center;gap:4px'><div style='height:7px;width:"+w+"px;background:"+col+";border-radius:4px;flex-shrink:0'></div><span style='font-size:8px;color:#6a5a40;white-space:nowrap;overflow:hidden;text-overflow:ellipsis'>"+_catEsc(a.nombre||'')+"</span></div>";
+  });
+  return h;
+}
+function _catCatPdfNotasHTML(item,cfg){
+  var notas=_catCatPdfNotasList(item.ficha);
+  if(!notas.length) return "<span style='font-size:9px;color:#c4b89c'>—</span>";
+  if((cfg.notas_modo||'fotos')==='escritas'){
+    var f=item.ficha||{}, parts=[];
+    if(f.notas_salida)parts.push("<b style='color:#9a7d4e'>Salida:</b> "+_catEsc(f.notas_salida));
+    if(f.notas_corazon)parts.push("<b style='color:#9a7d4e'>Corazón:</b> "+_catEsc(f.notas_corazon));
+    if(f.notas_fondo)parts.push("<b style='color:#9a7d4e'>Fondo:</b> "+_catEsc(f.notas_fondo));
+    return "<div style='font-size:9px;color:#6a5a40;line-height:1.3'>"+parts.join('<br>')+"</div>";
+  }
+  var h="<div style='display:flex;flex-wrap:wrap;gap:4px'>";
+  notas.slice(0,4).forEach(function(n){
+    var u=getNotaFoto(n);
+    h+="<div style='text-align:center;width:40px'>";
+    if(u)h+="<img src='"+_catEsc(u)+"' crossorigin='anonymous' style='width:34px;height:34px;border-radius:50%;object-fit:cover;border:1.5px solid #e3d2b4;display:block;margin:0 auto'>";
+    h+="<div style='font-size:7px;color:#8a7a5a;line-height:1.05;margin-top:1px;max-height:15px;overflow:hidden'>"+_catEsc(n)+"</div></div>";
+  });
+  h+="</div>";
+  return h;
+}
+function _catCatPdfBannerHTML(cat,cfg,slim){
+  var modo=cfg.banner_modo||'default';
+  var t1=_catEsc(cfg.banner_texto1||cat.nombre||'CATÁLOGO');
+  var t2=_catEsc(cfg.banner_texto2||'');
+  if(modo==='imagen' && cfg.banner_imagen_url){
+    return "<div style='height:"+(slim?70:220)+"px;overflow:hidden'><img src='"+_catEsc(cfg.banner_imagen_url)+"' crossorigin='anonymous' style='width:100%;height:100%;object-fit:cover;display:block'></div>";
+  }
+  var bg=cfg.banner_bg||'#1a1a1a', fg=cfg.banner_fg||'#ffffff';
+  var h="<div style='height:"+(slim?60:200)+"px;background:"+bg+";color:"+fg+";display:flex;flex-direction:column;align-items:center;justify-content:center;text-align:center;padding:0 24px'>";
+  h+="<div style='font-family:\"Cormorant Garamond\",serif;font-size:"+(slim?'1.4rem':'2.4rem')+";font-weight:700;letter-spacing:.04em;line-height:1.1'>"+t1+"</div>";
+  if(t2)h+="<div style='font-size:"+(slim?'.7rem':'.95rem')+";opacity:.85;margin-top:.3rem;letter-spacing:.12em;text-transform:uppercase'>"+t2+"</div>";
+  h+="</div>";
+  return h;
+}
+function _catCatPdfRowHTML(item,cfg){
+  var p=item.p, ficha=item.ficha||{};
+  var nombre=_catEsc(String(p.nombre||'').replace(/\s*\|.*/,'').trim());
+  var marca=_catEsc(String(p.empresa||'').trim());
+  var conc=_catCatPdfConc(p,ficha), ml=p.ml?(p.ml+' ml'):'';
+  var metaParts=[]; if(conc)metaParts.push(_catEsc(conc)); if(ml)metaParts.push(_catEsc(ml));
+  var meta=metaParts.join(' · ');
+  var precio=item.precio!=null?fmt(item.precio):'';
+  var h="<div style='display:flex;align-items:stretch;border-bottom:1px solid #ece0cc;padding:9px 0'>";
+  h+="<div style='flex:0 0 40%;padding-right:8px'><div style='font-family:\"Cormorant Garamond\",serif;font-size:15px;font-weight:700;color:#3a2f1c;line-height:1.15'>"+nombre+"</div>";
+  if(marca)h+="<div style='font-size:10px;color:#9a7d4e;font-weight:600;text-transform:uppercase;letter-spacing:.04em;margin-top:1px'>"+marca+"</div>";
+  if(meta)h+="<div style='font-size:10px;color:#aa9a80;margin-top:1px'>"+meta+"</div>";
+  h+="</div>";
+  h+="<div style='flex:0 0 15%;display:flex;align-items:center'><span style='font-size:14px;font-weight:700;color:#c4965a'>"+precio+"</span></div>";
+  h+="<div style='flex:0 0 24%;padding-right:8px;display:flex;align-items:center'>"+_catCatPdfNotasHTML(item,cfg)+"</div>";
+  h+="<div style='flex:0 0 21%;display:flex;flex-direction:column;justify-content:center;gap:2px'>"+_catCatPdfAcordesHTML(p)+"</div>";
+  h+="</div>";
+  return h;
+}
+function _catCatPdfFooterHTML(cfg,gcfg){
+  var h="";
+  if(cfg.incluir_contacto){
+    var nom=_catEsc(cfg.contacto_nombre||''), tel=_catEsc(cfg.contacto_telefono||''), nota=_catEsc(cfg.contacto_nota||'');
+    if(nom||tel||nota){
+      h+="<div style='margin-top:18px;padding:14px 16px;background:#f6efe1;border:1px solid #e6d6b8;border-radius:10px;text-align:center'>";
+      if(nom)h+="<div style='font-family:\"Cormorant Garamond\",serif;font-size:17px;font-weight:700;color:#3a2f1c'>"+nom+"</div>";
+      if(tel)h+="<div style='font-size:12px;color:#6a5a40;margin-top:2px'>"+tel+"</div>";
+      if(nota)h+="<div style='font-size:11px;color:#8a7a5a;margin-top:3px'>"+nota+"</div>";
+      h+="</div>";
+    }
+  }
+  if(gcfg && gcfg.credito_belle) h+="<div style='margin-top:10px;text-align:center;font-size:9px;color:#b8a888'>"+_catEsc(gcfg.credito_belle)+"</div>";
+  return h;
+}
+function _catCatPdfPageHTML(cat,cfg,gcfg,pageItems,isFirst,isLast,pageNum,totalPages){
+  var ubic=cfg.banner_ubicacion||'primera';
+  var h="<div style='width:794px;min-height:1123px;background:#fdfbf7;box-sizing:border-box;font-family:\"DM Sans\",Arial,sans-serif;display:flex;flex-direction:column'>";
+  if(isFirst) h+=_catCatPdfBannerHTML(cat,cfg,false);
+  else if(ubic==='todas') h+=_catCatPdfBannerHTML(cat,cfg,true);
+  h+="<div style='flex:1;padding:18px 30px 22px'>";
+  h+="<div style='display:flex;border-bottom:2px solid #c4965a;padding-bottom:5px;margin-bottom:2px'>";
+  h+="<div style='flex:0 0 40%;font-size:9px;font-weight:700;color:#9a7d4e;text-transform:uppercase;letter-spacing:.06em'>Perfume</div>";
+  h+="<div style='flex:0 0 15%;font-size:9px;font-weight:700;color:#9a7d4e;text-transform:uppercase;letter-spacing:.06em'>Precio</div>";
+  h+="<div style='flex:0 0 24%;font-size:9px;font-weight:700;color:#9a7d4e;text-transform:uppercase;letter-spacing:.06em'>Notas</div>";
+  h+="<div style='flex:0 0 21%;font-size:9px;font-weight:700;color:#9a7d4e;text-transform:uppercase;letter-spacing:.06em'>Acordes</div>";
+  h+="</div>";
+  pageItems.forEach(function(it){ h+=_catCatPdfRowHTML(it,cfg); });
+  if(isLast) h+=_catCatPdfFooterHTML(cfg,gcfg);
+  h+="</div>";
+  h+="<div style='padding:6px 30px 12px;display:flex;justify-content:space-between;font-size:9px;color:#bcae94'><span>"+_catEsc(cat.nombre||'Catálogo')+"</span><span>"+pageNum+" / "+totalPages+"</span></div>";
+  h+="</div>";
+  return h;
+}
+function _catCatPdfGenerar(catId){
+  var cat=(_catCatList||[]).filter(function(x){return x.id===catId;})[0];
+  if(!cat){ _catToast('Catálogo no encontrado','twarn'); return; }
+  if(typeof window.jspdf==='undefined' || typeof html2canvas==='undefined'){ _catToast('Cargando librerías, reintentá en un momento…','twarn'); return; }
+  var cfg=cat.config||{}, gcfg=_catCatConfig||{};
+  _catCatPdfOverlay(true,'Preparando tu catálogo…');
+  apiGet('catalogos_cliente_productos','select=producto_id,precio,precio_manual,orden&catalogo_id=eq.'+catId+'&order=orden.asc&limit=5000').then(function(rows){
+    rows=Array.isArray(rows)?rows:[];
+    if(!rows.length){ _catCatPdfOverlay(false); _catToast('Este catálogo no tiene productos. Tocá "Elegir productos".','twarn'); return; }
+    var byId={}; (allProds||[]).forEach(function(p){ byId[p.id]=p; });
+    var items=[];
+    rows.forEach(function(r){
+      var p=byId[r.producto_id]; if(!p)return;
+      var ficha=null; try{ ficha=fichaMatchProd(p.nombre,(typeof FICHAS_BELLE!=='undefined'?FICHAS_BELLE:[]),p.id); }catch(e){}
+      items.push({p:p, ficha:ficha||{}, precio:r.precio});
+    });
+    if(!items.length){ _catCatPdfOverlay(false); _catToast('No pude armar el catálogo','twarn'); return; }
+    _catCatPdfRender(cat,cfg,gcfg,items);
+  }).catch(function(e){ console.error('[catpdf load]',e); _catCatPdfOverlay(false); _catToast('No pude cargar los productos','twarn'); });
+}
+function _catCatPdfRender(cat,cfg,gcfg,items){
+  var ROWS_FIRST=11, ROWS_REST=16;
+  var pages=[], i=0;
+  pages.push(items.slice(0,ROWS_FIRST)); i=ROWS_FIRST;
+  while(i<items.length){ pages.push(items.slice(i,i+ROWS_REST)); i+=ROWS_REST; }
+  var pdf=new window.jspdf.jsPDF({orientation:'portrait',unit:'mm',format:'a4'});
+  var pw=pdf.internal.pageSize.getWidth(), ph=pdf.internal.pageSize.getHeight();
+  var host=document.createElement('div');
+  host.style.cssText='position:fixed;left:-99999px;top:0;width:794px;background:#fdfbf7';
+  document.body.appendChild(host);
+  var idx=0;
+  function finish(ok){
+    if(host.parentNode)host.parentNode.removeChild(host);
+    _catCatPdfOverlay(false);
+    if(ok){ pdf.save('Catalogo_'+String(cat.nombre||'Belle').replace(/[^a-zA-Z0-9]/g,'_')+'.pdf'); _catToast('¡Catálogo PDF listo!','tok'); }
+  }
+  function doPage(){
+    if(idx>=pages.length){ finish(true); return; }
+    _catCatPdfOverlay(true,'Generando página '+(idx+1)+' de '+pages.length+'…');
+    host.innerHTML=_catCatPdfPageHTML(cat,cfg,gcfg,pages[idx],idx===0,idx===pages.length-1,idx+1,pages.length);
+    var urls=[], nodes=host.getElementsByTagName('img'); for(var k=0;k<nodes.length;k++)urls.push(nodes[k].src);
+    _catCatPdfPreload(urls,function(){
+      html2canvas(host.firstChild,{scale:2,useCORS:true,allowTaint:false,backgroundColor:'#fdfbf7',logging:false}).then(function(canvas){
+        var imgData=canvas.toDataURL('image/jpeg',0.9);
+        if(idx>0)pdf.addPage();
+        var ratio=canvas.width/canvas.height, imgW=pw, imgH=imgW/ratio;
+        if(imgH>ph){ imgH=ph; imgW=imgH*ratio; }
+        pdf.addImage(imgData,'JPEG',(pw-imgW)/2,0,imgW,imgH);
+        idx++; setTimeout(doPage,40);
+      }).catch(function(e){ console.error('[catpdf page]',e); finish(false); _catToast('Error generando el PDF','terr'); });
+    });
+  }
+  doPage();
+}
 
 function _catCatModal(cat){
   var old=document.getElementById('_moCatCat'); if(old)old.remove();
