@@ -11327,17 +11327,27 @@ function _catRenderPanel(body){
     {key:"perfil",      label:"Perfil",      icon:"&#128100;"},
     {key:"notificaciones", label:"Avisos"+((typeof _catNotifUnread==='function'&&_catNotifUnread()>0)?(" ("+_catNotifUnread()+")"):""), icon:"&#128276;"}
   ];
+  if(_catCliente && _catCliente.puede_crear_catalogos){
+    tabs.unshift({key:"catalogos", label:"Mis Catálogos", icon:"&#128212;", destacado:true});
+  }
   tabs.forEach(function(t){
     var act = _catPanelTab === t.key;
+    var dest = !!t.destacado;
+    var bg = act ? "var(--accent)" : (dest ? "linear-gradient(135deg,#c4965a,#a9763f)" : "transparent");
+    var col = (act||dest) ? "#fff" : "var(--mid)";
+    var bd = (act||dest) ? "var(--accent)" : "#e8d9bf";
+    var fw = (act||dest) ? "700" : "500";
+    var glow = dest ? "box-shadow:0 2px 9px rgba(196,150,90,.45);" : "";
     h += "<button onclick='_catSetTab(&quot;"+t.key+"&quot;)' style='"+
-      "background:"+(act?"var(--accent)":"transparent")+";"+
-      "color:"+(act?"#fff":"var(--mid)")+";"+
-      "border:1px solid "+(act?"var(--accent)":"#e8d9bf")+";"+
+      "background:"+bg+";"+
+      "color:"+col+";"+
+      "border:1px solid "+bd+";"+
+      glow+
       "border-radius:8px;"+
       "padding:.5rem .35rem;"+
       "font-size:.72rem;"+
       "cursor:pointer;"+
-      "font-weight:"+(act?"600":"500")+";"+
+      "font-weight:"+fw+";"+
       "font-family:inherit;"+
       "display:flex;"+
       "align-items:center;"+
@@ -11379,6 +11389,8 @@ function _catRenderTab(){
   if(!box) return;
   if(_catPanelTab === "pedidos"){
     _catRenderTabPedidos(box);
+  } else if(_catPanelTab === "catalogos"){
+    _catRenderTabCatalogos(box);
   } else if(_catPanelTab === "favoritos"){
     _catRenderTabFavoritos(box);
   } else if(_catPanelTab === "direcciones"){
@@ -11392,6 +11404,319 @@ function _catRenderTab(){
   }
 }
 
+
+
+// ══════════════════════════════════════════════════════════════════
+// MIS CATÁLOGOS (cliente) — Fase 2: lista + formato + vista previa
+// ══════════════════════════════════════════════════════════════════
+var _catCatConfig = null;
+var _catCatList = [];
+var _catCatLoaded = false;
+var _catCatModalState = null;
+
+function _catCargarCatalogos(cb){
+  if(!_catCliente || !_catCliente.id){ _catCatList=[]; _catCatLoaded=true; if(cb)cb(); return; }
+  var pCfg = _catCatConfig ? Promise.resolve(_catCatConfig) : apiGet("catalogos_config","select=*&id=eq.1").then(function(r){ return (Array.isArray(r)&&r[0])||{}; }).catch(function(){return {};});
+  var pList = apiGet("catalogos_cliente","select=*&cliente_id=eq."+_catCliente.id+"&order=updated_at.desc&limit=100").catch(function(){return [];});
+  Promise.all([pCfg,pList]).then(function(res){
+    _catCatConfig = res[0]||{};
+    _catCatList = Array.isArray(res[1])?res[1]:[];
+    _catCatLoaded = true;
+    var ids=_catCatList.map(function(c){return c.id;});
+    if(ids.length){
+      apiGet("catalogos_cliente_productos","select=catalogo_id&catalogo_id=in.("+ids.join(",")+")&limit=5000").then(function(rows){
+        var cnt={}; (rows||[]).forEach(function(r){ cnt[r.catalogo_id]=(cnt[r.catalogo_id]||0)+1; });
+        _catCatList.forEach(function(c){ c._nprod=cnt[c.id]||0; });
+        if(cb)cb();
+      }).catch(function(){ if(cb)cb(); });
+    } else { if(cb)cb(); }
+  });
+}
+
+function _catRenderTabCatalogos(box){
+  if(!box)return;
+  if(!_catCatLoaded){
+    box.innerHTML="<div style='padding:1.5rem;text-align:center;color:#9a8870'>Cargando...</div>";
+    _catCargarCatalogos(function(){ var b=document.getElementById("_catTabBody"); if(b)_catRenderTabCatalogos(b); });
+    return;
+  }
+  var cfg=_catCatConfig||{};
+  var max=cfg.max_borradores_por_cliente||0;
+  var alcanzo = max>0 && _catCatList.length>=max;
+  var h="";
+  h+="<div style='display:flex;justify-content:space-between;align-items:center;margin-bottom:.5rem'>";
+  h+="<div style='font-size:1.05rem;font-weight:700;color:#5a4a30;font-family:\"Cormorant Garamond\",serif'>Mis Catálogos</div>";
+  if(!alcanzo){ h+="<button onclick='_catCatNuevo()' style='background:linear-gradient(135deg,#c4965a,#a9763f);color:#fff;border:none;border-radius:8px;padding:.45rem .85rem;font-size:.74rem;font-weight:700;cursor:pointer;font-family:inherit'>+ Nuevo</button>"; }
+  h+="</div>";
+  h+="<div style='font-size:.74rem;color:#9a8870;margin-bottom:.9rem'>Armá tu catálogo en PDF con tu marca y tus precios. Podés tener varios y editarlos cuando quieras.</div>";
+  if(alcanzo){ h+="<div style='font-size:.7rem;color:#b8860b;background:#fff8ec;border:1px solid #f0dca6;border-radius:8px;padding:.5rem .7rem;margin-bottom:.8rem'>Llegaste al máximo de "+max+" catálogos. Borrá uno para crear otro.</div>"; }
+  if(!_catCatList.length){
+    h+="<div style='padding:1.6rem 1rem;text-align:center;color:#9a8870;font-size:.82rem;border:1px dashed #e8d9bf;border-radius:10px'><div style='font-size:1.9rem;margin-bottom:.3rem'>&#128212;</div>Todavía no tenés catálogos.<br>Tocá <b>+ Nuevo</b> para armar el primero.</div>";
+  } else {
+    _catCatList.forEach(function(cat){
+      var nprod = cat._nprod!=null?cat._nprod:null;
+      var fecha = cat.updated_at?new Date(cat.updated_at).toLocaleDateString('es-AR'):"";
+      h+="<div style='border:1px solid #e8d9bf;border-radius:11px;padding:.8rem .9rem;margin-bottom:.7rem;background:#fffdf9'>";
+      h+="<div style='font-size:.95rem;font-weight:700;color:#5a4a30'>"+_catEsc(cat.nombre||'Catálogo')+"</div>";
+      h+="<div style='font-size:.66rem;color:#aa9a80;margin-top:.15rem'>"+(nprod!=null?(nprod+" producto"+(nprod===1?'':'s')+" · "):"")+"editado "+fecha+"</div>";
+      h+="<div style='display:flex;gap:.4rem;margin-top:.7rem;flex-wrap:wrap'>";
+      h+="<button onclick='_catCatElegirProductos("+cat.id+")' style='flex:1;min-width:140px;background:linear-gradient(135deg,#c4965a,#a9763f);color:#fff;border:none;border-radius:8px;padding:.5rem;font-size:.74rem;font-weight:700;cursor:pointer;font-family:inherit'>Elegir productos →</button>";
+      h+="<button onclick='_catCatEditarFormato("+cat.id+")' style='background:#fff;border:1px solid #d4ba8a;color:#a9763f;border-radius:8px;padding:.5rem .7rem;font-size:.72rem;cursor:pointer;font-family:inherit'>Formato</button>";
+      h+="<button onclick='_catCatDuplicar("+cat.id+")' title='Duplicar' style='background:#fff;border:1px solid #d4ba8a;color:#a9763f;border-radius:8px;padding:.5rem .65rem;font-size:.82rem;cursor:pointer;font-family:inherit'>&#128203;</button>";
+      h+="<button onclick='_catCatBorrar("+cat.id+")' title='Borrar' style='background:#fff;border:1px solid #f0dad6;color:#cc6b62;border-radius:8px;padding:.5rem .65rem;font-size:.82rem;cursor:pointer;font-family:inherit'>&#128465;</button>";
+      h+="</div>";
+      h+="</div>";
+    });
+  }
+  box.innerHTML=h;
+}
+
+function _catCatDefaults(){
+  var cfg=_catCatConfig||{};
+  var firstP = (cfg.modo_x1_habilitado!==false)?'x1':((cfg.modo_sugerido_habilitado!==false)?'sugerido':'manual');
+  var firstN = (cfg.notas_fotos_habilitado!==false)?'fotos':'escritas';
+  var base={ nombre:'', banner_modo:'default', banner_imagen_url:'', banner_preset_id:'',
+    banner_texto1:(cfg.texto_default||'CATÁLOGO'), banner_texto2:'',
+    banner_bg:(cfg.color_fondo_default||'#1a1a1a'), banner_fg:'#ffffff',
+    banner_ubicacion:'primera', precio_modo:firstP, notas_modo:firstN,
+    incluir_contacto:false, contacto_texto:'' };
+  // recordar último formato (del catálogo más reciente)
+  var last=(_catCatList&&_catCatList.length&&_catCatList[0].config)?_catCatList[0].config:null;
+  if(last){ ['banner_modo','banner_imagen_url','banner_preset_id','banner_texto1','banner_texto2','banner_bg','banner_fg','banner_ubicacion','precio_modo','notas_modo','incluir_contacto','contacto_texto'].forEach(function(k){ if(last[k]!=null)base[k]=last[k]; }); }
+  return base;
+}
+function _catCatClamp(s){
+  var cfg=_catCatConfig||{};
+  var pE=[]; if(cfg.modo_x1_habilitado!==false)pE.push('x1'); if(cfg.modo_sugerido_habilitado!==false)pE.push('sugerido'); if(cfg.modo_manual_habilitado!==false)pE.push('manual');
+  if(pE.indexOf(s.precio_modo)<0)s.precio_modo=pE[0]||'x1';
+  var nE=[]; if(cfg.notas_fotos_habilitado!==false)nE.push('fotos'); if(cfg.notas_escritas_habilitado!==false)nE.push('escritas');
+  if(nE.indexOf(s.notas_modo)<0)s.notas_modo=nE[0]||'fotos';
+  return s;
+}
+
+function _catCatNuevo(){
+  var cfg=_catCatConfig||{}; var max=cfg.max_borradores_por_cliente||0;
+  if(max>0 && _catCatList.length>=max){ _catToast('Llegaste al máximo de catálogos','twarn'); return; }
+  _catCatModal(null);
+}
+function _catCatEditarFormato(id){ var c=_catCatList.filter(function(x){return x.id===id;})[0]; if(c)_catCatModal(c); }
+function _catCatElegirProductos(id){ _catToast('Ya casi: el armado de productos y precios llega en la próxima actualización','tok'); }
+
+function _catCatModal(cat){
+  var old=document.getElementById('_moCatCat'); if(old)old.remove();
+  var s;
+  if(cat){ s=Object.assign(_catCatDefaults(), cat.config||{}, {id:cat.id, nombre:cat.nombre}); s._file=null; s._imgPreview=(cat.config&&cat.config.banner_imagen_url)||''; }
+  else { s=_catCatDefaults(); s.id=null; s._file=null; s._imgPreview=s.banner_imagen_url||''; }
+  s=_catCatClamp(s);
+  _catCatModalState=s;
+  var cfg=_catCatConfig||{};
+  var inp="width:100%;padding:.55rem .7rem;border:1px solid #e0d4bf;border-radius:8px;font-size:.85rem;font-family:inherit;color:#5a4a30;box-sizing:border-box;background:#fff";
+  var lbl="font-size:.68rem;color:#9a8870;text-transform:uppercase;font-weight:700;letter-spacing:.04em;display:block;margin-bottom:.3rem";
+  function gbtn(onclick,id,on,txt,extra){ return "<button type='button' onclick='"+onclick+"' id='"+id+"' style='flex:1;"+(extra||'')+"padding:.45rem;border-radius:8px;border:1px solid #d4ba8a;background:"+(on?'linear-gradient(135deg,#c4965a,#a9763f)':'#fff')+";color:"+(on?'#fff':'#a9763f')+";font-size:.7rem;font-weight:700;cursor:pointer;font-family:inherit'>"+txt+"</button>"; }
+  var mo=document.createElement('div');
+  mo.id='_moCatCat';
+  mo.style.cssText='position:fixed;inset:0;z-index:9999;background:rgba(20,15,8,.55);display:flex;align-items:flex-start;justify-content:center;padding:1rem;overflow-y:auto';
+  mo.onclick=function(e){ if(e.target===mo)_catCatCerrarModal(); };
+  var h="<div style='background:#fdfbf7;border-radius:16px;max-width:440px;width:100%;margin:auto;box-shadow:0 14px 50px rgba(184,158,110,.3);overflow:hidden'>";
+  h+="<div style='padding:1rem 1.1rem;border-bottom:1px solid #f0e7d6;display:flex;justify-content:space-between;align-items:center;background:#faf6ee'>";
+  h+="<div style='font-size:1.1rem;font-weight:700;color:#5a4a30;font-family:\"Cormorant Garamond\",serif'>"+(cat?'Formato del catálogo':'Nuevo catálogo')+"</div>";
+  h+="<span onclick='_catCatCerrarModal()' style='cursor:pointer;color:#9a8870;font-size:1.4rem;line-height:1'>&times;</span>";
+  h+="</div>";
+  h+="<div style='padding:1.1rem;max-height:calc(100vh - 150px);overflow-y:auto'>";
+  h+="<div style='margin-bottom:1rem'><label style='"+lbl+"'>Nombre del catálogo</label><input id='_catCatNombre' type='text' value='"+_catEsc(s.nombre||'')+"' placeholder='Ej: Catálogo Primavera' style='"+inp+"'></div>";
+  h+="<label style='"+lbl+"'>Vista previa</label><div id='_catCatPreview' style='margin-bottom:1rem'></div>";
+  h+="<label style='"+lbl+"'>Banner</label><div style='display:flex;gap:.4rem;margin-bottom:.6rem'>";
+  h+=gbtn('_catCatBannerModo("default")','_catCatBm_default',s.banner_modo==='default','Texto');
+  h+=gbtn('_catCatBannerModo("preset")','_catCatBm_preset',s.banner_modo==='preset','Prediseñado');
+  h+=gbtn('_catCatBannerModo("imagen")','_catCatBm_imagen',s.banner_modo==='imagen','Mi imagen');
+  h+="</div><div id='_catCatBannerFields' style='margin-bottom:1rem'></div>";
+  h+="<label style='"+lbl+"'>¿Dónde va el banner?</label><div style='display:flex;gap:.4rem;margin-bottom:1rem'>";
+  h+=gbtn('_catCatStateSet("banner_ubicacion","primera")','_catCatUb_primera',s.banner_ubicacion==='primera','Grande en la 1ª hoja','font-size:.66rem;');
+  h+=gbtn('_catCatStateSet("banner_ubicacion","todas")','_catCatUb_todas',s.banner_ubicacion==='todas','Encabezado en todas','font-size:.66rem;');
+  h+="</div>";
+  var pModos=[]; if(cfg.modo_x1_habilitado!==false)pModos.push(['x1','Precio x1']); if(cfg.modo_sugerido_habilitado!==false)pModos.push(['sugerido','Sugerido +'+(cfg.precio_sugerido_pct||7)+'%']); if(cfg.modo_manual_habilitado!==false)pModos.push(['manual','Manual']);
+  h+="<label style='"+lbl+"'>Precio que mostrás</label><div style='display:flex;gap:.4rem;margin-bottom:1rem;flex-wrap:wrap'>";
+  pModos.forEach(function(o){ h+=gbtn('_catCatStateSet("precio_modo","'+o[0]+'")','_catCatPm_'+o[0],s.precio_modo===o[0],o[1],'min-width:90px;font-size:.67rem;'); });
+  h+="</div>";
+  var nModos=[]; if(cfg.notas_fotos_habilitado!==false)nModos.push(['fotos','Fotos de notas']); if(cfg.notas_escritas_habilitado!==false)nModos.push(['escritas','Notas escritas']);
+  if(nModos.length){
+    h+="<label style='"+lbl+"'>Columna de notas</label><div style='display:flex;gap:.4rem;margin-bottom:1rem'>";
+    nModos.forEach(function(o){ h+=gbtn('_catCatStateSet("notas_modo","'+o[0]+'")','_catCatNm_'+o[0],s.notas_modo===o[0],o[1]); });
+    h+="</div>";
+  }
+  if(cfg.permitir_contacto_pie!==false){
+    h+="<label style='display:flex;align-items:center;gap:.5rem;cursor:pointer;margin-bottom:.5rem'><input type='checkbox' id='_catCatContacto' "+(s.incluir_contacto?'checked':'')+" onchange='_catCatStateSet(\"incluir_contacto\",this.checked)' style='width:18px;height:18px;accent-color:#c4965a'><span style='font-size:.82rem;color:#5a4a30'>Incluir mi contacto en el pie</span></label>";
+    h+="<input id='_catCatContactoTxt' type='text' value='"+_catEsc(s.contacto_texto||'')+"' placeholder='"+_catEsc((_catCliente&&_catCliente.telefono_principal)||'Tu teléfono / WhatsApp')+"' oninput='_catCatStateSet(\"contacto_texto\",this.value)' style='"+inp+";margin-bottom:.5rem;display:"+(s.incluir_contacto?'block':'none')+"'>";
+  }
+  h+="</div>";
+  h+="<div style='padding:.9rem 1.1rem;border-top:1px solid #f0e7d6;display:flex;gap:.6rem;background:#faf6ee'>";
+  h+="<button onclick='_catCatCerrarModal()' style='flex:1;background:#fff;border:1px solid #d4ba8a;color:#9a8870;border-radius:9px;padding:.65rem;font-size:.82rem;cursor:pointer;font-family:inherit'>Cancelar</button>";
+  h+="<button id='_catCatGuardarBtn' onclick='_catCatGuardar()' style='flex:1.4;background:linear-gradient(135deg,#c4965a,#a9763f);color:#fff;border:none;border-radius:9px;padding:.65rem;font-size:.82rem;font-weight:700;cursor:pointer;font-family:inherit'>Guardar</button>";
+  h+="</div></div>";
+  mo.innerHTML=h;
+  document.body.appendChild(mo);
+  if(typeof _catModalBackRegistrar==='function')_catModalBackRegistrar('_moCatCat',_catCatCerrarModal);
+  _catCatRenderBannerFields();
+  _catCatPreviewUpdate();
+}
+
+function _catCatSyncBtns(prefix,val,vals){
+  vals.forEach(function(x){ var b=document.getElementById(prefix+x); if(!b)return; var on=(x===val); b.style.background=on?'linear-gradient(135deg,#c4965a,#a9763f)':'#fff'; b.style.color=on?'#fff':'#a9763f'; });
+}
+function _catCatStateSet(k,v){
+  if(!_catCatModalState)return;
+  _catCatModalState[k]=v;
+  if(k==='precio_modo')_catCatSyncBtns('_catCatPm_',v,['x1','sugerido','manual']);
+  else if(k==='notas_modo')_catCatSyncBtns('_catCatNm_',v,['fotos','escritas']);
+  else if(k==='banner_ubicacion')_catCatSyncBtns('_catCatUb_',v,['primera','todas']);
+  else if(k==='incluir_contacto'){ var t=document.getElementById('_catCatContactoTxt'); if(t)t.style.display=v?'block':'none'; }
+  _catCatPreviewUpdate();
+}
+function _catCatBannerModo(m){
+  if(!_catCatModalState)return;
+  _catCatModalState.banner_modo=m;
+  _catCatSyncBtns('_catCatBm_',m,['default','preset','imagen']);
+  _catCatRenderBannerFields();
+  _catCatPreviewUpdate();
+}
+function _catCatPickPreset(id){ if(!_catCatModalState)return; _catCatModalState.banner_preset_id=id; _catCatRenderBannerFields(); _catCatPreviewUpdate(); }
+function _catCatBannerFile(input){
+  var f=input&&input.files&&input.files[0]; if(!f)return;
+  if(f.size>5*1024*1024){ _catToast('La imagen es muy grande (máx 5MB)','twarn'); input.value=''; return; }
+  _catCatModalState._file=f;
+  try{ if(_catCatModalState._imgPreviewObj)URL.revokeObjectURL(_catCatModalState._imgPreviewObj); }catch(e){}
+  _catCatModalState._imgPreviewObj=URL.createObjectURL(f);
+  _catCatModalState._imgPreview=_catCatModalState._imgPreviewObj;
+  _catCatPreviewUpdate();
+}
+
+function _catCatRenderBannerFields(){
+  var box=document.getElementById('_catCatBannerFields'); if(!box)return;
+  var s=_catCatModalState, cfg=_catCatConfig||{};
+  var inp="width:100%;padding:.5rem .65rem;border:1px solid #e0d4bf;border-radius:8px;font-size:.82rem;font-family:inherit;color:#5a4a30;box-sizing:border-box;background:#fff";
+  var sub="font-size:.66rem;color:#9a8870;margin-bottom:.35rem";
+  var h="";
+  if(s.banner_modo==='imagen'){
+    h+="<div style='"+sub+"'>Subí la imagen de tu comercio. Resolución sugerida: <b>"+_catEsc(cfg.resolucion_banner_sugerida||'1200 × 400 px')+"</b>.</div>";
+    h+="<input type='file' accept='image/*' onchange='_catCatBannerFile(this)' style='font-size:.78rem;color:#5a4a30'>";
+  } else if(s.banner_modo==='preset'){
+    var presets=Array.isArray(cfg.banner_presets)?cfg.banner_presets:[];
+    if(!presets.length){ h+="<div style='"+sub+"'>No hay estilos disponibles. Usá Texto o Mi imagen.</div>"; }
+    else {
+      h+="<div style='"+sub+"'>Elegí un estilo:</div><div style='display:flex;gap:.4rem;flex-wrap:wrap;margin-bottom:.6rem'>";
+      presets.forEach(function(p){
+        var sel=(s.banner_preset_id===p.id);
+        h+="<div onclick='_catCatPickPreset(\""+p.id+"\")' style='cursor:pointer;border:2px solid "+(sel?'#a9763f':'transparent')+";border-radius:8px;padding:1px'>";
+        h+="<div style='width:84px;height:38px;border-radius:6px;display:flex;align-items:center;justify-content:center;text-align:center;font-size:.55rem;font-weight:700;overflow:hidden;background:"+(p.bg||'#1a1a1a')+";color:"+(p.fg||'#fff')+"'>"+_catEsc(p.nombre||'')+"</div></div>";
+      });
+      h+="</div>";
+    }
+    h+="<input type='text' value='"+_catEsc(s.banner_texto1||'')+"' placeholder='Tu perfumería (renglón 1)' oninput='_catCatStateSet(\"banner_texto1\",this.value)' style='"+inp+";margin-bottom:.4rem'>";
+    h+="<input type='text' value='"+_catEsc(s.banner_texto2||'')+"' placeholder='Renglón 2 (opcional)' oninput='_catCatStateSet(\"banner_texto2\",this.value)' style='"+inp+"'>";
+  } else {
+    h+="<input type='text' value='"+_catEsc(s.banner_texto1||'')+"' placeholder='Texto (renglón 1)' oninput='_catCatStateSet(\"banner_texto1\",this.value)' style='"+inp+";margin-bottom:.4rem'>";
+    h+="<input type='text' value='"+_catEsc(s.banner_texto2||'')+"' placeholder='Renglón 2 (opcional)' oninput='_catCatStateSet(\"banner_texto2\",this.value)' style='"+inp+";margin-bottom:.5rem'>";
+    h+="<div style='display:flex;gap:1.2rem;align-items:center'>";
+    h+="<label style='font-size:.7rem;color:#7a6a50'>Fondo <input type='color' value='"+(s.banner_bg||'#1a1a1a')+"' oninput='_catCatStateSet(\"banner_bg\",this.value)' style='width:38px;height:30px;vertical-align:middle;border:1px solid #e0d4bf;border-radius:5px;cursor:pointer'></label>";
+    h+="<label style='font-size:.7rem;color:#7a6a50'>Letra <input type='color' value='"+(s.banner_fg||'#ffffff')+"' oninput='_catCatStateSet(\"banner_fg\",this.value)' style='width:38px;height:30px;vertical-align:middle;border:1px solid #e0d4bf;border-radius:5px;cursor:pointer'></label>";
+    h+="</div>";
+  }
+  box.innerHTML=h;
+}
+
+function _catCatPreviewUpdate(){
+  var box=document.getElementById('_catCatPreview'); if(!box)return;
+  var s=_catCatModalState, cfg=_catCatConfig||{};
+  var inner="";
+  if(s.banner_modo==='imagen'){
+    var src=s._imgPreview||s.banner_imagen_url||'';
+    inner=src?("<img src='"+src+"' style='width:100%;height:100%;object-fit:cover;display:block'>"):("<div style='display:flex;align-items:center;justify-content:center;height:100%;color:#9a8870;font-size:.75rem'>Subí tu imagen</div>");
+  } else {
+    var bg=s.banner_bg||'#1a1a1a', fg=s.banner_fg||'#ffffff';
+    if(s.banner_modo==='preset'){
+      var p=(Array.isArray(cfg.banner_presets)?cfg.banner_presets:[]).filter(function(x){return x.id===s.banner_preset_id;})[0];
+      if(p){ bg=p.bg||bg; fg=p.fg||fg; }
+    }
+    var t1=s.banner_texto1||(s.banner_modo==='default'?(cfg.texto_default||'CATÁLOGO'):'');
+    var t2=s.banner_texto2||'';
+    inner="<div style='height:100%;display:flex;flex-direction:column;align-items:center;justify-content:center;text-align:center;background:"+bg+";color:"+fg+";padding:.4rem'>"+
+      "<div style='font-family:\"Cormorant Garamond\",serif;font-size:1.5rem;font-weight:700;line-height:1.05'>"+_catEsc(t1)+"</div>"+
+      (t2?"<div style='font-family:\"Cormorant Garamond\",serif;font-size:.95rem;opacity:.92'>"+_catEsc(t2)+"</div>":"")+"</div>";
+  }
+  box.innerHTML="<div style='width:100%;aspect-ratio:3/1;border-radius:10px;overflow:hidden;border:1px solid #e8d9bf;background:#f1ece3'>"+inner+"</div>"+
+    "<div style='font-size:.62rem;color:#aa9a80;margin-top:.25rem;text-align:center'>"+(s.banner_ubicacion==='todas'?'Aparece como encabezado en todas las hojas':'Aparece grande en la primera hoja')+"</div>";
+}
+
+function _catCatGuardar(){
+  var s=_catCatModalState; if(!s)return;
+  var nombre=((document.getElementById('_catCatNombre')||{value:''}).value||'').trim()||'Mi catálogo';
+  s.nombre=nombre;
+  var btn=document.getElementById('_catCatGuardarBtn'); if(btn){btn.disabled=true;btn.textContent='Guardando...';}
+  var doSave=function(){
+    var config={ banner_modo:s.banner_modo, banner_imagen_url:s.banner_imagen_url||'', banner_preset_id:s.banner_preset_id||'',
+      banner_texto1:s.banner_texto1||'', banner_texto2:s.banner_texto2||'', banner_bg:s.banner_bg||'#1a1a1a', banner_fg:s.banner_fg||'#ffffff',
+      banner_ubicacion:s.banner_ubicacion||'primera', precio_modo:s.precio_modo||'x1', notas_modo:s.notas_modo||'fotos',
+      incluir_contacto:!!s.incluir_contacto, contacto_texto:s.contacto_texto||'' };
+    var payload={nombre:nombre, config:config, updated_at:new Date().toISOString()};
+    var p;
+    if(s.id){ p=apiPatch('catalogos_cliente',payload,'id=eq.'+s.id); }
+    else { payload.cliente_id=_catCliente.id; p=apiPost('catalogos_cliente',payload); }
+    p.then(function(){
+      _catToast('Catálogo guardado','tok');
+      _catCatCerrarModal();
+      _catCargarCatalogos(function(){ if(_catPanelTab==='catalogos'){ var b=document.getElementById('_catTabBody'); if(b)_catRenderTabCatalogos(b); } });
+    }).catch(function(e){ console.error('[catcat save]',e); _catToast('No se pudo guardar','twarn'); if(btn){btn.disabled=false;btn.textContent='Guardar';} });
+  };
+  if(s.banner_modo==='imagen' && s._file){
+    var uid=(_catSession&&_catSession.user&&_catSession.user.id)||null;
+    if(!uid){ _catToast('Sesión no válida','twarn'); if(btn){btn.disabled=false;btn.textContent='Guardar';} return; }
+    var ext=(((s._file.name||'img').split('.').pop())||'jpg').toLowerCase().replace(/[^a-z0-9]/g,'')||'jpg';
+    var path=uid+'/banner_'+Date.now()+'.'+ext;
+    _sbAuth.storage.from('catalogos-clientes').upload(path,s._file,{upsert:true,contentType:s._file.type}).then(function(res){
+      if(res && res.error)throw res.error;
+      var pub=_sbAuth.storage.from('catalogos-clientes').getPublicUrl(path);
+      s.banner_imagen_url=(pub&&pub.data&&pub.data.publicUrl)||'';
+      s._file=null;
+      doSave();
+    }).catch(function(e){ console.error('[catcat upload]',e); _catToast('No se pudo subir la imagen','twarn'); if(btn){btn.disabled=false;btn.textContent='Guardar';} });
+  } else { doSave(); }
+}
+
+function _catCatDuplicar(id){
+  var c=_catCatList.filter(function(x){return x.id===id;})[0]; if(!c)return;
+  var cfg=_catCatConfig||{}; var max=cfg.max_borradores_por_cliente||0;
+  if(max>0 && _catCatList.length>=max){ _catToast('Llegaste al máximo de catálogos','twarn'); return; }
+  var refresh=function(){ _catCargarCatalogos(function(){ if(_catPanelTab==='catalogos'){ var b=document.getElementById('_catTabBody'); if(b)_catRenderTabCatalogos(b); } }); };
+  apiPost('catalogos_cliente',{cliente_id:_catCliente.id, nombre:(c.nombre||'Catálogo')+' (copia)', config:c.config||{}, updated_at:new Date().toISOString()}).then(function(res){
+    var nuevo=Array.isArray(res)?res[0]:res;
+    if(nuevo && nuevo.id){
+      apiGet('catalogos_cliente_productos','select=producto_id,precio,precio_manual,orden&catalogo_id=eq.'+id+'&limit=5000').then(function(prods){
+        prods=Array.isArray(prods)?prods:[];
+        if(prods.length){
+          var rows=prods.map(function(p){ return {catalogo_id:nuevo.id, producto_id:p.producto_id, precio:p.precio, precio_manual:p.precio_manual, orden:p.orden}; });
+          apiPost('catalogos_cliente_productos',rows).then(function(){ _catToast('Catálogo duplicado','tok'); refresh(); }).catch(function(){ _catToast('Catálogo duplicado','tok'); refresh(); });
+        } else { _catToast('Catálogo duplicado','tok'); refresh(); }
+      }).catch(function(){ _catToast('Catálogo duplicado','tok'); refresh(); });
+    } else { _catToast('Catálogo duplicado','tok'); refresh(); }
+  }).catch(function(e){ console.error('[catcat dup]',e); _catToast('No se pudo duplicar','twarn'); });
+}
+
+function _catCatBorrar(id){
+  var c=_catCatList.filter(function(x){return x.id===id;})[0]; if(!c)return;
+  var hacer=function(){
+    _catCatList=_catCatList.filter(function(x){return x.id!==id;});
+    if(_catPanelTab==='catalogos'){ var b=document.getElementById('_catTabBody'); if(b)_catRenderTabCatalogos(b); }
+    apiDelete('catalogos_cliente','id=eq.'+id).catch(function(e){ console.error('[catcat del]',e); _catToast('No se pudo borrar','twarn'); _catCargarCatalogos(function(){ if(_catPanelTab==='catalogos'){ var b2=document.getElementById('_catTabBody'); if(b2)_catRenderTabCatalogos(b2); } }); });
+  };
+  if(typeof _catModalConfirm==='function'){
+    _catModalConfirm({titulo:'Borrar catálogo', mensaje:'¿Querés borrar "'+(c.nombre||'este catálogo')+'"? No se puede deshacer.', confirmTxt:'Sí, borrar', cancelTxt:'Cancelar', icono:'🗑️', peligroso:true, onConfirm:hacer});
+  } else { if(confirm('¿Borrar este catálogo?'))hacer(); }
+}
+
+function _catCatCerrarModal(){
+  var m=document.getElementById('_moCatCat'); if(m)m.remove();
+  try{ if(_catCatModalState&&_catCatModalState._imgPreviewObj)URL.revokeObjectURL(_catCatModalState._imgPreviewObj); }catch(e){}
+}
 
 // ══════════════ NOTIFICACIONES DEL CLIENTE (campanita + tab) ══════════════
 var _catNotifs = [];
