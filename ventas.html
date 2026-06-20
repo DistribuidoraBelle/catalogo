@@ -1039,6 +1039,151 @@ function checkDots(){
   apiGet("cotizaciones","select=id&vendedor_id=eq."+VENDEDOR_ID+"&estado=eq.cotizacion").then(function(data){
     var d=document.getElementById("dotCotiz");if(d)d.classList.toggle("show",Array.isArray(data)&&data.length>0);
   });
+  checkDotAvisos();
+}
+// Muestra el dot de Avisos si hay avisos pendientes de productos que YA tienen stock (listos para notificar)
+function checkDotAvisos(){
+  var d=document.getElementById("dotAvisos"); if(!d)return;
+  apiGet("avisos_stock","select=producto_id&avisado=eq.false&limit=5000").then(function(rows){
+    rows=Array.isArray(rows)?rows:[];
+    var ids={}; rows.forEach(function(r){ if(r.producto_id!=null)ids[r.producto_id]=1; });
+    var arr=Object.keys(ids);
+    if(!arr.length){ d.classList.remove("show"); return; }
+    apiGet("productos","select=id,stock_actual&id=in.("+arr.join(",")+")&stock_actual=gt.0&limit=5000").then(function(ps){
+      d.classList.toggle("show", Array.isArray(ps)&&ps.length>0);
+    }).catch(function(){});
+  }).catch(function(){});
+}
+
+
+// ════════════════════════════════════════════════════════════════════
+// AVISOS DE STOCK (vendedor) — replica del panel de belle (regla ORO)
+// ════════════════════════════════════════════════════════════════════
+var _avisosNotifMapV={};
+function loadAvisosStockV(){
+  var cont=document.getElementById("avisosStockBodyV");
+  if(!cont)return;
+  cont.innerHTML="<div style='padding:1.5rem;text-align:center;color:var(--tx3)'>Cargando avisos...</div>";
+  apiGet("avisos_stock","select=*&avisado=eq.false&order=created_at.asc&limit=5000").then(function(rows){
+    rows=Array.isArray(rows)?rows:[];
+    if(!rows.length){
+      cont.innerHTML="<div style='padding:2rem 1rem;text-align:center;color:var(--tx3)'><div style='font-size:2rem;margin-bottom:.5rem'>&#128235;</div>No hay avisos pendientes.<br><span style='font-size:.78rem'>Cuando un cliente pida \"Avisame cuando vuelva\" en un producto sin stock, va a aparecer ac\u00e1.</span></div>";
+      return;
+    }
+    var pids={}, cids={};
+    rows.forEach(function(r){ if(r.producto_id!=null)pids[r.producto_id]=1; if(r.cliente_id!=null)cids[r.cliente_id]=1; });
+    var pidArr=Object.keys(pids), cidArr=Object.keys(cids);
+    var pProd = pidArr.length ? apiGet("productos","select=id,nombre,stock_actual&id=in.("+pidArr.join(",")+")&limit=5000").catch(function(){return [];}) : Promise.resolve([]);
+    var pCli  = cidArr.length ? apiGet("clientes","select=id,nombre,apellido&id=in.("+cidArr.join(",")+")&limit=5000").catch(function(){return [];}) : Promise.resolve([]);
+    Promise.all([pProd,pCli]).then(function(res){
+      var stockMap={}, prodNomMap={};
+      (res[0]||[]).forEach(function(p){ stockMap[p.id]=(p.stock_actual==null?0:p.stock_actual); prodNomMap[p.id]=p.nombre; });
+      var cliMap={};
+      (res[1]||[]).forEach(function(c){ cliMap[c.id]=((c.nombre||"")+(c.apellido?(" "+c.apellido):"")).trim(); });
+      _avisosNotifMapV={};
+      var grupos={};
+      rows.forEach(function(r){
+        var k=(r.producto_id!=null)?("p"+r.producto_id):("n:"+(r.producto_nombre||""));
+        if(!grupos[k])grupos[k]={producto_id:r.producto_id,nombre:(r.producto_id!=null&&prodNomMap[r.producto_id])||r.producto_nombre||("Producto "+r.producto_id),personas:[],stock:(r.producto_id!=null&&stockMap[r.producto_id]!=null)?stockMap[r.producto_id]:null};
+        grupos[k].personas.push(r);
+      });
+      var arr=Object.keys(grupos).map(function(k){return grupos[k];});
+      arr.sort(function(a,b){
+        var as=(a.stock!=null&&a.stock>0)?1:0, bs=(b.stock!=null&&b.stock>0)?1:0;
+        if(as!==bs)return bs-as;
+        return b.personas.length-a.personas.length;
+      });
+      var totalPers=rows.length, totalProds=arr.length;
+      var listos=arr.filter(function(g){return g.stock!=null&&g.stock>0;}).length;
+      var html="<div style='display:flex;gap:.6rem;margin-bottom:.9rem;flex-wrap:wrap'>"+
+        "<div style='background:var(--sur2);border:1px solid var(--bd);border-radius:9px;padding:.5rem .9rem'><b style='font-size:1.1rem;color:var(--acc)'>"+totalProds+"</b> <span style='font-size:.75rem;color:var(--tx3)'>productos esperados</span></div>"+
+        "<div style='background:var(--sur2);border:1px solid var(--bd);border-radius:9px;padding:.5rem .9rem'><b style='font-size:1.1rem;color:var(--acc)'>"+totalPers+"</b> <span style='font-size:.75rem;color:var(--tx3)'>personas esperando</span></div>"+
+        "<div style='background:var(--gdim);border:1px solid var(--green);border-radius:9px;padding:.5rem .9rem'><b style='font-size:1.1rem;color:var(--green)'>"+listos+"</b> <span style='font-size:.75rem;color:var(--green)'>con stock (listos para avisar)</span></div>"+
+      "</div>"+
+      "<div style='font-size:.78rem;color:var(--tx3);margin-bottom:.8rem'>Cuando un producto vuelve a tener stock, toc\u00e1 <b>Notificar</b> en cada cliente: te abre el WhatsApp con el mensaje listo, le deja la notificaci\u00f3n en su cuenta y lo saca de la lista.</div>";
+      html+=arr.map(function(g){
+        var stock=g.stock;
+        var totalReq=g.personas.reduce(function(s,pe){return s+(pe.cantidad>0?pe.cantidad:1);},0);
+        var badge, borde;
+        if(stock==null){ badge="<span style='background:var(--sur3);color:var(--tx3);border-radius:12px;padding:.12rem .6rem;font-size:.66rem;font-weight:700'>stock desconocido</span>"; borde="var(--bd)"; }
+        else if(stock<=0){ badge="<span style='background:var(--sur3);color:var(--tx3);border-radius:12px;padding:.12rem .6rem;font-size:.66rem;font-weight:700'>&#9203; Sin stock a\u00fan</span>"; borde="var(--bd)"; }
+        else if(stock>=totalReq){ badge="<span style='background:var(--gdim);color:var(--green);border-radius:12px;padding:.12rem .6rem;font-size:.66rem;font-weight:700'>&#9989; Lleg\u00f3 todo</span>"; borde="var(--green)"; }
+        else { badge="<span style='background:var(--ydim);color:var(--yel);border-radius:12px;padding:.12rem .6rem;font-size:.66rem;font-weight:700'>&#9888; Lleg\u00f3 una parte</span>"; borde="var(--yel)"; }
+        var nombreEsc=(g.nombre||"").replace(/'/g,"\\'").replace(/"/g,"&quot;");
+        var stockTxt = (stock==null)?"":("<span style='font-size:.72rem;color:var(--tx3)'>Stock actual: <b style='color:"+((stock>0)?"var(--green)":"var(--tx3)")+"'>"+stock+"</b> &nbsp;\u00b7&nbsp; Piden en total: <b style='color:var(--tx2)'>"+totalReq+"</b></span>");
+        var filas=g.personas.map(function(pe){
+          var raw=(pe.whatsapp||"").trim();
+          var num=raw.replace(/\D/g,"");
+          if(num && num.indexOf("54")!==0) num="549"+num.replace(/^0/,"");
+          var cant=(pe.cantidad>0?pe.cantidad:1);
+          var nombreCli=(pe.cliente_id!=null&&cliMap[pe.cliente_id])?cliMap[pe.cliente_id]:"";
+          var fecha=pe.created_at?new Date(pe.created_at).toLocaleDateString('es-AR'):"";
+          var btn="";
+          if(stock!=null && stock>0){
+            var parcial=(stock<cant);
+            var disp=parcial?stock:cant;
+            var hola=nombreCli?("\u00a1Hola "+nombreCli+"! "):"\u00a1Hola! ";
+            var msg = parcial
+              ? (hola+"\ud83d\udc4b Te avisamos que "+g.nombre+" volvi\u00f3 a tener stock en Belle. Ingresaron "+disp+" unidad(es). \u00bfQuer\u00e9s que te lo reservemos? \ud83c\udf38")
+              : (hola+"\ud83d\udc4b Te avisamos que "+g.nombre+" volvi\u00f3 a tener stock en Belle. Hab\u00edas pedido "+cant+" unidad(es). \u00bfQuer\u00e9s que te lo reservemos? \ud83c\udf38");
+            var wa=num?("https://wa.me/"+num+"?text="+encodeURIComponent(msg)):"#";
+            _avisosNotifMapV[pe.id]={cliente_id:pe.cliente_id,producto_id:pe.producto_id,producto_nombre:g.nombre,parcial:parcial,cantidad:cant,disponible:disp,nombre:nombreCli};
+            var bg=parcial?"var(--yel)":"#25D366";
+            var fg=parcial?"#1a1200":"#fff";
+            var etiqueta=parcial?("Notificar parcial ("+disp+")"):"Notificar completo";
+            btn="<a href='"+wa+"' target='_blank' rel='noopener' onclick=\"notificarAvisoUnoV("+pe.id+")\" style='display:inline-flex;align-items:center;gap:.35rem;background:"+bg+";color:"+fg+";text-decoration:none;padding:.34rem .72rem;border-radius:8px;font-size:.72rem;font-weight:700'>&#128276; "+etiqueta+"</a>";
+          } else {
+            btn="<span style='font-size:.68rem;color:var(--tx3);font-style:italic'>esperando stock</span>";
+          }
+          return "<div style='display:flex;justify-content:space-between;align-items:center;gap:.6rem;flex-wrap:wrap;padding:.4rem 0;border-top:1px dashed var(--bd)'>"+
+            "<div style='min-width:0'><b style='font-size:.8rem;color:var(--tx)'>"+(nombreCli||raw||"?")+"</b>"+
+              "<span style='background:var(--acc);color:#1a1200;border-radius:10px;padding:.05rem .45rem;font-size:.64rem;font-weight:700;margin-left:.4rem'>"+cant+" u.</span>"+
+              (nombreCli&&raw?(" <span style='font-size:.66rem;color:var(--tx3)'>"+raw+"</span>"):"")+
+              (fecha?(" <span style='font-size:.62rem;color:var(--tx3)'>\u00b7 "+fecha+"</span>"):"")+
+            "</div>"+
+            "<div>"+btn+"</div>"+
+          "</div>";
+        }).join("");
+        return "<div style='background:var(--sur2);border:1px solid "+borde+";border-radius:11px;padding:.85rem 1rem;margin-bottom:.7rem'>"+
+          "<div style='display:flex;justify-content:space-between;align-items:flex-start;gap:.6rem;margin-bottom:.35rem;flex-wrap:wrap'>"+
+            "<div><b style='font-size:.92rem;color:var(--tx)'>"+(g.nombre||"")+"</b> "+badge+"<br>"+stockTxt+"</div>"+
+            "<button onclick=\"marcarAvisadoV("+(g.producto_id!=null?g.producto_id:"null")+",'"+nombreEsc+"')\" style='background:transparent;border:1px solid var(--bd);color:var(--tx2);border-radius:7px;font-size:.68rem;padding:.3rem .6rem;cursor:pointer;font-family:inherit'>&#10003; Marcar todos</button>"+
+          "</div>"+
+          filas+
+        "</div>";
+      }).join("");
+      cont.innerHTML=html;
+    });
+  }).catch(function(e){ console.error("[avisos-stock-v]",e); cont.innerHTML="<div style='padding:1rem;color:var(--red)'>Error cargando avisos.</div>"; });
+}
+function notificarAvisoUnoV(avisoId){
+  var d=_avisosNotifMapV[avisoId]; if(!d)return true;
+  var titulo, mensaje;
+  if(d.parcial){
+    titulo="\ud83c\udf38 "+d.producto_nombre+" volvi\u00f3 (en parte)";
+    mensaje="Volvi\u00f3 stock de "+d.producto_nombre+". Ingresaron "+d.disponible+" unidad(es) de las "+d.cantidad+" que esperabas. Escribinos para reserv\u00e1rtelo \ud83d\udc9b";
+  } else {
+    titulo="\ud83c\udf38 "+d.producto_nombre+" volvi\u00f3 a stock";
+    mensaje="\u00a1"+d.producto_nombre+" volvi\u00f3 a tener stock! Hab\u00edas pedido "+d.cantidad+" unidad(es). Escribinos para reserv\u00e1rtelo \ud83d\udc9b";
+  }
+  var tareas=[];
+  if(d.cliente_id!=null){
+    tareas.push(apiPost("notificaciones_cliente",{cliente_id:d.cliente_id,tipo:"aviso_stock",titulo:titulo,mensaje:mensaje,producto_id:d.producto_id,producto_nombre:d.producto_nombre,cantidad:d.cantidad,cantidad_disponible:d.disponible,parcial:!!d.parcial,origen:"vendedor"}));
+  }
+  tareas.push(apiPatch("avisos_stock",{avisado:true,avisado_at:new Date().toISOString()},"id=eq."+avisoId));
+  Promise.all(tareas).then(function(){
+    if(typeof toast==='function')toast("Notificado \u2713","tok");
+    setTimeout(function(){loadAvisosStockV(); if(typeof checkDotAvisos==='function')checkDotAvisos();},400);
+  }).catch(function(e){console.error("[notificar aviso v]",e); if(typeof toast==='function')toast("No se pudo registrar la notificaci\u00f3n","terr");});
+  return true;
+}
+function marcarAvisadoV(prodId, nombre){
+  if(!confirm("\u00bfMarcar como avisados a todos los que esperan "+(nombre||"este producto")+"?\nEsto los saca de la lista de pendientes."))return;
+  var filtro = (prodId!=null && prodId!=="null") ? ("producto_id=eq."+prodId+"&avisado=eq.false") : ("producto_nombre=eq."+encodeURIComponent(nombre)+"&avisado=eq.false");
+  apiPatch("avisos_stock",{avisado:true,avisado_at:new Date().toISOString()},filtro).then(function(){
+    if(typeof toast==='function')toast("Marcados como avisados \u2713","tok");
+    loadAvisosStockV(); if(typeof checkDotAvisos==='function')checkDotAvisos();
+  }).catch(function(e){console.error("[avisos-v marcar]",e); if(typeof toast==='function')toast("No se pudo actualizar","terr");});
 }
 
 function fmt(n){return n?("$"+Math.round(n).toLocaleString("es-AR",{timeZone:"America/Argentina/Buenos_Aires"})):"-";}
@@ -9015,7 +9160,7 @@ function agregarCombo(comboId){
 }
 
 
-var PAGES=["clientes-vend","catalogo","pedidos-web","rutas","transferidas","historial","movimientos","dinero","deposito","gastos","rendicion","reclamo","reservas","pedidos-prov","devoluciones","calculadora","cotizaciones"];
+var PAGES=["clientes-vend","catalogo","pedidos-web","avisos","rutas","transferidas","historial","movimientos","dinero","deposito","gastos","rendicion","reclamo","reservas","pedidos-prov","devoluciones","calculadora","cotizaciones"];
 
 // ── PEDIDOS PROVEEDOR (David) ─────────────────────────────────────────
 
@@ -10363,6 +10508,7 @@ function navTo(pg,el){
   if(pg==="clientes-vend")loadClientesVendedor();
   if(pg==="catalogo"){if(!document.getElementById("prodList"))buildCatalogo();renderCat();loadCombosVendedor();loadQuickPanels();}
   if(pg==="pedidos-web")loadPedidosWeb();
+  if(pg==="avisos")loadAvisosStockV();
   if(pg==="rutas")loadRutas();
   if(pg==="historial")loadHistorial();
   if(pg==="movimientos")loadMovimientos();
@@ -17105,6 +17251,7 @@ function _rtBorrarDir(id){
     <div class="tab" onclick="navTo('clientes-vend',this)">Mis Clientes</div>
     <div class="tab act" onclick="navTo('catalogo',this)">Catalogo</div>
     <div class="tab" onclick="navTo('pedidos-web',this)">Pedidos<span class="dot" id="dotPedidos"></span></div>
+    <div class="tab" onclick="navTo('avisos',this)">Avisos<span class="dot" id="dotAvisos"></span></div>
     <div class="tab" onclick="navTo('rutas',this)">Rutas<span class="dot" id="dotRutas"></span></div>
     <div class="tab" onclick="navTo('historial',this)">Historial</div>
     <div class="tab" onclick="navTo('movimientos',this)">Movimientos</div>
@@ -17121,6 +17268,11 @@ function _rtBorrarDir(id){
     <div class="page" id="pg-clientes-vend"></div>
     <div class="page act" id="pg-catalogo"></div>
     <div class="page" id="pg-pedidos-web"></div>
+    <div class="page" id="pg-avisos" style="padding:.9rem 1rem">
+      <h2 style="font-family:'Playfair Display',serif;color:var(--acc);font-size:1.2rem;margin-bottom:.25rem">Avisos de stock</h2>
+      <p style="color:var(--tx3);font-size:.78rem;margin-bottom:.9rem">Clientes que pidieron "Avisame cuando vuelva". Cuando el producto vuelve a entrar, notificalos con un toque.</p>
+      <div id="avisosStockBodyV"></div>
+    </div>
     <div class="page" id="pg-rutas" style="padding:.9rem 1rem"></div>
     <div class="page" id="pg-historial"></div>
     <div class="page" id="pg-movimientos"></div>
