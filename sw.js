@@ -1,44 +1,42 @@
-// Service Worker mínimo — Distribuidora Belle
-// Habilita "Agregar a inicio" (instalable) y un cache básico del shell.
-// Estrategia: network-first para el catálogo (siempre datos frescos),
-// con fallback a cache si no hay conexión.
+/* Distribuidora Belle — Service Worker (PWA + Web Push) */
+var BELLE_ICON = 'https://distribuidorabelle.com/og-belle.jpg';
 
-const CACHE = 'belle-cache-v1';
-const SHELL = ['index.html', 'favicon.svg', 'manifest.json'];
+self.addEventListener('install', function(e){ self.skipWaiting(); });
+self.addEventListener('activate', function(e){ e.waitUntil(self.clients.claim()); });
 
-self.addEventListener('install', function (e) {
-  self.skipWaiting();
-  e.waitUntil(
-    caches.open(CACHE).then(function (c) {
-      return c.addAll(SHELL).catch(function () {});
-    })
-  );
+// Recibe el push del servidor y muestra la notificación nativa en el celular
+self.addEventListener('push', function(event){
+  var data = {};
+  try { data = event.data ? event.data.json() : {}; }
+  catch(err){ data = { title: 'Distribuidora Belle', body: (event.data && event.data.text) ? event.data.text() : '' }; }
+
+  var title = data.title || 'Distribuidora Belle';
+  var options = {
+    body: data.body || '',
+    icon: data.icon || BELLE_ICON,
+    badge: data.badge || BELLE_ICON,
+    image: data.image || undefined,
+    tag: data.tag || ('belle-' + Date.now()),
+    renotify: true,
+    data: { url: data.url || './index.html' }
+  };
+  event.waitUntil(self.registration.showNotification(title, options));
 });
 
-self.addEventListener('activate', function (e) {
-  e.waitUntil(
-    caches.keys().then(function (keys) {
-      return Promise.all(
-        keys.filter(function (k) { return k !== CACHE; })
-            .map(function (k) { return caches.delete(k); })
-      );
-    }).then(function () { return self.clients.claim(); })
-  );
-});
-
-self.addEventListener('fetch', function (e) {
-  const req = e.request;
-  // Solo manejamos GET del mismo origen. El resto (Supabase, CDNs) pasa directo.
-  if (req.method !== 'GET' || new URL(req.url).origin !== self.location.origin) return;
-  e.respondWith(
-    fetch(req).then(function (res) {
-      const copy = res.clone();
-      caches.open(CACHE).then(function (c) { c.put(req, copy).catch(function () {}); });
-      return res;
-    }).catch(function () {
-      return caches.match(req).then(function (hit) {
-        return hit || caches.match('index.html');
-      });
+// Al tocar la notificación: enfocar una pestaña abierta o abrir el catálogo
+self.addEventListener('notificationclick', function(event){
+  event.notification.close();
+  var targetUrl = (event.notification.data && event.notification.data.url) || './index.html';
+  event.waitUntil(
+    self.clients.matchAll({ type: 'window', includeUncontrolled: true }).then(function(list){
+      for (var i = 0; i < list.length; i++){
+        var c = list[i];
+        if ('focus' in c){
+          try { if ('navigate' in c) c.navigate(targetUrl); } catch(e){}
+          return c.focus();
+        }
+      }
+      if (self.clients.openWindow) return self.clients.openWindow(targetUrl);
     })
   );
 });
