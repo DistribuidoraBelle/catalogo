@@ -1,8 +1,10 @@
 /* Distribuidora Belle — Service Worker (PWA + Web Push) */
-var BELLE_ICON = 'https://distribuidorabelle.com/og-belle.jpg';
+var BELLE_ICON = 'https://distribuidorabelle.com/favicon.png';
 
 self.addEventListener('install', function(e){ self.skipWaiting(); });
 self.addEventListener('activate', function(e){ e.waitUntil(self.clients.claim()); });
+
+function _isUrl(s){ return typeof s === 'string' && /^https?:\/\//.test(s); }
 
 // Recibe el push del servidor y muestra la notificación nativa en el celular
 self.addEventListener('push', function(event){
@@ -13,9 +15,11 @@ self.addEventListener('push', function(event){
   var title = data.title || 'Distribuidora Belle';
   var options = {
     body: data.body || '',
-    icon: data.icon || BELLE_ICON,
-    badge: data.badge || BELLE_ICON,
-    image: data.image || undefined,
+    // Ícono chico (izquierda): SIEMPRE el logo Belle. Solo se respeta otro si es una URL válida.
+    icon: _isUrl(data.icon) ? data.icon : BELLE_ICON,
+    badge: BELLE_ICON,
+    // Imagen grande (derecha): la foto del perfume / publicidad de la notificación, si tiene.
+    image: _isUrl(data.image) ? data.image : undefined,
     tag: data.tag || ('belle-' + Date.now()),
     renotify: true,
     data: { url: data.url || './index.html' }
