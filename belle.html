@@ -10236,14 +10236,31 @@ function _notifComposeHTML(){
     "<input id='nfCta' class='fi' placeholder='Texto del botón (ej: Ver producto)' style='width:100%;margin:0 0 .8rem' oninput='renderNotifPreview()'>"+
     "<label style='font-size:.72rem;font-weight:700'>¿A quién?</label>"+
     "<select id='nfSeg' class='fi' style='width:100%;margin:.2rem 0 .5rem' onchange='onNotifSegChange()'>"+
-      "<option value='todos_cuenta'>👥 Todos los que tienen cuenta</option><option value='cc'>💳 Clientes con Cuenta Corriente</option><option value='vendedor'>🧑‍💼 Clientes de un vendedor</option><option value='favoritos_producto'>⭐ Tienen un producto en favoritos</option>"+
+      "<option value='todos_cuenta'>👥 Todos los que tienen cuenta</option>"+
+      "<option value='cliente'>👤 Un cliente específico</option>"+
+      "<option value='catalogo'>📓 Con servicio de catálogo</option>"+
+      "<option value='mayorista'>⭐ Mayorista / VIP</option>"+
+      "<option value='cc'>💳 Clientes con Cuenta Corriente</option>"+
+      "<option value='vendedor'>🧑‍💼 Clientes de un vendedor</option>"+
+      "<option value='favoritos_producto'>⭐ Tienen un producto en favoritos</option>"+
     "</select>"+
     "<div id='nfSegVend' style='display:none;margin-bottom:.5rem'><select id='nfSegVendId' class='fi' style='width:100%'>"+vopts+"</select></div>"+
     "<div id='nfSegProd' style='display:none;margin-bottom:.5rem'><input id='nfSegProdId' class='fi' placeholder='ID del producto' style='width:100%'></div>"+
+    "<div id='nfSegCliente' style='display:none;margin-bottom:.5rem'>"+
+      "<input id='nfSegClienteBuscar' class='fi' placeholder='Buscá por nombre o email…' style='width:100%' oninput='_nfBuscarCliente()'>"+
+      "<div id='nfSegClienteRes' style='margin-top:.3rem'></div>"+
+      "<div id='nfSegClienteSel' style='font-size:.74rem;color:var(--acc);font-weight:700;margin-top:.3rem'></div>"+
+      "<input type='hidden' id='nfSegClienteId'>"+
+    "</div>"+
     "<div id='nfSegInfo' style='font-size:.72rem;color:var(--tx3);margin-bottom:.8rem'></div>"+
+    "<label style='font-size:.72rem;font-weight:700;display:block'>📅 Programar envío (opcional)</label>"+
+    "<div style='display:flex;gap:.4rem;align-items:center;margin:.2rem 0 .7rem'>"+
+      "<input type='datetime-local' id='nfProgramar' class='fi' style='flex:1' onchange='_nfProgramarChange()'>"+
+      "<button class='btn btn-g' style='font-size:.7rem' onclick='_nfLimpiarProgramar()' title='Quitar programación'>✖</button>"+
+    "</div>"+
     "<div style='display:flex;gap:.5rem;flex-wrap:wrap;align-items:center'>"+
       "<button class='btn btn-g' style='font-size:.74rem' onclick='contarSegmento()'>👁 Ver alcance</button>"+
-      "<button class='btn btn-a' style='font-size:.78rem;font-weight:800' onclick='enviarNotif()'>📨 Enviar ahora</button>"+
+      "<button id='nfBtnEnviar' class='btn btn-a' style='font-size:.78rem;font-weight:800' onclick='enviarNotif()'>📨 Enviar ahora</button>"+
     "</div>"+
   "</div>"+
   "<div style='margin-top:1rem'>"+
@@ -10264,9 +10281,10 @@ function onNotifLinkChange(){
 }
 function onNotifSegChange(){
   var v=_nfVal('nfSeg');
-  var a=document.getElementById('nfSegVend'), b=document.getElementById('nfSegProd'), inf=document.getElementById('nfSegInfo');
+  var a=document.getElementById('nfSegVend'), b=document.getElementById('nfSegProd'), c=document.getElementById('nfSegCliente'), inf=document.getElementById('nfSegInfo');
   if(a)a.style.display=(v==='vendedor')?'block':'none';
   if(b)b.style.display=(v==='favoritos_producto')?'block':'none';
+  if(c)c.style.display=(v==='cliente')?'block':'none';
   if(inf)inf.textContent='';
 }
 function subirNotifImagen(input){
@@ -10308,12 +10326,50 @@ function _resolveSegmento(cb){
     apiGet("clientes_favoritos","select=cliente_id&producto_id=eq."+pid+"&limit=5000").then(function(r){
       var s={}; (r||[]).forEach(function(x){if(x.cliente_id!=null)s[x.cliente_id]=1;}); cb(Object.keys(s).map(Number));
     });
+  }else if(seg==='catalogo'){
+    apiGet("clientes","select=id&puede_crear_catalogos=eq.true&auth_user_id=not.is.null&limit=5000").then(function(r){cb((r||[]).map(function(x){return x.id;}));});
+  }else if(seg==='mayorista'){
+    apiGet("clientes","select=id&precio_mayorista=eq.true&auth_user_id=not.is.null&limit=5000").then(function(r){cb((r||[]).map(function(x){return x.id;}));});
+  }else if(seg==='descuento'){
+    apiGet("clientes","select=id&descuento_especial=gt.0&auth_user_id=not.is.null&limit=5000").then(function(r){cb((r||[]).map(function(x){return x.id;}));});
+  }else if(seg==='cliente'){
+    var cid=parseInt(_nfVal('nfSegClienteId'),10)||null; cb(cid?[cid]:[]);
   }else cb([]);
 }
 function contarSegmento(){
   var inf=document.getElementById('nfSegInfo'); if(inf)inf.textContent='Calculando...';
   _resolveSegmento(function(ids){ if(inf)inf.innerHTML="Alcance: <b style='color:var(--acc)'>"+((ids||[]).length)+"</b> cliente(s)."; });
 }
+var _nfBuscarClienteT=null, _nfCliResMap={};
+function _nfBuscarCliente(){ if(_nfBuscarClienteT)clearTimeout(_nfBuscarClienteT); _nfBuscarClienteT=setTimeout(_nfBuscarClienteGo,300); }
+function _nfBuscarClienteGo(){
+  var q=(_nfVal('nfSegClienteBuscar')||'').trim();
+  var res=document.getElementById('nfSegClienteRes'); if(!res)return;
+  if(q.length<2){ res.innerHTML="<div style='font-size:.7rem;color:var(--tx3)'>Escribí al menos 2 letras…</div>"; return; }
+  var enc=encodeURIComponent('%'+q+'%');
+  apiGet("clientes","select=id,nombre,apellido,email&auth_user_id=not.is.null&or=(nombre.ilike."+enc+",apellido.ilike."+enc+",email.ilike."+enc+")&order=nombre&limit=12").then(function(r){
+    r=Array.isArray(r)?r:[]; _nfCliResMap={};
+    if(!r.length){ res.innerHTML="<div style='font-size:.7rem;color:var(--tx3)'>Sin resultados (solo clientes con cuenta).</div>"; return; }
+    res.innerHTML=r.map(function(c){
+      var nom=((c.nombre||'')+' '+(c.apellido||'')).trim()||('Cliente '+c.id);
+      _nfCliResMap[c.id]={nom:nom,email:c.email||''};
+      return "<button type='button' onclick='_nfElegirCliente("+c.id+")' style='display:block;width:100%;text-align:left;background:var(--sur2);border:1px solid var(--bd);border-radius:7px;padding:.4rem .6rem;margin-bottom:.25rem;cursor:pointer;font-size:.76rem;color:var(--tx)'>"+nom.replace(/</g,'&lt;')+(c.email?("<span style='color:var(--tx3)'> · "+c.email.replace(/</g,'&lt;')+"</span>"):"")+"</button>";
+    }).join("");
+  }).catch(function(e){console.error('[buscar cli]',e);});
+}
+function _nfElegirCliente(id){
+  var c=_nfCliResMap[id]; if(!c)return;
+  var h=document.getElementById('nfSegClienteId'); if(h)h.value=id;
+  var sel=document.getElementById('nfSegClienteSel'); if(sel)sel.textContent='✓ '+c.nom+(c.email?(' · '+c.email):'');
+  var res=document.getElementById('nfSegClienteRes'); if(res)res.innerHTML='';
+  if(typeof contarSegmento==='function')contarSegmento();
+}
+function _nfProgramarChange(){
+  var v=_nfVal('nfProgramar');
+  var btn=document.getElementById('nfBtnEnviar');
+  if(btn)btn.textContent = v ? '📅 Programar envío' : '📨 Enviar ahora';
+}
+function _nfLimpiarProgramar(){ var e=document.getElementById('nfProgramar'); if(e)e.value=''; _nfProgramarChange(); }
 function _insertNotifLotes(rows,i,done){
   if(i>=rows.length){done();return;}
   var lote=rows.slice(i,i+200);
@@ -10340,9 +10396,26 @@ function enviarNotif(){
   var seg=_nfVal('nfSeg'), segParam={};
   if(seg==='vendedor')segParam.vendedor_id=parseInt(_nfVal('nfSegVendId'),10)||null;
   if(seg==='favoritos_producto')segParam.producto_id=parseInt(_nfVal('nfSegProdId'),10)||null;
+  if(seg==='cliente')segParam.cliente_id=parseInt(_nfVal('nfSegClienteId'),10)||null;
+  var progAt=_nfVal('nfProgramar');
   _resolveSegmento(function(ids){
     ids=(ids||[]).filter(function(x){return x!=null;});
     if(!ids.length){ if(typeof toast==='function')toast('Ese grupo no tiene clientes','twarn'); return; }
+    if(progAt){
+      var _pd=new Date(progAt);
+      if(isNaN(_pd.getTime())){ if(typeof toast==='function')toast('Fecha de programación inválida','twarn'); return; }
+      if(_pd.getTime() <= Date.now()){ if(typeof toast==='function')toast('Esa fecha/hora ya pasó','twarn'); return; }
+      bellConfirm("Vas a PROGRAMAR «"+titulo+"» para el "+_pd.toLocaleString('es-AR')+" (~"+ids.length+" cliente(s)). ¿Confirmás?",function(){
+        apiPost("notif_campanias",{tipo:tipo,titulo:titulo,mensaje:mensaje,imagen_url:imagen,icono:icono,cta_texto:cta,link_pagina:link_pagina,link_id:link_id,link_url:link_url,segmento:seg,segmento_param:segParam,canales:['app'],estado:'programada',programada_at:_pd.toISOString(),creada_por:'admin',total_destinatarios:ids.length}).then(function(){
+          if(typeof toast==='function')toast('📅 Programada para '+_pd.toLocaleString('es-AR'),'tok');
+          ['nfTitulo','nfMensaje','nfImagen','nfCta','nfLinkProdId','nfLinkTxtVal','nfSegClienteBuscar','nfSegClienteId','nfProgramar'].forEach(function(idf){var e=document.getElementById(idf);if(e)e.value='';});
+          var _se=document.getElementById('nfSegClienteSel'); if(_se)_se.textContent=''; var _re=document.getElementById('nfSegClienteRes'); if(_re)_re.innerHTML='';
+          if(typeof _nfProgramarChange==='function')_nfProgramarChange();
+          renderNotifPreview(); loadNotifHistorial();
+        }).catch(function(e){console.error('[programarNotif]',e); if(typeof toast==='function')toast('No se pudo programar','terr');});
+      });
+      return;
+    }
     bellConfirm("Vas a enviar «"+titulo+"» a "+ids.length+" cliente(s). ¿Confirmás?",function(){
       apiPost("notif_campanias",{tipo:tipo,titulo:titulo,mensaje:mensaje,imagen_url:imagen,icono:icono,cta_texto:cta,link_pagina:link_pagina,link_id:link_id,link_url:link_url,segmento:seg,segmento_param:segParam,canales:['app'],estado:'enviada',enviada_at:new Date().toISOString(),creada_por:'admin',total_destinatarios:ids.length}).then(function(res){
         var campId=(Array.isArray(res)&&res[0])?res[0].id:null;
@@ -10350,13 +10423,23 @@ function enviarNotif(){
         var rows=ids.map(function(cid){var o={};for(var k in base)o[k]=base[k];o.cliente_id=cid;return o;});
         _insertNotifLotes(rows,0,function(){
           if(typeof toast==='function')toast('Notificación enviada a '+ids.length+' cliente(s) ✓','tok');
-          try{ var _pushUrl=(link_pagina==='producto'&&link_id)?('./index.html?ficha='+link_id):'./index.html'; _dispararPushNotif(ids, titulo, mensaje, imagen, _pushUrl); }catch(_e){}
-          ['nfTitulo','nfMensaje','nfImagen','nfCta','nfLinkProdId','nfLinkTxtVal'].forEach(function(idf){var e=document.getElementById(idf);if(e)e.value='';});
+          try{ var _pushUrl=_pushUrlPara(link_pagina,link_id,link_url); _dispararPushNotif(ids, titulo, mensaje, imagen, _pushUrl); }catch(_e){}
+          ['nfTitulo','nfMensaje','nfImagen','nfCta','nfLinkProdId','nfLinkTxtVal','nfSegClienteBuscar','nfSegClienteId'].forEach(function(idf){var e=document.getElementById(idf);if(e)e.value='';});
+          var _se=document.getElementById('nfSegClienteSel'); if(_se)_se.textContent=''; var _re=document.getElementById('nfSegClienteRes'); if(_re)_re.innerHTML='';
           renderNotifPreview(); loadNotifHistorial();
         });
       }).catch(function(e){console.error('[enviarNotif]',e); if(typeof toast==='function')toast('No se pudo enviar','terr');});
     });
   });
+}
+function _pushUrlPara(lp, lid, lurl){
+  if(lp==='producto' && lid) return './index.html?ficha='+lid;
+  if(lp==='ofertas') return './index.html?ir=ofertas';
+  if(lp==='combos') return './index.html?ir=combos';
+  if((lp==='marca'||lp==='familia'||lp==='busqueda') && lurl) return './index.html?ir=buscar&q='+encodeURIComponent(lurl);
+  if(lp && lp.indexOf('panel:')===0) return './index.html?ir=panel&p='+encodeURIComponent(lp.split(':')[1]||'notificaciones');
+  if((lp==='url'||lp==='whatsapp') && lurl) return lurl;
+  return './index.html';
 }
 function _dispararPushNotif(ids, titulo, mensaje, image, urlDestino){
   if(!ids||!ids.length)return;
@@ -10389,23 +10472,29 @@ function loadNotifHistorial(){
         var fecha=c.created_at?new Date(c.created_at).toLocaleString('es-AR'):"";
         var waText=encodeURIComponent((c.titulo||"")+(c.mensaje?("\n"+c.mensaje):""));
         var tEsc=(c.titulo||"").replace(/</g,'&lt;'), mEsc=(c.mensaje||"").replace(/</g,'&lt;');
-        return "<div style='background:var(--sur2);border:1px solid var(--bd);border-radius:10px;padding:.7rem .85rem;margin-bottom:.55rem'>"+
+        var prog=(c.estado==='programada'&&c.programada_at)?new Date(c.programada_at):null;
+        return "<div style='background:var(--sur2);border:1px solid "+(prog?'var(--acc)':'var(--bd)')+";border-radius:10px;padding:.7rem .85rem;margin-bottom:.55rem'>"+
           "<div style='display:flex;justify-content:space-between;gap:.6rem;align-items:flex-start;flex-wrap:wrap'>"+
             "<div style='min-width:0;flex:1'><b style='font-size:.86rem'>"+ic+" "+tEsc+"</b>"+
               (mEsc?("<div style='font-size:.74rem;color:var(--tx3);margin-top:.15rem'>"+mEsc+"</div>"):"")+
+              (prog?("<div style='font-size:.66rem;color:var(--acc);font-weight:700;margin-top:.3rem'>📅 Programada para "+prog.toLocaleString('es-AR')+"</div>"):"")+
               "<div style='font-size:.66rem;color:var(--tx3);margin-top:.3rem'>"+fecha+" · "+_segLabel(c.segmento)+"</div>"+
             "</div>"+
             "<div style='display:flex;gap:.35rem;align-items:center;flex-shrink:0'>"+
               "<button onclick='editarReenviarNotif("+c.id+")' title='Editar y reenviar' style='width:32px;height:32px;border-radius:50%;border:1px solid var(--bd);background:var(--sur2);color:var(--acc);cursor:pointer'>✏️</button>"+
               "<a href='https://wa.me/?text="+waText+"' target='_blank' rel='noopener' title='Reenviar por WhatsApp' style='display:inline-flex;align-items:center;justify-content:center;width:32px;height:32px;border-radius:50%;background:#25D366;color:#fff;text-decoration:none'>"+_waSvgSmall()+"</a>"+
-              "<button onclick='borrarNotifCampania("+c.id+")' title='Borrar' style='width:32px;height:32px;border-radius:50%;border:1px solid var(--bd);background:var(--sur2);color:var(--tx3);cursor:pointer'>🗑</button>"+
+              "<button onclick='borrarNotifCampania("+c.id+")' title='"+(prog?'Cancelar programación':'Borrar')+"' style='width:32px;height:32px;border-radius:50%;border:1px solid var(--bd);background:var(--sur2);color:var(--tx3);cursor:pointer'>"+(prog?'✖':'🗑')+"</button>"+
             "</div>"+
           "</div>"+
-          "<div style='display:flex;gap:.9rem;margin-top:.5rem;font-size:.7rem;color:var(--tx3)'>"+
-            "<span>📨 <b style='color:var(--tx)'>"+s.t+"</b> enviadas</span>"+
-            "<span>👁 <b style='color:#2e9c63'>"+s.l+"</b> leídas</span>"+
-            "<span>👆 <b style='color:var(--acc)'>"+s.c+"</b> clicks</span>"+
-          "</div>"+
+          (prog?
+            "<div style='margin-top:.5rem;font-size:.7rem;color:var(--acc);font-weight:700'>⏳ Pendiente · ~"+(c.total_destinatarios||0)+" destinatario(s)</div>"
+          :
+            "<div style='display:flex;gap:.9rem;margin-top:.5rem;font-size:.7rem;color:var(--tx3)'>"+
+              "<span>📨 <b style='color:var(--tx)'>"+s.t+"</b> enviadas</span>"+
+              "<span>👁 <b style='color:#2e9c63'>"+s.l+"</b> leídas</span>"+
+              "<span>👆 <b style='color:var(--acc)'>"+s.c+"</b> clicks</span>"+
+            "</div>"
+          )+
         "</div>";
       }).join("");
       box.innerHTML=h;
@@ -10468,9 +10557,9 @@ function editarReenviarNotif(id){
     if(lsel==='whatsapp' && v.indexOf('wa.me/')>=0){ v=(v.split('wa.me/')[1]||v); }
     set('nfLinkTxtVal', v);
   }
-  set('nfSeg', (['todos_cuenta','cc','vendedor','favoritos_producto'].indexOf(c.segmento)>=0?c.segmento:'todos_cuenta'));
+  set('nfSeg', (['todos_cuenta','cliente','catalogo','mayorista','descuento','cc','vendedor','favoritos_producto'].indexOf(c.segmento)>=0?c.segmento:'todos_cuenta'));
   if(typeof onNotifSegChange==='function')onNotifSegChange();
-  try{ var sp=c.segmento_param; if(typeof sp==='string')sp=JSON.parse(sp); if(sp){ if(sp.vendedor_id)set('nfSegVendId',sp.vendedor_id); if(sp.producto_id)set('nfSegProdId',sp.producto_id); } }catch(e){}
+  try{ var sp=c.segmento_param; if(typeof sp==='string')sp=JSON.parse(sp); if(sp){ if(sp.vendedor_id)set('nfSegVendId',sp.vendedor_id); if(sp.producto_id)set('nfSegProdId',sp.producto_id); if(sp.cliente_id){ set('nfSegClienteId',sp.cliente_id); var _se=document.getElementById('nfSegClienteSel'); if(_se)_se.textContent='✓ Cliente #'+sp.cliente_id; } } }catch(e){}
   if(typeof renderNotifPreview==='function')renderNotifPreview();
   var box=document.getElementById('notifCenterBody'); if(box&&box.scrollIntoView)box.scrollIntoView({behavior:'smooth',block:'start'});
   if(typeof toast==='function')toast('Cargada para editar. Revis\u00e1 y toc\u00e1 Enviar \u2713','ok');
@@ -10557,7 +10646,7 @@ function _avisarIngresoStockMasivo(prodList){
         var rows=ids.map(function(cid){var o={};for(var k in base)o[k]=base[k];o.cliente_id=cid;return o;});
         _insertNotifLotes(rows,0,function(){
           if(typeof toast==='function')toast("\uD83D\uDCE2 Aviso de ingreso enviado a "+ids.length+" cliente(s) \u2713","tok");
-          try{ _dispararPushNotif(ids, titulo, "Mir\u00e1 todo lo que lleg\u00f3 \uD83C\uDF38", (prodJson[0]&&prodJson[0].imagen)||null); }catch(_e){}
+          try{ var _noms=prodJson.map(function(p){return p.nombre;}).filter(Boolean); var _lista=_noms.slice(0,6).join(', ')+(_noms.length>6?(' y '+(_noms.length-6)+' m\u00e1s'):''); _dispararPushNotif(ids, titulo, 'Lleg\u00f3: '+_lista, (prodJson[0]&&prodJson[0].imagen)||null); }catch(_e){}
           if(_avSubTab==='notif' && typeof loadNotifHistorial==='function') loadNotifHistorial();
         });
       }).catch(function(e){console.error('[ingreso masivo]',e); if(typeof toast==='function')toast("No se pudo enviar el aviso de ingreso","terr");});
