@@ -250,6 +250,15 @@ header{background:var(--bg-header);border-bottom:1px solid var(--border-color);p
 #filtrosColapsables.expandido .pills{flex-wrap:wrap;justify-content:center}
 #filtrosColapsables.expandido .fsel{width:100%}
 }
+/* DESKTOP: misma barra compacta que mobile — buscador + Comparar/Acordes/Filtros en un renglon;
+   los selects (marcas, inspirado, ordenar) y las pills quedan colapsados detras del boton "Filtros". */
+@media(min-width:681px){
+  #catBotonesFila{display:flex !important;flex-direction:row;gap:.5rem;align-items:center}
+  #catBotonesFila > button{white-space:nowrap}
+  #btnFiltrosMobile{display:flex !important;align-items:center;gap:.4rem;background:transparent;border:1.5px solid var(--accent);color:var(--accent);border-radius:20px;padding:.3rem .85rem;font-size:.72rem;cursor:pointer;white-space:nowrap}
+  #filtrosColapsables{display:none !important;width:100%;flex-direction:row;flex-wrap:wrap;gap:.6rem;align-items:center;padding-top:.7rem;margin-top:.5rem;border-top:1px solid var(--border-color)}
+  #filtrosColapsables.expandido{display:flex !important}
+}
 @media(max-width:480px){.card{flex-direction:column}.cimg{width:100%;height:160px;min-width:unset;background:#fff}.cimg img{object-fit:contain;padding:8px;mix-blend-mode:multiply}.fav-heart{top:6px!important;right:6px!important;bottom:auto!important;left:auto!important}.share-btn{top:42px!important;right:6px!important;bottom:auto!important;left:auto!important}
 /* ── Mobile: card stacked vertical — cinfo y cright con padding idéntico para alineación prolija ── */
 /* Fix del desfase visible donde nombre AFNAN y precios no quedaban alineados verticalmente.   */
@@ -3872,6 +3881,42 @@ function _hayBusquedaActiva(){
   }catch(e){ return false; }
 }
 
+// 2026-06-26: busqueda tolerante a errores de tipeo / prefijos aproximados (ej "invit" -> "invictus").
+// _levAcotado: distancia de edicion con corte temprano (rapido). _matchTolerante: compara el
+// termino contra el inicio de cada palabra del texto permitiendo 1-2 errores.
+function _levAcotado(a,b,max){
+  var la=a.length, lb=b.length;
+  if(Math.abs(la-lb)>max) return max+1;
+  var prev=[], cur=[], i, j;
+  for(j=0;j<=lb;j++) prev[j]=j;
+  for(i=1;i<=la;i++){
+    cur[0]=i; var best=cur[0];
+    for(j=1;j<=lb;j++){
+      var cost=a.charCodeAt(i-1)===b.charCodeAt(j-1)?0:1;
+      var m=prev[j]+1, n=cur[j-1]+1, o=prev[j-1]+cost;
+      cur[j]=m<n?(m<o?m:o):(n<o?n:o);
+      if(cur[j]<best) best=cur[j];
+    }
+    if(best>max) return max+1; // corte temprano
+    for(j=0;j<=lb;j++) prev[j]=cur[j];
+  }
+  return prev[lb];
+}
+function _matchTolerante(texto, q){
+  if(!texto||!q||q.length<4) return false;
+  if(texto.indexOf(q)>=0) return true;
+  var tol = q.length>=7 ? 2 : 1;
+  var palabras = texto.split(/[^a-z0-9]+/);
+  for(var i=0;i<palabras.length;i++){
+    var w=palabras[i]; if(!w||w.length<3) continue;
+    var lo=Math.max(3,q.length-1), hi=Math.min(w.length,q.length+1);
+    for(var L=lo;L<=hi;L++){
+      if(_levAcotado(q, w.slice(0,L), tol)<=tol) return true;
+    }
+  }
+  return false;
+}
+
 function applyFilters(){
   var q=norm(document.getElementById("srch").value||"");
   var brand=document.getElementById("brandFilter").value;
@@ -3886,30 +3931,16 @@ function applyFilters(){
       }
     });
   }
-  // 2026-06-26: indice de dupes buscable, igual de rico que el asistente "cual es tu perfume arabe".
-  //   Combina ficha (inspirado_en_nombre + descripcion inspirado_en) + diccionario _DUPE_CANON por nombre,
-  //   canonizado con _dupeCanonFromText. Cacheado en window._dupeBuscarMap; se reconstruye si cambian las fichas.
-  if((!window._dupeBuscarMap || window._dupeBuscarMapN!==((window._fichasSB&&window._fichasSB.length)||0)) && Array.isArray(allProds)){
-    try{
-      var _fxPorProd={};
-      if(Array.isArray(window._fichasSB)){ window._fichasSB.forEach(function(f){ if(f&&f.producto_id) _fxPorProd[f.producto_id]=f; }); }
-      var _dbm={};
-      allProds.forEach(function(pp){
-        var fi=_fxPorProd[pp.id]||null, partes=[];
-        try{
-          var fx={}; if(fi){ for(var kk in fi){ fx[kk]=fi[kk]; } }
-          fx.nombre=pp.nombre; fx.nombre_completo=pp.nombre;
-          var arr=(typeof _dupesParec==='function')?_dupesParec(fx):[];
-          if(arr&&arr.length){ partes=partes.concat(arr); }
-          else { var uno=(typeof _dupeParec==='function')?_dupeParec(fx):''; if(uno) partes.push(uno); }
-        }catch(e){}
-        if(fi){ if(fi.inspirado_en_nombre) partes.push(String(fi.inspirado_en_nombre)); if(fi.inspirado_en) partes.push(String(fi.inspirado_en)); }
-        if(partes.length){ _dbm[pp.id]=norm(partes.join(' ')); }
-      });
-      window._dupeBuscarMap=_dbm; window._dupeBuscarMapN=((window._fichasSB&&window._fichasSB.length)||0);
-    }catch(e){ window._dupeBuscarMap=window._dupeBuscarMap||{}; }
+  // 2026-06-26: indice ficha->producto (robusto, cacheado por cantidad de fichas).
+  //   El "blob" de dupe de cada producto se calcula on-demand y se cachea en el propio
+  //   producto (p._dupeBlob / p._dupeBlobCorto), invalidado por _fLen. Evita el bug del
+  //   mapa global que quedaba vacio si applyFilters corria antes de cargar los productos.
+  var _fLen=(window._fichasSB&&window._fichasSB.length)||0;
+  if(!window._fichaPorProd || window._fichaPorProdN!==_fLen){
+    var _ixF={};
+    if(Array.isArray(window._fichasSB)){ window._fichasSB.forEach(function(f){ if(f&&f.producto_id && !_ixF[f.producto_id]) _ixF[f.producto_id]=f; }); }
+    window._fichaPorProd=_ixF; window._fichaPorProdN=_fLen;
   }
-  var _dupeBuscar=window._dupeBuscarMap||{};
   // Si hay busqueda activa O vista de favoritos O filtro de familia/precio, buscar en TODAS las pestanas
   var poolProds=(q||window._soloFavs||famF||precioF)?allProds:getTabProds();
   var filtered=poolProds.filter(function(p){
@@ -3926,11 +3957,30 @@ function applyFilters(){
       if(inspMap[p.id] !== inspF) return false;
     }
     if(q){
+      // blob de dupe cacheado en el propio producto (invalidado por _fLen)
+      if(p._dupeBlobN!==_fLen){
+        var _fi=(window._fichaPorProd||{})[p.id]||null, _full=[], _corto=[];
+        try{
+          var _fx={}; if(_fi){ for(var _k in _fi) _fx[_k]=_fi[_k]; } _fx.nombre=p.nombre; _fx.nombre_completo=p.nombre;
+          var _arr=(typeof _dupesParec==='function')?_dupesParec(_fx):[];
+          if(!(_arr&&_arr.length)){ var _u=(typeof _dupeParec==='function')?_dupeParec(_fx):''; _arr=_u?[_u]:[]; }
+          _arr.forEach(function(d){ _full.push(d); _corto.push(d); });
+        }catch(e){}
+        if(_fi){
+          if(_fi.inspirado_en_nombre){ _full.push(String(_fi.inspirado_en_nombre)); _corto.push(String(_fi.inspirado_en_nombre)); }
+          if(_fi.inspirado_en){ _full.push(String(_fi.inspirado_en)); } // descripcion: solo para substring
+        }
+        p._dupeBlob=norm(_full.join(' '));
+        p._dupeBlobCorto=norm(p.nombre+' '+_corto.join(' '));
+        p._dupeBlobN=_fLen;
+      }
       var enNombre=norm(p.nombre).indexOf(q)>=0;
       var enEmpresa=norm(p.empresa||"").indexOf(q)>=0;
-      // ✨ También buscar en inspirado_en_nombre (dupe buscable)
-      var enInsp = inspMap[p.id] ? (norm(inspMap[p.id]).indexOf(q)>=0) : false;
-      if(!enInsp && _dupeBuscar[p.id]) enInsp = _dupeBuscar[p.id].indexOf(q)>=0;
+      var enInsp = !!(p._dupeBlob && p._dupeBlob.indexOf(q)>=0);
+      // tolerancia a errores de tipeo / prefijos aproximados (ej "invit" -> "invictus")
+      if(!enNombre && !enEmpresa && !enInsp && q.length>=4){
+        if(_matchTolerante(p._dupeBlobCorto||"", q) || _matchTolerante(norm(p.nombre), q)) enInsp=true;
+      }
       if(!enNombre&&!enEmpresa&&!enInsp)return false;
     }
     if(_acordesFiltro&&_acordesFiltro.length){
