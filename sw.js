@@ -1,5 +1,6 @@
 /* Distribuidora Belle — Service Worker (PWA + Web Push) */
 var BELLE_ICON = 'https://distribuidorabelle.com/favicon.png';
+var BELLE_BADGE = 'https://distribuidorabelle.com/belle-badge.png';
 
 self.addEventListener('install', function(e){ self.skipWaiting(); });
 self.addEventListener('activate', function(e){ e.waitUntil(self.clients.claim()); });
@@ -38,7 +39,8 @@ self.addEventListener('push', function(event){
     body: data.body || '',
     // Ícono chico (izquierda): SIEMPRE el logo Belle. Solo se respeta otro si es una URL válida.
     icon: _isUrl(data.icon) ? data.icon : BELLE_ICON,
-    badge: BELLE_ICON,
+    // Icono chico (barra de estado): silueta monocroma de la B (fondo transparente).
+    badge: BELLE_BADGE,
     // Imagen grande (derecha): la foto del perfume / publicidad de la notificación, si tiene.
     image: _isUrl(data.image) ? data.image : undefined,
     tag: data.tag || ('belle-' + Date.now()),
