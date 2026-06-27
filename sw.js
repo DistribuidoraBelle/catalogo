@@ -4,6 +4,27 @@ var BELLE_ICON = 'https://distribuidorabelle.com/favicon.png';
 self.addEventListener('install', function(e){ self.skipWaiting(); });
 self.addEventListener('activate', function(e){ e.waitUntil(self.clients.claim()); });
 
+/* Fetch handler (network-first SOLO para la navegacion / carga de paginas).
+   Es lo que Chrome Android necesita para considerar la web "instalable como app".
+   - Siempre intenta la red primero (asi nunca sirve una version vieja con conexion).
+   - Cae al cache solo si no hay internet (offline basico).
+   - NO intercepta Supabase, imagenes ni otros assets: esos van directo a la red. */
+var BELLE_NAV_CACHE = 'belle-nav-v1';
+self.addEventListener('fetch', function(event){
+  var req = event.request;
+  if (req.method !== 'GET') return;
+  if (req.mode === 'navigate'){
+    event.respondWith(
+      fetch(req).then(function(resp){
+        try { var copy = resp.clone(); caches.open(BELLE_NAV_CACHE).then(function(c){ c.put(req, copy); }); } catch(e){}
+        return resp;
+      }).catch(function(){
+        return caches.match(req).then(function(m){ return m || Response.error(); });
+      })
+    );
+  }
+});
+
 function _isUrl(s){ return typeof s === 'string' && /^https?:\/\//.test(s); }
 
 // Recibe el push del servidor y muestra la notificación nativa en el celular
