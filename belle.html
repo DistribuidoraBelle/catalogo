@@ -3181,10 +3181,19 @@ function comprasParseAnyText(text, provNombre){
   var items=[];
   var seen={};
   var currentBrand='';
+  // 2026-06-27: el PDF de ASM (y similares) viene "corrido" (pdfjs junta toda la pagina en una sola
+  // linea). Si hay muchos codigos NNNN-N en pocas lineas, insertamos un salto antes de cada codigo
+  // para que cada producto quede en su propia linea y el parser por linea funcione.
+  var _nCods=(text.match(/\d{2,7}-\d\s/g)||[]).length;
+  var _nLineas=text.split(/[\n\r]+/).length;
+  if(_nCods>=5 && _nCods > _nLineas*1.5){ text=text.replace(/\s(\d{2,7}-\d)(?=\s)/g,'\n$1'); }
   var lines=text.split(/[\n\r]+/);
 
   // ATACADO/EPIC: "121170-2 PERFUME NAME / PRICE |"
   var rAtacado=/^\s*([\d]{3,7}-[\d])\s+(.+?)\s*\/\s*(?:[\d]+\s+)?([\d]+\.[\d]{2})\s*[\|]?\s*$/;
+  // ASM (importados Paraguay, PDF): "6982-3 ACRILICO DISPLAY 3.10" — codigo + descripcion + precio N.NN.
+  // El precio puede ir seguido del encabezado de la categoria siguiente; tomamos el precio e ignoramos el resto.
+  var rASM=/^([\d]{2,7}-[\d])\s+(.+?)\s+(\d[\d.,]*\.[\d]{2})(?=\s|$)/;
   // STAR: "NAME - $22.50 - (Npcs)" or "NAME - 22.50"
   var rStar=/^(.+?)\s*-\s*\$?([\d]+\.[\d]{2})\s*(?:-\s*\(([\d]+)pcs\))?\s*$/i;
   // Generic slash: "NAME / 22.50"
@@ -3222,7 +3231,7 @@ function comprasParseAnyText(text, provNombre){
     function _addItem(nom, pr, opts){
       opts = opts || {};
       if(!nom||nom.length<3) return false;
-      if(pr<=0 || pr>1000) return false;
+      if(pr<=0 || pr>100000) return false;
       // Filtros anti-falsos positivos
       if(/^(precio|valor|total|subtotal|envio|envío|descuento)/i.test(nom)) return false;
       if(seen[nom]) return false;
@@ -3249,6 +3258,14 @@ function comprasParseAnyText(text, provNombre){
       var pr=parseFloat(m[3]);
       _addItem(nom, pr, {codigo:codAt});
       return;
+    }
+    // ASM (PDF): codigo + descripcion + precio al final (sin "/")
+    var mAsm=rASM.exec(clean);
+    if(mAsm){
+      var codAsm=mAsm[1].trim();
+      var nomAsm=mAsm[2].trim().replace(/^PERFUME\s+/i,'').trim();
+      var prAsm=_bcParsePrecio(mAsm[3]);
+      if(_addItem(nomAsm, prAsm, {codigo:codAsm})) return;
     }
     m=rStar.exec(clean);
     if(m){
@@ -25973,6 +25990,37 @@ function bcAgregarManual(){
 
 
 
+// 2026-06-27: helpers ASM/genericos para el ayudante de compras.
+// _bcParsePrecio: numero directo; o string respetando separador de miles/decimal
+//   ("1,139.00"->1139, "1.139,00"->1139, "1,5"->1.5). Evita el bug parseFloat("1.139.00")=1.139.
+function _bcParsePrecio(v){
+  if(v==null) return NaN;
+  if(typeof v==='number') return v;
+  var s=String(v).trim().replace(/[^0-9.,]/g,'');
+  if(!s) return NaN;
+  var hasC=s.indexOf(',')>=0, hasD=s.indexOf('.')>=0;
+  if(hasC&&hasD){
+    if(s.lastIndexOf(',')>s.lastIndexOf('.')) s=s.replace(/\./g,'').replace(',','.'); // 1.139,00 -> 1139.00
+    else s=s.replace(/,/g,''); // 1,139.00 -> 1139.00
+  } else if(hasC){
+    var ps=s.split(',');
+    if(ps.length===2 && ps[1].length<=2) s=ps[0]+'.'+ps[1]; // 1,5 -> 1.5
+    else s=s.replace(/,/g,''); // 1,139 -> 1139
+  }
+  return parseFloat(s);
+}
+// _bcCodigoLimpio: si Excel guardo el codigo NNNN-N como fecha, lo reconstruye (Date o string ISO/locale).
+function _bcCodigoLimpio(v){
+  if(v==null) return '';
+  if(v instanceof Date && !isNaN(v)) return v.getUTCFullYear()+'-'+(v.getUTCMonth()+1);
+  var s=String(v).trim();
+  var m=s.match(/^(\d{3,4})-0?(\d{1,2})-\d{1,2}(?:[T ]|$)/); // ISO "6982-03-01..."
+  if(m) return m[1]+'-'+String(parseInt(m[2],10));
+  m=s.match(/^(\d{1,2})\/(\d{1,2})\/(\d{3,4})$/);           // "3/1/6982"
+  if(m) return m[3]+'-'+String(parseInt(m[1],10));
+  return s;
+}
+
 function bcCargarArchivo(input){
   var nombre=_bcGetProvNombre();
   if(!nombre){toast('Selecciona un proveedor primero','twarn');input.value='';return;}
@@ -26126,7 +26174,7 @@ function bcCargarArchivo(input){
                     var v=String(row[c]||'').trim();
                     var prTest=parseFloat(v.replace(/[^0-9.,]/g,'').replace(',','.'));
                     if(nIdx<0 && v.length>=5 && !/^\d+([.,]\d+)?$/.test(v)) nIdx=c;
-                    else if(pIdx<0 && !isNaN(prTest) && prTest>0 && prTest<1000 && /\d/.test(v)) pIdx=c;
+                    else if(pIdx<0 && !isNaN(prTest) && prTest>0 && prTest<100000 && /\d/.test(v)) pIdx=c;
                   }
                   if(nIdx>=0 && pIdx>=0){
                     ncol = nIdx; pcol = pIdx; hrow = r - 1; // -1 porque esta es ya la primera fila de datos
@@ -26138,14 +26186,13 @@ function bcCargarArchivo(input){
               rows.forEach(function(row,ri){
                 if(ri<=hrow) return;
                 var nom=String(row[ncol]||'').trim();
-                var prStr=String(row[pcol]||'').trim().replace(/[^0-9.,]/g,'').replace(',','.');
-                var pr=parseFloat(prStr);
+                var pr=_bcParsePrecio(row[pcol]);
                 if(!nom||nom.length<3) return;
                 if(/^(DESCRIPCION|CODIGO|PRODUTO|NOMBRE|NOME|PRECO|PRECIO|TOTAL|SUBTOTAL)/i.test(nom)) return;
-                if(isNaN(pr)||pr<=0||pr>1000) return; // ampliado de 600 a 1000
+                if(isNaN(pr)||pr<=0||pr>100000) return;
                 var itm={nombre_proveedor:nom,nombre_norm:bcNormalizarNombre(nom),precio_usd:pr,proveedor:nombre};
-                if(codcol>=0 && row[codcol]){
-                  itm.codigo = String(row[codcol]).trim();
+                if(codcol>=0 && row[codcol]!=null && row[codcol]!==''){
+                  itm.codigo = _bcCodigoLimpio(row[codcol]);
                 }
                 if(marcacol>=0 && row[marcacol]){
                   itm.marca = String(row[marcacol]).trim();
@@ -26159,12 +26206,12 @@ function bcCargarArchivo(input){
             });
             return items;
           };
-          var wb2=XLSX.read(new Uint8Array(e.target.result),{type:'array',raw:false});
-          var items=parseSheet(wb2,false);
+          // 2026-06-27: leer con cellDates (fechas->Date) y raw:true PRIMERO: precios numericos
+          //   exactos (evita corromper "1,139.00" -> 1.139) y codigos guardados como fecha recuperables.
+          var wbR=XLSX.read(new Uint8Array(e.target.result),{type:'array',cellDates:true});
+          var items=parseSheet(wbR,true);
           if(!items.length){
-            // Retry with raw:true (numbers as-is)
-            var wb3=XLSX.read(new Uint8Array(e.target.result),{type:'array',raw:true});
-            items=parseSheet(wb3,true);
+            items=parseSheet(wbR,false); // fallback: valores formateados
           }
           bcGuardarProveedor(nombre,items);
         }catch(err){toast('Error Excel: '+err.message,'terr');console.error(err);_bcLimpiarLoading(nombre);}
