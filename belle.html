@@ -1743,6 +1743,11 @@ tr.row-hl:hover td{
       </div>
       <div id="bcRepoResumen" style="margin-bottom:.7rem"></div>
       <div id="bcRepoContent"></div>
+      <div style="border-top:1px dashed var(--bd);margin-top:.9rem;padding-top:.8rem">
+        <button onclick="bcArmarPedidoAuto()" style="width:100%;padding:.6rem;background:linear-gradient(135deg,#7b61ff,#b39dff);border:none;border-radius:10px;color:#fff;font-weight:800;font-size:.85rem;cursor:pointer;letter-spacing:.01em">🤖 Armar pedido automático con las listas cargadas</button>
+        <div style="font-size:.62rem;color:var(--tx3);text-align:center;margin-top:.3rem">Cruza lo que conviene reponer con tus proveedores cargados y arma el pedido al mejor precio.</div>
+        <div id="bcAutoContent" style="margin-top:.8rem"></div>
+      </div>
     </div>
   </div>
 
@@ -26302,7 +26307,7 @@ function bcAgregarManual(){
   // Agregar item
   var item={
     nombre_proveedor:nombre.trim(),
-    nombre_norm:nombre.trim(),
+    nombre_norm:(typeof bcNormalizarNombre==='function'?bcNormalizarNombre(nombre.trim()):nombre.trim()),
     precio_usd:precio||0,
     codigo:codigo.trim()||null,
     estoque:null,
@@ -26786,6 +26791,160 @@ function _bcCalcReposicion(){
   });
   return out;
 }
+
+// ═══════════════════════════════════════════════════════════════════
+// 🤖 GENERADOR DE PEDIDO AUTOMÁTICO (2026-07)
+// Cruza el motor de reposición (qué conviene pedir) con las listas de
+// proveedores cargadas, elige el proveedor más barato para cada producto,
+// y arma el pedido priorizado por lo que más sale / más rinde.
+// ═══════════════════════════════════════════════════════════════════
+function _bcIndiceProveedores(){
+  var idx={}; // producto_id -> [{prov, idx, precio, nombreProv}]
+  Object.keys(bcProveedores||{}).forEach(function(prov){
+    (bcProveedores[prov]||[]).forEach(function(it,i){
+      var m=bcFindInProds(it);
+      if(m && m.id){ (idx[m.id]=idx[m.id]||[]).push({prov:prov, idx:i, precio:it.precio_usd||0, nombreProv:it.nombre_proveedor||''}); }
+    });
+  });
+  return idx;
+}
+
+function bcArmarPedidoAuto(){
+  var cont=document.getElementById('bcAutoContent'); if(!cont) return;
+  var provKeys=Object.keys(bcProveedores||{});
+  if(!provKeys.length){ cont.innerHTML="<div class='empty' style='margin-top:.4rem'>Cargá al menos una lista de proveedor (arriba en «Cargar proveedores») y volvé a tocar el botón.</div>"; return; }
+  if(!window._bcVentasAgg){ cont.innerHTML="<div class='loading'><div class='spin'></div>Analizando ventas y cruzando con las listas...</div>"; _bcCargarVentasRepo(function(){bcArmarPedidoAuto();}); return; }
+
+  var diasObj=Math.max(7,parseInt(_bcRepo.diasObj)||60);
+  var repo=_bcCalcReposicion();
+  var aPedir=repo.filter(function(x){return x.sugerido>0 && (x.cat==='quiebre'||x.cat==='reponer');});
+  var indice=_bcIndiceProveedores();
+
+  var porProv={}, sinProv=[];
+  aPedir.forEach(function(x){
+    var ops=(indice[x.p.id]||[]).slice();
+    if(!ops.length){ sinProv.push(x); return; }
+    ops.sort(function(a,b){return (a.precio||9e9)-(b.precio||9e9);});
+    var elegido=ops[0];
+    (porProv[elegido.prov]=porProv[elegido.prov]||[]).push({x:x, op:elegido, ops:ops});
+  });
+  window._bcPedidoAutoData=porProv;
+
+  // Ordenar cada proveedor por prioridad (quiebre primero, luego más vendido)
+  var rank={quiebre:0,reponer:1};
+  Object.keys(porProv).forEach(function(prov){
+    porProv[prov].sort(function(a,b){
+      if(rank[a.x.cat]!==rank[b.x.cat]) return rank[a.x.cat]-rank[b.x.cat];
+      return b.x.velMes-a.x.velMes;
+    });
+  });
+
+  var provsOrden=Object.keys(porProv).sort(function(a,b){return porProv[b].length-porProv[a].length;});
+  var totalLineas=aPedir.length, cubiertas=aPedir.length-sinProv.length;
+  var invTotal=0; provsOrden.forEach(function(prov){ porProv[prov].forEach(function(d){ invTotal+=d.x.sugerido*(d.op.precio||0); }); });
+
+  // ── Comparativas rápidas (entre lo que conviene pedir) ──
+  var topVend=aPedir.slice().sort(function(a,b){return b.velMes-a.velMes;}).slice(0,5);
+  var topRent=aPedir.slice().filter(function(x){return x.rM>0;}).sort(function(a,b){return b.rM-a.rM;}).slice(0,5);
+  function _miniList(arr,fmtVal){
+    return arr.map(function(x,i){
+      var nom=(x.p.nombre||'').indexOf(' - ')>-1?(x.p.nombre||'').split(' - ')[1]:(x.p.nombre||'');
+      return "<div style='display:flex;justify-content:space-between;gap:.5rem;padding:.2rem 0;border-bottom:1px solid var(--bd);font-size:.68rem'><span style='color:var(--tx2);overflow:hidden;text-overflow:ellipsis;white-space:nowrap'>"+(i+1)+". "+_admEsc(nom)+"</span><b style='color:var(--acc);white-space:nowrap'>"+fmtVal(x)+"</b></div>";
+    }).join('');
+  }
+
+  var html="";
+  // Resumen
+  html+="<div style='display:flex;flex-wrap:wrap;gap:.5rem;margin-bottom:.7rem'>"+
+    "<div style='flex:1;min-width:120px;background:var(--sur);border:1px solid var(--bd);border-radius:8px;padding:.5rem .65rem'><div style='font-size:.58rem;color:var(--tx3);text-transform:uppercase;font-weight:700'>Pedido armado</div><div style='font-size:1.15rem;font-weight:800;color:var(--tx)'>"+cubiertas+"<span style='font-size:.7rem;color:var(--tx3)'>/"+totalLineas+" líneas</span></div><div style='font-size:.55rem;color:var(--tx3)'>"+provsOrden.length+" proveedor(es)</div></div>"+
+    "<div style='flex:1;min-width:120px;background:rgba(99,187,106,.08);border:1px solid rgba(99,187,106,.35);border-radius:8px;padding:.5rem .65rem'><div style='font-size:.58rem;color:var(--green);text-transform:uppercase;font-weight:700'>💵 Inversión</div><div style='font-size:1.1rem;font-weight:800;color:var(--tx)'>"+_bcFmtU(invTotal)+"</div><div style='font-size:.55rem;color:var(--tx3)'>al mejor precio</div></div>"+
+    (sinProv.length?"<div style='flex:1;min-width:120px;background:rgba(240,160,32,.08);border:1px solid rgba(240,160,32,.35);border-radius:8px;padding:.5rem .65rem'><div style='font-size:.58rem;color:#f0a020;text-transform:uppercase;font-weight:700'>⚠️ Sin proveedor</div><div style='font-size:1.15rem;font-weight:800;color:var(--tx)'>"+sinProv.length+"</div><div style='font-size:.55rem;color:var(--tx3)'>no están en las listas</div></div>":"")+
+    "</div>";
+
+  // Comparativas
+  if(topVend.length||topRent.length){
+    html+="<div style='display:flex;flex-wrap:wrap;gap:.6rem;margin-bottom:.8rem'>";
+    if(topVend.length) html+="<div style='flex:1;min-width:200px;background:var(--sur);border:1px solid var(--bd);border-radius:8px;padding:.55rem .7rem'><div style='font-size:.64rem;color:var(--tx2);font-weight:700;margin-bottom:.3rem'>🔥 Los que más salen (a pedir)</div>"+_miniList(topVend,function(x){return (x.velMes>=10?Math.round(x.velMes):x.velMes.toFixed(1))+" u/mes";})+"</div>";
+    if(topRent.length) html+="<div style='flex:1;min-width:200px;background:var(--sur);border:1px solid var(--bd);border-radius:8px;padding:.55rem .7rem'><div style='font-size:.64rem;color:var(--tx2);font-weight:700;margin-bottom:.3rem'>💎 Los más rentables (a pedir)</div>"+_miniList(topRent,function(x){return Math.round(x.rM)+"% margen";})+"</div>";
+    html+="</div>";
+  }
+
+  if(!provsOrden.length){
+    html+="<div class='empty'>Ninguno de los productos que conviene reponer está en las listas de proveedores cargadas. Cargá la lista del proveedor que los tenga.</div>";
+    cont.innerHTML=html; return;
+  }
+
+  // Botón cargar TODO
+  html+="<div style='margin-bottom:.7rem'><button onclick='bcRepoCargarTodo()' style='width:100%;padding:.55rem;background:linear-gradient(135deg,#7b61ff,#9d7bff);border:none;border-radius:9px;color:#fff;font-weight:800;font-size:.82rem;cursor:pointer'>⬇️ Cargar TODO a los pedidos ("+cubiertas+" líneas, "+provsOrden.length+" prov.)</button></div>";
+
+  // Tarjeta por proveedor
+  provsOrden.forEach(function(prov){
+    var lista=porProv[prov];
+    var totalProv=lista.reduce(function(s,d){return s+d.x.sugerido*(d.op.precio||0);},0);
+    var unidProv=lista.reduce(function(s,d){return s+d.x.sugerido;},0);
+    html+="<div style='background:var(--sur);border:1px solid var(--bd);border-radius:10px;padding:.7rem;margin-bottom:.7rem'>"+
+      "<div style='display:flex;align-items:center;justify-content:space-between;gap:.5rem;margin-bottom:.5rem;flex-wrap:wrap'>"+
+        "<div><span style='font-weight:800;color:var(--acc);font-size:.9rem'>"+_admEsc(prov)+"</span> <span style='font-size:.65rem;color:var(--tx3)'>"+lista.length+" productos · "+unidProv+" u · "+_bcFmtU(totalProv)+"</span></div>"+
+        "<button onclick=\"bcRepoCargarProv('"+String(prov).replace(/'/g,"\\'")+"')\" style='padding:.35rem .7rem;background:var(--acc);border:none;border-radius:7px;color:#000;font-weight:700;font-size:.7rem;cursor:pointer'>⬇️ Cargar al pedido</button>"+
+      "</div>";
+    lista.slice(0,60).forEach(function(d){
+      var x=d.x, col=x.cat==='quiebre'?'#e5484d':'#f0a020';
+      var nom=(x.p.nombre||'').indexOf(' - ')>-1?(x.p.nombre||'').split(' - ')[1]:(x.p.nombre||'');
+      var mejor=d.ops.length>1;
+      html+="<div style='display:flex;align-items:center;gap:.5rem;padding:.35rem 0;border-top:1px solid var(--bd)'>"+
+        "<div style='width:6px;height:32px;background:"+col+";border-radius:3px;flex-shrink:0'></div>"+
+        "<div style='flex:1;min-width:0'>"+
+          "<div style='font-size:.74rem;color:var(--tx);font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap'>"+_admEsc(nom)+"</div>"+
+          "<div style='font-size:.6rem;color:var(--tx3)'>"+(x.cat==='quiebre'?'🔴 quiebre':'🟠 reponer')+" · vende "+(x.velMes>=10?Math.round(x.velMes):x.velMes.toFixed(1))+"/mes · stock "+x.libre+" +✈️"+x.viaje+" · u$d "+(d.op.precio||0).toFixed(2)+(mejor?" <span style='color:var(--green)'>(mejor de "+d.ops.length+")</span>":"")+"</div>"+
+        "</div>"+
+        "<div style='text-align:center;flex-shrink:0'><div style='font-size:1.2rem;font-weight:800;color:"+col+";line-height:1'>"+x.sugerido+"</div><div style='font-size:.5rem;color:var(--tx3)'>pedir</div></div>"+
+      "</div>";
+    });
+    if(lista.length>60) html+="<div style='font-size:.6rem;color:var(--tx3);text-align:center;margin-top:.3rem'>… y "+(lista.length-60)+" más</div>";
+    html+="</div>";
+  });
+
+  // Sin proveedor
+  if(sinProv.length){
+    html+="<div style='background:rgba(240,160,32,.06);border:1px solid rgba(240,160,32,.3);border-radius:10px;padding:.7rem;margin-bottom:.5rem'>"+
+      "<div style='font-size:.72rem;font-weight:700;color:#f0a020;margin-bottom:.35rem'>⚠️ "+sinProv.length+" producto(s) que conviene pedir NO están en las listas cargadas</div>";
+    sinProv.slice(0,25).forEach(function(x){
+      var nom=(x.p.nombre||'').indexOf(' - ')>-1?(x.p.nombre||'').split(' - ')[1]:(x.p.nombre||'');
+      html+="<div style='font-size:.64rem;color:var(--tx2);padding:.12rem 0'>• "+_admEsc(nom)+" <span style='color:var(--tx3)'>("+(x.cat==='quiebre'?'quiebre':'reponer')+", "+x.sugerido+" u)</span></div>";
+    });
+    if(sinProv.length>25) html+="<div style='font-size:.6rem;color:var(--tx3);margin-top:.2rem'>… y "+(sinProv.length-25)+" más</div>";
+    html+="</div>";
+  }
+
+  cont.innerHTML=html;
+}
+
+function bcRepoCargarProv(prov){
+  var data=(window._bcPedidoAutoData||{})[prov];
+  if(!data||!data.length){ if(typeof toast==='function')toast('Nada para cargar','twarn'); return; }
+  var n=0;
+  data.forEach(function(d){
+    var it=(bcProveedores[prov]||[])[d.op.idx];
+    if(!it)return;
+    if(typeof bcToggleLista==='function'){ bcToggleLista(prov, d.op.idx, d.x.sugerido, bcTitleCase(it.nombre_proveedor||''), it.precio_usd); n++; }
+  });
+  if(typeof toast==='function')toast('Cargadas '+n+' líneas al pedido de '+prov+' — revisalas en su pestaña y confirmá','tok');
+}
+
+function bcRepoCargarTodo(){
+  var porProv=window._bcPedidoAutoData||{};
+  var provs=Object.keys(porProv);
+  if(!provs.length){ if(typeof toast==='function')toast('Nada para cargar','twarn'); return; }
+  var total=0;
+  provs.forEach(function(prov){
+    (porProv[prov]||[]).forEach(function(d){
+      var it=(bcProveedores[prov]||[])[d.op.idx];
+      if(it && typeof bcToggleLista==='function'){ bcToggleLista(prov, d.op.idx, d.x.sugerido, bcTitleCase(it.nombre_proveedor||''), it.precio_usd); total++; }
+    });
+  });
+  if(typeof toast==='function')toast('¡Listo! '+total+' líneas cargadas en '+provs.length+' proveedor(es). Revisá cada pestaña y confirmá el pedido.','tok');
+}
+
 
 function bcToggleReposicion(){
   _bcRepo.abierto=!_bcRepo.abierto;
