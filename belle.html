@@ -27536,7 +27536,8 @@ function _bcPersistMatches(){
   window._bcManualMatches=data;
   try{localStorage.setItem('bcMatches_global',JSON.stringify(data));}catch(e){}
   try{localStorage.setItem('bcCrossReject_global',JSON.stringify(data));}catch(e){}
-  if(typeof _bcResetFindCache==='function')_bcResetFindCache();
+  // PERF: NO reseteamos toda la find cache acá (lo hace bcSetManualMatch solo para la key
+  // que cambió). Reseteo global sólo en cambios de umbral / recargas masivas.
   bcMatchCache=null;
   clearTimeout(window._bcMatchSaveTimer);
   window._bcMatchSaveTimer=setTimeout(function(){
@@ -27825,13 +27826,17 @@ function bcRenderPedidos(){
     statsGlobal.totalProveedores++;
     provDistrib.push({prov:k, total:totalProv, qty:unitsProv, items:sel.length});
 
-    // Calcular ahorro vs costo histórico
+    // Calcular ahorro vs costo histórico (usa la MISMA key que el render → comparte caché)
     sel.forEach(function(it){
-      var match = bcFindInProds({nombre_norm:it.nombre, nombre_proveedor:it.nombre});
+      var _idx=parseInt(String(it.key||'').replace('l',''));
+      var provIt=(bcProveedores[k]||[])[_idx]||{nombre_norm:it.nombre,nombre_proveedor:it.nombre};
+      var mk=bcNorm(provIt.nombre_norm||provIt.nombre_proveedor||it.nombre||'');
+      var esNuevo=(typeof bcManualMatches!=='undefined'&&bcManualMatches[mk]===-1);
+      var match = esNuevo?null:bcFindInProds(provIt);
       if(match && match.costo_ind > 0){
         var diff = match.costo_ind - it.precio; // positivo = ahorramos
         statsGlobal.ahorro += diff * it.qty;
-      } else if(!match){
+      } else if(!match && !esNuevo){
         statsGlobal.sinMatch++;
       }
     });
@@ -27966,9 +27971,9 @@ function bcRenderPedidos(){
             '<div style="display:flex;align-items:center;gap:.3rem;margin-top:.2rem;padding-left:.1rem">'+
               chip+
               (esNuevo
-                ? '<button onclick="bcPedidoDesmarcarNuevo(\''+k+'\',\''+it.key+'\')" style="margin-left:auto;font-size:.58rem;padding:.12rem .45rem;background:var(--sur3);border:1px solid var(--bd);border-radius:5px;color:var(--tx2);cursor:pointer;flex-shrink:0;font-weight:600">&#8617; deshacer</button>'
-                : '<button onclick="bcPedidoMarcarNuevo(\''+k+'\',\''+it.key+'\')" title="Marcar como producto nuevo (se crea al confirmar)" style="margin-left:auto;font-size:.58rem;padding:.12rem .45rem;background:rgba(168,85,247,.12);border:1px solid rgba(168,85,247,.4);border-radius:5px;color:#c084fc;cursor:pointer;flex-shrink:0;font-weight:600">&#127381; nuevo</button>')+
-              '<button onclick="bcPedidoEditarMatch(\''+k+'\',\''+it.key+'\')" style="font-size:.58rem;padding:.12rem .45rem;background:var(--sur3);border:1px solid var(--bd);border-radius:5px;color:var(--tx2);cursor:pointer;flex-shrink:0;font-weight:600">'+((itMatch||esNuevo)?'&#9998; cambiar':'&#128269; asignar')+'</button>'+
+                ? '<button onclick="bcPedidoToggleNuevo(\''+k+'\',\''+it.key+'\')" title="Marcado como NUEVO — tocá para deshacer" style="margin-left:auto;font-size:.58rem;padding:.12rem .55rem;background:#a855f7;border:1px solid #c084fc;border-radius:5px;color:#fff;cursor:pointer;flex-shrink:0;font-weight:800;box-shadow:0 0 0 3px rgba(168,85,247,.28)">&#127381; NUEVO &#10003;</button>'
+                : '<button onclick="bcPedidoToggleNuevo(\''+k+'\',\''+it.key+'\')" title="Marcar como producto nuevo (se crea al confirmar)" style="margin-left:auto;font-size:.58rem;padding:.12rem .5rem;background:rgba(168,85,247,.12);border:1px solid rgba(168,85,247,.4);border-radius:5px;color:#c084fc;cursor:pointer;flex-shrink:0;font-weight:600">&#127381; nuevo</button>'
+                  + '<button onclick="bcPedidoEditarMatch(\''+k+'\',\''+it.key+'\')" style="font-size:.58rem;padding:.12rem .45rem;background:var(--sur3);border:1px solid var(--bd);border-radius:5px;color:var(--tx2);cursor:pointer;flex-shrink:0;font-weight:600">'+(itMatch?'&#9998; cambiar':'&#128269; asignar')+'</button>')+
             '</div>'+
           '</div>';
         }).join('')+
@@ -28236,18 +28241,30 @@ function _bcPedidoMK(k, itemKeyPedido){
   var provIt=(bcProveedores[k]||[])[_idx]||{nombre_norm:it.nombre,nombre_proveedor:it.nombre};
   return bcNorm(provIt.nombre_norm||provIt.nombre_proveedor||it.nombre||'');
 }
-// Marcar una línea del pedido como PRODUCTO NUEVO (se creará al confirmar)
+// Marcar/desmarcar una línea del pedido como PRODUCTO NUEVO (toggle).
+// Repinta el pedido de forma directa para que el cambio se vea SIEMPRE,
+// aunque el re-render de otra pestaña llegara a fallar.
+function bcPedidoToggleNuevo(k, itemKeyPedido){
+  var mk=_bcPedidoMK(k,itemKeyPedido); if(!mk) return;
+  var eraNuevo=(bcManualMatches[mk]===-1);
+  bcSetManualMatch(mk, eraNuevo?null:-1);
+  // Solo repintar el pedido (liviano). La comparativa/lista se refrescan al visitarlas.
+  try{ bcRenderPedidos(); }catch(e){}
+  try{ if(typeof bcRenderFloating==='function') bcRenderFloating(); }catch(e){}
+  if(typeof toast==='function') toast(eraNuevo?'Se quitó la marca de nuevo':'Marcado como producto NUEVO — se creará al confirmar el pedido', eraNuevo?'twarn':'tok');
+}
+// (compat) marcar / desmarcar explícito
 function bcPedidoMarcarNuevo(k, itemKeyPedido){
   var mk=_bcPedidoMK(k,itemKeyPedido); if(!mk) return;
-  bcSetManualMatch(mk,-1);  // -1 = es nuevo, no machear con nada
-  if(typeof bcRenderAllViews==='function') bcRenderAllViews(); else bcRenderPedidos();
-  if(typeof toast==='function') toast('Marcado como producto NUEVO — se creará al confirmar el pedido','tok');
+  bcSetManualMatch(mk,-1);
+  try{ bcRenderPedidos(); }catch(e){}
+  try{ if(typeof bcRenderFloating==='function') bcRenderFloating(); }catch(e){}
 }
-// Deshacer "nuevo": vuelve a intentar equiparar automáticamente
 function bcPedidoDesmarcarNuevo(k, itemKeyPedido){
   var mk=_bcPedidoMK(k,itemKeyPedido); if(!mk) return;
-  bcSetManualMatch(mk,null); // borra el flag → re-machea
-  if(typeof bcRenderAllViews==='function') bcRenderAllViews(); else bcRenderPedidos();
+  bcSetManualMatch(mk,null);
+  try{ bcRenderPedidos(); }catch(e){}
+  try{ if(typeof bcRenderFloating==='function') bcRenderFloating(); }catch(e){}
 }
 
 function bcRemoveItemPedido(k, key){
@@ -36828,6 +36845,11 @@ function bcSetManualMatch(k,pid){
   if(pid===null||pid===undefined){delete bcManualMatches[k];}
   else{bcManualMatches[k]=parseInt(pid);}
   window._bcManualMatches=bcManualMatches;
+  // PERF: invalidar SOLO la key que cambió (no toda la caché → evita recalcular ~500 productos)
+  try{
+    if(window._bcFindCache) delete window._bcFindCache[k];
+    if(window._bcFindScoreCache) delete window._bcFindScoreCache[k];
+  }catch(e){}
   _bcPersistMatches();
 }
 
