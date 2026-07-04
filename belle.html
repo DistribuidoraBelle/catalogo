@@ -1744,8 +1744,22 @@ tr.row-hl:hover td{
       <div id="bcRepoResumen" style="margin-bottom:.7rem"></div>
       <div id="bcRepoContent"></div>
       <div style="border-top:1px dashed var(--bd);margin-top:.9rem;padding-top:.8rem">
-        <button onclick="bcArmarPedidoAuto()" style="width:100%;padding:.6rem;background:linear-gradient(135deg,#7b61ff,#b39dff);border:none;border-radius:10px;color:#fff;font-weight:800;font-size:.85rem;cursor:pointer;letter-spacing:.01em">🤖 Armar pedido automático con las listas cargadas</button>
-        <div style="font-size:.62rem;color:var(--tx3);text-align:center;margin-top:.3rem">Cruza lo que conviene reponer con tus proveedores cargados y arma el pedido al mejor precio.</div>
+        <div style="display:flex;flex-wrap:wrap;gap:.5rem;align-items:flex-end;margin-bottom:.4rem">
+          <div>
+            <div style="font-size:.58rem;color:var(--tx3);text-transform:uppercase;font-weight:600;margin-bottom:.2rem">Presupuesto u$d</div>
+            <input id="bcAutoPresu" type="number" min="0" placeholder="ej: 2000" style="width:100px;padding:.42rem;background:var(--sur3);border:1px solid var(--bd);border-radius:var(--rs);color:var(--green);font-weight:700;font-size:.85rem;text-align:center">
+          </div>
+          <div>
+            <div style="font-size:.58rem;color:var(--tx3);text-transform:uppercase;font-weight:600;margin-bottom:.2rem">Modo</div>
+            <select id="bcAutoModo" class="sel" style="font-size:.74rem">
+              <option value="presu">💰 Ajustar al presupuesto</option>
+              <option value="cat">🗂️ Por categorías (S→1→2)</option>
+              <option value="todo">📋 Todo lo que conviene</option>
+            </select>
+          </div>
+          <button onclick="bcArmarPedidoAuto()" style="flex:1;min-width:170px;padding:.55rem;background:linear-gradient(135deg,#7b61ff,#b39dff);border:none;border-radius:10px;color:#fff;font-weight:800;font-size:.82rem;cursor:pointer">🤖 Armar pedido automático</button>
+        </div>
+        <div style="font-size:.6rem;color:var(--tx3);margin-top:.15rem">Poné cuánto tenés para gastar y armo el mejor pedido posible entre tus proveedores, repartiendo proporcional a lo que más sale y más rinde. Todo editable antes de cargar.</div>
         <div id="bcAutoContent" style="margin-top:.8rem"></div>
       </div>
     </div>
@@ -26143,6 +26157,11 @@ function bcWords(s){
     .replace(/\s+/g,' ').trim();
   // Splittear y quedarnos con palabras de >=2 chars
   var arr = r.split(' ').filter(function(w){return w.length>=2;});
+  // FIX 2026-07: deduplicar palabras repetidas (nombres con marca duplicada tipo
+  // "AFNAN AFNAN - 9am Dive" rompían el score de similitud y no macheaban solos)
+  var _seen={}, _ded=[];
+  for(var _di=0;_di<arr.length;_di++){ if(!_seen[arr[_di]]){ _seen[arr[_di]]=1; _ded.push(arr[_di]); } }
+  arr=_ded;
   window._bcWordsCache[s] = arr;
   return arr;
 }
@@ -26792,14 +26811,10 @@ function _bcCalcReposicion(){
   return out;
 }
 
-// ═══════════════════════════════════════════════════════════════════
-// 🤖 GENERADOR DE PEDIDO AUTOMÁTICO (2026-07)
-// Cruza el motor de reposición (qué conviene pedir) con las listas de
-// proveedores cargadas, elige el proveedor más barato para cada producto,
-// y arma el pedido priorizado por lo que más sale / más rinde.
-// ═══════════════════════════════════════════════════════════════════
+// 🤖 GENERADOR DE PEDIDO AUTOMÁTICO (2026-07) — con presupuesto, reparto proporcional
+// a las ventas, modo por categorías y cantidades/precios editables.
 function _bcIndiceProveedores(){
-  var idx={}; // producto_id -> [{prov, idx, precio, nombreProv}]
+  var idx={};
   Object.keys(bcProveedores||{}).forEach(function(prov){
     (bcProveedores[prov]||[]).forEach(function(it,i){
       var m=bcFindInProds(it);
@@ -26809,124 +26824,167 @@ function _bcIndiceProveedores(){
   return idx;
 }
 
+// Reparte el presupuesto de a 1 unidad, priorizando por peso (ventas × rentabilidad),
+// con prioridad decreciente para que sea PROPORCIONAL a la salida (5 de uno, 3 de otro...).
+// Respeta el tope de cada producto (sugerido) y, si porCat, gasta por categoría S→1→2→3.
+function _bcOptimizarPresupuesto(cands, presupuesto, porCat){
+  cands.forEach(function(c){ c.qty=0; c.precio=c.op.precio||0; c.peso=Math.max(0.15,c.x.velMes)*(1+Math.max(0,c.x.rM)/100); });
+  var restante=presupuesto;
+  var grupos = porCat ? ['S','1','2','3',''] : [null];
+  grupos.forEach(function(catAct){
+    var grupo = (catAct===null) ? cands : cands.filter(function(c){ return String(c.x.p.cat||'')===catAct; });
+    if(!grupo.length) return;
+    var guard=0;
+    while(guard++<200000){
+      var best=null, bestScore=-1;
+      for(var i=0;i<grupo.length;i++){
+        var c=grupo[i];
+        if(c.qty>=c.x.sugerido) continue;
+        if((c.precio||0)>restante+1e-6) continue;
+        var sc=c.peso/(c.qty+1);
+        if(sc>bestScore){ bestScore=sc; best=c; }
+      }
+      if(!best) break;
+      best.qty++; restante-=(best.precio||0);
+    }
+  });
+  return restante;
+}
+
 function bcArmarPedidoAuto(){
   var cont=document.getElementById('bcAutoContent'); if(!cont) return;
   var provKeys=Object.keys(bcProveedores||{});
   if(!provKeys.length){ cont.innerHTML="<div class='empty' style='margin-top:.4rem'>Cargá al menos una lista de proveedor (arriba en «Cargar proveedores») y volvé a tocar el botón.</div>"; return; }
   if(!window._bcVentasAgg){ cont.innerHTML="<div class='loading'><div class='spin'></div>Analizando ventas y cruzando con las listas...</div>"; _bcCargarVentasRepo(function(){bcArmarPedidoAuto();}); return; }
 
-  var diasObj=Math.max(7,parseInt(_bcRepo.diasObj)||60);
+  var presu=parseFloat((document.getElementById('bcAutoPresu')||{}).value)||0;
+  var modo=(document.getElementById('bcAutoModo')||{}).value||'presu';
   var repo=_bcCalcReposicion();
   var aPedir=repo.filter(function(x){return x.sugerido>0 && (x.cat==='quiebre'||x.cat==='reponer');});
   var indice=_bcIndiceProveedores();
 
-  var porProv={}, sinProv=[];
+  var cands=[], sinProv=[];
   aPedir.forEach(function(x){
     var ops=(indice[x.p.id]||[]).slice();
     if(!ops.length){ sinProv.push(x); return; }
     ops.sort(function(a,b){return (a.precio||9e9)-(b.precio||9e9);});
-    var elegido=ops[0];
-    (porProv[elegido.prov]=porProv[elegido.prov]||[]).push({x:x, op:elegido, ops:ops});
+    cands.push({x:x, op:ops[0], ops:ops, qty:0, precio:ops[0].precio||0});
+  });
+
+  var sobra=0, usoPresu=(modo==='presu'||modo==='cat')&&presu>0;
+  if(usoPresu){ sobra=_bcOptimizarPresupuesto(cands, presu, modo==='cat'); }
+  else { cands.forEach(function(c){ c.qty=c.x.sugerido; c.precio=c.op.precio||0; }); }
+
+  var conCant=cands.filter(function(c){return c.qty>0;});
+  if(usoPresu && !conCant.length){ cont.innerHTML="<div class='empty' style='margin-top:.4rem'>Con u$d "+presu+" no alcanza ni para una unidad de lo que conviene. Subí el presupuesto.</div>"; return; }
+
+  var porProv={};
+  conCant.forEach(function(c){ (porProv[c.op.prov]=porProv[c.op.prov]||[]).push(c); });
+  var rank={quiebre:0,reponer:1};
+  var kc=0;
+  Object.keys(porProv).forEach(function(prov){
+    porProv[prov].sort(function(a,b){ if(rank[a.x.cat]!==rank[b.x.cat])return rank[a.x.cat]-rank[b.x.cat]; return b.x.velMes-a.x.velMes; });
+    porProv[prov].forEach(function(c){ c.key='a'+(kc++); });
   });
   window._bcPedidoAutoData=porProv;
 
-  // Ordenar cada proveedor por prioridad (quiebre primero, luego más vendido)
-  var rank={quiebre:0,reponer:1};
-  Object.keys(porProv).forEach(function(prov){
-    porProv[prov].sort(function(a,b){
-      if(rank[a.x.cat]!==rank[b.x.cat]) return rank[a.x.cat]-rank[b.x.cat];
-      return b.x.velMes-a.x.velMes;
-    });
-  });
-
   var provsOrden=Object.keys(porProv).sort(function(a,b){return porProv[b].length-porProv[a].length;});
-  var totalLineas=aPedir.length, cubiertas=aPedir.length-sinProv.length;
-  var invTotal=0; provsOrden.forEach(function(prov){ porProv[prov].forEach(function(d){ invTotal+=d.x.sugerido*(d.op.precio||0); }); });
+  var invTotal=0,unidTotal=0; provsOrden.forEach(function(prov){ porProv[prov].forEach(function(c){ invTotal+=c.qty*(c.precio||0); unidTotal+=c.qty; }); });
 
-  // ── Comparativas rápidas (entre lo que conviene pedir) ──
-  var topVend=aPedir.slice().sort(function(a,b){return b.velMes-a.velMes;}).slice(0,5);
-  var topRent=aPedir.slice().filter(function(x){return x.rM>0;}).sort(function(a,b){return b.rM-a.rM;}).slice(0,5);
+  var topVend=conCant.slice().sort(function(a,b){return b.x.velMes-a.x.velMes;}).slice(0,5);
+  var topRent=conCant.slice().filter(function(c){return c.x.rM>0;}).sort(function(a,b){return b.x.rM-a.x.rM;}).slice(0,5);
   function _miniList(arr,fmtVal){
-    return arr.map(function(x,i){
-      var nom=(x.p.nombre||'').indexOf(' - ')>-1?(x.p.nombre||'').split(' - ')[1]:(x.p.nombre||'');
-      return "<div style='display:flex;justify-content:space-between;gap:.5rem;padding:.2rem 0;border-bottom:1px solid var(--bd);font-size:.68rem'><span style='color:var(--tx2);overflow:hidden;text-overflow:ellipsis;white-space:nowrap'>"+(i+1)+". "+_admEsc(nom)+"</span><b style='color:var(--acc);white-space:nowrap'>"+fmtVal(x)+"</b></div>";
+    return arr.map(function(c,i){
+      var nom=(c.x.p.nombre||'').indexOf(' - ')>-1?(c.x.p.nombre||'').split(' - ')[1]:(c.x.p.nombre||'');
+      return "<div style='display:flex;justify-content:space-between;gap:.5rem;padding:.18rem 0;border-bottom:1px solid var(--bd);font-size:.66rem'><span style='color:var(--tx2);overflow:hidden;text-overflow:ellipsis;white-space:nowrap'>"+(i+1)+". "+_admEsc(nom)+"</span><b style='color:var(--acc);white-space:nowrap'>"+fmtVal(c)+"</b></div>";
     }).join('');
   }
 
   var html="";
+  html+="<div style='display:flex;justify-content:space-between;align-items:center;margin-bottom:.5rem'>"+
+    "<div style='font-size:.8rem;font-weight:800;color:var(--tx)'>🤖 Pedido armado</div>"+
+    "<button onclick=\"document.getElementById('bcAutoContent').innerHTML=''\" style='background:none;border:1px solid var(--bd);border-radius:6px;color:var(--tx3);font-size:.62rem;padding:.2rem .5rem;cursor:pointer'>✕ cerrar</button></div>";
   // Resumen
   html+="<div style='display:flex;flex-wrap:wrap;gap:.5rem;margin-bottom:.7rem'>"+
-    "<div style='flex:1;min-width:120px;background:var(--sur);border:1px solid var(--bd);border-radius:8px;padding:.5rem .65rem'><div style='font-size:.58rem;color:var(--tx3);text-transform:uppercase;font-weight:700'>Pedido armado</div><div style='font-size:1.15rem;font-weight:800;color:var(--tx)'>"+cubiertas+"<span style='font-size:.7rem;color:var(--tx3)'>/"+totalLineas+" líneas</span></div><div style='font-size:.55rem;color:var(--tx3)'>"+provsOrden.length+" proveedor(es)</div></div>"+
-    "<div style='flex:1;min-width:120px;background:rgba(99,187,106,.08);border:1px solid rgba(99,187,106,.35);border-radius:8px;padding:.5rem .65rem'><div style='font-size:.58rem;color:var(--green);text-transform:uppercase;font-weight:700'>💵 Inversión</div><div style='font-size:1.1rem;font-weight:800;color:var(--tx)'>"+_bcFmtU(invTotal)+"</div><div style='font-size:.55rem;color:var(--tx3)'>al mejor precio</div></div>"+
-    (sinProv.length?"<div style='flex:1;min-width:120px;background:rgba(240,160,32,.08);border:1px solid rgba(240,160,32,.35);border-radius:8px;padding:.5rem .65rem'><div style='font-size:.58rem;color:#f0a020;text-transform:uppercase;font-weight:700'>⚠️ Sin proveedor</div><div style='font-size:1.15rem;font-weight:800;color:var(--tx)'>"+sinProv.length+"</div><div style='font-size:.55rem;color:var(--tx3)'>no están en las listas</div></div>":"")+
+    "<div style='flex:1;min-width:110px;background:var(--sur);border:1px solid var(--bd);border-radius:8px;padding:.5rem .65rem'><div style='font-size:.56rem;color:var(--tx3);text-transform:uppercase;font-weight:700'>Unidades</div><div style='font-size:1.15rem;font-weight:800;color:var(--tx)' id='bcAutoUnid'>"+unidTotal+"</div><div style='font-size:.54rem;color:var(--tx3)'>"+conCant.length+" productos · "+provsOrden.length+" prov.</div></div>"+
+    "<div style='flex:1;min-width:120px;background:rgba(99,187,106,.08);border:1px solid rgba(99,187,106,.35);border-radius:8px;padding:.5rem .65rem'><div style='font-size:.56rem;color:var(--green);text-transform:uppercase;font-weight:700'>💵 Total</div><div style='font-size:1.1rem;font-weight:800;color:var(--tx)' id='bcAutoTotalGen'>"+_bcFmtU(invTotal)+"</div>"+(usoPresu?"<div style='font-size:.54rem;color:var(--tx3)'>de u$d "+presu+" · sobran "+_bcFmtU(Math.max(0,sobra))+"</div>":"<div style='font-size:.54rem;color:var(--tx3)'>sin límite</div>")+"</div>"+
+    (sinProv.length?"<div style='flex:1;min-width:110px;background:rgba(240,160,32,.08);border:1px solid rgba(240,160,32,.35);border-radius:8px;padding:.5rem .65rem'><div style='font-size:.56rem;color:#f0a020;text-transform:uppercase;font-weight:700'>⚠️ Sin lista</div><div style='font-size:1.15rem;font-weight:800;color:var(--tx)'>"+sinProv.length+"</div><div style='font-size:.54rem;color:var(--tx3)'>no cargados</div></div>":"")+
     "</div>";
-
   // Comparativas
   if(topVend.length||topRent.length){
-    html+="<div style='display:flex;flex-wrap:wrap;gap:.6rem;margin-bottom:.8rem'>";
-    if(topVend.length) html+="<div style='flex:1;min-width:200px;background:var(--sur);border:1px solid var(--bd);border-radius:8px;padding:.55rem .7rem'><div style='font-size:.64rem;color:var(--tx2);font-weight:700;margin-bottom:.3rem'>🔥 Los que más salen (a pedir)</div>"+_miniList(topVend,function(x){return (x.velMes>=10?Math.round(x.velMes):x.velMes.toFixed(1))+" u/mes";})+"</div>";
-    if(topRent.length) html+="<div style='flex:1;min-width:200px;background:var(--sur);border:1px solid var(--bd);border-radius:8px;padding:.55rem .7rem'><div style='font-size:.64rem;color:var(--tx2);font-weight:700;margin-bottom:.3rem'>💎 Los más rentables (a pedir)</div>"+_miniList(topRent,function(x){return Math.round(x.rM)+"% margen";})+"</div>";
+    html+="<div style='display:flex;flex-wrap:wrap;gap:.6rem;margin-bottom:.7rem'>";
+    if(topVend.length) html+="<div style='flex:1;min-width:190px;background:var(--sur);border:1px solid var(--bd);border-radius:8px;padding:.5rem .65rem'><div style='font-size:.62rem;color:var(--tx2);font-weight:700;margin-bottom:.25rem'>🔥 Los que más salen</div>"+_miniList(topVend,function(c){return (c.x.velMes>=10?Math.round(c.x.velMes):c.x.velMes.toFixed(1))+"/mes";})+"</div>";
+    if(topRent.length) html+="<div style='flex:1;min-width:190px;background:var(--sur);border:1px solid var(--bd);border-radius:8px;padding:.5rem .65rem'><div style='font-size:.62rem;color:var(--tx2);font-weight:700;margin-bottom:.25rem'>💎 Los más rentables</div>"+_miniList(topRent,function(c){return Math.round(c.x.rM)+"%";})+"</div>";
     html+="</div>";
   }
+  // Cargar todo
+  html+="<div style='margin-bottom:.7rem'><button onclick='bcRepoCargarTodo()' style='width:100%;padding:.55rem;background:linear-gradient(135deg,#7b61ff,#9d7bff);border:none;border-radius:9px;color:#fff;font-weight:800;font-size:.82rem;cursor:pointer'>⬇️ Cargar TODO a los pedidos</button></div>";
 
-  if(!provsOrden.length){
-    html+="<div class='empty'>Ninguno de los productos que conviene reponer está en las listas de proveedores cargadas. Cargá la lista del proveedor que los tenga.</div>";
-    cont.innerHTML=html; return;
-  }
-
-  // Botón cargar TODO
-  html+="<div style='margin-bottom:.7rem'><button onclick='bcRepoCargarTodo()' style='width:100%;padding:.55rem;background:linear-gradient(135deg,#7b61ff,#9d7bff);border:none;border-radius:9px;color:#fff;font-weight:800;font-size:.82rem;cursor:pointer'>⬇️ Cargar TODO a los pedidos ("+cubiertas+" líneas, "+provsOrden.length+" prov.)</button></div>";
-
-  // Tarjeta por proveedor
   provsOrden.forEach(function(prov){
     var lista=porProv[prov];
-    var totalProv=lista.reduce(function(s,d){return s+d.x.sugerido*(d.op.precio||0);},0);
-    var unidProv=lista.reduce(function(s,d){return s+d.x.sugerido;},0);
+    var totalProv=lista.reduce(function(s,c){return s+c.qty*(c.precio||0);},0);
     html+="<div style='background:var(--sur);border:1px solid var(--bd);border-radius:10px;padding:.7rem;margin-bottom:.7rem'>"+
-      "<div style='display:flex;align-items:center;justify-content:space-between;gap:.5rem;margin-bottom:.5rem;flex-wrap:wrap'>"+
-        "<div><span style='font-weight:800;color:var(--acc);font-size:.9rem'>"+_admEsc(prov)+"</span> <span style='font-size:.65rem;color:var(--tx3)'>"+lista.length+" productos · "+unidProv+" u · "+_bcFmtU(totalProv)+"</span></div>"+
-        "<button onclick=\"bcRepoCargarProv('"+String(prov).replace(/'/g,"\\'")+"')\" style='padding:.35rem .7rem;background:var(--acc);border:none;border-radius:7px;color:#000;font-weight:700;font-size:.7rem;cursor:pointer'>⬇️ Cargar al pedido</button>"+
+      "<div style='display:flex;align-items:center;justify-content:space-between;gap:.5rem;margin-bottom:.4rem;flex-wrap:wrap'>"+
+        "<div><span style='font-weight:800;color:var(--acc);font-size:.9rem'>"+_admEsc(prov)+"</span> <span style='font-size:.63rem;color:var(--tx3)'>"+lista.length+" prod · <b id='bcAutoTotProv_"+_admEsc(prov).replace(/[^A-Za-z0-9]/g,'')+"'>"+_bcFmtU(totalProv)+"</b></span></div>"+
+        "<button onclick=\"bcRepoCargarProv('"+String(prov).replace(/'/g,"\\'")+"')\" style='padding:.35rem .7rem;background:var(--acc);border:none;border-radius:7px;color:#000;font-weight:700;font-size:.7rem;cursor:pointer'>⬇️ Cargar</button>"+
       "</div>";
-    lista.slice(0,60).forEach(function(d){
-      var x=d.x, col=x.cat==='quiebre'?'#e5484d':'#f0a020';
+    lista.forEach(function(c){
+      var x=c.x, col=x.cat==='quiebre'?'#e5484d':'#f0a020';
       var nom=(x.p.nombre||'').indexOf(' - ')>-1?(x.p.nombre||'').split(' - ')[1]:(x.p.nombre||'');
-      var mejor=d.ops.length>1;
       html+="<div style='display:flex;align-items:center;gap:.5rem;padding:.35rem 0;border-top:1px solid var(--bd)'>"+
-        "<div style='width:6px;height:32px;background:"+col+";border-radius:3px;flex-shrink:0'></div>"+
+        "<div style='width:5px;height:34px;background:"+col+";border-radius:3px;flex-shrink:0'></div>"+
         "<div style='flex:1;min-width:0'>"+
-          "<div style='font-size:.74rem;color:var(--tx);font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap'>"+_admEsc(nom)+"</div>"+
-          "<div style='font-size:.6rem;color:var(--tx3)'>"+(x.cat==='quiebre'?'🔴 quiebre':'🟠 reponer')+" · vende "+(x.velMes>=10?Math.round(x.velMes):x.velMes.toFixed(1))+"/mes · stock "+x.libre+" +✈️"+x.viaje+" · u$d "+(d.op.precio||0).toFixed(2)+(mejor?" <span style='color:var(--green)'>(mejor de "+d.ops.length+")</span>":"")+"</div>"+
+          "<div style='font-size:.73rem;color:var(--tx);font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap'>"+_admEsc(nom)+"</div>"+
+          "<div style='font-size:.58rem;color:var(--tx3)'>"+(x.cat==='quiebre'?'🔴':'🟠')+" vende "+(x.velMes>=10?Math.round(x.velMes):x.velMes.toFixed(1))+"/mes · stock "+x.libre+" +✈️"+x.viaje+" · cat "+(x.p.cat||'-')+(x.rM>0?" · "+Math.round(x.rM)+"% marg":"")+"</div>"+
         "</div>"+
-        "<div style='text-align:center;flex-shrink:0'><div style='font-size:1.2rem;font-weight:800;color:"+col+";line-height:1'>"+x.sugerido+"</div><div style='font-size:.5rem;color:var(--tx3)'>pedir</div></div>"+
+        "<div style='text-align:center;flex-shrink:0'><div style='font-size:.5rem;color:var(--tx3)'>u$d c/u</div><input type='number' step='0.01' value='"+(c.precio||0).toFixed(2)+"' onchange=\"bcAutoSetPrecio('"+c.key+"',this.value)\" style='width:56px;padding:.2rem;text-align:center;background:var(--sur3);border:1px solid var(--bd);border-radius:5px;color:var(--tx2);font-size:.68rem'></div>"+
+        "<div style='text-align:center;flex-shrink:0'><div style='font-size:.5rem;color:var(--tx3)'>pedir</div><input type='number' min='0' value='"+c.qty+"' onchange=\"bcAutoSetQty('"+c.key+"',this.value)\" style='width:46px;padding:.2rem;text-align:center;background:var(--gdim);border:1px solid "+col+";border-radius:5px;color:"+col+";font-weight:800;font-size:.85rem'></div>"+
       "</div>";
     });
-    if(lista.length>60) html+="<div style='font-size:.6rem;color:var(--tx3);text-align:center;margin-top:.3rem'>… y "+(lista.length-60)+" más</div>";
     html+="</div>";
   });
 
-  // Sin proveedor
   if(sinProv.length){
-    html+="<div style='background:rgba(240,160,32,.06);border:1px solid rgba(240,160,32,.3);border-radius:10px;padding:.7rem;margin-bottom:.5rem'>"+
-      "<div style='font-size:.72rem;font-weight:700;color:#f0a020;margin-bottom:.35rem'>⚠️ "+sinProv.length+" producto(s) que conviene pedir NO están en las listas cargadas</div>";
-    sinProv.slice(0,25).forEach(function(x){
+    html+="<div style='background:rgba(240,160,32,.06);border:1px solid rgba(240,160,32,.3);border-radius:10px;padding:.7rem'>"+
+      "<div style='font-size:.7rem;font-weight:700;color:#f0a020;margin-bottom:.3rem'>⚠️ "+sinProv.length+" que conviene pedir NO están en las listas cargadas</div>";
+    sinProv.slice(0,20).forEach(function(x){
       var nom=(x.p.nombre||'').indexOf(' - ')>-1?(x.p.nombre||'').split(' - ')[1]:(x.p.nombre||'');
-      html+="<div style='font-size:.64rem;color:var(--tx2);padding:.12rem 0'>• "+_admEsc(nom)+" <span style='color:var(--tx3)'>("+(x.cat==='quiebre'?'quiebre':'reponer')+", "+x.sugerido+" u)</span></div>";
+      html+="<div style='font-size:.63rem;color:var(--tx2);padding:.1rem 0'>• "+_admEsc(nom)+" <span style='color:var(--tx3)'>("+x.sugerido+" u)</span></div>";
     });
-    if(sinProv.length>25) html+="<div style='font-size:.6rem;color:var(--tx3);margin-top:.2rem'>… y "+(sinProv.length-25)+" más</div>";
+    if(sinProv.length>20) html+="<div style='font-size:.58rem;color:var(--tx3);margin-top:.2rem'>… y "+(sinProv.length-20)+" más</div>";
     html+="</div>";
   }
-
   cont.innerHTML=html;
 }
+
+function _bcAutoFindByKey(key){
+  var d=window._bcPedidoAutoData||{}, found=null;
+  Object.keys(d).forEach(function(prov){ d[prov].forEach(function(c){ if(c.key===key) found=c; }); });
+  return found;
+}
+function _bcAutoActualizarTotales(){
+  var d=window._bcPedidoAutoData||{}, gen=0, unid=0;
+  Object.keys(d).forEach(function(prov){
+    var t=0; d[prov].forEach(function(c){ t+=c.qty*(c.precio||0); unid+=c.qty; });
+    gen+=t;
+    var el=document.getElementById('bcAutoTotProv_'+prov.replace(/[^A-Za-z0-9]/g,'')); if(el)el.textContent=_bcFmtU(t);
+  });
+  var g=document.getElementById('bcAutoTotalGen'); if(g)g.textContent=_bcFmtU(gen);
+  var u=document.getElementById('bcAutoUnid'); if(u)u.textContent=unid;
+}
+function bcAutoSetQty(key,val){ var c=_bcAutoFindByKey(key); if(c){ c.qty=Math.max(0,parseInt(val)||0); _bcAutoActualizarTotales(); } }
+function bcAutoSetPrecio(key,val){ var c=_bcAutoFindByKey(key); if(c){ c.precio=Math.max(0,parseFloat(val)||0); _bcAutoActualizarTotales(); } }
 
 function bcRepoCargarProv(prov){
   var data=(window._bcPedidoAutoData||{})[prov];
   if(!data||!data.length){ if(typeof toast==='function')toast('Nada para cargar','twarn'); return; }
   var n=0;
-  data.forEach(function(d){
-    var it=(bcProveedores[prov]||[])[d.op.idx];
+  data.forEach(function(c){
+    if(c.qty<=0) return;
+    var it=(bcProveedores[prov]||[])[c.op.idx];
     if(!it)return;
-    if(typeof bcToggleLista==='function'){ bcToggleLista(prov, d.op.idx, d.x.sugerido, bcTitleCase(it.nombre_proveedor||''), it.precio_usd); n++; }
+    if(c.precio && c.precio!==it.precio_usd) it.precio_usd=c.precio; // respetar precio editado
+    if(typeof bcToggleLista==='function'){ bcToggleLista(prov, c.op.idx, c.qty, bcTitleCase(it.nombre_proveedor||''), it.precio_usd); n++; }
   });
   if(typeof toast==='function')toast('Cargadas '+n+' líneas al pedido de '+prov+' — revisalas en su pestaña y confirmá','tok');
 }
@@ -26937,13 +26995,17 @@ function bcRepoCargarTodo(){
   if(!provs.length){ if(typeof toast==='function')toast('Nada para cargar','twarn'); return; }
   var total=0;
   provs.forEach(function(prov){
-    (porProv[prov]||[]).forEach(function(d){
-      var it=(bcProveedores[prov]||[])[d.op.idx];
-      if(it && typeof bcToggleLista==='function'){ bcToggleLista(prov, d.op.idx, d.x.sugerido, bcTitleCase(it.nombre_proveedor||''), it.precio_usd); total++; }
+    (porProv[prov]||[]).forEach(function(c){
+      if(c.qty<=0) return;
+      var it=(bcProveedores[prov]||[])[c.op.idx];
+      if(!it) return;
+      if(c.precio && c.precio!==it.precio_usd) it.precio_usd=c.precio;
+      if(typeof bcToggleLista==='function'){ bcToggleLista(prov, c.op.idx, c.qty, bcTitleCase(it.nombre_proveedor||''), it.precio_usd); total++; }
     });
   });
-  if(typeof toast==='function')toast('¡Listo! '+total+' líneas cargadas en '+provs.length+' proveedor(es). Revisá cada pestaña y confirmá el pedido.','tok');
+  if(typeof toast==='function')toast('¡Listo! '+total+' líneas cargadas en '+provs.length+' proveedor(es). Revisá cada pestaña y confirmá.','tok');
 }
+
 
 
 function bcToggleReposicion(){
