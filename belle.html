@@ -1891,10 +1891,29 @@ tr.row-hl:hover td{
           <div>
             <div style="font-size:.58rem;color:var(--tx3);text-transform:uppercase;font-weight:600;margin-bottom:.2rem">Modo</div>
             <select id="bcAutoModo" class="sel" onchange="bcAutoToggleModo()" style="font-size:.74rem">
-              <option value="presu">💰 Ajustar al presupuesto</option>
+              <option value="presu">🧠 Plan inteligente</option>
               <option value="cat">🗂️ Por categorías (S→1→2)</option>
               <option value="todo">📋 Todo lo que conviene</option>
             </select>
+          </div>
+          <div id="bcAutoProControls" style="display:flex;gap:.5rem;flex-wrap:wrap">
+            <div>
+              <div style="font-size:.58rem;color:var(--tx3);text-transform:uppercase;font-weight:600;margin-bottom:.2rem">Perfil</div>
+              <select id="bcAutoPerfil" class="sel" style="font-size:.74rem">
+                <option value="conservador">🛡️ Conservador</option>
+                <option value="equilibrado" selected>⚖️ Equilibrado</option>
+                <option value="agresivo">🚀 Agresivo</option>
+              </select>
+            </div>
+            <div>
+              <div style="font-size:.58rem;color:var(--tx3);text-transform:uppercase;font-weight:600;margin-bottom:.2rem">Nuevos por</div>
+              <select id="bcAutoCriterio" class="sel" style="font-size:.74rem">
+                <option value="mixto" selected>✨ Marca + margen</option>
+                <option value="marca">🔥 Marcas que rotan</option>
+                <option value="margen">💎 Mejor margen</option>
+                <option value="barato">🏷️ Más baratos</option>
+              </select>
+            </div>
           </div>
           <button onclick="bcArmarPedidoAuto()" style="flex:1;min-width:170px;padding:.55rem;background:linear-gradient(135deg,#7b61ff,#b39dff);border:none;border-radius:10px;color:#fff;font-weight:800;font-size:.82rem;cursor:pointer">🤖 Armar pedido automático</button>
         </div>
@@ -27027,7 +27046,329 @@ function bcAutoToggleModo(){
   var modo=(document.getElementById('bcAutoModo')||{}).value||'presu';
   var wrap=document.getElementById('bcAutoPresuWrap');
   if(wrap) wrap.style.display=(modo==='todo')?'none':'';
+  var pro=document.getElementById('bcAutoProControls');
+  if(pro) pro.style.display=(modo==='presu')?'flex':'none';
 }
+
+// ═══════════════════════════════════════════════════════════════════════
+// 🧠 ANÁLISIS PROFESIONAL DE COMPRA (2026-07)
+// Mira TODO el universo de listas de proveedores y lo clasifica en:
+//   🔄 REFORZAR (lo que ya rota y conviene reponer)
+//   ✨ PROBAR NUEVO (oportunidades que todavía no vendés)
+//   💰 GUARDAR (cuánto NO conviene gastar en vez de sobre-stockear)
+// según el presupuesto, el perfil de riesgo y el criterio de nuevos elegido.
+// ═══════════════════════════════════════════════════════════════════════
+
+// Perfil: del presupuesto restante (tras cubrir lo URGENTE), qué % va a apostar
+// a nuevos vs. profundizar lo que ya vendés, hasta qué techo de cobertura, y
+// cuántas unidades de test comprar por producto nuevo.
+var _BC_PERFILES = {
+  conservador: { nuevosPct:0.20, techoDias:90,  testU:2, etiqueta:'Conservador' },
+  equilibrado: { nuevosPct:0.40, techoDias:120, testU:3, etiqueta:'Equilibrado' },
+  agresivo:    { nuevosPct:0.60, techoDias:150, testU:4, etiqueta:'Agresivo' }
+};
+
+// Marca comercial real: matchea el nombre de proveedor contra las marcas del
+// catálogo (p.empresa), porque el campo "marca" de la lista viene ruidoso.
+function _bcMarcasCatalogo(){
+  if(window._bcMarcasCat) return window._bcMarcasCat;
+  var set={};
+  (prods||[]).forEach(function(p){
+    var e=(p.empresa||'').trim(); if(!e) return;
+    var k=bcNorm(e); if(k && k.length>=2) set[k]=e;
+  });
+  var arr=Object.keys(set).map(function(k){return {k:k,e:set[k]};});
+  arr.sort(function(a,b){return b.k.length-a.k.length;}); // "maison alhambra" antes que "maison"
+  window._bcMarcasCat=arr;
+  return arr;
+}
+function _bcMarcaDe(nombreProv){
+  var n=bcNorm(nombreProv||''); if(!n) return '';
+  var arr=_bcMarcasCatalogo();
+  for(var i=0;i<arr.length;i++){
+    if(n===arr[i].k || n.indexOf(arr[i].k+' ')===0) return arr[i].e;
+  }
+  var w=(nombreProv||'').trim().split(/\s+/)[0]||'';
+  return w?bcTitleCase(w):'';
+}
+
+// Rotación (unidades 90d) y margen medio por marca comercial.
+function _bcStatsPorMarca(){
+  if(window._bcMarcaStats) return window._bcMarcaStats;
+  var agg=window._bcVentasAgg||{};
+  var byMarca={};
+  (prods||[]).forEach(function(p){
+    if(p.activo===false) return;
+    var e=(p.empresa||'').trim(); if(!e) return;
+    var a=agg[p.id]||{u90:0};
+    var r=calcP(p);
+    var m=byMarca[e]=byMarca[e]||{u90:0,sumRM:0,nRM:0};
+    m.u90 += (a.u90||0);
+    if(r && isFinite(r.rM)){ m.sumRM+=r.rM; m.nRM++; }
+  });
+  Object.keys(byMarca).forEach(function(e){ var m=byMarca[e]; m.rM=m.nRM>0?m.sumRM/m.nRM:0; });
+  window._bcMarcaStats=byMarca;
+  return byMarca;
+}
+
+// ── Motor principal: devuelve el plan de compra ──
+function _bcAnalisisPro(presu, perfilKey, criterioNuevos){
+  window._bcMarcasCat=null; window._bcMarcaStats=null; // datos frescos cada análisis
+  var perfil=_BC_PERFILES[perfilKey]||_BC_PERFILES.equilibrado;
+  var repo=_bcCalcReposicion();
+  var repoById={}; repo.forEach(function(x){ repoById[x.p.id]=x; });
+  var marcaStats=_bcStatsPorMarca();
+  var maxU90=1, maxRM=1;
+  Object.keys(marcaStats).forEach(function(e){
+    if(marcaStats[e].u90>maxU90)maxU90=marcaStats[e].u90;
+    if(marcaStats[e].rM>maxRM)maxRM=marcaStats[e].rM;
+  });
+
+  // 1) Recorrer TODO el universo de líneas de proveedor
+  var refPorProd={}, nuevosMap={};
+  Object.keys(bcProveedores||{}).forEach(function(prov){
+    (bcProveedores[prov]||[]).forEach(function(it,i){
+      var precio=it.precio_usd||0; if(precio<=0) return;
+      var m=bcFindInProds(it);
+      if(m && m.id){
+        var x=repoById[m.id]; if(!x) return;
+        if(x.velMes>=0.5){
+          var e=refPorProd[m.id]=refPorProd[m.id]||{x:x, ops:[]};
+          e.ops.push({prov:prov, idx:i, precio:precio, nombreProv:it.nombre_proveedor||''});
+        }
+      } else {
+        var key=bcNorm(it.nombre_norm||it.nombre_proveedor||''); if(!key) return;
+        var prev=nuevosMap[key];
+        if(!prev || precio<prev.precio){
+          nuevosMap[key]={it:it, prov:prov, idx:i, precio:precio, marca:_bcMarcaDe(it.nombre_proveedor)};
+        }
+      }
+    });
+  });
+
+  // 2) REFORZAR — mejor precio por producto
+  var reforzar=[];
+  Object.keys(refPorProd).forEach(function(pid){
+    var e=refPorProd[pid];
+    e.ops.sort(function(a,b){return a.precio-b.precio;});
+    reforzar.push({x:e.x, op:e.ops[0], ops:e.ops, precio:e.ops[0].precio, qty:0, esNuevo:false});
+  });
+
+  // 3) NUEVOS — score según criterio elegido
+  var nuevos=Object.keys(nuevosMap).map(function(k){
+    var d=nuevosMap[k];
+    var ms=marcaStats[d.marca]||{u90:0,rM:0};
+    var score;
+    if(criterioNuevos==='marca')       score=ms.u90;
+    else if(criterioNuevos==='margen') score=ms.rM;
+    else if(criterioNuevos==='barato') score=(d.precio>0?1000/d.precio:0);
+    else                               score=(ms.u90/maxU90)*0.6+(ms.rM/maxRM)*0.4; // mixto
+    return {it:d.it, op:{prov:d.prov, idx:d.idx, precio:d.precio, nombreProv:d.it.nombre_proveedor||''},
+            prov:d.prov, precio:d.precio, marca:d.marca, u90Marca:ms.u90, rMMarca:ms.rM, score:score, qty:0, esNuevo:true, x:null};
+  });
+  nuevos.sort(function(a,b){return b.score-a.score;});
+
+  // 4) REPARTO del presupuesto
+  var gastado=0;
+  // 4a) URGENTE primero (quiebre + reponer → cubrir "sugerido")
+  var urgentes=reforzar.filter(function(c){return c.x.cat==='quiebre'||c.x.cat==='reponer';})
+    .sort(function(a,b){var r={quiebre:0,reponer:1}; if(r[a.x.cat]!==r[b.x.cat])return r[a.x.cat]-r[b.x.cat]; return b.x.velMes-a.x.velMes;});
+  urgentes.forEach(function(c){
+    var falta=Math.max(0, c.x.sugerido);
+    while(falta>0 && gastado+c.precio<=presu){ c.qty++; gastado+=c.precio; falta--; }
+  });
+  var urgenteUSD=gastado;
+  var nUrg=urgentes.filter(function(c){return c.qty>0;}).length;
+
+  // 4b) presupuesto restante → dividir reforzar-profundizar vs nuevos
+  var resto=Math.max(0, presu-gastado);
+  var budNuevos=resto*perfil.nuevosPct;
+  var budReforzar=resto-budNuevos;
+
+  // 4c) helpers de gasto (reciben plata disponible, devuelven lo gastado)
+  function _peso(c){ return c.x.velMes*(1+Math.max(0,c.x.rM)/100)*(c.x.cat==='quiebre'?2.2:c.x.cat==='reponer'?1.5:1.0); }
+  var pool=reforzar.filter(function(c){return c.x.velDia>0 && c.precio>0;});
+  function _gastarReforzar(dispo){
+    var g=0, guard=0;
+    while(guard++<200000){
+      var best=null,bestSc=-1;
+      for(var i=0;i<pool.length;i++){
+        var c=pool[i];
+        if((c.x.dispFut+c.qty)/c.x.velDia >= perfil.techoDias) continue; // no sobre-stockear
+        if(g+c.precio>dispo) continue;
+        var sc=_peso(c)/(c.qty+1);
+        if(sc>bestSc){bestSc=sc;best=c;}
+      }
+      if(!best) break;
+      best.qty++; g+=best.precio;
+    }
+    return g;
+  }
+  function _gastarNuevos(dispo){
+    var g=0;
+    for(var j=0;j<nuevos.length;j++){
+      var c=nuevos[j];
+      if(c.precio<=0) continue;
+      if((criterioNuevos==='marca'||criterioNuevos==='mixto') && c.u90Marca<=0) continue; // sin rotación de marca
+      var falta=perfil.testU - c.qty; if(falta<=0) continue;
+      while(falta>0 && g+c.precio<=dispo){ c.qty++; g+=c.precio; falta--; }
+      if(g>=dispo) break;
+    }
+    return g;
+  }
+  // primer reparto según el mix del perfil
+  var gastoRef=_gastarReforzar(budReforzar);
+  var gastoNuevos=_gastarNuevos(budNuevos);
+  gastado+=gastoRef+gastoNuevos;
+  // reasignar el sobrante hasta el techo sano (evita guardar de más si hay dónde colocar)
+  var sob=presu-gastado;
+  if(sob>0){ var e1=_gastarReforzar(sob); gastoRef+=e1; gastado+=e1; sob=presu-gastado; }
+  if(sob>0){ var e2=_gastarNuevos(sob);   gastoNuevos+=e2; gastado+=e2; }
+
+  return {
+    perfil:perfil, perfilKey:perfilKey, criterioNuevos:criterioNuevos,
+    reforzar:reforzar.filter(function(c){return c.qty>0;}),
+    nuevos:nuevos.filter(function(c){return c.qty>0;}),
+    urgenteUSD:urgenteUSD, reforzarUSD:urgenteUSD+gastoRef, profundUSD:gastoRef, nuevosUSD:gastoNuevos,
+    totalUSD:gastado, sobra:Math.max(0,presu-gastado), presu:presu, nUrgentes:nUrg,
+    universo:{reforzables:reforzar.length, nuevosDisp:nuevos.length}
+  };
+}
+
+// Carga el plan a los pedidos (reusa bcToggleLista); para NUEVOS setea el flag
+// de "producto nuevo" (-1) para que salgan marcados y se creen al confirmar.
+function _bcProCargarTodo(){
+  var porProv=window._bcPedidoAutoData||{}; var provs=Object.keys(porProv);
+  if(!provs.length){ if(typeof toast==='function')toast('Nada para cargar','twarn'); return; }
+  var total=0;
+  provs.forEach(function(prov){
+    (porProv[prov]||[]).forEach(function(c){
+      if(c.qty<=0) return;
+      var it=(bcProveedores[prov]||[])[c.op.idx]; if(!it) return;
+      if(c.precio && c.precio!==it.precio_usd) it.precio_usd=c.precio;
+      if(c.esNuevo){ try{ bcSetManualMatch(bcNorm(it.nombre_norm||it.nombre_proveedor||''), -1); }catch(e){} }
+      bcToggleLista(prov, c.op.idx, c.qty, bcTitleCase(it.nombre_proveedor||''), it.precio_usd); total++;
+    });
+  });
+  if(typeof toast==='function')toast('¡Listo! '+total+' líneas cargadas. Revisá cada proveedor y confirmá.','tok');
+}
+function _bcProCargarProv(prov){
+  var data=(window._bcPedidoAutoData||{})[prov];
+  if(!data||!data.length){ if(typeof toast==='function')toast('Nada para cargar','twarn'); return; }
+  var n=0;
+  data.forEach(function(c){
+    if(c.qty<=0) return;
+    var it=(bcProveedores[prov]||[])[c.op.idx]; if(!it)return;
+    if(c.precio && c.precio!==it.precio_usd) it.precio_usd=c.precio;
+    if(c.esNuevo){ try{ bcSetManualMatch(bcNorm(it.nombre_norm||it.nombre_proveedor||''), -1); }catch(e){} }
+    bcToggleLista(prov, c.op.idx, c.qty, bcTitleCase(it.nombre_proveedor||''), it.precio_usd); n++;
+  });
+  if(typeof toast==='function')toast('Cargadas '+n+' líneas de '+prov+' — revisá y confirmá','tok');
+}
+
+// ── Render del plan profesional ──
+function _bcRenderAnalisisPro(plan){
+  var cont=document.getElementById('bcAutoContent'); if(!cont) return;
+  // armar window._bcPedidoAutoData con keys 'a'+n (reusa bcAutoSetQty/Precio/QuitarLinea)
+  var porProv={}, kc=0;
+  var todas=plan.reforzar.concat(plan.nuevos);
+  todas.forEach(function(c){ c.key='a'+(kc++); (porProv[c.op.prov]=porProv[c.op.prov]||[]).push(c); });
+  window._bcPedidoAutoData=porProv;
+
+  function _nom(c){
+    if(c.esNuevo){ return bcTitleCase((c.it.nombre_proveedor||'').replace(/\s+(EDP|EDT|PARFUM|EAU DE.*)\s.*$/i,'')); }
+    var nm=(c.x.p.nombre||''); return nm.indexOf(' - ')>-1?nm.split(' - ')[1]:nm;
+  }
+  function _lineaRef(c){
+    var x=c.x, col=x.cat==='quiebre'?'#e5484d':x.cat==='reponer'?'#f0a020':'#3fae74';
+    var emo=x.cat==='quiebre'?'🔴':x.cat==='reponer'?'🟠':'🟢';
+    var cubre=(x.velDia>0)?Math.round((x.dispFut+c.qty)/x.velDia):999;
+    var cubreTxt=cubre>=365?'+1 año':(cubre+'d');
+    return "<div data-afila='"+c.key+"' style='display:flex;align-items:center;gap:.5rem;padding:.35rem 0;border-top:1px solid var(--bd)'>"+
+      "<div style='width:5px;height:34px;background:"+col+";border-radius:3px;flex-shrink:0'></div>"+
+      "<div style='flex:1;min-width:0'>"+
+        "<div style='font-size:.73rem;color:var(--tx);font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap'>"+_admEsc(_nom(c))+"</div>"+
+        "<div style='font-size:.58rem;color:var(--tx3)'>"+emo+" vende "+(x.velMes>=10?Math.round(x.velMes):x.velMes.toFixed(1))+"/mes · stock "+x.libre+" +✈️"+x.viaje+" → con esto cubrís ~"+cubreTxt+(x.rM>0?" · "+Math.round(x.rM)+"% marg":"")+"</div>"+
+      "</div>"+
+      _inputsLinea(c,col)+"</div>";
+  }
+  function _lineaNuevo(c){
+    var col='#a855f7';
+    var extra=c.u90Marca>0?(c.marca+" vende "+c.u90Marca+"u/trim"):(c.marca||'marca s/dato');
+    if(c.rMMarca>0) extra+=" · ~"+Math.round(c.rMMarca)+"% marg";
+    return "<div data-afila='"+c.key+"' style='display:flex;align-items:center;gap:.5rem;padding:.35rem 0;border-top:1px solid var(--bd)'>"+
+      "<div style='width:5px;height:34px;background:"+col+";border-radius:3px;flex-shrink:0'></div>"+
+      "<div style='flex:1;min-width:0'>"+
+        "<div style='font-size:.73rem;color:var(--tx);font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap'>"+_admEsc(_nom(c))+" <span style='font-size:.55rem;color:#c084fc;font-weight:700'>NUEVO</span></div>"+
+        "<div style='font-size:.58rem;color:var(--tx3)'>✨ "+_admEsc(extra)+" · probar "+c.qty+"u</div>"+
+      "</div>"+
+      _inputsLinea(c,col)+"</div>";
+  }
+  function _inputsLinea(c,col){
+    return "<div style='text-align:center;flex-shrink:0'><div style='font-size:.5rem;color:var(--tx3)'>u$d c/u</div><input type='number' step='0.01' value='"+(c.precio||0).toFixed(2)+"' onchange=\"bcAutoSetPrecio('"+c.key+"',this.value)\" style='width:56px;padding:.2rem;text-align:center;background:var(--sur3);border:1px solid var(--bd);border-radius:5px;color:var(--tx2);font-size:.68rem'></div>"+
+      "<div style='text-align:center;flex-shrink:0'><div style='font-size:.5rem;color:var(--tx3)'>pedir</div><input type='number' min='0' value='"+c.qty+"' onchange=\"bcAutoSetQty('"+c.key+"',this.value)\" style='width:46px;padding:.2rem;text-align:center;background:var(--gdim);border:1px solid "+col+";border-radius:5px;color:"+col+";font-weight:800;font-size:.85rem'></div>"+
+      "<button onclick=\"bcAutoQuitarLinea('"+c.key+"',this)\" title='Quitar' style='background:transparent;border:none;color:var(--red);cursor:pointer;font-size:.8rem;flex-shrink:0;padding:.1rem .25rem'>&#10006;</button>";
+  }
+  function _grupoProv(arr, render){
+    var byP={}; arr.forEach(function(c){ (byP[c.op.prov]=byP[c.op.prov]||[]).push(c); });
+    return Object.keys(byP).sort(function(a,b){return byP[b].length-byP[a].length;}).map(function(prov){
+      var lista=byP[prov], tot=lista.reduce(function(s,c){return s+c.qty*(c.precio||0);},0);
+      return "<div style='background:var(--sur);border:1px solid var(--bd);border-radius:10px;padding:.6rem;margin-bottom:.55rem'>"+
+        "<div style='display:flex;align-items:center;justify-content:space-between;gap:.5rem;margin-bottom:.2rem'>"+
+          "<span style='font-weight:800;color:var(--acc);font-size:.82rem'>"+_admEsc(prov)+" <span style='font-size:.6rem;color:var(--tx3)'>"+lista.length+" prod · "+_bcFmtU(tot)+"</span></span>"+
+          "<button onclick=\"_bcProCargarProv('"+String(prov).replace(/'/g,"\\'")+"')\" style='padding:.3rem .6rem;background:var(--acc);border:none;border-radius:6px;color:#000;font-weight:700;font-size:.66rem;cursor:pointer'>⬇️ Cargar</button>"+
+        "</div>"+lista.map(render).join('')+"</div>";
+    }).join('');
+  }
+
+  var html="";
+  html+="<div style='display:flex;justify-content:space-between;align-items:center;margin-bottom:.5rem'>"+
+    "<div style='font-size:.82rem;font-weight:800;color:var(--tx)'>🧠 Plan de compra · "+plan.perfil.etiqueta+"</div>"+
+    "<button onclick=\"document.getElementById('bcAutoContent').innerHTML=''\" style='background:none;border:1px solid var(--bd);border-radius:6px;color:var(--tx3);font-size:.62rem;padding:.2rem .5rem;cursor:pointer'>✕ cerrar</button></div>";
+
+  // desglose del presupuesto (barra)
+  var p=plan.presu||1;
+  function _pct(v){return Math.max(0,Math.min(100,(v/p)*100));}
+  html+="<div style='background:var(--sur);border:1px solid var(--bd);border-radius:10px;padding:.7rem;margin-bottom:.7rem'>"+
+    "<div style='display:flex;height:12px;border-radius:6px;overflow:hidden;background:var(--sur3);margin-bottom:.5rem'>"+
+      "<div style='width:"+_pct(plan.urgenteUSD)+"%;background:#e5484d' title='Urgente'></div>"+
+      "<div style='width:"+_pct(plan.profundUSD)+"%;background:#3fae74' title='Reforzar'></div>"+
+      "<div style='width:"+_pct(plan.nuevosUSD)+"%;background:#a855f7' title='Nuevos'></div>"+
+      "<div style='width:"+_pct(plan.sobra)+"%;background:var(--bd2)' title='Guardar'></div>"+
+    "</div>"+
+    "<div style='display:flex;flex-wrap:wrap;gap:.4rem .9rem;font-size:.62rem'>"+
+      "<span style='color:#e5484d;font-weight:700'>🔴 Urgente "+_bcFmtU(plan.urgenteUSD)+"</span>"+
+      "<span style='color:#3fae74;font-weight:700'>🔄 Reforzar "+_bcFmtU(plan.profundUSD)+"</span>"+
+      "<span style='color:#c084fc;font-weight:700'>✨ Nuevos "+_bcFmtU(plan.nuevosUSD)+"</span>"+
+      "<span style='color:var(--tx2);font-weight:700'>💰 Guardar "+_bcFmtU(plan.sobra)+"</span>"+
+      "<span style='color:var(--tx3);margin-left:auto'>de "+_bcFmtU(plan.presu)+"</span>"+
+    "</div></div>";
+
+  // consejo de ahorro
+  if(plan.sobra > plan.presu*0.10 && plan.sobra > 40){
+    html+="<div style='background:rgba(240,160,32,.08);border:1px solid rgba(240,160,32,.35);border-radius:9px;padding:.55rem .7rem;margin-bottom:.7rem;font-size:.66rem;color:var(--tx2);line-height:1.4'>"+
+      "💰 <b style='color:#f0a020'>Te conviene guardar "+_bcFmtU(plan.sobra)+"</b> en vez de gastarlo. Cubrí lo urgente, reforzaste lo que rota hasta ~"+plan.perfil.techoDias+" días y probaste nuevos; forzar más sería sobre-stockear. Si querés arriesgar más, subí el perfil a <b>Agresivo</b>.</div>";
+  }
+
+  html+="<button onclick='_bcProCargarTodo()' style='width:100%;padding:.55rem;background:linear-gradient(135deg,#7b61ff,#9d7bff);border:none;border-radius:9px;color:#fff;font-weight:800;font-size:.82rem;cursor:pointer;margin-bottom:.8rem'>⬇️ Cargar TODO el plan a los pedidos</button>";
+
+  // sección reforzar
+  if(plan.reforzar.length){
+    html+="<div style='font-size:.72rem;font-weight:800;color:#3fae74;margin:.2rem 0 .4rem'>🔄 Reforzar lo que ya rota ("+plan.reforzar.length+")</div>"+_grupoProv(plan.reforzar,_lineaRef);
+  }
+  // sección nuevos
+  if(plan.nuevos.length){
+    html+="<div style='font-size:.72rem;font-weight:800;color:#c084fc;margin:.6rem 0 .4rem'>✨ Probar productos nuevos ("+plan.nuevos.length+")</div>"+
+      "<div style='font-size:.6rem;color:var(--tx3);margin-bottom:.4rem'>Apuestas de pocas unidades para testear, priorizadas por: "+
+      (plan.criterioNuevos==='marca'?'marcas que ya te rotan':plan.criterioNuevos==='margen'?'mejor margen':plan.criterioNuevos==='barato'?'menor precio (bajo riesgo)':'marca que rota + margen')+".</div>"+
+      _grupoProv(plan.nuevos,_lineaNuevo);
+  }
+  if(!plan.reforzar.length && !plan.nuevos.length){
+    html+="<div class='empty' style='margin-top:.4rem'>Con u$d "+plan.presu+" y este perfil no arma nada. Subí el presupuesto o cambiá el perfil/criterio.</div>";
+  }
+  cont.innerHTML=html;
+}
+
 
 function bcArmarPedidoAuto(){
   var cont=document.getElementById('bcAutoContent'); if(!cont) return;
@@ -27037,6 +27378,16 @@ function bcArmarPedidoAuto(){
 
   var presu=parseFloat((document.getElementById('bcAutoPresu')||{}).value)||0;
   var modo=(document.getElementById('bcAutoModo')||{}).value||'presu';
+  // 🧠 MODO PRESUPUESTO → cerebro profesional (reforzar / nuevos / guardar)
+  if(modo==='presu'){
+    if(!presu||presu<=0){ cont.innerHTML="<div class='empty' style='margin-top:.4rem'>Poné un presupuesto en u$d y toco de nuevo.</div>"; return; }
+    var _perfilKey=(document.getElementById('bcAutoPerfil')||{}).value||'equilibrado';
+    var _criterio=(document.getElementById('bcAutoCriterio')||{}).value||'mixto';
+    var _nLineas=0; Object.keys(bcProveedores||{}).forEach(function(k){_nLineas+=(bcProveedores[k]||[]).length;});
+    cont.innerHTML="<div class='loading'><div class='spin'></div>Analizando "+_nLineas+" l&iacute;neas de proveedor, ventas, stock y viaje&hellip;</div>";
+    setTimeout(function(){ try{ var plan=_bcAnalisisPro(presu,_perfilKey,_criterio); _bcRenderAnalisisPro(plan); }catch(e){ cont.innerHTML="<div class='empty' style='margin-top:.4rem'>No pude armar el plan: "+((e&&e.message)||e)+"</div>"; } }, 30);
+    return;
+  }
   var usoPresu=(modo==='presu'||modo==='cat')&&presu>0;
   var repo=_bcCalcReposicion();
   // En modo presupuesto: TODO lo que se mueve (para poder desplegar el presupuesto,
@@ -48451,8 +48802,8 @@ var BELLE_IG_MODELOS_RAW=[
 })();
 
 </script>
-<!-- BUILD BELLE · 2026-07-04 21:48 -->
-<div id="bcBuildStamp" style="position:fixed;bottom:4px;right:6px;z-index:2147483647;font-size:9px;line-height:1;color:#7c85a8;background:rgba(15,17,23,.6);padding:2px 6px;border-radius:4px;pointer-events:none;font-family:ui-monospace,monospace;letter-spacing:.02em;opacity:.7">v2026-07-04 · 21:48</div>
+<!-- BUILD BELLE · 2026-07-04 22:19 -->
+<div id="bcBuildStamp" style="position:fixed;bottom:4px;right:6px;z-index:2147483647;font-size:9px;line-height:1;color:#7c85a8;background:rgba(15,17,23,.6);padding:2px 6px;border-radius:4px;pointer-events:none;font-family:ui-monospace,monospace;letter-spacing:.02em;opacity:.7">v2026-07-04 · 22:19</div>
 </body>
 <!-- build:20260418-195140-20260418-194515-20260330-001651 -->
 </html>
