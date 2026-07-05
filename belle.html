@@ -31957,6 +31957,92 @@ function bcWarmMatchCache(){
   setTimeout(step, 0);
 }
 
+// ═══════════════════════════════════════════════════════════════════════
+// 🎯 MATCHER PROFESIONAL (2026-07) — compara el MODELO del perfume, no la marca.
+// Regla: misma marca + mismo volumen + género compatible + tokens del modelo
+// idénticos (sin palabras distintivas sobrantes). Si algo distintivo difiere
+// (Black, Night, Portrait, Her/Him, Kit…) → NO es el mismo producto.
+// ═══════════════════════════════════════════════════════════════════════
+
+// Normalización para matching: pega apóstrofes (Bade'e→Badee), saca tildes y símbolos.
+function _bcNM(s){
+  return String(s||'').toLowerCase()
+    .normalize('NFD').replace(/[\u0300-\u036f]/g,'')
+    .replace(/['’`´ʼ]/g,'')          // apóstrofes pegados
+    .replace(/[^a-z0-9]+/g,' ')
+    .replace(/\s+/g,' ').trim();
+}
+// Género (diferenciador de SKU si ambos lo declaran y difieren)
+var _BC_GENERO = {her:'F',him:'M',his:'M',men:'M',man:'M',woman:'F',women:'F',homme:'M',femme:'F',
+  hombre:'M',mujer:'F',masculino:'M',masculina:'M',femenino:'F',femenina:'F',boy:'M',girl:'F',mens:'M',womens:'F'};
+// Palabras genéricas (tipo/conectores/ruido) que NO distinguen un producto de otro
+var _BC_GEN = {edp:1,edt:1,edc:1,edn:1,eau:1,de:1,del:1,la:1,el:1,les:1,parfum:1,parfums:1,toilette:1,
+  cologne:1,perfume:1,perfumes:1,ml:1,oz:1,fl:1,spr:1,spray:1,vapo:1,vaporisateur:1,natural:1,
+  the:1,and:1,y:1,pour:1,for:1,por:1,fragrance:1,fragancia:1,unisex:1,em:1,by:1,new:1};
+// Volúmenes comunes (se descartan como el ml)
+var _BC_VOL = {'20':1,'25':1,'30':1,'35':1,'40':1,'45':1,'50':1,'55':1,'60':1,'65':1,'70':1,'75':1,
+  '80':1,'85':1,'90':1,'100':1,'105':1,'110':1,'115':1,'120':1,'125':1,'150':1,'175':1,'180':1,'200':1,'250':1};
+
+// Extrae los tokens distintivos del MODELO (sin marca, sin genéricas, sin ml) + el género.
+function _bcModelo(nombreNorm, marcas){
+  var n=' '+nombreNorm+' ';
+  (marcas||[]).forEach(function(m){
+    var mk=_bcNM(m||''); if(!mk) return;
+    n=n.split(' '+mk+' ').join(' ');
+    mk.split(' ').forEach(function(w){ if(w.length>=3) n=n.split(' '+w+' ').join(' '); });
+  });
+  n=n.replace(/\b\d+\s*ml\b/g,' ').replace(/\b\d+\s*oz\b/g,' ');
+  var gen=null, set={};
+  n.split(/\s+/).forEach(function(w){
+    if(!w||w.length<2) return;
+    if(_BC_GENERO[w]){ var g=_BC_GENERO[w]; gen = gen==null ? g : (gen===g?g:'X'); return; }
+    if(_BC_GEN[w]) return;
+    if(_BC_VOL[w]) return;
+    if(/^\d+$/.test(w) && w.length<=2) return;   // números sueltos cortos = ruido
+    set[w]=1;
+  });
+  return {toks:Object.keys(set), gen:gen};
+}
+
+// ¿La marca del proveedor es una marca CONOCIDA del catálogo? (para bloquear con confianza)
+function _bcMarcaConocida(m){
+  if(!m) return false;
+  var arr=(typeof _bcMarcasCatalogo==='function')?_bcMarcasCatalogo():[];
+  var mk=_bcNM(m);
+  for(var i=0;i<arr.length;i++){ if(arr[i].k===mk) return true; }
+  return false;
+}
+
+// Score 0..1 entre una línea de proveedor (cruda) y un producto del catálogo.
+function _bcMatchScore(provRaw, provMarca, p){
+  var catMarca=p.empresa||'';
+  var provN=_bcNM(provRaw);
+  // 1) Marca: si ambas son conocidas y difieren → productos de marcas distintas
+  var a=_bcNM(provMarca||''), b=_bcNM(catMarca);
+  if(a && b && a!==b && a.indexOf(b)<0 && b.indexOf(a)<0 && _bcMarcaConocida(provMarca)) return 0;
+  // 2) Volumen: si ambos lo declaran y difieren → SKU distinto
+  var volP=_bcExtraerVolumen(provRaw);
+  var catFull=(p.empresa||'')+' '+(p.nombre||'')+(p.ml?(' '+p.ml+'ml'):'');
+  var volC=_bcExtraerVolumen(catFull);
+  if(volP!=null && volC!=null && volP!==volC) return 0;
+  // 3) Modelo (tokens distintivos) — saco ambas marcas para no contaminar
+  var mp=_bcModelo(provN, [provMarca, catMarca]);
+  var mc=_bcModelo(_bcNM(catFull), [catMarca, provMarca]);
+  if(!mp.toks.length || !mc.toks.length) return 0;
+  // 4) Género: si ambos lo declaran y difieren → distinto (Her ≠ Him)
+  if(mp.gen && mc.gen && mp.gen!==mc.gen && mp.gen!=='X' && mc.gen!=='X') return 0;
+  // 5) Tokens del modelo deben ser idénticos (sin sobrantes distintivos)
+  var setC={}; mc.toks.forEach(function(t){setC[t]=1;});
+  var setP={}; mp.toks.forEach(function(t){setP[t]=1;});
+  var inter=0, soloP=0, soloC=0;
+  mp.toks.forEach(function(t){ setC[t]?inter++:soloP++; });
+  mc.toks.forEach(function(t){ if(!setP[t])soloC++; });
+  if(inter===0) return 0;
+  if(soloP===0 && soloC===0) return 0.99;   // modelo idéntico → match
+  return 0;                                  // cualquier palabra distintiva sobrante → distinto
+}
+
+
 function bcFindInProds(item){
   // Try to match provider item against our catalog
   if(!prods||!prods.length) return null;
@@ -31986,92 +32072,19 @@ function bcFindInProds(item){
   // el catálogo tenía datos viejos y matcheaba uno con stock 0.
   var candidatos = [];
   var bestScore = 0;
-  // Volumen del item del proveedor (para preferir match con mismo ml si está en catálogo)
   var volProv = _bcExtraerVolumen(item.nombre_norm||item.nombre_proveedor||'');
-
+  var provRaw = item.nombre_norm||item.nombre_proveedor||'';
+  var provMarca = (typeof _bcMarcaDe==='function') ? _bcMarcaDe(provRaw) : '';
   prods.forEach(function(p){
-    var pFull = (p.empresa||'') + ' ' + (p.nombre||'') + (p.ml? (' '+p.ml+'ml') : '');
-    var pn = bcNorm(pFull);
-    if(!pn) return;
-    var score = bcSim(nombre, pn);
-    // 🔧 FIX 2026-05-26: bajado 0.90 → 0.75 (era muy estricto, perdíamos matches reales).
-    // Las variaciones de ml/marca/orden de palabras a veces caen entre 0.75-0.89.
-    // El usuario puede revisar/corregir desde la UI.
-    if(score >= 0.75){
-      candidatos.push({prod:p, score:score, pn:pn});
+    var score = _bcMatchScore(provRaw, provMarca, p);
+    if(score >= 0.9){
+      candidatos.push({prod:p, score:score, pn:''});
       if(score > bestScore) bestScore = score;
     }
   });
-
-  // Sin candidatos por bcSim → 🆕 FALLBACK POR PALABRAS (HÍBRIDO C, 2026-05-26)
-  // Aplicamos lógica tipo "Recepción de Pedidos": cuento palabras DISTINTIVAS
-  // que el proveedor comparte con cada producto del catálogo.
-  // Esto rescata casos como "Freya EDP 100ml" (proveedor) vs "AL HARAMAIN Freya 100ml"
-  // donde bcSim daba 0.57 por penalizar palabras desiguales.
-  //
-  // IMPORTANTE: ignoramos palabras GENÉRICAS (edp, edt, parfum, ml, eau, etc) porque
-  // si las contáramos, "Freya EDP 100ml" matchearía con cualquier "X EDP 100ml".
   if(!candidatos.length){
-    var GENERICAS = {
-      'edp':1,'edt':1,'edc':1,'edn':1,'eau':1,'parfum':1,'cologne':1,
-      'ml':1,'oz':1,'spr':1,'spray':1,'extrait':1,'intense':1,'absolute':1,
-      'pour':1,'for':1,'her':1,'him':1,'men':1,'women':1,'hombre':1,'mujer':1,'unisex':1,
-      'the':1,'and':1,'and':1,'del':1
-    };
-    var words = nombre.split(/\s+/).filter(function(w){
-      // Distintiva: largo >=3, NO es número puro (100, 50), NO está en lista genérica, NO termina en 'ml'
-      if(w.length < 3) return false;
-      if(GENERICAS[w]) return false;
-      if(/^\d+$/.test(w)) return false;     // "100", "50", "30"
-      if(/^\d+ml$/.test(w)) return false;   // "100ml" pegado
-      if(/^\d+oz$/.test(w)) return false;
-      return true;
-    });
-    if(words.length < 2){
-      // Nombre muy corto (1 palabra distintiva o menos) — no se puede aplicar fallback con seguridad
-      window._bcFindCache[nombre] = null;
-      return null;
-    }
-    var candFallback = [];
-    prods.forEach(function(p){
-      var pFull = (p.empresa||'') + ' ' + (p.nombre||'') + (p.ml? (' '+p.ml+'ml') : '');
-      var pn = bcNorm(pFull);
-      if(!pn) return;
-      // Filtro de volumen sigue activo (si proveedor dice 100ml y catalog 50ml → NO)
-      var volCat = _bcExtraerVolumen(pn);
-      if(volProv != null && volCat != null && volProv !== volCat){
-        return;
-      }
-      // Contar palabras DISTINTIVAS compartidas (presentes en el producto del catalogo)
-      var compartidas = 0;
-      for(var i=0; i<words.length; i++){
-        if(pn.indexOf(words[i]) >= 0) compartidas++;
-      }
-      if(compartidas >= 2){
-        // Score "estimado" para fallback: proporcional a palabras matcheadas
-        var fbScore = 0.55 + (compartidas / words.length) * 0.19;
-        candFallback.push({prod:p, score:fbScore, pn:pn, compartidas:compartidas});
-      }
-    });
-    if(!candFallback.length){
-      window._bcFindCache[nombre] = null;
-      return null;
-    }
-    // Ordenar candidatos del fallback: más palabras en común > stock > más vendido
-    candFallback.sort(function(a,b){
-      if(b.compartidas !== a.compartidas) return b.compartidas - a.compartidas;
-      var sA = (a.prod.stock_actual||0) > 0 ? 1 : 0;
-      var sB = (b.prod.stock_actual||0) > 0 ? 1 : 0;
-      if(sA !== sB) return sB - sA;
-      var vA = a.prod.vendido_david||0, vB = b.prod.vendido_david||0;
-      return vB - vA;
-    });
-    // Tomar el top y devolverlo
-    var winnerFb = candFallback[0].prod;
-    window._bcFindCache[nombre] = winnerFb.id;
-    if(!window._bcFindScoreCache) window._bcFindScoreCache = {};
-    window._bcFindScoreCache[nombre] = candFallback[0].score;
-    return winnerFb;
+    window._bcFindCache[nombre] = null;
+    return null;
   }
 
   // Filtrar a los que están cerca del mejor score (dentro de 0.05)
@@ -48969,8 +48982,8 @@ var BELLE_IG_MODELOS_RAW=[
 })();
 
 </script>
-<!-- BUILD BELLE · 2026-07-04 23:06 ARG -->
-<div id="bcBuildStamp" style="position:fixed;bottom:4px;right:6px;z-index:2147483647;font-size:9px;line-height:1;color:#7c85a8;background:rgba(15,17,23,.6);padding:2px 6px;border-radius:4px;pointer-events:none;font-family:ui-monospace,monospace;letter-spacing:.02em;opacity:.7">v2026-07-04 · 23:06 ARG</div>
+<!-- BUILD BELLE · 2026-07-04 23:20 ARG -->
+<div id="bcBuildStamp" style="position:fixed;bottom:4px;right:6px;z-index:2147483647;font-size:9px;line-height:1;color:#7c85a8;background:rgba(15,17,23,.6);padding:2px 6px;border-radius:4px;pointer-events:none;font-family:ui-monospace,monospace;letter-spacing:.02em;opacity:.7">v2026-07-04 · 23:20 ARG</div>
 </body>
 <!-- build:20260418-195140-20260418-194515-20260330-001651 -->
 </html>
