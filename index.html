@@ -3088,20 +3088,59 @@ function _gtElegir(id){
 }
 
 // ── Descargar PNG ──
+// Hace transparentes los píxeles blancos de una <img> ya en base64 (sin taint),
+// para replicar el mix-blend-mode que html2canvas no soporta en la descarga.
+function _gtQuitarFondo(imgEl){
+  return new Promise(function(resolve){
+    var src=imgEl?imgEl.src:"";
+    if(!src || src.indexOf("data:")!==0){ resolve(); return; } // solo base64 local (sin cross-origin taint)
+    var im=new Image();
+    im.onload=function(){
+      try{
+        var cv=document.createElement("canvas"); cv.width=im.naturalWidth; cv.height=im.naturalHeight;
+        if(!cv.width||!cv.height){ resolve(); return; }
+        var ctx=cv.getContext("2d"); ctx.drawImage(im,0,0);
+        var dt=ctx.getImageData(0,0,cv.width,cv.height); var d=dt.data;
+        for(var i=0;i<d.length;i+=4){ if(d[i]>236 && d[i+1]>236 && d[i+2]>236) d[i+3]=0; }
+        ctx.putImageData(dt,0,0);
+        imgEl.src=cv.toDataURL("image/png");
+        imgEl.style.mixBlendMode="normal";
+      }catch(e){}
+      resolve();
+    };
+    im.onerror=function(){ resolve(); };
+    im.src=src;
+  });
+}
+
 function _gtDescargar(){
   var card=document.getElementById("gtCard");
   if(!_gtState.prod||!card){ _gtToastGt("Primero elegí un producto"); return; }
   if(typeof html2canvas==="undefined"){ _gtToastGt("Cargando… reintentá en un momento"); return; }
   _gtToastGt("Generando imagen…");
-  var _gtSc=Math.max(2,1080/(card.offsetWidth||360));
-  html2canvas(card,{backgroundColor:null,scale:_gtSc,useCORS:true,allowTaint:false,logging:false}).then(function(canvas){
+  // Guardar srcs originales para restaurar el preview luego de la captura
+  var imgs=Array.prototype.slice.call(card.querySelectorAll("img"));
+  var orig=imgs.map(function(im){ return {el:im, src:im.src, mbm:im.style.mixBlendMode}; });
+  function restaurar(){ orig.forEach(function(o){ o.el.src=o.src; o.el.style.mixBlendMode=o.mbm||""; }); }
+  // 1) Precargar TODAS las imágenes a base64 (notas + foto), como hace el catálogo para el PDF
+  var precarga=(typeof _compPrecargarImgs==="function")?_compPrecargarImgs(card):Promise.resolve();
+  precarga.then(function(){
+    // 2) Quitar el fondo blanco de la foto del perfume (ahora ya es base64, sin taint)
+    var foto=card.querySelector(".gt-photo img");
+    return foto?_gtQuitarFondo(foto):Promise.resolve();
+  }).then(function(){
+    // 3) Capturar en alta resolución (~1080px para Instagram)
+    var _gtSc=Math.max(2,1080/(card.offsetWidth||360));
+    return html2canvas(card,{backgroundColor:null,scale:_gtSc,useCORS:true,allowTaint:false,logging:false});
+  }).then(function(canvas){
     var url=canvas.toDataURL("image/png");
     var a=document.createElement("a");
     a.href=url;
     a.download="tarjeta_"+String(_gtProdNombre(_gtState.prod)).replace(/[^a-z0-9]+/gi,"_").toLowerCase()+".png";
     document.body.appendChild(a); a.click(); document.body.removeChild(a);
+    restaurar();
     _gtToastGt("¡Listo! Se descargó tu tarjeta");
-  }).catch(function(e){ _gtToastGt("No se pudo generar. Reintentá."); });
+  }).catch(function(e){ restaurar(); _gtToastGt("No se pudo generar. Reintentá."); });
 }
 function _gtToastGt(m){ var el=document.getElementById("gtMsg"); if(el){ el.textContent=m; } }
 
