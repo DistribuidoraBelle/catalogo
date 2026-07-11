@@ -1307,6 +1307,7 @@ tr.row-hl:hover td{
         <button class="btn btn-g _repTab" data-tab="panorama" onclick="_repCambiarTab('panorama')">📈 Panorama</button>
         <button class="btn btn-a _repTab" data-tab="financiero" onclick="_repCambiarTab('financiero')">💰 Financiero</button>
         <button class="btn btn-g _repTab" data-tab="rentabilidad" onclick="_repCambiarTab('rentabilidad')">💎 Rentabilidad</button>
+        <button class="btn btn-g _repTab" data-tab="bajorend" onclick="_repCambiarTab('bajorend')">🐌 Bajo rendimiento</button>
         <button class="btn btn-g _repTab" data-tab="vendedores" onclick="_repCambiarTab('vendedores')">👥 Por Vendedor</button>
         <button class="btn btn-g _repTab" data-tab="clientes" onclick="_repCambiarTab('clientes')">🛍️ Clientes</button>
         <button class="btn btn-g _repTab" data-tab="productos" onclick="_repCambiarTab('productos')">📦 Productos</button>
@@ -32592,6 +32593,7 @@ function _repRenderTab(){
   if(tab === "panorama") _repCargarPanorama();
   else if(tab === "financiero") _repCargarFinanciero();
   else if(tab === "rentabilidad") _repCargarRentabilidad();
+  else if(tab === "bajorend") _repCargarBajoRend();
   else if(tab === "vendedores") _repCargarVendedores();
   else if(tab === "clientes") _repCargarClientes();
   else if(tab === "productos") _repCargarProductos();
@@ -33022,6 +33024,206 @@ function _repCargarFinanciero(){
     var el = document.getElementById("_repContenido");
     if(el) el.innerHTML = "<div style='color:var(--red);padding:2rem;text-align:center'>Error al cargar reportes financieros</div>";
   });
+}
+
+// ════════════════════════════════════════════════════════════════════
+// ════════════════════════════════════════════════════════════════════
+// SECCIÓN: BAJO RENDIMIENTO (Fase 3) — dónde NO dejar recursos
+// Stock dormido (hace cuánto no se vende), nunca vendidos, plata
+// inmovilizada, productos de bajo margen (dejan poca plata / pérdida).
+// ════════════════════════════════════════════════════════════════════
+function _repDiasDesde(fechaStr){
+  if(!fechaStr) return Infinity;
+  var d = new Date(fechaStr);
+  return Math.floor((Date.now() - d.getTime())/86400000);
+}
+function _repFmtDiasQuieto(dias){
+  if(dias===Infinity) return "Nunca vendido";
+  if(dias<=0) return "hoy";
+  if(dias===1) return "ayer";
+  if(dias<30) return "hace "+dias+" días";
+  if(dias<60) return "hace "+dias+" días";
+  var m=Math.floor(dias/30);
+  return "hace ~"+m+" mes"+(m===1?"":"es");
+}
+function _repCritBadge(dias){
+  if(dias===Infinity) return "<span style='background:rgba(224,101,90,.18);color:#e0655a;padding:.1rem .45rem;border-radius:5px;font-size:.62rem;font-weight:700'>🔴 NUNCA</span>";
+  if(dias>=60) return "<span style='background:rgba(224,101,90,.14);color:#e0655a;padding:.1rem .45rem;border-radius:5px;font-size:.62rem;font-weight:700'>🔴 +60d</span>";
+  if(dias>=30) return "<span style='background:rgba(230,180,60,.16);color:#e0b43c;padding:.1rem .45rem;border-radius:5px;font-size:.62rem;font-weight:700'>🟠 +30d</span>";
+  if(dias>=14) return "<span style='background:rgba(230,180,60,.12);color:#e0b43c;padding:.1rem .45rem;border-radius:5px;font-size:.62rem;font-weight:600'>🟡 +14d</span>";
+  return "<span style='color:var(--green);font-size:.62rem'>activo</span>";
+}
+
+function _repCargarBajoRend(){
+  var r = _repCalcRango(window._repPeriodo);
+  Promise.all([
+    apiGet("productos", "select=id,nombre,empresa,ml,activo,oculto,costo_ind,costo_log,stock_actual&limit=6000").catch(function(){return [];}),
+    apiGetAll("ventas", "select=producto_id,cantidad,total,created_at&estado=in.(confirmada,archivada_periodo)&limit=20000").catch(function(){return [];})
+  ]).then(function(data){
+    var productos = data[0]||[], ventas = data[1]||[];
+    var cotiz = (typeof cotizActual !== "undefined" && cotizActual) ? cotizActual : 1520;
+
+    // Agregar por producto: última venta, unidades históricas, facturación, precio prom
+    var agg = {};
+    ventas.forEach(function(v){
+      var pid=v.producto_id; if(!pid) return;
+      if(!agg[pid]) agg[pid]={ultima:null, unid:0, fact:0};
+      var a=agg[pid];
+      if(!a.ultima || v.created_at>a.ultima) a.ultima=v.created_at;
+      a.unid += parseInt(v.cantidad)||0;
+      a.fact += parseFloat(v.total)||0;
+      // ventas del período (para "menos vendidos del período")
+      if(v.created_at >= r.desde.toISOString() && v.created_at < r.hasta.toISOString()){
+        a.unidPer = (a.unidPer||0) + (parseInt(v.cantidad)||0);
+      }
+    });
+
+    var hoy = Date.now();
+    var dormidos=[], nuncaVend=[], bajoMargen=[];
+    var kActivos=0, kNunca=0, kQuietos30=0, plataInmov=0;
+    var porMarca = {};
+
+    productos.forEach(function(p){
+      if(!p.activo || p.oculto) return;
+      kActivos++;
+      var a = agg[p.id] || {ultima:null, unid:0, fact:0};
+      var dias = a.ultima ? Math.floor((hoy - new Date(a.ultima).getTime())/86400000) : Infinity;
+      var stock = parseInt(p.stock_actual)||0;
+      var costoUnit = ((parseFloat(p.costo_ind)||0)+(parseFloat(p.costo_log)||0))*cotiz;
+      var inmov = stock>0 ? stock*costoUnit : 0;
+      var marca = p.empresa || "Sin marca";
+
+      var item = { id:p.id, nombre:p.nombre, marca:marca, ml:p.ml, dias:dias, ultima:a.ultima, stock:stock, inmov:inmov, unidHist:a.unid, factHist:a.fact };
+
+      if(dias===Infinity){ kNunca++; nuncaVend.push(item); }
+      if(dias>30){ // dormido (incl. nunca)
+        kQuietos30++;
+        dormidos.push(item);
+        if(stock>0){
+          plataInmov += inmov;
+          if(!porMarca[marca]) porMarca[marca]={inmov:0, count:0};
+          porMarca[marca].inmov += inmov; porMarca[marca].count++;
+        }
+      }
+      // Bajo margen: productos vendidos (>=3 unid histórico) con margen bajo
+      if(a.unid>=3 && a.fact>0){
+        var precioProm = a.fact/a.unid;
+        var margen = precioProm>0 ? (precioProm-costoUnit)/precioProm*100 : 0;
+        bajoMargen.push({ nombre:p.nombre, marca:marca, unid:a.unid, precioProm:precioProm, costoUnit:costoUnit, margen:margen, ganUnit:precioProm-costoUnit });
+      }
+    });
+
+    // Orden: más quieto primero (nunca = Infinity), desempate por plata inmovilizada
+    dormidos.sort(function(a,b){ if(a.dias!==b.dias) return b.dias-a.dias; return b.inmov-a.inmov; });
+    bajoMargen.sort(function(a,b){ return a.margen-b.margen; });
+    var marcasFren = Object.keys(porMarca).map(function(k){return {marca:k, inmov:porMarca[k].inmov, count:porMarca[k].count};}).sort(function(a,b){return b.inmov-a.inmov;}).slice(0,6);
+
+    window._repBajoRendData = { dormidos:dormidos, cotiz:cotiz };
+
+    var h="";
+    h += _repHeaderSeccion("🐌 Bajo rendimiento", "bajorend");
+    h += "<div style='font-size:.7rem;color:var(--tx3);margin-bottom:.8rem;padding:.5rem .7rem;background:var(--sur2);border-radius:7px'>🎯 Dónde <b>no</b> conviene poner plata: lo que no rota, lo que está dormido y lo que deja poco margen. Ideal para decidir qué mandar a promoción.</div>";
+
+    // KPIs
+    h += "<div style='display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:.6rem;margin-bottom:1rem'>";
+    h += _repPanoKpi("📦 Productos activos", kActivos.toLocaleString("es-AR"), "var(--tx)");
+    h += _repPanoKpi("🔴 Nunca vendidos", kNunca.toLocaleString("es-AR"), "#e0655a", "de "+kActivos+" activos");
+    h += _repPanoKpi("😴 Dormidos (+30 días)", kQuietos30.toLocaleString("es-AR"), "#e0b43c", "sin ventas hace +1 mes");
+    h += _repPanoKpi("💸 Plata inmovilizada", fmt(plataInmov), "#e0655a", "en stock que no rota");
+    h += "</div>";
+
+    // ── Stock dormido ──
+    h += "<div style='background:var(--sur);border:1px solid var(--bd);border-radius:10px;padding:1rem;margin-bottom:1rem'>";
+    h += "<div style='display:flex;flex-wrap:wrap;gap:.6rem;justify-content:space-between;align-items:center;margin-bottom:.8rem'>";
+    h += "<div style='font-size:.85rem;font-weight:700;color:var(--tx)'>😴 Stock dormido — candidatos a promoción</div>";
+    h += "<button class='btn btn-g' onclick='_repExportDormidos()' style='font-size:.7rem'>⬇ Exportar Excel</button>";
+    h += "</div>";
+    h += "<div style='font-size:.66rem;color:var(--tx3);margin-bottom:.7rem'>Ordenados del que hace <b>más tiempo</b> no sale. El de arriba es el más urgente para largar en oferta.</div>";
+    if(!dormidos.length){
+      h += "<div style='text-align:center;color:var(--green);padding:1.5rem;font-size:.82rem'>✅ ¡Todo rota! No hay productos dormidos.</div>";
+    } else {
+      h += "<div style='overflow-x:auto'><table style='width:100%;font-size:.74rem;border-collapse:collapse'>";
+      h += "<thead><tr style='border-bottom:1px solid var(--bd);text-align:left;color:var(--tx3);font-size:.64rem;text-transform:uppercase'>";
+      h += "<th style='padding:.45rem'>#</th><th>Producto</th><th>Marca</th><th>Última venta</th><th>Estado</th><th style='text-align:right'>Stock</th><th style='text-align:right'>Plata parada</th>";
+      h += "</tr></thead><tbody>";
+      dormidos.slice(0,40).forEach(function(it,i){
+        h += "<tr style='border-bottom:1px solid var(--bd)'>";
+        h += "<td style='padding:.4rem .45rem;color:var(--tx3);font-weight:700'>"+(i+1)+"</td>";
+        h += "<td style='color:var(--tx);max-width:220px'>"+_admEsc(it.nombre)+(it.ml?" <span style='color:var(--tx3);font-size:.66rem'>"+it.ml+"ml</span>":"")+"</td>";
+        h += "<td style='color:var(--tx2)'>"+_admEsc(it.marca)+"</td>";
+        h += "<td style='color:var(--tx3)'>"+_repFmtDiasQuieto(it.dias)+"</td>";
+        h += "<td>"+_repCritBadge(it.dias)+"</td>";
+        h += "<td style='text-align:right;color:"+(it.stock>0?"var(--tx)":"var(--tx3)")+";font-weight:600'>"+it.stock+"</td>";
+        h += "<td style='text-align:right;color:"+(it.inmov>0?"#e0655a":"var(--tx3)")+";font-weight:700'>"+(it.inmov>0?fmt(it.inmov):"—")+"</td>";
+        h += "</tr>";
+      });
+      h += "</tbody></table></div>";
+      if(dormidos.length>40) h += "<div style='text-align:center;padding:.6rem;color:var(--tx3);font-size:.7rem'>Mostrando 40 de "+dormidos.length+" dormidos. Exportá a Excel para ver todos.</div>";
+    }
+    h += "</div>";
+
+    // ── Marcas frenadas ──
+    if(marcasFren.length){
+      h += "<div style='background:var(--sur);border:1px solid var(--bd);border-radius:10px;padding:1rem;margin-bottom:1rem'>";
+      h += "<div style='font-size:.85rem;font-weight:700;color:var(--tx);margin-bottom:.3rem'>🏷️ Marcas con más plata frenada</div>";
+      h += "<div style='font-size:.66rem;color:var(--tx3);margin-bottom:.8rem'>Plata inmovilizada en stock dormido, por marca.</div>";
+      var maxM = marcasFren[0].inmov||1;
+      marcasFren.forEach(function(mk){
+        var pct=Math.max(3, mk.inmov/maxM*100);
+        h += "<div style='margin-bottom:.6rem'>";
+        h += "<div style='display:flex;justify-content:space-between;font-size:.73rem;margin-bottom:.2rem'><span style='color:var(--tx)'>"+_admEsc(mk.marca)+" <span style='color:var(--tx3);font-size:.64rem'>("+mk.count+" prod.)</span></span><span style='color:#e0655a;font-weight:700'>"+fmt(mk.inmov)+"</span></div>";
+        h += "<div style='height:8px;background:var(--sur2);border-radius:5px;overflow:hidden'><div style='height:100%;width:"+pct.toFixed(1)+"%;background:linear-gradient(90deg,#e0655a,#c9963a);border-radius:5px'></div></div>";
+        h += "</div>";
+      });
+      h += "</div>";
+    }
+
+    // ── Bajo margen ──
+    h += "<div style='background:var(--sur);border:1px solid var(--bd);border-radius:10px;padding:1rem;margin-bottom:1rem'>";
+    h += "<div style='font-size:.85rem;font-weight:700;color:var(--tx);margin-bottom:.3rem'>📉 Rotan pero dejan poca plata</div>";
+    h += "<div style='font-size:.66rem;color:var(--tx3);margin-bottom:.8rem'>Productos que sí se venden pero con el <b>margen más bajo</b>. En rojo, los que se venden por debajo del costo (pierden plata).</div>";
+    if(!bajoMargen.length){
+      h += "<div style='text-align:center;color:var(--tx3);padding:1.2rem;font-size:.8rem;font-style:italic'>Sin datos suficientes</div>";
+    } else {
+      h += "<div style='overflow-x:auto'><table style='width:100%;font-size:.74rem;border-collapse:collapse'>";
+      h += "<thead><tr style='border-bottom:1px solid var(--bd);text-align:left;color:var(--tx3);font-size:.64rem;text-transform:uppercase'>";
+      h += "<th style='padding:.45rem'>Producto</th><th style='text-align:right'>Vendidos</th><th style='text-align:right'>Precio prom</th><th style='text-align:right'>Costo</th><th style='text-align:right'>Gana c/u</th><th style='text-align:right'>Margen</th>";
+      h += "</tr></thead><tbody>";
+      bajoMargen.slice(0,12).forEach(function(it){
+        var neg = it.margen<0;
+        h += "<tr style='border-bottom:1px solid var(--bd)"+(neg?";background:rgba(224,101,90,.06)":"")+"'>";
+        h += "<td style='padding:.4rem .45rem;color:var(--tx);max-width:220px'>"+_admEsc(it.nombre)+"</td>";
+        h += "<td style='text-align:right;color:var(--tx2)'>"+it.unid+"</td>";
+        h += "<td style='text-align:right;color:var(--tx2)'>"+fmt(it.precioProm)+"</td>";
+        h += "<td style='text-align:right;color:var(--tx3)'>"+fmt(it.costoUnit)+"</td>";
+        h += "<td style='text-align:right;color:"+(neg?"#e0655a":"var(--tx)")+";font-weight:600'>"+fmt(it.ganUnit)+"</td>";
+        h += "<td style='text-align:right;font-weight:700;color:"+(neg?"#e0655a":it.margen<20?"#e0b43c":"var(--green)")+"'>"+it.margen.toFixed(0)+"%</td>";
+        h += "</tr>";
+      });
+      h += "</tbody></table></div>";
+    }
+    h += "</div>";
+
+    var el=document.getElementById("_repContenido"); if(el) el.innerHTML=h;
+  }).catch(function(e){
+    console.error("[belle] _repCargarBajoRend error:", e);
+    var el=document.getElementById("_repContenido");
+    if(el) el.innerHTML="<div style='color:var(--red);padding:2rem;text-align:center'>Error al cargar el análisis de bajo rendimiento</div>";
+  });
+}
+
+function _repExportDormidos(){
+  var d = window._repBajoRendData; if(!d || !d.dormidos) return;
+  var rows = [["Producto","Marca","ML","Ultima venta","Dias sin vender","Stock","Plata inmovilizada ARS","Unidades vendidas historico"]];
+  d.dormidos.forEach(function(it){
+    rows.push([
+      it.nombre, it.marca, it.ml||"",
+      it.ultima ? new Date(it.ultima).toLocaleDateString("es-AR") : "NUNCA",
+      it.dias===Infinity ? "NUNCA" : it.dias,
+      it.stock, Math.round(it.inmov), it.unidHist
+    ]);
+  });
+  _repDescargarCSV("Belle_stock_dormido", rows);
 }
 
 // ════════════════════════════════════════════════════════════════════
