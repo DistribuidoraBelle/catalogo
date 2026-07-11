@@ -33159,7 +33159,7 @@ function _repCargarProyeccion(){
     apiGetAll("ventas", "select=total&estado=in.(confirmada,archivada_periodo)&created_at=gte."+rAnt.desde.toISOString()+"&created_at=lt."+rAnt.hasta.toISOString()+"&limit=8000").catch(function(){return [];}),
     apiGet("gastos_vendedor", "select=monto,categoria,concepto&aprobado=is.true&created_at=gte."+r.desde.toISOString()+"&created_at=lt."+r.hasta.toISOString()+"&limit=5000").catch(function(){return [];}),
     apiGet("gastos_vendedor", "select=monto&aprobado=is.true&created_at=gte."+rAnt.desde.toISOString()+"&created_at=lt."+rAnt.hasta.toISOString()+"&limit=5000").catch(function(){return [];}),
-    (Array.isArray(prods) && prods.length) ? Promise.resolve(prods) : apiGet("productos", "select=id,nombre,empresa,activo,oculto,costo_ind,costo_log,stock_actual&limit=6000").catch(function(){return [];}),
+    apiGet("productos", "select=id,nombre,empresa,activo,oculto,costo_ind,costo_log,stock_actual,created_at,ultimo_ingreso_at,reingreso_at&limit=6000").catch(function(){return [];}),
     apiGet("combos", "select=id,nombre,combo_items(producto_id,cantidad,es_decan)&limit=2000").catch(function(){return [];}),
     apiGetAll("pedidos_catalogo", "select=cliente_id,total,created_at&estado=neq.cancelado&limit=20000").catch(function(){return [];}),
     apiGet("clientes", "select=id,nombre,apellido,telefono_principal,vendedor_asignado_id&limit=6000").catch(function(){return [];}),
@@ -33202,7 +33202,14 @@ function _repCargarProyeccion(){
     // Stock dormido con detalle
     var vendidos60={}; ventas60.forEach(function(v){ if(v.producto_id) vendidos60[v.producto_id]=true; });
     var dormN=0, dormPlata=0, dormLista=[];
-    productos.forEach(function(p){ if(!p.activo||p.oculto) return; var st=parseInt(p.stock_actual)||0; if(st>0 && !vendidos60[p.id]){ var cu=((parseFloat(p.costo_ind)||0)+(parseFloat(p.costo_log)||0))*cotiz; var pl=st*cu; dormN++; dormPlata+=pl; dormLista.push({nombre:p.nombre, marca:p.empresa||"—", stock:st, plata:pl}); } });
+    productos.forEach(function(p){ if(!p.activo||p.oculto) return; var st=parseInt(p.stock_actual)||0; if(st<=0) return;
+      if(vendidos60[p.id]) return; // vendió en los últimos 60 días: rota
+      var ingreso=Math.max(p.ultimo_ingreso_at?new Date(p.ultimo_ingreso_at).getTime():0, p.reingreso_at?new Date(p.reingreso_at).getTime():0, p.created_at?new Date(p.created_at).getTime():0);
+      var diasIng = ingreso>0 ? (Date.now()-ingreso)/86400000 : 999;
+      if(diasIng<=60) return; // recién ingresó: período de gracia, no es problema
+      var cu=((parseFloat(p.costo_ind)||0)+(parseFloat(p.costo_log)||0))*cotiz; var pl=st*cu;
+      dormN++; dormPlata+=pl; dormLista.push({nombre:p.nombre, marca:p.empresa||"—", stock:st, plata:pl});
+    });
     dormLista.sort(function(a,b){return b.plata-a.plata;});
 
     // Gastos por categoría
@@ -33332,32 +33339,32 @@ function _repDiasDesde(fechaStr){
   return Math.floor((Date.now() - d.getTime())/86400000);
 }
 function _repFmtDiasQuieto(dias){
-  if(dias===Infinity) return "Nunca vendido";
+  if(dias>=999999) return "sin datos";
   if(dias<=0) return "hoy";
   if(dias===1) return "ayer";
-  if(dias<30) return "hace "+dias+" días";
   if(dias<60) return "hace "+dias+" días";
   var m=Math.floor(dias/30);
   return "hace ~"+m+" mes"+(m===1?"":"es");
 }
-function _repCritBadge(dias){
-  if(dias===Infinity) return "<span style='background:rgba(224,101,90,.18);color:#e0655a;padding:.1rem .45rem;border-radius:5px;font-size:.62rem;font-weight:700'>🔴 NUNCA</span>";
-  if(dias>=60) return "<span style='background:rgba(224,101,90,.14);color:#e0655a;padding:.1rem .45rem;border-radius:5px;font-size:.62rem;font-weight:700'>🔴 +60d</span>";
-  if(dias>=30) return "<span style='background:rgba(230,180,60,.16);color:#e0b43c;padding:.1rem .45rem;border-radius:5px;font-size:.62rem;font-weight:700'>🟠 +30d</span>";
-  if(dias>=14) return "<span style='background:rgba(230,180,60,.12);color:#e0b43c;padding:.1rem .45rem;border-radius:5px;font-size:.62rem;font-weight:600'>🟡 +14d</span>";
-  return "<span style='color:var(--green);font-size:.62rem'>activo</span>";
+function _repCritBadge(dias, nunca){
+  var b;
+  if(dias>=90) b="<span style='background:rgba(224,101,90,.16);color:#e0655a;padding:.1rem .45rem;border-radius:5px;font-size:.62rem;font-weight:700'>🔴 +3 meses</span>";
+  else if(dias>=60) b="<span style='background:rgba(224,101,90,.12);color:#e0655a;padding:.1rem .45rem;border-radius:5px;font-size:.62rem;font-weight:700'>🔴 +60d</span>";
+  else if(dias>=30) b="<span style='background:rgba(230,180,60,.14);color:#e0b43c;padding:.1rem .45rem;border-radius:5px;font-size:.62rem;font-weight:700'>🟠 +30d</span>";
+  else b="<span style='color:var(--green);font-size:.62rem'>reciente</span>";
+  if(nunca) b+=" <span style='background:var(--sur2);color:var(--tx3);padding:.1rem .4rem;border-radius:5px;font-size:.6rem'>nunca vendió</span>";
+  return b;
 }
 
 function _repCargarBajoRend(){
-  var r = _repCalcRango(window._repPeriodo);
+  var UMBRAL = 30; // días para considerar "dormido" (los más nuevos quedan en gracia)
   Promise.all([
-    apiGet("productos", "select=id,nombre,empresa,ml,activo,oculto,costo_ind,costo_log,stock_actual&limit=6000").catch(function(){return [];}),
+    apiGet("productos", "select=id,nombre,empresa,ml,activo,oculto,costo_ind,costo_log,stock_actual,created_at,ultimo_ingreso_at,reingreso_at&limit=6000").catch(function(){return [];}),
     apiGetAll("ventas", "select=producto_id,cantidad,total,created_at&estado=in.(confirmada,archivada_periodo)&limit=20000").catch(function(){return [];})
   ]).then(function(data){
     var productos = data[0]||[], ventas = data[1]||[];
     var cotiz = (typeof cotizActual !== "undefined" && cotizActual) ? cotizActual : 1520;
 
-    // Agregar por producto: última venta, unidades históricas, facturación, precio prom
     var agg = {};
     ventas.forEach(function(v){
       var pid=v.producto_id; if(!pid) return;
@@ -33366,65 +33373,85 @@ function _repCargarBajoRend(){
       if(!a.ultima || v.created_at>a.ultima) a.ultima=v.created_at;
       a.unid += parseInt(v.cantidad)||0;
       a.fact += parseFloat(v.total)||0;
-      // ventas del período (para "menos vendidos del período")
-      if(v.created_at >= r.desde.toISOString() && v.created_at < r.hasta.toISOString()){
-        a.unidPer = (a.unidPer||0) + (parseInt(v.cantidad)||0);
-      }
     });
 
     var hoy = Date.now();
-    var dormidos=[], nuncaVend=[], bajoMargen=[];
-    var kActivos=0, kNunca=0, kQuietos30=0, plataInmov=0;
+    var dormidos=[], bajoMargen=[];
+    var kActivos=0, kNunca=0, kQuietos=0, kNuevos=0, plataInmov=0, plataNuevos=0;
     var porMarca = {};
 
     productos.forEach(function(p){
       if(!p.activo || p.oculto) return;
       kActivos++;
       var a = agg[p.id] || {ultima:null, unid:0, fact:0};
-      var dias = a.ultima ? Math.floor((hoy - new Date(a.ultima).getTime())/86400000) : Infinity;
       var stock = parseInt(p.stock_actual)||0;
       var costoUnit = ((parseFloat(p.costo_ind)||0)+(parseFloat(p.costo_log)||0))*cotiz;
       var inmov = stock>0 ? stock*costoUnit : 0;
       var marca = p.empresa || "Sin marca";
+      // fecha de referencia = movimiento MÁS RECIENTE (última venta o último ingreso de stock)
+      var ultimaV = a.ultima ? new Date(a.ultima).getTime() : 0;
+      var ingreso = Math.max(
+        p.ultimo_ingreso_at ? new Date(p.ultimo_ingreso_at).getTime() : 0,
+        p.reingreso_at ? new Date(p.reingreso_at).getTime() : 0,
+        p.created_at ? new Date(p.created_at).getTime() : 0
+      );
+      var fechaRef = Math.max(ultimaV, ingreso);
+      var dias = fechaRef>0 ? Math.floor((hoy - fechaRef)/86400000) : 999999;
+      var nunca = !a.ultima;
+      var esNuevo = dias < UMBRAL;
 
-      var item = { id:p.id, nombre:p.nombre, marca:marca, ml:p.ml, dias:dias, ultima:a.ultima, stock:stock, inmov:inmov, unidHist:a.unid, factHist:a.fact };
-
-      if(dias===Infinity){ kNunca++; nuncaVend.push(item); }
-      if(dias>30){ // dormido (incl. nunca)
-        kQuietos30++;
-        dormidos.push(item);
-        if(stock>0){
-          plataInmov += inmov;
-          if(!porMarca[marca]) porMarca[marca]={inmov:0, count:0};
-          porMarca[marca].inmov += inmov; porMarca[marca].count++;
-        }
+      if(esNuevo){
+        // Período de gracia: recién ingresó o se movió hace poco. NO es problema.
+        if(nunca && stock>0){ kNuevos++; plataNuevos += inmov; }
+        return;
       }
-      // Bajo margen: productos vendidos (>=3 unid histórico) con margen bajo
+      // A partir de acá: lleva +30 días sin moverse
+      if(nunca) kNunca++;
+      kQuietos++;
+      var item = { id:p.id, nombre:p.nombre, marca:marca, ml:p.ml, dias:dias, nunca:nunca, ingreso:ingreso, ultima:a.ultima, stock:stock, inmov:inmov, unidHist:a.unid };
+      dormidos.push(item);
+      if(stock>0){
+        plataInmov += inmov;
+        if(!porMarca[marca]) porMarca[marca]={inmov:0, count:0};
+        porMarca[marca].inmov += inmov; porMarca[marca].count++;
+      }
+
+      // Bajo margen (sobre productos con ventas reales)
       if(a.unid>=3 && a.fact>0){
         var precioProm = a.fact/a.unid;
         var margen = precioProm>0 ? (precioProm-costoUnit)/precioProm*100 : 0;
-        bajoMargen.push({ nombre:p.nombre, marca:marca, unid:a.unid, precioProm:precioProm, costoUnit:costoUnit, margen:margen, ganUnit:precioProm-costoUnit });
+        bajoMargen.push({ nombre:p.nombre, unid:a.unid, precioProm:precioProm, costoUnit:costoUnit, margen:margen, ganUnit:precioProm-costoUnit });
       }
     });
+    // bajo margen: recorrer TODOS los vendidos (no solo dormidos)
+    bajoMargen=[];
+    productos.forEach(function(p){
+      if(!p.activo||p.oculto) return;
+      var a=agg[p.id]; if(!a||a.unid<3||a.fact<=0) return;
+      var costoUnit=((parseFloat(p.costo_ind)||0)+(parseFloat(p.costo_log)||0))*cotiz;
+      var precioProm=a.fact/a.unid; var margen=precioProm>0?(precioProm-costoUnit)/precioProm*100:0;
+      bajoMargen.push({nombre:p.nombre, unid:a.unid, precioProm:precioProm, costoUnit:costoUnit, margen:margen, ganUnit:precioProm-costoUnit});
+    });
 
-    // Orden: más quieto primero (nunca = Infinity), desempate por plata inmovilizada
     dormidos.sort(function(a,b){ if(a.dias!==b.dias) return b.dias-a.dias; return b.inmov-a.inmov; });
     bajoMargen.sort(function(a,b){ return a.margen-b.margen; });
     var marcasFren = Object.keys(porMarca).map(function(k){return {marca:k, inmov:porMarca[k].inmov, count:porMarca[k].count};}).sort(function(a,b){return b.inmov-a.inmov;}).slice(0,6);
 
-    window._repBajoRendData = { dormidos:dormidos, cotiz:cotiz };
+    window._repBajoRendData = { dormidos:dormidos };
 
     var h="";
     h += _repHeaderSeccion("🐌 Bajo rendimiento", "bajorend");
-    h += "<div style='font-size:.7rem;color:var(--tx3);margin-bottom:.8rem;padding:.5rem .7rem;background:var(--sur2);border-radius:7px'>🎯 Dónde <b>no</b> conviene poner plata: lo que no rota, lo que está dormido y lo que deja poco margen. Ideal para decidir qué mandar a promoción.</div>";
+    h += "<div style='font-size:.7rem;color:var(--tx3);margin-bottom:.8rem;padding:.5rem .7rem;background:var(--sur2);border-radius:7px'>🎯 Dónde <b>no</b> conviene poner plata. La quietud se mide desde el <b>último movimiento real</b> (última venta o último ingreso de stock), así los productos recién llegados <b>no</b> se cuentan como problema: están en período de gracia.</div>";
 
-    // KPIs
     h += "<div style='display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:.6rem;margin-bottom:1rem'>";
     h += _repPanoKpi("📦 Productos activos", kActivos.toLocaleString("es-AR"), "var(--tx)");
-    h += _repPanoKpi("🔴 Nunca vendidos", kNunca.toLocaleString("es-AR"), "#e0655a", "de "+kActivos+" activos");
-    h += _repPanoKpi("😴 Dormidos (+30 días)", kQuietos30.toLocaleString("es-AR"), "#e0b43c", "sin ventas hace +1 mes");
+    h += _repPanoKpi("🔴 Nunca vendidos", kNunca.toLocaleString("es-AR"), "#e0655a", "+30 días en stock, sin 1 venta");
+    h += _repPanoKpi("😴 Dormidos (+30 días)", kQuietos.toLocaleString("es-AR"), "#e0b43c", "sin moverse hace +1 mes");
     h += _repPanoKpi("💸 Plata inmovilizada", fmt(plataInmov), "#e0655a", "en stock que no rota");
     h += "</div>";
+    if(kNuevos>0){
+      h += "<div style='font-size:.7rem;color:var(--tx3);margin-bottom:1rem;padding:.5rem .7rem;background:rgba(76,175,130,.08);border:1px solid rgba(76,175,130,.25);border-radius:7px'>🌱 <b>"+kNuevos+" producto"+(kNuevos===1?"":"s")+" nuevo"+(kNuevos===1?"":"s")+"</b> (ingresaron hace menos de "+UMBRAL+" días y aún no vendieron): "+fmt(plataNuevos)+" en stock. <b>No</b> los cuento como problema todavía — dales tiempo.</div>";
+    }
 
     // ── Stock dormido ──
     h += "<div style='background:var(--sur);border:1px solid var(--bd);border-radius:10px;padding:1rem;margin-bottom:1rem'>";
@@ -33432,13 +33459,13 @@ function _repCargarBajoRend(){
     h += "<div style='font-size:.85rem;font-weight:700;color:var(--tx)'>😴 Stock dormido — candidatos a promoción</div>";
     h += "<button class='btn btn-g' onclick='_repExportDormidos()' style='font-size:.7rem'>⬇ Exportar Excel</button>";
     h += "</div>";
-    h += "<div style='font-size:.66rem;color:var(--tx3);margin-bottom:.7rem'>Ordenados del que hace <b>más tiempo</b> no sale. El de arriba es el más urgente para largar en oferta.</div>";
+    h += "<div style='font-size:.66rem;color:var(--tx3);margin-bottom:.7rem'>Ordenados del que hace <b>más tiempo</b> no se mueve. Arriba, los más urgentes para largar en oferta.</div>";
     if(!dormidos.length){
-      h += "<div style='text-align:center;color:var(--green);padding:1.5rem;font-size:.82rem'>✅ ¡Todo rota! No hay productos dormidos.</div>";
+      h += "<div style='text-align:center;color:var(--green);padding:1.5rem;font-size:.82rem'>✅ ¡Todo lo que ya tuvo su tiempo rota! No hay dormidos.</div>";
     } else {
       h += "<div style='overflow-x:auto'><table style='width:100%;font-size:.74rem;border-collapse:collapse'>";
       h += "<thead><tr style='border-bottom:1px solid var(--bd);text-align:left;color:var(--tx3);font-size:.64rem;text-transform:uppercase'>";
-      h += "<th style='padding:.45rem'>#</th><th>Producto</th><th>Marca</th><th>Última venta</th><th>Estado</th><th style='text-align:right'>Stock</th><th style='text-align:right'>Plata parada</th>";
+      h += "<th style='padding:.45rem'>#</th><th>Producto</th><th>Marca</th><th>Quieto</th><th>Estado</th><th style='text-align:right'>Stock</th><th style='text-align:right'>Plata parada</th>";
       h += "</tr></thead><tbody>";
       dormidos.slice(0,40).forEach(function(it,i){
         h += "<tr style='border-bottom:1px solid var(--bd)'>";
@@ -33446,7 +33473,7 @@ function _repCargarBajoRend(){
         h += "<td style='color:var(--tx);max-width:220px'>"+_admEsc(it.nombre)+(it.ml?" <span style='color:var(--tx3);font-size:.66rem'>"+it.ml+"ml</span>":"")+"</td>";
         h += "<td style='color:var(--tx2)'>"+_admEsc(it.marca)+"</td>";
         h += "<td style='color:var(--tx3)'>"+_repFmtDiasQuieto(it.dias)+"</td>";
-        h += "<td>"+_repCritBadge(it.dias)+"</td>";
+        h += "<td>"+_repCritBadge(it.dias, it.nunca)+"</td>";
         h += "<td style='text-align:right;color:"+(it.stock>0?"var(--tx)":"var(--tx3)")+";font-weight:600'>"+it.stock+"</td>";
         h += "<td style='text-align:right;color:"+(it.inmov>0?"#e0655a":"var(--tx3)")+";font-weight:700'>"+(it.inmov>0?fmt(it.inmov):"—")+"</td>";
         h += "</tr>";
@@ -33508,19 +33535,19 @@ function _repCargarBajoRend(){
 
 function _repExportDormidos(){
   var d = window._repBajoRendData; if(!d || !d.dormidos) return;
-  var rows = [["Producto","Marca","ML","Ultima venta","Dias sin vender","Stock","Plata inmovilizada ARS","Unidades vendidas historico"]];
+  var rows = [["Producto","Marca","ML","Quieto (dias)","Nunca vendido","Ultima venta","Stock","Plata inmovilizada ARS","Unidades vendidas historico"]];
   d.dormidos.forEach(function(it){
     rows.push([
       it.nombre, it.marca, it.ml||"",
-      it.ultima ? new Date(it.ultima).toLocaleDateString("es-AR") : "NUNCA",
-      it.dias===Infinity ? "NUNCA" : it.dias,
+      it.dias>=999999?"s/d":it.dias,
+      it.nunca?"SI":"no",
+      it.ultima ? new Date(it.ultima).toLocaleDateString("es-AR") : "nunca",
       it.stock, Math.round(it.inmov), it.unidHist
     ]);
   });
   _repDescargarCSV("Belle_stock_dormido", rows);
 }
 
-// ════════════════════════════════════════════════════════════════════
 // SECCIÓN: RENTABILIDAD (la joya de la corona)
 // Calcula: facturación, costos productos, gastos operativos,
 //          ganancia bruta, ganancia neta, márgenes, ticket promedio
