@@ -33360,19 +33360,26 @@ function _repCargarBajoRend(){
   var UMBRAL = 30; // días para considerar "dormido" (los más nuevos quedan en gracia)
   Promise.all([
     apiGet("productos", "select=id,nombre,empresa,ml,activo,oculto,costo_ind,costo_log,stock_actual,created_at,ultimo_ingreso_at,reingreso_at&limit=6000").catch(function(){return [];}),
-    apiGetAll("ventas", "select=producto_id,cantidad,total,created_at&estado=in.(confirmada,archivada_periodo)&limit=20000").catch(function(){return [];})
+    apiGetAll("ventas", "select=producto_id,producto_nombre,cantidad,total,segmento,created_at&estado=in.(confirmada,archivada_periodo)&limit=20000").catch(function(){return [];}),
+    apiGet("combos", "select=id,nombre,combo_items(producto_id,cantidad,es_decan)&limit=2000").catch(function(){return [];})
   ]).then(function(data){
-    var productos = data[0]||[], ventas = data[1]||[];
+    var productos = data[0]||[], ventas = data[1]||[], combos = data[2]||[];
     var cotiz = (typeof cotizActual !== "undefined" && cotizActual) ? cotizActual : 1520;
+    var DECAN_ML=5, PERFUME_ML=100, cpv=0.94*cotiz;
+    var mapCP={}; productos.forEach(function(p){ mapCP[p.id]=((parseFloat(p.costo_ind)||0)+(parseFloat(p.costo_log)||0))*cotiz; });
+    var mapCC={}; combos.forEach(function(c){ var ct=0; (c.combo_items||[]).forEach(function(ci){ var cb=mapCP[ci.producto_id]||0,q=parseInt(ci.cantidad)||1; ct+= ci.es_decan?((cb*DECAN_ML/PERFUME_ML)+cpv)*q:cb*q; }); if(c.nombre)mapCC[c.nombre]=ct; });
+    function _costoU(v){ var s=(v.segmento||"").toLowerCase(); if(s==="combo"){var nl=(v.producto_nombre||"").replace(/^Combo:\s*/i,"").trim();return mapCC[nl]||mapCC[v.producto_nombre]||0;} var cb=mapCP[v.producto_id]||0; if(s==="decan")return (cb*DECAN_ML/PERFUME_ML)+cpv; return cb; }
 
+    // Agregar por producto: última venta + margen REAL (costo por segmento, sin ventas de $0)
     var agg = {};
     ventas.forEach(function(v){
       var pid=v.producto_id; if(!pid) return;
-      if(!agg[pid]) agg[pid]={ultima:null, unid:0, fact:0};
+      if(!agg[pid]) agg[pid]={ultima:null, unid:0, factM:0, costoM:0, unidM:0};
       var a=agg[pid];
       if(!a.ultima || v.created_at>a.ultima) a.ultima=v.created_at;
-      a.unid += parseInt(v.cantidad)||0;
-      a.fact += parseFloat(v.total)||0;
+      var q=parseInt(v.cantidad)||0, t=parseFloat(v.total)||0;
+      a.unid += q;
+      if(t>0){ a.factM += t; a.unidM += q; a.costoM += _costoU(v)*q; } // solo ventas reales, costo según segmento
     });
 
     var hoy = Date.now();
@@ -33383,12 +33390,11 @@ function _repCargarBajoRend(){
     productos.forEach(function(p){
       if(!p.activo || p.oculto) return;
       kActivos++;
-      var a = agg[p.id] || {ultima:null, unid:0, fact:0};
+      var a = agg[p.id] || {ultima:null, unid:0, factM:0, costoM:0, unidM:0};
       var stock = parseInt(p.stock_actual)||0;
-      var costoUnit = ((parseFloat(p.costo_ind)||0)+(parseFloat(p.costo_log)||0))*cotiz;
-      var inmov = stock>0 ? stock*costoUnit : 0;
+      var costoFull = mapCP[p.id]||0;
+      var inmov = stock>0 ? stock*costoFull : 0;
       var marca = p.empresa || "Sin marca";
-      // fecha de referencia = movimiento MÁS RECIENTE (última venta o último ingreso de stock)
       var ultimaV = a.ultima ? new Date(a.ultima).getTime() : 0;
       var ingreso = Math.max(
         p.ultimo_ingreso_at ? new Date(p.ultimo_ingreso_at).getTime() : 0,
@@ -33398,39 +33404,21 @@ function _repCargarBajoRend(){
       var fechaRef = Math.max(ultimaV, ingreso);
       var dias = fechaRef>0 ? Math.floor((hoy - fechaRef)/86400000) : 999999;
       var nunca = !a.ultima;
-      var esNuevo = dias < UMBRAL;
 
-      if(esNuevo){
-        // Período de gracia: recién ingresó o se movió hace poco. NO es problema.
+      if(dias < UMBRAL){
         if(nunca && stock>0){ kNuevos++; plataNuevos += inmov; }
-        return;
-      }
-      // A partir de acá: lleva +30 días sin moverse
-      if(nunca) kNunca++;
-      kQuietos++;
-      var item = { id:p.id, nombre:p.nombre, marca:marca, ml:p.ml, dias:dias, nunca:nunca, ingreso:ingreso, ultima:a.ultima, stock:stock, inmov:inmov, unidHist:a.unid };
-      dormidos.push(item);
-      if(stock>0){
-        plataInmov += inmov;
-        if(!porMarca[marca]) porMarca[marca]={inmov:0, count:0};
-        porMarca[marca].inmov += inmov; porMarca[marca].count++;
+      } else {
+        if(nunca) kNunca++;
+        kQuietos++;
+        dormidos.push({ id:p.id, nombre:p.nombre, marca:marca, ml:p.ml, dias:dias, nunca:nunca, ultima:a.ultima, stock:stock, inmov:inmov, unidHist:a.unid });
+        if(stock>0){ plataInmov += inmov; if(!porMarca[marca]) porMarca[marca]={inmov:0, count:0}; porMarca[marca].inmov += inmov; porMarca[marca].count++; }
       }
 
-      // Bajo margen (sobre productos con ventas reales)
-      if(a.unid>=3 && a.fact>0){
-        var precioProm = a.fact/a.unid;
-        var margen = precioProm>0 ? (precioProm-costoUnit)/precioProm*100 : 0;
-        bajoMargen.push({ nombre:p.nombre, unid:a.unid, precioProm:precioProm, costoUnit:costoUnit, margen:margen, ganUnit:precioProm-costoUnit });
+      // Bajo margen REAL: facturación y costo por segmento, con >=3 unidades pagas
+      if(a.unidM>=3 && a.factM>0){
+        var margen = (a.factM - a.costoM)/a.factM*100;
+        bajoMargen.push({ nombre:p.nombre, unid:a.unidM, fact:a.factM, costo:a.costoM, gan:a.factM-a.costoM, margen:margen });
       }
-    });
-    // bajo margen: recorrer TODOS los vendidos (no solo dormidos)
-    bajoMargen=[];
-    productos.forEach(function(p){
-      if(!p.activo||p.oculto) return;
-      var a=agg[p.id]; if(!a||a.unid<3||a.fact<=0) return;
-      var costoUnit=((parseFloat(p.costo_ind)||0)+(parseFloat(p.costo_log)||0))*cotiz;
-      var precioProm=a.fact/a.unid; var margen=precioProm>0?(precioProm-costoUnit)/precioProm*100:0;
-      bajoMargen.push({nombre:p.nombre, unid:a.unid, precioProm:precioProm, costoUnit:costoUnit, margen:margen, ganUnit:precioProm-costoUnit});
     });
 
     dormidos.sort(function(a,b){ if(a.dias!==b.dias) return b.dias-a.dias; return b.inmov-a.inmov; });
@@ -33441,7 +33429,7 @@ function _repCargarBajoRend(){
 
     var h="";
     h += _repHeaderSeccion("🐌 Bajo rendimiento", "bajorend");
-    h += "<div style='font-size:.7rem;color:var(--tx3);margin-bottom:.8rem;padding:.5rem .7rem;background:var(--sur2);border-radius:7px'>🎯 Dónde <b>no</b> conviene poner plata. La quietud se mide desde el <b>último movimiento real</b> (última venta o último ingreso de stock), así los productos recién llegados <b>no</b> se cuentan como problema: están en período de gracia.</div>";
+    h += "<div style='font-size:.7rem;color:var(--tx3);margin-bottom:.8rem;padding:.5rem .7rem;background:var(--sur2);border-radius:7px'>🎯 Dónde <b>no</b> conviene poner plata. La quietud se mide desde el <b>último movimiento real</b> (última venta o último ingreso de stock), así los recién llegados <b>no</b> cuentan como problema. Los márgenes usan el costo real según el tipo de venta (frasco, decant o combo).</div>";
 
     h += "<div style='display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:.6rem;margin-bottom:1rem'>";
     h += _repPanoKpi("📦 Productos activos", kActivos.toLocaleString("es-AR"), "var(--tx)");
@@ -33499,25 +33487,25 @@ function _repCargarBajoRend(){
       h += "</div>";
     }
 
-    // ── Bajo margen ──
+    // ── Bajo margen (corregido) ──
     h += "<div style='background:var(--sur);border:1px solid var(--bd);border-radius:10px;padding:1rem;margin-bottom:1rem'>";
     h += "<div style='font-size:.85rem;font-weight:700;color:var(--tx);margin-bottom:.3rem'>📉 Rotan pero dejan poca plata</div>";
-    h += "<div style='font-size:.66rem;color:var(--tx3);margin-bottom:.8rem'>Productos que sí se venden pero con el <b>margen más bajo</b>. En rojo, los que se venden por debajo del costo (pierden plata).</div>";
+    h += "<div style='font-size:.66rem;color:var(--tx3);margin-bottom:.8rem'>Productos con al menos 3 ventas reales, ordenados por el <b>margen más bajo</b>. Facturación y costo calculados por tipo de venta. En rojo, margen negativo real.</div>";
     if(!bajoMargen.length){
       h += "<div style='text-align:center;color:var(--tx3);padding:1.2rem;font-size:.8rem;font-style:italic'>Sin datos suficientes</div>";
     } else {
       h += "<div style='overflow-x:auto'><table style='width:100%;font-size:.74rem;border-collapse:collapse'>";
       h += "<thead><tr style='border-bottom:1px solid var(--bd);text-align:left;color:var(--tx3);font-size:.64rem;text-transform:uppercase'>";
-      h += "<th style='padding:.45rem'>Producto</th><th style='text-align:right'>Vendidos</th><th style='text-align:right'>Precio prom</th><th style='text-align:right'>Costo</th><th style='text-align:right'>Gana c/u</th><th style='text-align:right'>Margen</th>";
+      h += "<th style='padding:.45rem'>Producto</th><th style='text-align:right'>Vendidos</th><th style='text-align:right'>Facturó</th><th style='text-align:right'>Costo</th><th style='text-align:right'>Ganancia</th><th style='text-align:right'>Margen</th>";
       h += "</tr></thead><tbody>";
       bajoMargen.slice(0,12).forEach(function(it){
         var neg = it.margen<0;
         h += "<tr style='border-bottom:1px solid var(--bd)"+(neg?";background:rgba(224,101,90,.06)":"")+"'>";
         h += "<td style='padding:.4rem .45rem;color:var(--tx);max-width:220px'>"+_admEsc(it.nombre)+"</td>";
         h += "<td style='text-align:right;color:var(--tx2)'>"+it.unid+"</td>";
-        h += "<td style='text-align:right;color:var(--tx2)'>"+fmt(it.precioProm)+"</td>";
-        h += "<td style='text-align:right;color:var(--tx3)'>"+fmt(it.costoUnit)+"</td>";
-        h += "<td style='text-align:right;color:"+(neg?"#e0655a":"var(--tx)")+";font-weight:600'>"+fmt(it.ganUnit)+"</td>";
+        h += "<td style='text-align:right;color:var(--tx2)'>"+fmt(it.fact)+"</td>";
+        h += "<td style='text-align:right;color:var(--tx3)'>"+fmt(it.costo)+"</td>";
+        h += "<td style='text-align:right;color:"+(neg?"#e0655a":"var(--green)")+";font-weight:600'>"+fmt(it.gan)+"</td>";
         h += "<td style='text-align:right;font-weight:700;color:"+(neg?"#e0655a":it.margen<20?"#e0b43c":"var(--green)")+"'>"+it.margen.toFixed(0)+"%</td>";
         h += "</tr>";
       });
