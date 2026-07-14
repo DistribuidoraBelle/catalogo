@@ -1,6 +1,33 @@
 ---
 name: emil-design-eng
-description: This skill encodes Emil Kowalski's philosophy on UI polish, component design, animation decisions, and the invisible details that make software feel great.
+description: |
+  This skill encodes Emil Kowalski's philosophy on UI polish, component design, animation decisions, and the invisible details that make software feel great.
+triggers:
+  - "emil kowalski"
+  - "design engineering"
+  - "UI polish philosophy"
+  - "animation philosophy"
+  - "component design"
+  - "invisible details"
+  - "界面哲学"
+  - "设计工程"
+od:
+  mode: prototype
+  surface: web
+  platform: desktop
+  category: design-engineering
+  upstream: "https://github.com/emilkowalski/skills"
+  source-commit: a47903a06a05d2e24c483bd8961c85969a51a494
+  preview:
+    type: markdown
+  craft:
+    requires:
+      - animation-discipline
+      - accessibility-baseline
+      - typography
+      - anti-ai-slop
+  example_prompt: |
+    Help me build interfaces that feel right — consult Emil Kowalski's design engineering philosophy for animation decisions, component building, CSS mastery, and the invisible details that compound into great software.
 ---
 
 # Design Engineering

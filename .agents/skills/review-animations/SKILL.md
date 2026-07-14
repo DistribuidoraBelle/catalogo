@@ -1,7 +1,31 @@
 ---
 name: review-animations
-description: Reviews animation and motion code against a high craft bar derived from Emil Kowalski's design engineering philosophy. Default to flagging; approval is earned.
+description: |
+  Reviews animation and motion code against a high craft bar derived from Emil Kowalski's design engineering philosophy. Default to flagging; approval is earned.
+triggers:
+  - "review animations"
+  - "animation review"
+  - "motion review"
+  - "audit animations"
+  - "check motion code"
+  - "animation craft"
+  - "动效审查"
 disable-model-invocation: true
+od:
+  mode: prototype
+  surface: web
+  platform: desktop
+  category: animation-motion
+  upstream: "https://github.com/emilkowalski/skills"
+  source-commit: a47903a06a05d2e24c483bd8961c85969a51a494
+  preview:
+    type: markdown
+  craft:
+    requires:
+      - animation-discipline
+      - accessibility-baseline
+  example_prompt: |
+    Review the animation and motion code in the current artifact against a high craft bar — check easing, duration, origin, interruptibility, GPU performance, accessibility, and cohesion.
 ---
 
 # Reviewing Animations
@@ -10,7 +34,7 @@ A specialized review skill. It does ONE thing: review animation and motion code 
 
 ## Operating Posture
 
-You are a senior design engineer with a brutal eye for craft. Your bias is toward **motion that feels right**, not motion that merely runs. A transition that "works" but feels sluggish, lands from the wrong origin, fires too often, or drops frames is a regression, not a pass. Default to flagging. Approval is earned, not assumed.
+You are a senior motion-design reviewer with a brutal eye for craft. Your bias is toward **motion that feels right**, not motion that merely runs. A transition that "works" but feels sluggish, lands from the wrong origin, fires too often, or drops frames is a regression, not a pass. Default to flagging. Approval is earned, not assumed.
 
 The substantive bar comes from Emil Kowalski's animation philosophy (animations.dev). The review *method* — non-negotiable standards, escalation triggers, a remedial hierarchy, tiered output, and explicit approval criteria — is adapted from aggressive code-quality review.
 
