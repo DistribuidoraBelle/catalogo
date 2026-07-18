@@ -895,6 +895,8 @@ tr.row-hl:hover td{
         <button class="btn btn-a" onclick="stkBulkAplicar()" style="font-size:.72rem;font-weight:700">Aplicar</button>
         <button class="btn btn-g" onclick="stkSelAllFiltered()" style="font-size:.72rem">☑️ Seleccionar todos (filtrados)</button>
         <button class="btn btn-g" onclick="stkSelClear()" style="font-size:.72rem">Limpiar</button>
+        <span style="color:var(--tx3)">·</span>
+        <button class="btn btn-red" onclick="stkBulkEliminar()" style="font-size:.72rem;font-weight:700">🗑️ Eliminar seleccionados</button>
       </div>
       <div class="tbl-wrap" id="stockProdWrap">
         <div class="tbl-scroll">
@@ -3046,6 +3048,27 @@ tr.row-hl:hover td{
 </div>
 </div>
 
+<!-- MODAL ELIMINAR PRODUCTOS EN LOTE -->
+<div class="mo" id="moStkBulkDel">
+<div class="md" style="max-width:560px">
+  <div class="mh"><div class="mtt">🗑️ Eliminar productos</div><button class="btn btn-g" onclick="cerrarModal('moStkBulkDel')" style="padding:.2rem .5rem">X</button></div>
+  <div class="mb">
+    <div id="stkBulkDelResumen" style="font-size:.84rem;color:var(--tx)"></div>
+    <div id="stkBulkDelLista" style="max-height:230px;overflow-y:auto;background:var(--sur2);border:1px solid var(--bd);border-radius:8px;padding:.5rem .6rem"></div>
+    <div id="stkBulkDelWarn"></div>
+    <div class="fg full">
+      <label>Motivo de la eliminación (queda en el historial)</label>
+      <input class="fi" id="stkBulkDelMotivo" type="text" placeholder="ej: producto discontinuado" maxlength="120">
+    </div>
+    <div style="font-size:.68rem;color:var(--tx3);line-height:1.5">Las ventas históricas y los movimientos de stock se conservan (quedan con nombre legible). Esta acción <b>no se puede deshacer</b>.</div>
+  </div>
+  <div class="mf">
+    <button class="btn btn-g" onclick="cerrarModal('moStkBulkDel')">Cancelar</button>
+    <button class="btn btn-red" id="stkBulkDelBtn" onclick="stkBulkDelConfirmar()">Eliminar definitivamente</button>
+  </div>
+</div>
+</div>
+
 <!-- MODAL EDITAR RENDICION -->
 <div class="mo" id="moRend">
 <div class="md" style="max-width:440px">
@@ -4972,6 +4995,110 @@ function stkBulkAplicar(){
       patch.precio_may_ars=r.pm; patch.precio_med_ars=r.pe; patch.precio_min_ars=r.pi;
     }
     apiPatch('productos',patch,'id=eq.'+id).then(function(){ok++;},function(){fail++;}).then(_step);
+  })();
+}
+
+// ── Eliminar productos seleccionados (en lote) — reusa el patrón seguro de deleteProd() ──
+function stkBulkEliminar(){
+  var ids=Array.from(window._stkSel||[]);
+  if(!ids.length){toast('No hay productos seleccionados','twarn');return;}
+  var sel=ids.map(function(id){return prods.find(function(x){return x.id===id;});}).filter(Boolean);
+  if(!sel.length){toast('No se encontraron los productos seleccionados','terr');return;}
+  toast('Verificando dependencias...','tok');
+  var idlist=sel.map(function(p){return p.id;}).join(',');
+  Promise.all([
+    apiGet("reservas","select=producto_id,cantidad&estado=eq.activa&producto_id=in.("+idlist+")&limit=2000").catch(function(){return [];}),
+    apiGet("combo_items","select=combo_id,producto_id&producto_id=in.("+idlist+")&limit=1000").catch(function(){return [];}),
+    apiGet("fichas_perfume","select=id,producto_id&producto_id=in.("+idlist+")&limit=2000").catch(function(){return [];})
+  ]).then(function(deps){
+    var reservas=deps[0]||[], combos=deps[1]||[], fichas=deps[2]||[];
+    var reservaPorProd={}, comboPorProd={}, fichaSet={};
+    reservas.forEach(function(r){reservaPorProd[r.producto_id]=(reservaPorProd[r.producto_id]||0)+(r.cantidad||0);});
+    combos.forEach(function(c){(comboPorProd[c.producto_id]=comboPorProd[c.producto_id]||[]).push(c.combo_id);});
+    fichas.forEach(function(f){fichaSet[f.producto_id]=true;});
+    var bloqueados=[], eliminables=[];
+    sel.forEach(function(p){
+      if(reservaPorProd[p.id]){ bloqueados.push({p:p,reserva:reservaPorProd[p.id]}); }
+      else { eliminables.push({p:p, tieneFicha:!!fichaSet[p.id], combos:(comboPorProd[p.id]||[])}); }
+    });
+    window._stkBulkDelData={eliminables:eliminables};
+
+    var resumen=document.getElementById('stkBulkDelResumen');
+    resumen.innerHTML = eliminables.length
+      ? "Vas a eliminar <b style='color:var(--red)'>"+eliminables.length+"</b> producto"+(eliminables.length!==1?'s':'')+" del catálogo."
+      : "<b style='color:var(--red)'>Ninguno de los seleccionados se puede eliminar ahora.</b>";
+
+    var lista=document.getElementById('stkBulkDelLista'); var lh='';
+    eliminables.forEach(function(e){
+      var badges=[];
+      if(e.p.stock_actual>0) badges.push("<span style='color:var(--tx3)'>"+e.p.stock_actual+"u stock</span>");
+      if(e.p.en_viaje>0) badges.push("<span style='color:#d0a040'>"+e.p.en_viaje+"u en viaje</span>");
+      if(e.combos.length) badges.push("<span style='color:var(--red)'>en "+e.combos.length+" combo"+(e.combos.length!==1?'s':'')+"</span>");
+      lh += "<div style='display:flex;justify-content:space-between;gap:.5rem;align-items:baseline;padding:.28rem .05rem;border-bottom:1px solid var(--bd)'>"+
+            "<span style='color:var(--tx);font-size:.76rem'>"+_admEsc((e.p.empresa?e.p.empresa+' · ':'')+(e.p.nombre||''))+"</span>"+
+            "<span style='font-size:.66rem;white-space:nowrap;text-align:right'>"+badges.join(' · ')+"</span></div>";
+    });
+    lista.innerHTML = lh || "<div style='color:var(--tx3);font-size:.76rem;padding:.3rem'>—</div>";
+    lista.style.display = eliminables.length ? '' : 'none';
+
+    var warn=document.getElementById('stkBulkDelWarn'); var wh='';
+    var totStock=eliminables.reduce(function(s,e){return s+(e.p.stock_actual>0?e.p.stock_actual:0);},0);
+    var totViaje=eliminables.reduce(function(s,e){return s+(e.p.en_viaje>0?e.p.en_viaje:0);},0);
+    var conCombos=eliminables.filter(function(e){return e.combos.length;}).length;
+    var avisos=[];
+    if(totStock>0) avisos.push("Se pierde información de <b>"+totStock+"u</b> en stock físico.");
+    if(totViaje>0) avisos.push("Se pierden <b>"+totViaje+"u</b> pendientes en viaje.");
+    if(conCombos>0) avisos.push("<b>"+conCombos+"</b> producto"+(conCombos!==1?'s':'')+" está"+(conCombos!==1?'n':'')+" en combos — esos combos quedarán incompletos.");
+    if(avisos.length) wh += "<div style='background:var(--rdim);border:1px solid var(--red);border-radius:8px;padding:.5rem .65rem;font-size:.72rem;color:var(--tx2);line-height:1.55'>⚠️ "+avisos.join('<br>⚠️ ')+"</div>";
+    if(bloqueados.length){
+      var bl=bloqueados.map(function(b){return _admEsc(b.p.nombre||'')+" ("+b.reserva+"u)";}).join(', ');
+      wh += "<div style='margin-top:.5rem;background:var(--sur2);border:1px dashed var(--bd2);border-radius:8px;padding:.5rem .65rem;font-size:.72rem;color:var(--tx3);line-height:1.55'>🔒 <b>"+bloqueados.length+"</b> con reserva activa — <b>NO</b> se eliminan: "+bl+". Cancelá las reservas primero.</div>";
+    }
+    warn.innerHTML=wh;
+
+    var btn=document.getElementById('stkBulkDelBtn');
+    if(btn){ btn.disabled=!eliminables.length; btn.style.opacity=eliminables.length?'1':'.5'; btn.textContent=eliminables.length?('Eliminar '+eliminables.length+' definitivamente'):'Nada para eliminar'; }
+    document.getElementById('stkBulkDelMotivo').value='';
+    abrirModal('moStkBulkDel');
+  }).catch(function(e){ toast('Error verificando dependencias: '+(e&&e.message||''),'terr'); });
+}
+
+function stkBulkDelConfirmar(){
+  var data=window._stkBulkDelData; if(!data||!data.eliminables||!data.eliminables.length){cerrarModal('moStkBulkDel');return;}
+  var motivoRaw=(document.getElementById('stkBulkDelMotivo')||{value:''}).value.trim();
+  var motivo=(motivoRaw||'Eliminación masiva desde Stock y precios').replace(/[<>]/g,'').replace(/\|/g,'/');
+  var lista=data.eliminables.slice();
+  var btn=document.getElementById('stkBulkDelBtn');
+  if(btn){btn.disabled=true;btn.textContent='Eliminando...';}
+  var ok=0,fail=0,i=0;
+  (function _step(){
+    if(i>=lista.length){
+      if(btn)btn.disabled=false;
+      cerrarModal('moStkBulkDel');
+      toast('Eliminados: '+ok+(fail?' · '+fail+' con error':''), fail?'twarn':'tok');
+      lista.forEach(function(e){window._stkSel.delete(e.p.id);});
+      stkUpdateBulkBar();
+      loadProds();
+      return;
+    }
+    var e=lista[i++]; var p=e.p; var id=p.id;
+    apiPost("movimientos_stock",{
+      producto_id:id, producto_nombre:p.nombre,
+      tipo:"eliminacion", cantidad:0,
+      stock_antes:p.stock_actual||0, stock_despues:0,
+      motivo:"HARD DELETE (lote): "+motivo+(e.combos.length?" | en "+e.combos.length+" combo(s)":"")+((p.en_viaje||0)?" | "+p.en_viaje+"u en viaje":""),
+      usuario:"admin"
+    }).catch(function(){})
+    .then(function(){ return e.tieneFicha ? apiDelete("fichas_perfume","producto_id=eq."+id).catch(function(){}) : null; })
+    .then(function(){ return apiDelete("productos","id=eq."+id); })
+    .then(function(){
+      ok++;
+      _logAct('eliminar_producto',{producto_id:id,producto_nombre:p.nombre,empresa:p.empresa||null,motivo:motivo,stock_actual_perdido:p.stock_actual||0,en_viaje_perdido:p.en_viaje||0,fichas_eliminadas:e.tieneFicha?1:0,combos_afectados:e.combos.length,origen:'lote'});
+    },function(err){
+      fail++;
+      _logAct('eliminar_producto',{producto_id:id,producto_nombre:p.nombre,motivo:motivo,origen:'lote'},{exito:false,error_msg:err&&err.message||String(err)});
+    })
+    .then(_step);
   })();
 }
 
