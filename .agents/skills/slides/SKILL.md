@@ -1,42 +1,40 @@
 ---
 name: slides
-description: |
-  Create and edit .pptx presentation decks with PptxGenJS. Useful for sales decks, kickoff briefs, and design-system showcases.
-triggers:
-  - "slides"
-  - "pptxgenjs"
-  - "sales deck"
-  - "design showcase deck"
-od:
-  mode: deck
-  category: slides
-  upstream: "https://github.com/openai/skills"
+description: Create strategic HTML presentations with Chart.js, design tokens, responsive layouts, copywriting formulas, and contextual slide strategies.
+argument-hint: "[topic] [slide-count]"
+metadata:
+  author: claudekit
+  version: "1.0.0"
 ---
 
-# slides
+# Slides
 
-> Curated from OpenAI's skills repository.
+Strategic HTML presentation design with data visualization.
 
-## What it does
+## When to Use
 
-Create and edit .pptx presentation decks with PptxGenJS. Useful for sales decks, kickoff briefs, and design-system showcases.
+- Marketing presentations and pitch decks
+- Data-driven slides with Chart.js
+- Strategic slide design with layout patterns
+- Copywriting-optimized presentation content
 
-## Source
+## Subcommands
 
-- Upstream: https://github.com/openai/skills
-- Category: `slides`
+| Subcommand | Description | Reference |
+|------------|-------------|-----------|
+| `create` | Create strategic presentation slides | `references/create.md` |
 
-## How to use
+## References (Knowledge Base)
 
-This catalogue entry advertises the skill in Open Design so the agent
-discovers it during planning. To run the full upstream workflow with
-its original assets, scripts, and references, install the upstream
-bundle into your active agent's skills directory:
+| Topic | File |
+|-------|------|
+| Layout Patterns | `references/layout-patterns.md` |
+| HTML Template | `references/html-template.md` |
+| Copywriting Formulas | `references/copywriting-formulas.md` |
+| Slide Strategies | `references/slide-strategies.md` |
 
-```bash
-# Inspect the upstream README for exact paths
-open https://github.com/openai/skills
-```
+## Routing
 
-Then ask the agent to invoke this skill by name (`slides`) or with
-one of the trigger phrases listed in this skill's frontmatter.
+1. Parse subcommand from `$ARGUMENTS` (first word)
+2. Load corresponding `references/{subcommand}.md`
+3. Execute with remaining arguments
