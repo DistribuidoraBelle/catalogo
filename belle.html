@@ -3051,7 +3051,7 @@ tr.row-hl:hover td{
 <!-- MODAL ELIMINAR PRODUCTOS EN LOTE -->
 <div class="mo" id="moStkBulkDel">
 <div class="md" style="max-width:560px">
-  <div class="mh"><div class="mtt">🗑️ Eliminar productos</div><button class="btn btn-g" onclick="cerrarModal('moStkBulkDel')" style="padding:.2rem .5rem">X</button></div>
+  <div class="mh"><div class="mtt">🗑️ Eliminar / archivar productos</div><button class="btn btn-g" onclick="cerrarModal('moStkBulkDel')" style="padding:.2rem .5rem">X</button></div>
   <div class="mb">
     <div id="stkBulkDelResumen" style="font-size:.84rem;color:var(--tx)"></div>
     <div id="stkBulkDelLista" style="max-height:230px;overflow-y:auto;background:var(--sur2);border:1px solid var(--bd);border-radius:8px;padding:.5rem .6rem"></div>
@@ -3060,11 +3060,11 @@ tr.row-hl:hover td{
       <label>Motivo de la eliminación (queda en el historial)</label>
       <input class="fi" id="stkBulkDelMotivo" type="text" placeholder="ej: producto discontinuado" maxlength="120">
     </div>
-    <div style="font-size:.68rem;color:var(--tx3);line-height:1.5">Las ventas históricas y los movimientos de stock se conservan (quedan con nombre legible). Esta acción <b>no se puede deshacer</b>.</div>
+    <div style="font-size:.68rem;color:var(--tx3);line-height:1.5">Los productos con ventas o movimientos se <b>archivan</b> (salen del catálogo, reversible). El <b>borrado real</b> solo aplica a los que no tienen historial y <b>no se puede deshacer</b>.</div>
   </div>
   <div class="mf">
     <button class="btn btn-g" onclick="cerrarModal('moStkBulkDel')">Cancelar</button>
-    <button class="btn btn-red" id="stkBulkDelBtn" onclick="stkBulkDelConfirmar()">Eliminar definitivamente</button>
+    <button class="btn btn-red" id="stkBulkDelBtn" onclick="stkBulkDelConfirmar()">Aplicar</button>
   </div>
 </div>
 </div>
@@ -4998,108 +4998,136 @@ function stkBulkAplicar(){
   })();
 }
 
-// ── Eliminar productos seleccionados (en lote) — reusa el patrón seguro de deleteProd() ──
+// ── Eliminar productos seleccionados (en lote) — HÍBRIDO ──
+// Los que NO tienen ventas/movimientos/combos → borrado real. Los que SÍ → se archivan (activo=false).
+// La base bloquea el DELETE de productos con historial (FK NO ACTION en ventas/movimientos_stock),
+// y hacerlo destruiría la contabilidad, por eso esos se archivan en vez de borrarse.
 function stkBulkEliminar(){
   var ids=Array.from(window._stkSel||[]);
   if(!ids.length){toast('No hay productos seleccionados','twarn');return;}
   var sel=ids.map(function(id){return prods.find(function(x){return x.id===id;});}).filter(Boolean);
   if(!sel.length){toast('No se encontraron los productos seleccionados','terr');return;}
-  toast('Verificando dependencias...','tok');
+  toast('Analizando productos...','tok');
   var idlist=sel.map(function(p){return p.id;}).join(',');
   Promise.all([
     apiGet("reservas","select=producto_id,cantidad&estado=eq.activa&producto_id=in.("+idlist+")&limit=2000").catch(function(){return [];}),
-    apiGet("combo_items","select=combo_id,producto_id&producto_id=in.("+idlist+")&limit=1000").catch(function(){return [];}),
-    apiGet("fichas_perfume","select=id,producto_id&producto_id=in.("+idlist+")&limit=2000").catch(function(){return [];})
+    apiGet("combo_items","select=producto_id&producto_id=in.("+idlist+")&limit=2000").catch(function(){return [];}),
+    apiGet("ventas","select=producto_id&producto_id=in.("+idlist+")&limit=5000").catch(function(){return [];}),
+    apiGet("movimientos_stock","select=producto_id&producto_id=in.("+idlist+")&limit=5000").catch(function(){return [];}),
+    apiGet("fichas_perfume","select=producto_id&producto_id=in.("+idlist+")&limit=2000").catch(function(){return [];})
   ]).then(function(deps){
-    var reservas=deps[0]||[], combos=deps[1]||[], fichas=deps[2]||[];
-    var reservaPorProd={}, comboPorProd={}, fichaSet={};
+    var reservas=deps[0]||[], combos=deps[1]||[], ventas=deps[2]||[], movs=deps[3]||[], fichas=deps[4]||[];
+    var reservaPorProd={}, tieneVenta={}, tieneMov={}, tieneCombo={}, tieneFicha={};
     reservas.forEach(function(r){reservaPorProd[r.producto_id]=(reservaPorProd[r.producto_id]||0)+(r.cantidad||0);});
-    combos.forEach(function(c){(comboPorProd[c.producto_id]=comboPorProd[c.producto_id]||[]).push(c.combo_id);});
-    fichas.forEach(function(f){fichaSet[f.producto_id]=true;});
-    var bloqueados=[], eliminables=[];
+    ventas.forEach(function(v){tieneVenta[v.producto_id]=true;});
+    movs.forEach(function(m){tieneMov[m.producto_id]=true;});
+    combos.forEach(function(c){tieneCombo[c.producto_id]=true;});
+    fichas.forEach(function(f){tieneFicha[f.producto_id]=true;});
+
+    var bloqueados=[], borrar=[], archivar=[];
     sel.forEach(function(p){
-      if(reservaPorProd[p.id]){ bloqueados.push({p:p,reserva:reservaPorProd[p.id]}); }
-      else { eliminables.push({p:p, tieneFicha:!!fichaSet[p.id], combos:(comboPorProd[p.id]||[])}); }
+      if(reservaPorProd[p.id]){ bloqueados.push({p:p,reserva:reservaPorProd[p.id]}); return; }
+      var conHist = tieneVenta[p.id] || tieneMov[p.id] || tieneCombo[p.id];
+      if(conHist) archivar.push({p:p, venta:!!tieneVenta[p.id], combo:!!tieneCombo[p.id]});
+      else borrar.push({p:p, ficha:!!tieneFicha[p.id]});
     });
-    window._stkBulkDelData={eliminables:eliminables};
+    window._stkBulkDelData={borrar:borrar, archivar:archivar};
 
     var resumen=document.getElementById('stkBulkDelResumen');
-    resumen.innerHTML = eliminables.length
-      ? "Vas a eliminar <b style='color:var(--red)'>"+eliminables.length+"</b> producto"+(eliminables.length!==1?'s':'')+" del catálogo."
-      : "<b style='color:var(--red)'>Ninguno de los seleccionados se puede eliminar ahora.</b>";
+    var parts=[];
+    if(borrar.length) parts.push("<b style='color:var(--red)'>"+borrar.length+"</b> se borra"+(borrar.length!==1?'n':'')+" definitivamente");
+    if(archivar.length) parts.push("<b style='color:#d0a040'>"+archivar.length+"</b> se archiva"+(archivar.length!==1?'n':'')+" (con historial)");
+    resumen.innerHTML = parts.length ? parts.join(' · ') : "<b style='color:var(--red)'>Ninguno de los seleccionados se puede procesar ahora.</b>";
 
     var lista=document.getElementById('stkBulkDelLista'); var lh='';
-    eliminables.forEach(function(e){
-      var badges=[];
-      if(e.p.stock_actual>0) badges.push("<span style='color:var(--tx3)'>"+e.p.stock_actual+"u stock</span>");
-      if(e.p.en_viaje>0) badges.push("<span style='color:#d0a040'>"+e.p.en_viaje+"u en viaje</span>");
-      if(e.combos.length) badges.push("<span style='color:var(--red)'>en "+e.combos.length+" combo"+(e.combos.length!==1?'s':'')+"</span>");
-      lh += "<div style='display:flex;justify-content:space-between;gap:.5rem;align-items:baseline;padding:.28rem .05rem;border-bottom:1px solid var(--bd)'>"+
-            "<span style='color:var(--tx);font-size:.76rem'>"+_admEsc((e.p.empresa?e.p.empresa+' · ':'')+(e.p.nombre||''))+"</span>"+
-            "<span style='font-size:.66rem;white-space:nowrap;text-align:right'>"+badges.join(' · ')+"</span></div>";
-    });
+    function _fila(e, tag, color){
+      return "<div style='display:flex;justify-content:space-between;gap:.5rem;align-items:baseline;padding:.26rem .05rem;border-bottom:1px solid var(--bd)'>"+
+             "<span style='color:var(--tx);font-size:.75rem'>"+_admEsc((e.p.empresa?e.p.empresa+' · ':'')+(e.p.nombre||''))+"</span>"+
+             "<span style='font-size:.62rem;white-space:nowrap;color:"+color+";font-weight:700'>"+tag+"</span></div>";
+    }
+    if(borrar.length){ lh+="<div style='font-size:.6rem;text-transform:uppercase;letter-spacing:.05em;color:var(--red);margin:.1rem 0 .2rem'>Borrar definitivamente</div>"; borrar.forEach(function(e){lh+=_fila(e,'🗑 borrar','var(--red)');}); }
+    if(archivar.length){ lh+="<div style='font-size:.6rem;text-transform:uppercase;letter-spacing:.05em;color:#d0a040;margin:.55rem 0 .2rem'>Archivar (conserva historial)</div>"; archivar.forEach(function(e){lh+=_fila(e,'📦 archivar','#d0a040');}); }
     lista.innerHTML = lh || "<div style='color:var(--tx3);font-size:.76rem;padding:.3rem'>—</div>";
-    lista.style.display = eliminables.length ? '' : 'none';
+    lista.style.display = (borrar.length||archivar.length)?'':'none';
 
     var warn=document.getElementById('stkBulkDelWarn'); var wh='';
-    var totStock=eliminables.reduce(function(s,e){return s+(e.p.stock_actual>0?e.p.stock_actual:0);},0);
-    var totViaje=eliminables.reduce(function(s,e){return s+(e.p.en_viaje>0?e.p.en_viaje:0);},0);
-    var conCombos=eliminables.filter(function(e){return e.combos.length;}).length;
-    var avisos=[];
-    if(totStock>0) avisos.push("Se pierde información de <b>"+totStock+"u</b> en stock físico.");
-    if(totViaje>0) avisos.push("Se pierden <b>"+totViaje+"u</b> pendientes en viaje.");
-    if(conCombos>0) avisos.push("<b>"+conCombos+"</b> producto"+(conCombos!==1?'s':'')+" está"+(conCombos!==1?'n':'')+" en combos — esos combos quedarán incompletos.");
-    if(avisos.length) wh += "<div style='background:var(--rdim);border:1px solid var(--red);border-radius:8px;padding:.5rem .65rem;font-size:.72rem;color:var(--tx2);line-height:1.55'>⚠️ "+avisos.join('<br>⚠️ ')+"</div>";
+    if(archivar.length){
+      wh += "<div style='background:var(--sur2);border:1px solid #d0a040;border-radius:8px;padding:.5rem .65rem;font-size:.72rem;color:var(--tx2);line-height:1.55'>📦 Los que tienen ventas o movimientos <b>no se pueden borrar</b> (romperían el historial). Se <b>archivan</b>: salen del catálogo y de esta lista, pero se conservan y podés reactivarlos.</div>";
+    }
     if(bloqueados.length){
       var bl=bloqueados.map(function(b){return _admEsc(b.p.nombre||'')+" ("+b.reserva+"u)";}).join(', ');
-      wh += "<div style='margin-top:.5rem;background:var(--sur2);border:1px dashed var(--bd2);border-radius:8px;padding:.5rem .65rem;font-size:.72rem;color:var(--tx3);line-height:1.55'>🔒 <b>"+bloqueados.length+"</b> con reserva activa — <b>NO</b> se eliminan: "+bl+". Cancelá las reservas primero.</div>";
+      wh += "<div style='margin-top:.5rem;background:var(--rdim);border:1px dashed var(--red);border-radius:8px;padding:.5rem .65rem;font-size:.72rem;color:var(--tx3);line-height:1.55'>🔒 <b>"+bloqueados.length+"</b> con reserva activa — <b>NO</b> se tocan: "+bl+". Cancelá las reservas primero.</div>";
     }
     warn.innerHTML=wh;
 
     var btn=document.getElementById('stkBulkDelBtn');
-    if(btn){ btn.disabled=!eliminables.length; btn.style.opacity=eliminables.length?'1':'.5'; btn.textContent=eliminables.length?('Eliminar '+eliminables.length+' definitivamente'):'Nada para eliminar'; }
+    var total=borrar.length+archivar.length;
+    if(btn){ btn.disabled=!total; btn.style.opacity=total?'1':'.5'; btn.textContent=total?('Aplicar a '+total+' producto'+(total!==1?'s':'')):'Nada para procesar'; }
     document.getElementById('stkBulkDelMotivo').value='';
     abrirModal('moStkBulkDel');
-  }).catch(function(e){ toast('Error verificando dependencias: '+(e&&e.message||''),'terr'); });
+  }).catch(function(e){ toast('Error analizando: '+(e&&e.message||''),'terr'); });
 }
 
 function stkBulkDelConfirmar(){
-  var data=window._stkBulkDelData; if(!data||!data.eliminables||!data.eliminables.length){cerrarModal('moStkBulkDel');return;}
+  var data=window._stkBulkDelData; if(!data||((!data.borrar||!data.borrar.length)&&(!data.archivar||!data.archivar.length))){cerrarModal('moStkBulkDel');return;}
   var motivoRaw=(document.getElementById('stkBulkDelMotivo')||{value:''}).value.trim();
-  var motivo=(motivoRaw||'Eliminación masiva desde Stock y precios').replace(/[<>]/g,'').replace(/\|/g,'/');
-  var lista=data.eliminables.slice();
+  var motivo=(motivoRaw||'Depuración desde Stock y precios').replace(/[<>]/g,'').replace(/\|/g,'/');
+  var borrar=(data.borrar||[]).slice(), archivar=(data.archivar||[]).slice();
   var btn=document.getElementById('stkBulkDelBtn');
-  if(btn){btn.disabled=true;btn.textContent='Eliminando...';}
-  var ok=0,fail=0,i=0;
+  if(btn){btn.disabled=true;btn.textContent='Procesando...';}
+
+  var tareas=[];
+  borrar.forEach(function(e){tareas.push({tipo:'del', e:e});});
+  archivar.forEach(function(e){tareas.push({tipo:'arch', e:e});});
+
+  var i=0;
   (function _step(){
-    if(i>=lista.length){
+    if(i>=tareas.length){ return _finalizar(); }
+    var t=tareas[i++]; var id=t.e.p.id;
+    if(t.tipo==='del'){
+      // Borrado real: primero la ficha (si hay), después el producto.
+      // NO se escribe en movimientos_stock: esa FK (NO ACTION) bloquearía el propio borrado.
+      var prom = t.e.ficha ? apiDelete("fichas_perfume","producto_id=eq."+id).catch(function(){}) : Promise.resolve();
+      prom.then(function(){ return apiDelete("productos","id=eq."+id); })
+          .then(function(){}, function(){})
+          .then(_step);
+    } else {
+      apiPatch("productos",{activo:false},"id=eq."+id).then(function(){}, function(){}).then(_step);
+    }
+  })();
+
+  function _finalizar(){
+    // Verificación REAL contra la base — apiDelete/apiPatch pueden silenciar errores, así que no confiamos en su resultado.
+    var allIds=tareas.map(function(t){return t.e.p.id;}).join(',');
+    apiGet("productos","select=id,activo&id=in.("+allIds+")").then(function(rows){
+      var estado={}; (Array.isArray(rows)?rows:[]).forEach(function(r){estado[r.id]=r;});
+      var okDel=0,failDel=0,okArch=0,failArch=0;
+      borrar.forEach(function(e){
+        if(!estado[e.p.id]){ okDel++; window._stkSel.delete(e.p.id); _logAct('eliminar_producto',{producto_id:e.p.id,producto_nombre:e.p.nombre,empresa:e.p.empresa||null,motivo:motivo,origen:'lote'}); }
+        else failDel++;
+      });
+      archivar.forEach(function(e){
+        var r=estado[e.p.id];
+        if(r && r.activo===false){ okArch++; window._stkSel.delete(e.p.id); _logAct('archivar_producto',{producto_id:e.p.id,producto_nombre:e.p.nombre,empresa:e.p.empresa||null,motivo:motivo,origen:'lote'}); }
+        else failArch++;
+      });
       if(btn)btn.disabled=false;
       cerrarModal('moStkBulkDel');
-      toast('Eliminados: '+ok+(fail?' · '+fail+' con error':''), fail?'twarn':'tok');
-      lista.forEach(function(e){window._stkSel.delete(e.p.id);});
+      var msg=[];
+      if(okDel)msg.push(okDel+' borrado'+(okDel!==1?'s':''));
+      if(okArch)msg.push(okArch+' archivado'+(okArch!==1?'s':''));
+      var fails=failDel+failArch;
+      if(fails)msg.push(fails+' sin cambios (revisá)');
+      toast(msg.join(' · ')||'Sin cambios', fails?'twarn':'tok');
       stkUpdateBulkBar();
       loadProds();
-      return;
-    }
-    var e=lista[i++]; var p=e.p; var id=p.id;
-    apiPost("movimientos_stock",{
-      producto_id:id, producto_nombre:p.nombre,
-      tipo:"eliminacion", cantidad:0,
-      stock_antes:p.stock_actual||0, stock_despues:0,
-      motivo:"HARD DELETE (lote): "+motivo+(e.combos.length?" | en "+e.combos.length+" combo(s)":"")+((p.en_viaje||0)?" | "+p.en_viaje+"u en viaje":""),
-      usuario:"admin"
-    }).catch(function(){})
-    .then(function(){ return e.tieneFicha ? apiDelete("fichas_perfume","producto_id=eq."+id).catch(function(){}) : null; })
-    .then(function(){ return apiDelete("productos","id=eq."+id); })
-    .then(function(){
-      ok++;
-      _logAct('eliminar_producto',{producto_id:id,producto_nombre:p.nombre,empresa:p.empresa||null,motivo:motivo,stock_actual_perdido:p.stock_actual||0,en_viaje_perdido:p.en_viaje||0,fichas_eliminadas:e.tieneFicha?1:0,combos_afectados:e.combos.length,origen:'lote'});
-    },function(err){
-      fail++;
-      _logAct('eliminar_producto',{producto_id:id,producto_nombre:p.nombre,motivo:motivo,origen:'lote'},{exito:false,error_msg:err&&err.message||String(err)});
-    })
-    .then(_step);
-  })();
+    }).catch(function(){
+      if(btn)btn.disabled=false;
+      cerrarModal('moStkBulkDel');
+      toast('Procesado, pero no pude verificar el resultado. Refrescá para confirmar.','twarn');
+      loadProds();
+    });
+  }
 }
 
 // ════════════════════════════════════════════════════════════════════
