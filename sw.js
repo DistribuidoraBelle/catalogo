@@ -7,7 +7,8 @@ self.addEventListener('activate', function(e){ e.waitUntil(self.clients.claim())
 
 /* Fetch handler (network-first SOLO para la navegacion / carga de paginas).
    Es lo que Chrome Android necesita para considerar la web "instalable como app".
-   - Siempre intenta la red primero (asi nunca sirve una version vieja con conexion).
+   - Siempre baja la pagina FRESCA de la red, ignorando el cache HTTP del navegador
+     (cache:'reload'). Asi despues de cada deploy no hace falta Ctrl+Shift+R.
    - Cae al cache solo si no hay internet (offline basico).
    - NO intercepta Supabase, imagenes ni otros assets: esos van directo a la red. */
 var BELLE_NAV_CACHE = 'belle-nav-v1';
@@ -16,7 +17,7 @@ self.addEventListener('fetch', function(event){
   if (req.method !== 'GET') return;
   if (req.mode === 'navigate'){
     event.respondWith(
-      fetch(req).then(function(resp){
+      fetch(req.url, {cache:'reload', credentials:'same-origin'}).then(function(resp){
         try { var copy = resp.clone(); caches.open(BELLE_NAV_CACHE).then(function(c){ c.put(req, copy); }); } catch(e){}
         return resp;
       }).catch(function(){
