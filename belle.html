@@ -6345,6 +6345,7 @@ function renderStockPage(){
     return"<tr>"+
       "<td style='white-space:nowrap'>"+
         "<input type='checkbox' class='stk-chk' onclick='stkToggleSel("+id+",this.checked)' "+((window._stkSel&&window._stkSel.has(id))?"checked":"")+" title='Seleccionar' style='margin-right:.25rem;vertical-align:middle;cursor:pointer'>"+
+        "<button class='ib' onclick='_prodStatsAbrir("+id+")' title='Estadísticas del producto' style='background:linear-gradient(135deg,#6366f1,#22c55e);color:#fff;border:none'>📊</button>"+
         "<button class='ib ib-e' onclick='openProdModal("+id+")' title='Editar producto'>✏️</button>"+
         "<button class='ib ib-s' onclick='openStkModal("+id+")' title='Editar stock'>📦</button>"+
         "<button class='ib' onclick='adminVerMovimientos("+id+","+JSON.stringify(p.nombre)+")' title='Ver movimientos' style='background:var(--sur3);color:var(--tx);border-color:var(--bd2)'>📋</button>"+
@@ -35041,6 +35042,10 @@ function _repCargarProductos(){
 
     var h = "";
     h += _repHeaderSeccion("📦 Productos", "productos");
+    h += "<div style='display:flex;gap:.4rem;margin-bottom:.9rem;flex-wrap:wrap'>"+
+         "<button class='btn btn-a' style='font-size:.75rem'>📊 Resumen</button>"+
+         "<button class='btn btn-g' onclick='_repProdListaAbrir()' style='font-size:.75rem'>📋 Lista completa de productos</button>"+
+         "</div>";
     h += (function(){
       var s=_repSerieTiempo(ventas, r, function(v){return parseInt(v.cantidad)||0;});
       return _repBloqueEvol("📈 Unidades vendidas en el tiempo","Volumen de unidades despachadas durante el período.", s.labels, [{nombre:"Unidades",color:"#5a9fd4",datos:s.datos}]);
@@ -35114,6 +35119,164 @@ function _repCargarProductos(){
     var el = document.getElementById("_repContenido");
     if(el) el.innerHTML = "<div style='color:var(--red);padding:2rem;text-align:center'>Error al cargar reportes de productos</div>";
   });
+}
+
+// ════════════════════════════════════════════════════════════════════
+// 📊 ESTADÍSTICAS POR PRODUCTO (2026-07) — modal desde Stock y precios
+// ════════════════════════════════════════════════════════════════════
+function _bcNombreVendedor(vid){
+  try{ if(typeof VENDEDORES_CFG!=='undefined'&&VENDEDORES_CFG){ var f=VENDEDORES_CFG.find(function(x){return String(x.id)===String(vid);}); if(f&&f.nombre)return f.nombre; } }catch(e){}
+  return ({1:'David',2:'Facu'})[vid]||(vid?('Vend '+vid):'Sin asignar');
+}
+function _prodStatsAbrir(id){
+  id=parseInt(id);
+  var p=(prods||[]).find(function(x){return x.id===id;});
+  if(!p){toast('Producto no encontrado','terr');return;}
+  var ex=document.getElementById('_moProdStats'); if(ex)ex.remove();
+  var mo=document.createElement('div'); mo.id='_moProdStats'; mo.className='mo open'; mo.style.zIndex='10001';
+  mo.innerHTML="<div class='md' style='max-width:880px;width:97%;max-height:92vh;overflow-y:auto'>"+
+    "<div class='mh'><div class='mtt'>📊 Estadísticas — "+_admEsc(p.nombre||'')+"</div><button class='btn btn-g' onclick=\"var _m=document.getElementById('_moProdStats');if(_m)_m.remove()\" style='padding:.2rem .5rem'>X</button></div>"+
+    "<div class='mb' id='_prodStatsBody'><div class='loading' style='padding:2rem;text-align:center'><div class='spin'></div>Cargando historial de ventas...</div></div></div>";
+  document.body.appendChild(mo);
+  apiGetAll('ventas','select=cantidad,total,vendedor_id,segmento,created_at,estado&producto_id=eq.'+id+'&estado=in.(confirmada,archivada_periodo,dev_parcial)&order=created_at.asc&limit=20000')
+    .then(function(vs){ _prodStatsRender(p, Array.isArray(vs)?vs:[]); })
+    .catch(function(e){ var b=document.getElementById('_prodStatsBody'); if(b)b.innerHTML="<div style='color:var(--red);padding:1rem'>Error cargando: "+(e&&e.message||'')+"</div>"; });
+}
+function _prodStatsRender(p, vs){
+  var b=document.getElementById('_prodStatsBody'); if(!b) return;
+  var r=(typeof calcP==='function')?calcP(p):{rM:0,ct:0};
+  var PAL=['#6366f1','#22c55e','#f59e0b','#ef4444','#06b6d4','#a855f7','#ec4899','#84cc16','#14b8a6','#f97316'];
+  var totalU=0, totalF=0, ultima=null, primera=null, porMes={}, porVend={}, porSeg={};
+  vs.forEach(function(v){
+    var c=parseInt(v.cantidad)||0, t=parseFloat(v.total)||0;
+    totalU+=c; totalF+=t;
+    var d=new Date(v.created_at);
+    if(!ultima||d>ultima)ultima=d; if(!primera||d<primera)primera=d;
+    var ym=d.getFullYear()+'-'+('0'+(d.getMonth()+1)).slice(-2);
+    porMes[ym]=(porMes[ym]||0)+c;
+    var vk=_bcNombreVendedor(v.vendedor_id); porVend[vk]=(porVend[vk]||0)+t;
+    var sk=(typeof _labelSegmento==='function'&&typeof _normalizarSegmento==='function')?_labelSegmento(_normalizarSegmento(v.segmento)):(v.segmento||'—');
+    porSeg[sk]=(porSeg[sk]||0)+t;
+  });
+  var diasUlt = ultima? Math.floor((Date.now()-ultima.getTime())/86400000) : null;
+  var mesesSpan = (primera&&ultima)? Math.max(1,(ultima.getFullYear()*12+ultima.getMonth())-(primera.getFullYear()*12+primera.getMonth())+1) : 1;
+  var promMes = totalU/mesesSpan;
+  var ticket = vs.length? (totalF/totalU||0) : 0;
+  // línea: últimos 12 meses
+  var labels=[], datos=[]; var now=new Date();
+  for(var i=11;i>=0;i--){ var dd=new Date(now.getFullYear(), now.getMonth()-i, 1); var ym=dd.getFullYear()+'-'+('0'+(dd.getMonth()+1)).slice(-2); labels.push(('0'+(dd.getMonth()+1)).slice(-2)+'/'+String(dd.getFullYear()).slice(-2)); datos.push(porMes[ym]||0); }
+  var vendItems=Object.keys(porVend).sort(function(a,b2){return porVend[b2]-porVend[a];}).map(function(k,i){return {label:k,valor:porVend[k],color:PAL[i%PAL.length]};});
+  var segItems=Object.keys(porSeg).sort(function(a,b2){return porSeg[b2]-porSeg[a];}).map(function(k,i){return {label:k,valor:porSeg[k],color:PAL[i%PAL.length]};});
+  function _kpi(t,v,col){ return "<div style='background:var(--sur2);border:1px solid var(--bd);border-radius:8px;padding:.55rem .7rem'><div style='font-size:.58rem;color:var(--tx3);text-transform:uppercase;letter-spacing:.04em'>"+t+"</div><div style='font-size:1.05rem;font-weight:700;color:"+(col||'var(--tx)')+";margin-top:.15rem'>"+v+"</div></div>"; }
+  var ultCol=diasUlt===null?'var(--tx3)':(diasUlt>60?'#ef4444':(diasUlt>30?'#f59e0b':'#22c55e'));
+  var margCol=(r.rM>=25?'#22c55e':(r.rM>=0?'#f59e0b':'#ef4444'));
+  var h='';
+  if(!vs.length){ h+="<div style='background:var(--sur2);border:1px solid var(--bd);border-radius:8px;padding:.9rem;text-align:center;color:var(--tx3);font-size:.85rem;margin-bottom:1rem'>Este producto todavía no registra ventas.</div>"; }
+  h+="<div style='display:grid;grid-template-columns:repeat(auto-fit,minmax(135px,1fr));gap:.55rem;margin-bottom:1rem'>";
+  h+=_kpi('Vendido total', totalU+'u');
+  h+=_kpi('Facturado', fmt(totalF));
+  h+=_kpi('Promedio / mes', promMes.toFixed(1)+'u');
+  h+=_kpi('Última venta', diasUlt===null?'nunca':('hace '+diasUlt+'d'), ultCol);
+  h+=_kpi('Rentabilidad', Math.round(r.rM||0)+'%', margCol);
+  h+=_kpi('Ticket prom.', fmt(Math.round(ticket)));
+  h+=_kpi('Stock', (p.stock_actual||0)+'u'+((p.en_viaje||0)>0?' +✈️'+p.en_viaje:'')+((p.reserva||0)>0?' ('+p.reserva+'res)':''));
+  h+=_kpi('Ventas (tickets)', String(vs.length));
+  h+="</div>";
+  h+="<div style='background:var(--sur2);border:1px solid var(--bd);border-radius:10px;padding:.8rem;margin-bottom:1rem'><div style='font-size:.8rem;font-weight:700;margin-bottom:.4rem'>📈 Unidades vendidas por mes (últimos 12)</div>"+_repChartLineas(labels,[{nombre:'Unidades',color:'#6366f1',datos:datos}])+"</div>";
+  h+="<div style='display:grid;grid-template-columns:repeat(auto-fit,minmax(300px,1fr));gap:1rem'>";
+  h+="<div style='background:var(--sur2);border:1px solid var(--bd);border-radius:10px;padding:.8rem'><div style='font-size:.8rem;font-weight:700;margin-bottom:.5rem'>🥧 Facturación por vendedor</div>"+(vendItems.length?_repChartDona(vendItems,150):"<div style='color:var(--tx3);font-size:.75rem;padding:1rem;text-align:center'>Sin datos</div>")+"</div>";
+  h+="<div style='background:var(--sur2);border:1px solid var(--bd);border-radius:10px;padding:.8rem'><div style='font-size:.8rem;font-weight:700;margin-bottom:.5rem'>🥧 Ventas por segmento (x1/x3/x10)</div>"+(segItems.length?_repChartDona(segItems,150):"<div style='color:var(--tx3);font-size:.75rem;padding:1rem;text-align:center'>Sin datos</div>")+"</div>";
+  h+="</div>";
+  b.innerHTML=h;
+}
+
+// ════════════════════════════════════════════════════════════════════
+// 📋 LISTA COMPLETA DE PRODUCTOS (2026-07) — Reportes › Productos, ordenable
+// ════════════════════════════════════════════════════════════════════
+window._repProdListaSort = window._repProdListaSort || 'vendidos';
+function _repProdListaAbrir(){
+  var el=document.getElementById('_repContenido'); if(!el)return;
+  el.innerHTML="<div class='loading' style='padding:2rem;text-align:center'><div class='spin'></div>Cargando todos los productos...</div>";
+  Promise.all([
+    apiGetAll('ventas','select=producto_id,cantidad,total,created_at&estado=in.(confirmada,archivada_periodo)&limit=20000').catch(function(){return[];}),
+    apiGet('productos','select=id,nombre,empresa,ml,stock_actual,en_viaje,reserva,costo_ind,costo_log,gan_usd_may,gan_usd_med,precio_may_ars,precio_med_ars,precio_min_ars,precio_ml,cotiz_hist,activo&activo=is.true&order=empresa,nombre&limit=3000').catch(function(){return[];})
+  ]).then(function(data){
+    var ventas=data[0]||[], productos=data[1]||[];
+    var agg={};
+    ventas.forEach(function(v){
+      if(!v.producto_id)return;
+      var a=agg[v.producto_id]=agg[v.producto_id]||{u:0,f:0,ultima:null,primera:null};
+      a.u+=parseInt(v.cantidad)||0; a.f+=parseFloat(v.total)||0;
+      var d=new Date(v.created_at);
+      if(!a.ultima||d>a.ultima)a.ultima=d; if(!a.primera||d<a.primera)a.primera=d;
+    });
+    window._repProdListaRows=productos.map(function(p){
+      var a=agg[p.id]||{u:0,f:0,ultima:null,primera:null};
+      var meses=(a.primera&&a.ultima)?Math.max(1,(a.ultima.getFullYear()*12+a.ultima.getMonth())-(a.primera.getFullYear()*12+a.primera.getMonth())+1):1;
+      var rr=(typeof calcP==='function')?calcP(p):{rM:0};
+      return {p:p, u:a.u, f:a.f, prom:a.u/meses, dias:a.ultima?Math.floor((Date.now()-a.ultima.getTime())/86400000):null, rM:rr.rM||0, stock:(p.stock_actual||0)};
+    });
+    _repProdListaRender();
+  }).catch(function(e){ el.innerHTML="<div style='color:var(--red);padding:1rem'>Error: "+(e&&e.message||'')+"</div>"; });
+}
+function _repProdListaSetSort(v){ window._repProdListaSort=v; _repProdListaRender(); }
+function _repProdListaCmp(){
+  var s=window._repProdListaSort;
+  return function(a,b){
+    if(s==='rentables')return b.rM-a.rM;
+    if(s==='promedio')return b.prom-a.prom;
+    if(s==='facturado')return b.f-a.f;
+    if(s==='reciente')return (a.dias===null?1e9:a.dias)-(b.dias===null?1e9:b.dias);
+    if(s==='antigua')return (b.dias===null?-1:b.dias)-(a.dias===null?-1:a.dias);
+    if(s==='stock')return b.stock-a.stock;
+    if(s==='nombre')return String(a.p.nombre||'').localeCompare(String(b.p.nombre||''));
+    return b.u-a.u; // vendidos
+  };
+}
+function _repProdListaRender(){
+  var el=document.getElementById('_repContenido'); if(!el)return;
+  var rows=(window._repProdListaRows||[]).slice().sort(_repProdListaCmp());
+  var s=window._repProdListaSort;
+  var h='';
+  h+="<div style='display:flex;gap:.5rem;align-items:center;margin-bottom:.7rem;flex-wrap:wrap'>";
+  h+="<button class='btn btn-g' onclick='_repCargarProductos()' style='font-size:.75rem'>← Resumen</button>";
+  h+="<span style='font-size:.82rem;font-weight:700'>📋 Todos los productos ("+rows.length+")</span>";
+  h+="<span style='flex:1'></span>";
+  h+="<label style='font-size:.7rem;color:var(--tx3)'>Ordenar por</label>";
+  h+="<select class='sel' onchange='_repProdListaSetSort(this.value)' style='font-size:.75rem'>";
+  [['vendidos','Más vendidos'],['rentables','Más rentables'],['promedio','Promedio mensual'],['facturado','Más facturado'],['reciente','Venta más reciente'],['antigua','Hace más que no vende'],['stock','Más stock'],['nombre','Nombre (A-Z)']].forEach(function(o){ h+="<option value='"+o[0]+"'"+(s===o[0]?' selected':'')+">"+o[1]+"</option>"; });
+  h+="</select>";
+  h+="<button class='btn btn-g' onclick='_repProdListaExport()' style='font-size:.72rem'>⬇ Excel</button>";
+  h+="</div>";
+  h+="<div class='tbl-wrap'><div class='tbl-scroll'><table style='min-width:740px;font-size:.72rem'><thead><tr>";
+  ['#','Producto','Vendidos','Prom/mes','Última venta','Rent.','Stock','Facturado'].forEach(function(th){ h+="<th style='white-space:nowrap;text-align:"+(th==='Producto'||th==='#'?'left':'center')+"'>"+th+"</th>"; });
+  h+="</tr></thead><tbody>";
+  rows.forEach(function(x,i){
+    var ultTxt=x.dias===null?'—':('hace '+x.dias+'d');
+    var ultCol=x.dias===null?'var(--tx3)':(x.dias>60?'#ef4444':(x.dias>30?'#f59e0b':'var(--tx)'));
+    var margCol=x.rM>=25?'var(--green)':(x.rM>=0?'var(--yel)':'var(--red)');
+    h+="<tr class='row-hl' style='border-bottom:1px solid var(--bd)'>";
+    h+="<td style='color:var(--tx3)'>"+(i+1)+"</td>";
+    h+="<td><button class='ib' onclick='_prodStatsAbrir("+x.p.id+")' title='Ver estadísticas' style='background:linear-gradient(135deg,#6366f1,#22c55e);color:#fff;border:none;margin-right:.3rem'>📊</button>"+_admEsc((x.p.empresa?x.p.empresa+' · ':'')+_prodMl(x.p))+"</td>";
+    h+="<td style='text-align:center;font-weight:700'>"+x.u+"u</td>";
+    h+="<td style='text-align:center'>"+x.prom.toFixed(1)+"</td>";
+    h+="<td style='text-align:center;color:"+ultCol+"'>"+ultTxt+"</td>";
+    h+="<td style='text-align:center;color:"+margCol+";font-weight:600'>"+Math.round(x.rM)+"%</td>";
+    h+="<td style='text-align:center'>"+x.stock+"u</td>";
+    h+="<td style='text-align:right'>"+fmt(x.f)+"</td>";
+    h+="</tr>";
+  });
+  h+="</tbody></table></div></div>";
+  el.innerHTML=h;
+}
+function _repProdListaExport(){
+  try{
+    var rows=(window._repProdListaRows||[]).slice().sort(_repProdListaCmp());
+    var aoa=[['Producto','Marca','ML','Vendidos','Prom/mes','Ultima venta (dias)','Rentabilidad %','Stock','Facturado']];
+    rows.forEach(function(x){ aoa.push([x.p.nombre||'', x.p.empresa||'', x.p.ml||'', x.u, +x.prom.toFixed(1), (x.dias===null?'':x.dias), Math.round(x.rM), x.stock, Math.round(x.f)]); });
+    var ws=XLSX.utils.aoa_to_sheet(aoa); var wb=XLSX.utils.book_new(); XLSX.utils.book_append_sheet(wb,ws,'Productos');
+    XLSX.writeFile(wb,'productos_reporte.xlsx');
+  }catch(e){ toast('Error exportando','terr'); }
 }
 
 // ════════════════════════════════════════════════════════════════════
