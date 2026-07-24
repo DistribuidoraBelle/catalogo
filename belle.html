@@ -316,16 +316,20 @@ td{padding:.35rem .5rem;font-size:.78rem;color:var(--tx2);vertical-align:middle;
        del tr aunque tenga inline-style con background (filas "★ Nuestras" o
        las filas pares con var(--sur3) en datos cruzados). */
 tr.row-hl{transition:background-color .15s ease, box-shadow .15s ease}
-tr.row-hl:hover{
+/* :focus-within = ilumina el renglón donde estás trabajando (input/botón enfocado) */
+tr.row-hl:hover, tr.row-hl:focus-within{
   background:linear-gradient(90deg, rgba(196,150,90,.22), rgba(196,150,90,.10)) !important;
   box-shadow:inset 3px 0 0 var(--acc);
 }
-tr.row-hl:hover td{
+tr.row-hl:hover td, tr.row-hl:focus-within td{
   background:transparent !important;
   color:var(--tx) !important;
 }
 .bc-ped-row{transition:background .12s ease;border-radius:5px}
-.bc-ped-row:hover{background:linear-gradient(90deg,rgba(196,150,90,.16),rgba(196,150,90,.06))}
+.bc-ped-row:hover, .bc-ped-row:focus-within{background:linear-gradient(90deg,rgba(196,150,90,.16),rgba(196,150,90,.06));box-shadow:inset 3px 0 0 var(--acc)}
+/* Renglones del plan de compra (generador automático): iluminar el que estás editando */
+[data-afila]{transition:background .12s ease;border-radius:5px}
+[data-afila]:hover, [data-afila]:focus-within{background:linear-gradient(90deg,rgba(196,150,90,.14),rgba(196,150,90,.05));box-shadow:inset 3px 0 0 var(--acc)}
 
 /* ══════════════════════════════════════════════════════════════════════
    CAPA MOBILE v2 (2026-06-27) — additiva, SOLO aplica en celular (<=600px).
@@ -27509,7 +27513,7 @@ function _bcRenderAnalisisPro(plan){
       "<div style='flex:1;min-width:0'>"+
         "<div style='font-size:.73rem;color:var(--tx);font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap'>"+_admEsc(_nomProv(c))+"</div>"+
         "<div onclick=\"_bcPlanEditarMatch('"+c.key+"')\" style='font-size:.56rem;color:var(--tx3);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;cursor:pointer'>↳ macheo: "+_admEsc(cat)+" <span style='color:var(--acc);font-weight:600'>✏️ cambiar</span></div>"+
-        "<div style='font-size:.58rem;color:var(--tx3)'>"+emo+" vende "+(x.velMes>=10?Math.round(x.velMes):x.velMes.toFixed(1))+"/mes · stock "+x.libre+(x.viaje>0?"+✈️"+x.viaje:"")+" · te dura ~"+dH+" → con el pedido ~"+dF+(x.rM>0?" · "+Math.round(x.rM)+"% marg":"")+"</div>"+
+        "<div style='font-size:.58rem;color:var(--tx3)'>"+emo+" Se vende <b>"+(x.velMes>=10?Math.round(x.velMes):x.velMes.toFixed(1))+"/mes</b> · te queda para <b>~"+dH+"</b> (stock "+x.libre+(x.viaje>0?"+✈️"+x.viaje:"")+") → te sugiero <b>"+c.qty+"u</b> (llegás a ~"+dF+")"+(x.rM>0?" · deja "+Math.round(x.rM)+"% marg":"")+"</div>"+
       "</div>"+
       _inputsLinea(c,col)+"</div>";
   }
@@ -28501,6 +28505,7 @@ function bcToggleComp(k, ri, val, nombre, precio){
 function bcToggleLista(k, idx, val, nombre, precio){
   var qty=Math.max(0,parseInt(val)||0);
   if(!bcPedidos[k]) bcPedidos[k]={items:{}};
+  var wasThere=!!(bcPedidos[k].items && bcPedidos[k].items['l'+idx]);
   if(qty===0){
     delete bcPedidos[k].items['l'+idx];
   } else {
@@ -28510,6 +28515,90 @@ function bcToggleLista(k, idx, val, nombre, precio){
   draftSave();
   bcRenderFloating();
   bcRenderPedidos();
+  // 🆕 2026-07: si el MISMO producto del catálogo ya está agregado en otro proveedor, avisar.
+  if(qty>0 && !wasThere){
+    try{
+      var catId=_bcCatIdDe(k, idx);
+      if(catId){
+        var dups=_bcDupsEnPedidos(catId, k, 'l'+idx);
+        if(dups.length) _bcDupModal(k, 'l'+idx, idx, precio, nombre, dups);
+      }
+    }catch(e){ console.warn('[bc dup]',e); }
+  }
+}
+
+// ── Aviso de producto repetido entre proveedores (2026-07) ──────────────
+// Devuelve el id de catálogo macheado para una línea de proveedor (o null si es nuevo/rechazado).
+function _bcCatIdDe(provKey, idx){
+  var provIt=(bcProveedores[provKey]||[])[idx];
+  if(!provIt) return null;
+  var mk=bcNorm(provIt.nombre_norm||provIt.nombre_proveedor||'');
+  if(typeof bcManualMatches!=='undefined' && bcManualMatches[mk]===-1) return null; // marcado NUEVO
+  var m=bcFindInProds(provIt);
+  return (m&&m.id)?m.id:null;
+}
+// Busca el mismo producto de catálogo en los pedidos de TODOS los proveedores (excepto el recién agregado).
+function _bcDupsEnPedidos(catId, exclProv, exclKey){
+  var dups=[];
+  if(!catId) return dups;
+  Object.keys(bcPedidos||{}).forEach(function(prov){
+    var items=(bcPedidos[prov]||{}).items||{};
+    Object.keys(items).forEach(function(key){
+      if(prov===exclProv && key===exclKey) return;
+      var it=items[key]; if(!it||!it.qty) return;
+      if(String(key).charAt(0)!=='l') return; // solo líneas de proveedor
+      var idx=parseInt(String(key).slice(1));
+      if(_bcCatIdDe(prov, idx)===catId){
+        dups.push({prov:prov, key:key, idx:idx, precio:it.precio, qty:it.qty, nombre:it.nombre});
+      }
+    });
+  });
+  return dups;
+}
+function _bcDupModal(prov, key, idx, precio, nombre, dups){
+  var ex=document.getElementById('_moBcDup'); if(ex)ex.remove();
+  var todos=[{prov:prov,key:key,idx:idx,precio:precio,nombre:nombre,_new:true}].concat(dups);
+  var min=Math.min.apply(null, todos.map(function(t){return t.precio||0;}));
+  var listaH=todos.map(function(t){
+    var barato=((t.precio||0)<=min);
+    return "<div style='display:flex;justify-content:space-between;gap:.5rem;padding:.3rem .1rem;border-bottom:1px solid var(--bd);font-size:.75rem'>"+
+      "<span style='color:var(--tx)'>"+_admEsc(t.prov)+(t._new?" <span style='color:var(--acc);font-size:.62rem'>(recién agregado)</span>":"")+" · "+(t.qty||1)+"u</span>"+
+      "<span style='white-space:nowrap;color:"+(barato?'var(--green)':'var(--tx3)')+";font-weight:"+(barato?'700':'400')+"'>u$d "+(t.precio||0).toFixed(2)+(barato?" ✓":"")+"</span></div>";
+  }).join('');
+  var mo=document.createElement('div'); mo.id='_moBcDup'; mo.className='mo open'; mo.style.zIndex='10002';
+  var h="<div class='md' style='max-width:460px'>";
+  h+="<div class='mh'><div class='mtt'>⚠️ Producto repetido</div><button class='btn btn-g' onclick=\"var _m=document.getElementById('_moBcDup');if(_m)_m.remove()\" style='padding:.2rem .5rem'>X</button></div>";
+  h+="<div class='mb'>";
+  h+="<div style='font-size:.82rem;color:var(--tx)'><b>"+_admEsc(nombre)+"</b> ya lo tenés agregado en otro proveedor:</div>";
+  h+="<div style='background:var(--sur2);border:1px solid var(--bd);border-radius:8px;padding:.3rem .6rem'>"+listaH+"</div>";
+  h+="</div>";
+  h+="<div class='mf' style='flex-direction:column;align-items:stretch;gap:.4rem'>";
+  h+="<button class='btn btn-green' onclick='_bcDupResolver(\"barato\")'>✅ Dejar solo el más barato (u$d "+min.toFixed(2)+")</button>";
+  h+="<button class='btn btn-g' onclick='_bcDupResolver(\"ambos\")'>Agregar igual (dejar los dos)</button>";
+  h+="<button class='btn btn-red' onclick='_bcDupResolver(\"quitar\")'>No agregar este</button>";
+  h+="</div></div>";
+  mo.innerHTML=h;
+  document.body.appendChild(mo);
+  window._bcDupCtx={prov:prov,key:key,idx:idx,precio:precio,nombre:nombre,dups:dups,todos:todos,min:min};
+}
+function _bcDupResolver(accion){
+  var c=window._bcDupCtx; var _m=document.getElementById('_moBcDup'); if(_m)_m.remove();
+  if(!c){ return; }
+  if(accion==='quitar'){
+    if(bcPedidos[c.prov]&&bcPedidos[c.prov].items) delete bcPedidos[c.prov].items[c.key];
+    toast('No se agregó','twarn');
+  } else if(accion==='barato'){
+    c.todos.forEach(function(t){
+      if((t.precio||0)>c.min){ if(bcPedidos[t.prov]&&bcPedidos[t.prov].items) delete bcPedidos[t.prov].items[t.key]; }
+    });
+    toast('Dejamos solo el más barato ✓','tok');
+  } else {
+    toast('Quedaron los dos','tok');
+  }
+  draftSave();
+  bcRenderFloating();
+  bcRenderPedidos();
+  if(typeof bcRenderAllViews==='function') bcRenderAllViews(true);
 }
 
 // ── PEDIDOS ──────────────────────────────────────────────────────
