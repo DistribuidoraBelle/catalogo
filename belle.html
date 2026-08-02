@@ -2335,11 +2335,12 @@ tr.row-hl:hover td, tr.row-hl:focus-within td{
           <div class="sec-title">Crear / editar cuenta</div>
           <div class="fr" style="gap:.6rem">
             <div class="fg full"><label>Nombre</label><input class="fi" id="cNombre" type="text"></div>
-            <div class="fg"><label>Usuario</label><input class="fi" id="cUsuario" type="text"></div>
-            <div class="fg"><label>Contrasena</label><input class="fi" id="cPass" type="text"></div>
-            <div class="fg"><label>Rol</label><select class="fs" id="cRol"><option value="vendedor">Vendedor</option><option value="admin">Administrador</option></select></div>
+            <div class="fg full"><label>Email (para entrar)</label><input class="fi" id="cEmail" type="email" placeholder="nombre@distribuidorabelle.com"></div>
+            <div class="fg"><label>Contraseña</label><input class="fi" id="cPass" type="text" placeholder="mín. 6 (vacío = no cambiar)"></div>
+            <div class="fg"><label>Rol</label><select class="fs" id="cRol"><option value="vendedor">Vendedor</option><option value="deposito">Depósito</option><option value="admin">Administrador</option></select></div>
+            <div class="fg"><label>Vendedor ID</label><input class="fi" id="cVendId" type="number" placeholder="1/2/3 (opcional)"></div>
           </div>
-          <input type="hidden" id="cEditId">
+          <input type="hidden" id="cEditUid">
           <div style="display:flex;gap:.5rem;margin-top:.7rem">
             <button class="btn btn-a" onclick="saveCuenta()">Guardar</button>
             <button class="btn btn-g" onclick="clearCuentaForm()">Limpiar</button>
@@ -12351,50 +12352,95 @@ function eliminarSlide(id){
 
 // HISTORIAL PERIODOS
 
-// CUENTAS
+// CUENTAS (2026-08) — conectadas al login REAL (Supabase Auth) vía edge function admin-usuarios.
+// La función verifica del lado del servidor que quien llama sea un admin activo.
+function _adminUsuariosCall(payload){
+  return fetch(SB_URL+"/functions/v1/admin-usuarios",{
+    method:"POST",
+    headers:{"Content-Type":"application/json","apikey":SB_KEY,"Authorization":"Bearer "+(_authToken||SB_KEY)},
+    body:JSON.stringify(payload)
+  }).then(function(r){ return r.json().then(function(b){ if(!r.ok||(b&&b.error)) throw new Error((b&&b.error)||("HTTP "+r.status)); return b; }); });
+}
+window._cuentasData=[];
+function _cuFind(uid){ return (window._cuentasData||[]).find(function(x){return x.auth_user_id===uid;}); }
 function loadCuentas(){
-  apiGet("usuarios_sistema","select=*&order=rol,nombre").then(function(data){
-    if(!Array.isArray(data)){document.getElementById("cuentasList").innerHTML="<div class='empty'>Sin cuentas</div>";return;}
-    document.getElementById("cuentasList").innerHTML=data.map(function(u){
-      var rb=u.rol==="admin"?"<span class='badge bg-yel'>Admin</span>":"<span class='badge bg-blue'>Vendedor</span>";
+  var el=document.getElementById("cuentasList"); if(el)el.innerHTML="<div class='loading'><div class='spin'></div>Cargando cuentas...</div>";
+  _adminUsuariosCall({accion:"listar"}).then(function(res){
+    window._cuentasData=(res&&res.cuentas)||[];
+    if(!window._cuentasData.length){ if(el)el.innerHTML="<div class='empty'>Sin cuentas</div>"; return; }
+    if(el)el.innerHTML=window._cuentasData.map(function(u){
+      var rolLbl=u.rol==="admin"?"Admin":u.rol==="deposito"?"Depósito":"Vendedor";
+      var rb="<span class='badge "+(u.rol==="admin"?"bg-yel":"bg-blue")+"'>"+rolLbl+"</span>";
       var ab=u.activo?"<span class='badge bg-green'>Activo</span>":"<span class='badge bg-red'>Inactivo</span>";
-      return"<div style='display:flex;align-items:center;gap:.5rem;padding:.5rem 0;border-bottom:1px solid var(--bd)'>"+
-        "<div style='flex:1'><div style='font-size:.82rem;font-weight:500;color:var(--tx)'>"+u.nombre+"</div><div style='font-size:.7rem;color:var(--tx3)'>@"+u.usuario+"</div></div>"+
-        "<div style='display:flex;gap:.3rem;align-items:center'>"+rb+ab+
-        "<button class='ib ib-e' onclick='editCuenta("+JSON.stringify(u).replace(/"/g,"&quot;")+")'>Ed</button>"+
-        "<button class='ib "+(u.activo?"ib-x":"ib-s")+"' onclick='toggleCuenta("+u.id+","+u.activo+")'>"+(u.activo?"Off":"On")+"</button>"+
+      var uid=u.auth_user_id;
+      return "<div style='display:flex;align-items:center;gap:.5rem;padding:.5rem 0;border-bottom:1px solid var(--bd)'>"+
+        "<div style='flex:1;min-width:0'><div style='font-size:.82rem;font-weight:500;color:var(--tx)'>"+_admEsc(u.nombre||"")+(u.vendedor_id?" <span style='color:var(--tx3);font-size:.64rem'>· vend "+u.vendedor_id+"</span>":"")+"</div><div style='font-size:.7rem;color:var(--tx3);overflow:hidden;text-overflow:ellipsis'>"+_admEsc(u.email||"")+"</div></div>"+
+        "<div style='display:flex;gap:.3rem;align-items:center;flex-wrap:wrap;justify-content:flex-end'>"+rb+ab+
+          "<button class='ib ib-e' title='Editar' onclick=\"editCuenta('"+uid+"')\">&#9998;</button>"+
+          "<button class='ib' title='Cambiar contraseña' style='background:var(--sur3);color:var(--tx)' onclick=\"resetCuentaPass('"+uid+"')\">&#128273;</button>"+
+          "<button class='ib "+(u.activo?"ib-x":"ib-s")+"' title='"+(u.activo?"Desactivar":"Activar")+"' onclick=\"toggleCuenta('"+uid+"',"+u.activo+")\">"+(u.activo?"Off":"On")+"</button>"+
         "</div></div>";
     }).join("");
-  });
+  }).catch(function(e){ if(el)el.innerHTML="<div class='empty' style='color:var(--red)'>Error cargando cuentas: "+_admEsc(e.message||"")+"</div>"; });
 }
-function editCuenta(u){
-  var obj;
-  try{obj=typeof u==="string"?JSON.parse(u.replace(/&quot;/g,'"')):u;}catch(e){obj={}; }
-  if(!obj)return;
-  document.getElementById("cNombre").value=obj.nombre||"";
-  document.getElementById("cUsuario").value=obj.usuario||"";
-  document.getElementById("cPass").value="";
-  document.getElementById("cRol").value=obj.rol||"vendedor";
-  document.getElementById("cEditId").value=obj.id;
+function editCuenta(uid){
+  var u=_cuFind(uid); if(!u)return;
+  document.getElementById("cNombre").value=u.nombre||"";
+  var em=document.getElementById("cEmail"); em.value=u.email||""; em.disabled=true;
+  document.getElementById("cPass").value=""; document.getElementById("cPass").placeholder="mín. 6 (vacío = no cambiar)";
+  document.getElementById("cRol").value=u.rol||"vendedor";
+  document.getElementById("cVendId").value=u.vendedor_id||"";
+  document.getElementById("cEditUid").value=uid;
 }
 function clearCuentaForm(){
-  ["cNombre","cUsuario","cPass","cEditId"].forEach(function(id){document.getElementById(id).value="";});
+  ["cNombre","cEmail","cPass","cVendId","cEditUid"].forEach(function(id){var e=document.getElementById(id);if(e)e.value="";});
+  var em=document.getElementById("cEmail"); if(em)em.disabled=false;
   document.getElementById("cRol").value="vendedor";
 }
 function saveCuenta(){
   var nombre=document.getElementById("cNombre").value.trim();
-  var usuario=document.getElementById("cUsuario").value.trim().toLowerCase();
+  var email=document.getElementById("cEmail").value.trim().toLowerCase();
   var pass=document.getElementById("cPass").value.trim();
   var rol=document.getElementById("cRol").value;
-  var editId=document.getElementById("cEditId").value;
-  if(!nombre||!usuario){toast("Nombre y usuario obligatorios","terr");return;}
-  var data={nombre:nombre,usuario:usuario,rol:rol};
-  if(pass)data.password=pass;
-  var prom=editId?apiPatch("usuarios_sistema",data,"id=eq."+editId):apiPost("usuarios_sistema",Object.assign(data,{password:pass||"1234",activo:true}));
-  prom.then(function(){toast(editId?"Cuenta actualizada":"Cuenta creada","tok");clearCuentaForm();loadCuentas();});
+  var vid=parseInt(document.getElementById("cVendId").value)||null;
+  var editUid=document.getElementById("cEditUid").value;
+  if(!nombre){toast("Nombre obligatorio","terr");return;}
+  if(editUid){
+    _adminUsuariosCall({accion:"editar",auth_user_id:editUid,nombre:nombre,rol:rol,vendedor_id:vid}).then(function(){
+      if(pass){ if(pass.length<6){throw new Error("La contraseña debe tener al menos 6 caracteres");} return _adminUsuariosCall({accion:"resetpass",auth_user_id:editUid,password:pass}); }
+    }).then(function(){toast("Cuenta actualizada ✓","tok");clearCuentaForm();loadCuentas();}).catch(function(e){toast("Error: "+(e.message||""),"terr");});
+  } else {
+    if(!email){toast("El email es obligatorio para crear","terr");return;}
+    if(!pass||pass.length<6){toast("Contraseña de al menos 6 caracteres","terr");return;}
+    _adminUsuariosCall({accion:"crear",email:email,password:pass,nombre:nombre,rol:rol,vendedor_id:vid}).then(function(){toast("Cuenta creada ✓","tok");clearCuentaForm();loadCuentas();}).catch(function(e){toast("Error: "+(e.message||""),"terr");});
+  }
 }
-function toggleCuenta(id,activo){
-  apiPatch("usuarios_sistema",{activo:!activo},"id=eq."+id).then(function(){toast("Cuenta "+(activo?"desactivada":"activada"),"tok");loadCuentas();});
+function toggleCuenta(uid,activo){
+  _adminUsuariosCall({accion:"editar",auth_user_id:uid,activo:!activo}).then(function(){toast("Cuenta "+(activo?"desactivada":"activada"),"tok");loadCuentas();}).catch(function(e){toast("Error: "+(e.message||""),"terr");});
+}
+function resetCuentaPass(uid){
+  var u=_cuFind(uid); if(!u)return;
+  var ex=document.getElementById('_moResetPass'); if(ex)ex.remove();
+  var mo=document.createElement('div'); mo.id='_moResetPass'; mo.className='mo open'; mo.style.zIndex='10001';
+  mo.innerHTML="<div class='md' style='max-width:390px'>"+
+    "<div class='mh'><div class='mtt'>🔑 Contraseña de "+_admEsc(u.nombre||u.email)+"</div><button class='btn btn-g' onclick=\"var _m=document.getElementById('_moResetPass');if(_m)_m.remove()\" style='padding:.2rem .5rem'>X</button></div>"+
+    "<div class='mb'>"+
+      "<div class='fg'><label>Nueva contraseña</label><input class='fi' id='_rpNueva' type='text' placeholder='Mínimo 6 caracteres'></div>"+
+      "<div style='font-size:.66rem;color:var(--tx3);line-height:1.4'>Le vas a poner una contraseña nueva a <b>"+_admEsc(u.email||"")+"</b>. Después avisale la nueva clave.</div>"+
+    "</div>"+
+    "<div class='mf'><button class='btn btn-g' onclick=\"var _m=document.getElementById('_moResetPass');if(_m)_m.remove()\">Cancelar</button><button class='btn btn-a' id='_rpBtn' onclick=\"_rpGuardar('"+uid+"')\">Guardar</button></div>"+
+  "</div>";
+  document.body.appendChild(mo);
+  setTimeout(function(){var i=document.getElementById('_rpNueva');if(i)i.focus();},80);
+}
+function _rpGuardar(uid){
+  var n=(document.getElementById('_rpNueva')||{value:''}).value.trim();
+  if(!n||n.length<6){toast("Mínimo 6 caracteres","twarn");return;}
+  var btn=document.getElementById('_rpBtn'); if(btn){btn.disabled=true;btn.textContent='Guardando...';}
+  _adminUsuariosCall({accion:"resetpass",auth_user_id:uid,password:n}).then(function(){
+    var _m=document.getElementById('_moResetPass'); if(_m)_m.remove();
+    toast("Contraseña actualizada ✓","tok");
+  }).catch(function(e){ toast("Error: "+(e.message||""),"terr"); if(btn){btn.disabled=false;btn.textContent='Guardar';} });
 }
 
 // CATALOGO EDIT
