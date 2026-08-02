@@ -4744,6 +4744,7 @@ function doLogin(){
     if(res.error || !res.data || !res.data.session){ _loginError("Usuario o contrasena incorrectos"); return; }
     _authToken = res.data.session.access_token;
     var uid = res.data.session.user.id;
+    window._authUid = uid;
     apiGet("staff_perfiles","select=rol,vendedor_id,nombre&auth_user_id=eq."+uid+"&activo=is.true").then(function(rows){
       var perfil = (Array.isArray(rows)&&rows[0]) ? rows[0] : null;
       if(!perfil){ cli.auth.signOut(); _authToken=null; _loginError("Esta cuenta no tiene acceso al panel."); return; }
@@ -4759,6 +4760,7 @@ function _tryAutoLogin(){
     var s = res && res.data ? res.data.session : null;
     if(!s) return;
     _authToken = s.access_token;
+    window._authUid = s.user.id;
     apiGet("staff_perfiles","select=rol,vendedor_id,nombre&auth_user_id=eq."+s.user.id+"&activo=is.true").then(function(rows){
       var perfil = (Array.isArray(rows)&&rows[0]) ? rows[0] : null;
       if(perfil && perfil.rol===PANEL_ROL) _entrarStaff(perfil);
@@ -4799,9 +4801,10 @@ function _guardarClave(){
   if(!n||n.length<6){toast('Mínimo 6 caracteres','twarn');return;}
   if(n!==r){toast('Las contraseñas no coinciden','twarn');return;}
   var btn=document.getElementById('_clBtn'); if(btn){btn.disabled=true;btn.textContent='Guardando...';}
-  var cli=_sbAuth(); if(!cli){toast('Error de sesión','terr');if(btn){btn.disabled=false;btn.textContent='Guardar';}return;}
-  cli.auth.updateUser({password:n}).then(function(res){
-    if(res&&res.error){ toast('Error: '+(res.error.message||''),'terr'); if(btn){btn.disabled=false;btn.textContent='Guardar';} return; }
+  var uid=window._authUid;
+  if(!uid){ toast('No pude identificar tu sesión. Cerrá sesión y volvé a entrar.','terr'); if(btn){btn.disabled=false;btn.textContent='Guardar';} return; }
+  // Usa la función de servidor (token) — evita el "session missing" del cliente.
+  _adminUsuariosCall({accion:"resetpass",auth_user_id:uid,password:n}).then(function(){
     var _m=document.getElementById('_moClave'); if(_m)_m.remove();
     toast('Contraseña actualizada ✓','tok');
   }).catch(function(e){ toast('Error: '+(e&&e.message||''),'terr'); if(btn){btn.disabled=false;btn.textContent='Guardar';} });
@@ -12354,15 +12357,27 @@ function eliminarSlide(id){
 
 // CUENTAS (2026-08) — conectadas al login REAL (Supabase Auth) vía edge function admin-usuarios.
 // La función verifica del lado del servidor que quien llama sea un admin activo.
+// Devuelve un access_token VÁLIDO: usa el de la sesión y, si venció, lo refresca solo.
+function _authTokenFresco(){
+  var cli; try{ cli=_sbAuth(); }catch(e){ cli=null; }
+  if(!cli||!cli.auth||!cli.auth.getSession) return Promise.resolve(_authToken||null);
+  return cli.auth.getSession().then(function(r){
+    var s=r&&r.data?r.data.session:null;
+    if(s&&s.access_token){ _authToken=s.access_token; if(s.user)window._authUid=s.user.id; return s.access_token; }
+    // Sin sesión activa → intentar refrescar con el refresh token
+    return cli.auth.refreshSession().then(function(rr){
+      var s2=rr&&rr.data?rr.data.session:null;
+      if(s2&&s2.access_token){ _authToken=s2.access_token; if(s2.user)window._authUid=s2.user.id; return s2.access_token; }
+      return null;
+    },function(){ return null; });
+  },function(){ return _authToken||null; });
+}
 function _adminUsuariosCall(payload){
-  // Tomar el token FRESCO de la sesión (más confiable que _authToken, que puede estar viejo).
-  var _tokP;
-  try{ var _c=_sbAuth(); _tokP=(_c&&_c.auth&&_c.auth.getSession)?_c.auth.getSession().then(function(r){return (r&&r.data&&r.data.session&&r.data.session.access_token)||_authToken;},function(){return _authToken;}):Promise.resolve(_authToken); }
-  catch(e){ _tokP=Promise.resolve(_authToken); }
-  return _tokP.then(function(tok){
+  return _authTokenFresco().then(function(tok){
+    if(!tok){ throw new Error("Tu sesión venció. Cerrá sesión y volvé a entrar."); }
     return fetch(SB_URL+"/functions/v1/admin-usuarios",{
       method:"POST",
-      headers:{"Content-Type":"application/json","apikey":SB_KEY,"Authorization":"Bearer "+(tok||_authToken||SB_KEY)},
+      headers:{"Content-Type":"application/json","apikey":SB_KEY,"Authorization":"Bearer "+tok},
       body:JSON.stringify(payload)
     });
   }).then(function(r){ return r.json().then(function(b){ if(!r.ok||(b&&b.error)) throw new Error((b&&b.error)||("HTTP "+r.status)); return b; }); });
