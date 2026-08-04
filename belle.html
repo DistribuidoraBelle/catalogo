@@ -23768,6 +23768,14 @@ function safeParseJson(str,def){
   try{return JSON.parse(str);}catch(e){return def;}
 }
 
+// Aviso throttleado si un guardado a la nube falla (el local siempre queda a salvo).
+function _bcAvisarGuardadoFallo(e){
+  console.error('[bc] fallo guardado nube:',e);
+  var ahora=Date.now();
+  if(window._bcUltimoAvisoFallo && (ahora-window._bcUltimoAvisoFallo)<8000) return;
+  window._bcUltimoAvisoFallo=ahora;
+  try{ toast('⚠️ No se pudo guardar en la nube (quedó guardado en este equipo). Revisá la conexión.','twarn'); }catch(_e){}
+}
 function draftPersist(){
   // Cache local inmediato
   try{localStorage.setItem('belleDrafts',JSON.stringify(drafts));
@@ -23781,7 +23789,7 @@ function draftPersist(){
       proveedores:JSON.stringify(d.proveedores||{}),
       pedidos:JSON.stringify(d.pedidos||{}),
       updated_at:new Date().toISOString()
-    });
+    }).then(function(res){ if(res)_bcAvisarGuardadoFallo(res); }).catch(_bcAvisarGuardadoFallo);
   });
   // Guardar cual es el activo
   apiUpsert('bellcito_drafts',{
@@ -23983,7 +23991,7 @@ function draftRenderTabs(){
   container.innerHTML=drafts.map(function(d){
     var isActive=d.id===activeDraftId;
     var itemCount=0;
-    if(d.proveedores){
+    if(d.pedidos){
       Object.values(d.pedidos||{}).forEach(function(p){
         Object.values(p.items||{}).forEach(function(it){if(it.qty>0)itemCount++;});
       });
@@ -28769,6 +28777,22 @@ function bcGetMatches(){
 
 
 
+// Resuelve el ítem original del proveedor para una línea del pedido, tomando la key correcta:
+//  - key 'l'+idx (vista Lista) → índice directo en bcProveedores[k]
+//  - key 'c'+ri (vista Comparar) → se identifica POR NOMBRE (ri no es índice del array)
+// Antes se hacía parseInt(key.replace('l','')) que daba NaN en las 'c…' → macheo/flag "nuevo" mal.
+function _bcProvItDe(k, it){
+  var arr=bcProveedores[k]||[];
+  var key=String((it&&it.key)||'');
+  if(key.charAt(0)==='l'){
+    var idx=parseInt(key.slice(1));
+    if(!isNaN(idx) && arr[idx]) return arr[idx];
+  }
+  var nom=(it&&it.nombre)||'';
+  var found=arr.find(function(p){return p.nombre_proveedor===nom||p.nombre_norm===nom;});
+  if(found) return found;
+  return {nombre_norm:nom,nombre_proveedor:nom};
+}
 function bcToggleComp(k, ri, val, nombre, precio){
   var qty=Math.max(0,parseInt(val)||0);
   if(!bcPedidos[k]) bcPedidos[k]={items:{}};
@@ -28952,8 +28976,7 @@ function bcRenderPedidos(){
 
     // Calcular ahorro vs costo histórico (usa la MISMA key que el render → comparte caché)
     sel.forEach(function(it){
-      var _idx=parseInt(String(it.key||'').replace('l',''));
-      var provIt=(bcProveedores[k]||[])[_idx]||{nombre_norm:it.nombre,nombre_proveedor:it.nombre};
+      var provIt=_bcProvItDe(k,it);
       var mk=bcNorm(provIt.nombre_norm||provIt.nombre_proveedor||it.nombre||'');
       var esNuevo=(typeof bcManualMatches!=='undefined'&&bcManualMatches[mk]===-1);
       var match = esNuevo?null:bcFindInProds(provIt);
@@ -29061,8 +29084,7 @@ function bcRenderPedidos(){
         sel.map(function(it){
           // Recuperar el item ORIGINAL del proveedor para machear con la MISMA key
           // que usan el comparador y la lista → un solo macheo, coherente en todas las vistas.
-          var _idx=parseInt(String(it.key||'').replace('l',''));
-          var provIt=(bcProveedores[k]||[])[_idx]||{nombre_norm:it.nombre,nombre_proveedor:it.nombre};
+          var provIt=_bcProvItDe(k,it);
           var mk=bcNorm(provIt.nombre_norm||provIt.nombre_proveedor||it.nombre||'');
           var esNuevo=(typeof bcManualMatches!=='undefined'&&bcManualMatches[mk]===-1);
           var itMatch=esNuevo?null:bcFindInProds(provIt);
@@ -29350,8 +29372,7 @@ function bcSetPrecioPedido(k,key,val){
 function bcPedidoEditarMatch(k, itemKeyPedido){
   var it=(bcPedidos[k]&&bcPedidos[k].items)?bcPedidos[k].items[itemKeyPedido]:null;
   if(!it){ if(typeof toast==='function')toast('No encontré esa línea','twarn'); return; }
-  var _idx=parseInt(String(it.key||'').replace('l',''));
-  var provIt=(bcProveedores[k]||[])[_idx]||{nombre_norm:it.nombre,nombre_proveedor:it.nombre};
+  var provIt=_bcProvItDe(k,it);
   var provNombre=provIt.nombre_proveedor||it.nombre||'';
   var actual=bcFindInProds(provIt);
   bcAbrirMatchModal(bcNorm(provIt.nombre_norm||provIt.nombre_proveedor||it.nombre||''), actual?actual.id:null, provNombre);
@@ -29361,8 +29382,7 @@ function bcPedidoEditarMatch(k, itemKeyPedido){
 function _bcPedidoMK(k, itemKeyPedido){
   var it=(bcPedidos[k]&&bcPedidos[k].items)?bcPedidos[k].items[itemKeyPedido]:null;
   if(!it) return null;
-  var _idx=parseInt(String(it.key||'').replace('l',''));
-  var provIt=(bcProveedores[k]||[])[_idx]||{nombre_norm:it.nombre,nombre_proveedor:it.nombre};
+  var provIt=_bcProvItDe(k,it);
   return bcNorm(provIt.nombre_norm||provIt.nombre_proveedor||it.nombre||'');
 }
 // Marcar/desmarcar una línea del pedido como PRODUCTO NUEVO (toggle).
@@ -29825,8 +29845,7 @@ function _bcConfirmarPedidoFinal(k){
         // nombre_norm ORIGINAL del proveedor (recuperado por índice), no el
         // título de display. Así el flag "es nuevo" (-1) y los macheos manuales
         // se respetan al confirmar, y se dispara bien la creación de productos nuevos.
-        var _idx=parseInt(String(it.key||'').replace('l',''));
-        var provIt=(bcProveedores[k]||[])[_idx]||{nombre_norm:it.nombre,nombre_proveedor:it.nombre};
+        var provIt=_bcProvItDe(k,it);
         var key=bcNorm(provIt.nombre_norm||provIt.nombre_proveedor||it.nombre||'');
         var match;
         if(bcManualMatches[key]===-1){ match=null; }                                   // marcado NUEVO
@@ -50971,7 +50990,7 @@ var BELLE_IG_MODELOS_RAW=[
 
 </script>
 <!-- BUILD BELLE · 2026-08-02 ARG -->
-<div id="bcBuildStamp" style="position:fixed;bottom:4px;right:6px;z-index:2147483647;font-size:9px;line-height:1;color:#7c85a8;background:rgba(15,17,23,.6);padding:2px 6px;border-radius:4px;pointer-events:none;font-family:ui-monospace,monospace;letter-spacing:.02em;opacity:.55;font-size:7px">04/08 20:22 · ayudante</div>
+<div id="bcBuildStamp" style="position:fixed;bottom:4px;right:6px;z-index:2147483647;font-size:9px;line-height:1;color:#7c85a8;background:rgba(15,17,23,.6);padding:2px 6px;border-radius:4px;pointer-events:none;font-family:ui-monospace,monospace;letter-spacing:.02em;opacity:.55;font-size:7px">04/08 20:48 · ayudante t2</div>
 </body>
 <!-- build:20260418-195140-20260418-194515-20260330-001651 -->
 </html>
