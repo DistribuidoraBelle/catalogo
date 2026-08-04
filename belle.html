@@ -28678,6 +28678,7 @@ function bcGetMatches(){
 function bcToggleComp(k, ri, val, nombre, precio){
   var qty=Math.max(0,parseInt(val)||0);
   if(!bcPedidos[k]) bcPedidos[k]={items:{}};
+  var wasThere=!!(bcPedidos[k].items && bcPedidos[k].items['c'+ri]);
   if(qty===0){
     delete bcPedidos[k].items['c'+ri];
   } else {
@@ -28687,6 +28688,11 @@ function bcToggleComp(k, ri, val, nombre, precio){
   bcRenderFloating();
   bcRenderPedidos();
   draftSave();
+  // 🆕 2026-08 (bug 1): mismo aviso de repetido / más barato que en la vista Lista.
+  if(qty>0 && !wasThere){
+    var listIdx=(bcProveedores[k]||[]).findIndex(function(p){return p.nombre_proveedor===nombre||p.nombre_norm===nombre;});
+    if(listIdx>=0) _bcChequearDup(k, 'c'+ri, listIdx, precio, nombre);
+  }
 }
 
 // ── LISTA COMPLETA ───────────────────────────────────────────────
@@ -28705,16 +28711,9 @@ function bcToggleLista(k, idx, val, nombre, precio){
   draftSave();
   bcRenderFloating();
   bcRenderPedidos();
-  // 🆕 2026-07: si el MISMO producto del catálogo ya está agregado en otro proveedor, avisar.
-  if(qty>0 && !wasThere){
-    try{
-      var catId=_bcCatIdDe(k, idx);
-      if(catId){
-        var dups=_bcDupsEnPedidos(catId, k, 'l'+idx);
-        if(dups.length) _bcDupModal(k, 'l'+idx, idx, precio, nombre, dups);
-      }
-    }catch(e){ console.warn('[bc dup]',e); }
-  }
+  // 🆕 2026-07/08 (bug 1): avisar si el MISMO producto del catálogo está en otro proveedor,
+  // ya sea agregado en su pedido o disponible MÁS BARATO en su lista de precios.
+  if(qty>0 && !wasThere){ _bcChequearDup(k, 'l'+idx, idx, precio, nombre); }
 }
 
 // ── Aviso de producto repetido entre proveedores (2026-07) ──────────────
@@ -28745,21 +28744,55 @@ function _bcDupsEnPedidos(catId, exclProv, exclKey){
   });
   return dups;
 }
+// 🆕 2026-08 (bug 1): mismo producto de catálogo presente en las LISTAS de precios de otros
+// proveedores (aunque todavía no esté agregado al pedido). Devuelve el más barato por proveedor.
+function _bcDupsEnListas(catId, exclProv, exclIdx){
+  var out=[]; if(!catId) return out;
+  Object.keys(bcProveedores||{}).forEach(function(prov){
+    var lista=bcProveedores[prov]||[];
+    var best=null;
+    for(var i=0; i<lista.length; i++){
+      if(prov===exclProv && i===exclIdx) continue;
+      if(_bcCatIdDe(prov, i)===catId){
+        var pr=(lista[i].precio_usd)||0;
+        if(!best || pr<best.precio){ best={prov:prov, idx:i, precio:pr, nombre:lista[i].nombre_proveedor||'', _list:true}; }
+      }
+    }
+    if(best) out.push(best);
+  });
+  return out;
+}
+// Chequeo unificado al agregar: junta duplicados ya en pedidos + los más baratos en las listas,
+// y si hay algún otro proveedor con el mismo producto, muestra el cartel para dejar el más barato.
+function _bcChequearDup(prov, key, idx, precio, nombre){
+  try{
+    var catId=_bcCatIdDe(prov, idx);
+    if(!catId) return;
+    var dupsPed=_bcDupsEnPedidos(catId, prov, key);
+    var provsEnPed={}; dupsPed.forEach(function(d){ provsEnPed[d.prov]=true; });
+    var dupsLista=_bcDupsEnListas(catId, prov, idx).filter(function(d){ return d.prov!==prov && !provsEnPed[d.prov]; });
+    var dups=dupsPed.concat(dupsLista);
+    if(dups.length) _bcDupModal(prov, key, idx, precio, nombre, dups);
+  }catch(e){ console.warn('[bc dup]',e); }
+}
 function _bcDupModal(prov, key, idx, precio, nombre, dups){
   var ex=document.getElementById('_moBcDup'); if(ex)ex.remove();
   var todos=[{prov:prov,key:key,idx:idx,precio:precio,nombre:nombre,_new:true}].concat(dups);
   var min=Math.min.apply(null, todos.map(function(t){return t.precio||0;}));
   var listaH=todos.map(function(t){
     var barato=((t.precio||0)<=min);
+    var estado = t._new ? " <span style='color:var(--acc);font-size:.62rem'>(recién agregado)</span>"
+               : t._list ? " <span style='color:var(--tx3);font-size:.62rem'>(en su lista, sin agregar)</span>"
+               : " · "+(t.qty||1)+"u en pedido";
     return "<div style='display:flex;justify-content:space-between;gap:.5rem;padding:.3rem .1rem;border-bottom:1px solid var(--bd);font-size:.75rem'>"+
-      "<span style='color:var(--tx)'>"+_admEsc(t.prov)+(t._new?" <span style='color:var(--acc);font-size:.62rem'>(recién agregado)</span>":"")+" · "+(t.qty||1)+"u</span>"+
+      "<span style='color:var(--tx)'>"+_admEsc(t.prov)+estado+"</span>"+
       "<span style='white-space:nowrap;color:"+(barato?'var(--green)':'var(--tx3)')+";font-weight:"+(barato?'700':'400')+"'>u$d "+(t.precio||0).toFixed(2)+(barato?" ✓":"")+"</span></div>";
   }).join('');
   var mo=document.createElement('div'); mo.id='_moBcDup'; mo.className='mo open'; mo.style.zIndex='10002';
   var h="<div class='md' style='max-width:460px'>";
   h+="<div class='mh'><div class='mtt'>⚠️ Producto repetido</div><button class='btn btn-g' onclick=\"var _m=document.getElementById('_moBcDup');if(_m)_m.remove()\" style='padding:.2rem .5rem'>X</button></div>";
   h+="<div class='mb'>";
-  h+="<div style='font-size:.82rem;color:var(--tx)'><b>"+_admEsc(nombre)+"</b> ya lo tenés agregado en otro proveedor:</div>";
+  h+="<div style='font-size:.82rem;color:var(--tx)'><b>"+_admEsc(nombre)+"</b> aparece en otros proveedores (elegí el más barato):</div>";
   h+="<div style='background:var(--sur2);border:1px solid var(--bd);border-radius:8px;padding:.3rem .6rem'>"+listaH+"</div>";
   h+="</div>";
   h+="<div class='mf' style='flex-direction:column;align-items:stretch;gap:.4rem'>";
@@ -28778,7 +28811,17 @@ function _bcDupResolver(accion){
     if(bcPedidos[c.prov]&&bcPedidos[c.prov].items) delete bcPedidos[c.prov].items[c.key];
     toast('No se agregó','twarn');
   } else if(accion==='barato'){
+    // 🆕 2026-08: si el más barato estaba solo en una LISTA (sin agregar), agregarlo al pedido.
+    var elMin=null;
+    c.todos.forEach(function(t){ if(!elMin && (t.precio||0)<=c.min+1e-9) elMin=t; });
+    if(elMin && elMin._list){
+      if(!bcPedidos[elMin.prov]) bcPedidos[elMin.prov]={items:{}};
+      var provItMin=(bcProveedores[elMin.prov]||[])[elMin.idx]||{};
+      bcPedidos[elMin.prov].items['l'+elMin.idx]={nombre:elMin.nombre,precio:elMin.precio,qty:1,key:'l'+elMin.idx,codigo:provItMin.codigo||''};
+    }
+    // quitar del pedido los que son más caros que el mínimo (los _list no están en el pedido)
     c.todos.forEach(function(t){
+      if(t._list) return;
       if((t.precio||0)>c.min){ if(bcPedidos[t.prov]&&bcPedidos[t.prov].items) delete bcPedidos[t.prov].items[t.key]; }
     });
     toast('Dejamos solo el más barato ✓','tok');
@@ -31563,11 +31606,21 @@ function bcAgregarTodosRecom(provKey){
   var entries=(window._bcRecomEntries&&window._bcRecomEntries[provKey])||[];
   if(!entries.length){ toast('No hay recomendaciones para agregar','twarn'); return; }
   if(!bcPedidos[provKey]) bcPedidos[provKey]={items:{}};
-  var agregados=0;
+  // FIX 2026-08 (bug "mismo producto en todas las listas"): al agregar en bloque, solo sumar
+  // productos donde ESTE proveedor es el más barato. Reusa _bcIndiceProveedores (mismo patrón
+  // que "Armar pedido automático"). Así el mismo producto no se repite en varias listas.
+  var indice=_bcIndiceProveedores();
+  var agregados=0, omitidosCaro=0;
   entries.forEach(function(e){
     var it=e.item; var idx=it._idx;
     var ya=bcPedidos[provKey].items['l'+idx];
     if(ya && ya.qty>0) return; // no pisar lo que ya pusiste
+    var prod=e.prod||bcFindInProds(it);
+    var pid=prod&&prod.id;
+    if(pid!=null){
+      var ops=(indice[pid]||[]).slice().sort(function(a,b){return (a.precio||9e9)-(b.precio||9e9);});
+      if(ops.length && ops[0].prov!==provKey){ omitidosCaro++; return; } // más barato en otro proveedor
+    }
     var provIt=(bcProveedores[provKey]||[])[idx]||{};
     bcPedidos[provKey].items['l'+idx]={nombre:bcTitleCase(it.nombre_proveedor||''),precio:it.precio_usd,qty:1,key:'l'+idx,codigo:provIt.codigo||''};
     agregados++;
@@ -31576,7 +31629,9 @@ function bcAgregarTodosRecom(provKey){
   bcRenderFloating();
   bcRenderPedidos();
   bcRenderRecomendaciones();
-  toast(agregados ? ('➕ '+agregados+' agregados (1u c/u)') : 'Ya estaban todos agregados','tok');
+  var msg = agregados ? ('➕ '+agregados+' agregados (1u c/u)') : 'No se agregó nada nuevo';
+  if(omitidosCaro) msg += ' · '+omitidosCaro+' omitidos (más baratos en otro proveedor)';
+  toast(msg,'tok');
 }
 
 function bcRenderRecomendaciones(){
@@ -31630,25 +31685,30 @@ function bcRenderRecomendaciones(){
           entry.tipos.push('nuevo');
           entry.info = 'No está en tu catálogo';
         } else {
-          var stock = match.stock_actual||0;
+          // 🆕 2026-08 (mejora): usar disponible LIBRE (stock físico − reservado), igual que el
+          // resto del sistema, para no recomendar reponer algo cuyo stock ya está comprometido.
+          var stockFis = match.stock_actual||0;
+          var reserva = match.reserva||0;
+          var stock = Math.max(0, stockFis - reserva);
           var enViaje = match.en_viaje||0;
           var cat = String(match.cat||'3').replace('.0','');
           var costo = match.costo_ind||0;
           var vendido = match.vendido_david||0;
+          var resTxt = reserva>0 ? (' · '+reserva+' reservadas') : '';
 
           // Sin stock + sin viaje
           if(stock===0 && enViaje===0){
             entry.tipos.push('nunca');
             entry.urgencia = Math.max(entry.urgencia, 5);
-            entry.info = 'Agotado · sin pedido en viaje';
+            entry.info = 'Sin disponible · sin pedido en viaje'+resTxt;
           } else if(stock===0){
             entry.tipos.push('sin');
             entry.urgencia = Math.max(entry.urgencia, 4);
-            entry.info = 'Sin stock (✈️ '+enViaje+' u en viaje)';
+            entry.info = 'Sin disponible (✈️ '+enViaje+' u en viaje)'+resTxt;
           } else if(stock<=3){
             entry.tipos.push('bajo');
             entry.urgencia = Math.max(entry.urgencia, 3);
-            entry.info = stock+' u en stock';
+            entry.info = stock+' u libres'+resTxt;
           }
 
           // Más vendidos (cat S/1, stock bajo)
@@ -31801,6 +31861,8 @@ function bcRenderRecomendaciones(){
     var totalMostrados = 0;
     var provsAMostrar = (fProv === 'todos') ? keys : [fProv];
 
+    // 🆕 2026-08: índice cruzado producto→proveedores para marcar el MÁS BARATO en cada fila.
+    var _recIndice = _bcIndiceProveedores();
     provsAMostrar.forEach(function(provKey){
       var entries = byProv[provKey].filter(passFilter);
       if(!entries.length) return;
@@ -31903,8 +31965,20 @@ function bcRenderRecomendaciones(){
         });
         html += '</td>';
 
-        // Precio proveedor
-        html += '<td style="padding:.35rem .5rem;text-align:right;white-space:nowrap;font-weight:700;color:var(--acc)">u$d '+it.precio_usd.toFixed(2)+'</td>';
+        // Precio proveedor + aviso "más barato" (2026-08)
+        var _cheapTag='';
+        if(prod && prod.id!=null){
+          var _ops=(_recIndice[prod.id]||[]).slice().sort(function(a,b){return (a.precio||9e9)-(b.precio||9e9);});
+          if(_ops.length){
+            var _min=_ops[0];
+            if(_min.prov!==provKey && (_min.precio||0) < (it.precio_usd||0) - 1e-9){
+              _cheapTag='<div style="font-size:.55rem;color:#22c55e;font-weight:700" title="Está más barato en '+_esc(_min.prov)+'">▼ '+_esc(_min.prov)+' u$d '+(_min.precio||0).toFixed(2)+'</div>';
+            } else if(_min.prov===provKey && _ops.length>1){
+              _cheapTag='<div style="font-size:.55rem;color:#22c55e;font-weight:700" title="Es el más barato entre los proveedores cargados">✓ más barato</div>';
+            }
+          }
+        }
+        html += '<td style="padding:.35rem .5rem;text-align:right;white-space:nowrap;font-weight:700;color:var(--acc)">u$d '+it.precio_usd.toFixed(2)+_cheapTag+'</td>';
 
         // Costo nuestro
         html += '<td style="padding:.35rem .5rem;text-align:right;white-space:nowrap">';
@@ -32022,7 +32096,8 @@ function bcAccionRapida(tipo){
       var score = bcSim(bcNorm(pFull), bcNorm(item.nombre_norm||item.nombre_proveedor||''));
       if(score < 0.999) return;
 
-      var stock = match.stock_actual||0, enViaje = match.en_viaje||0;
+      // 🆕 2026-08 (mejora): disponible LIBRE (stock físico − reservado), consistente con recomendaciones.
+      var stock = Math.max(0,(match.stock_actual||0)-(match.reserva||0)), enViaje = match.en_viaje||0;
       var cat = String(match.cat||'3').replace('.0',''), costo = match.costo_ind||0;
       var tipos = [];
       if(stock===0 && enViaje===0) tipos.push('nunca');
@@ -32036,6 +32111,20 @@ function bcAccionRapida(tipo){
       }
     });
   });
+
+  // FIX 2026-08 (bug "mismo producto en todas las listas"): de-duplicar por producto de
+  // catálogo, quedándonos con el proveedor MÁS BARATO. Antes se agregaba el mismo producto
+  // a TODAS las listas de proveedores sin priorizar precio.
+  (function(){
+    var mejorPorProd = {}, sinId = [];
+    matched.forEach(function(m){
+      var pid = m.match && m.match.id;
+      if(pid==null){ sinId.push(m); return; }
+      var prev = mejorPorProd[pid];
+      if(!prev || (m.item.precio_usd||1e9) < (prev.item.precio_usd||1e9)){ mejorPorProd[pid] = m; }
+    });
+    matched = Object.keys(mejorPorProd).map(function(k){ return mejorPorProd[k]; }).concat(sinId);
+  })();
 
   if(matched.length === 0){
     toast('No se encontraron items que cumplan la condición con match 100%','twarn');
