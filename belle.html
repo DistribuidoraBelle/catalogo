@@ -1809,6 +1809,9 @@ tr.row-hl:hover td, tr.row-hl:focus-within td{
     <div style="font-size:.7rem;color:var(--tx3);font-weight:600;text-transform:uppercase;letter-spacing:.05em">Borradores:</div>
     <div id="draftTabsContainer" style="display:flex;gap:.3rem;flex-wrap:wrap"></div>
     <button class="btn btn-g" onclick="draftNew()" style="font-size:.68rem;padding:.2rem .5rem">+ Nuevo</button>
+    <button class="btn btn-a" onclick="draftGuardarYa()" title="Guardar todo ahora en la base (no esperar)" style="font-size:.68rem;padding:.2rem .6rem;margin-left:auto">💾 Guardar</button>
+    <button class="btn btn-g" onclick="bcRecargarCatalogo()" title="Traer el catálogo de la empresa actualizado (stock/precios)" style="font-size:.68rem;padding:.2rem .5rem">🔄 Catálogo</button>
+    <span id="bcCatInfo" style="font-size:.62rem;color:var(--tx3);white-space:nowrap"></span>
   </div>
 
   
@@ -14293,7 +14296,7 @@ function ctrlBuscRender(q){
   var allProds=Array.isArray(prods)&&prods.length?prods:[];
   if(!allProds.length){
     el.innerHTML='<div class="empty">Cargando...</div>';
-    apiGet('productos','select=id,nombre,empresa,ml,stock_actual&activo=is.true&order=empresa,nombre&limit=2000').then(function(data){
+    apiGet('productos','select=*&activo=is.true&order=empresa,nombre&limit=2000').then(function(data){
       if(Array.isArray(data))prods=data;ctrlBuscRender(q);
     });
     return;
@@ -14343,7 +14346,7 @@ function ctrlBuscarProducto(itemId, q){
   if(!Array.isArray(prods)||!prods.length){
     resEl.innerHTML='<div style="padding:.3rem .5rem;font-size:.7rem;color:var(--tx3)">Cargando productos...</div>';
     resEl.style.display='block';
-    apiGet('productos','select=id,nombre,empresa,ml,stock_actual,en_viaje&activo=is.true&order=empresa,nombre&limit=2000').then(function(data){
+    apiGet('productos','select=*&activo=is.true&order=empresa,nombre&limit=2000').then(function(data){
       if(Array.isArray(data))prods=data;
       ctrlBuscarProducto(itemId,q);
     });
@@ -23796,12 +23799,31 @@ function draftSave(){
   d.items=JSON.parse(JSON.stringify(comprasItems||[]));
   d.proveedores=JSON.parse(JSON.stringify(bcProveedores||{}));
   d.pedidos=JSON.parse(JSON.stringify(bcPedidos||{}));
+  d._ts=Date.now(); // marca de tiempo local → sirve para ganar por fecha al sincronizar entre PCs/base
   try{localStorage.setItem('belleDrafts',JSON.stringify(drafts));
       localStorage.setItem('belleDraftsActive',activeDraftId);}catch(e){}
   draftRenderTabs();
   clearTimeout(_draftTimer);
   _draftTimer=setTimeout(draftPersist,1500);
 }
+// Guardado FORZADO a la base (botón 💾 Guardar y al salir/cerrar). No espera el debounce.
+function _bcFlushGuardado(){
+  try{ clearTimeout(_draftTimer); }catch(e){}
+  try{ draftPersist(); }catch(e){}
+  try{
+    clearTimeout(window._bcMatchSaveTimer);
+    var data=window._bcManualMatches||(typeof bcManualMatches!=='undefined'?bcManualMatches:{})||{};
+    apiUpsert('bellcito_drafts',{draft_id:'__matches__global',label:'matches',items:JSON.stringify(data),proveedores:'{}',pedidos:'{}',updated_at:new Date().toISOString()});
+  }catch(e){}
+}
+function draftGuardarYa(){
+  try{ draftSave(); }catch(e){}
+  _bcFlushGuardado();
+  try{ toast('Guardado ✓','tok'); }catch(e){}
+}
+// Guardar automáticamente al salir/cerrar/ocultar la pestaña → no se pierde nada por el debounce.
+document.addEventListener('visibilitychange',function(){ if(document.visibilityState==='hidden'){ try{ if(typeof drafts!=='undefined'&&drafts&&drafts.length){ draftSave(); _bcFlushGuardado(); } }catch(e){} } });
+window.addEventListener('beforeunload',function(){ try{ if(typeof drafts!=='undefined'&&drafts&&drafts.length){ draftSave(); _bcFlushGuardado(); } }catch(e){} });
 
 function draftInit(){
   var container=document.getElementById('draftTabsContainer');
@@ -23817,13 +23839,31 @@ function draftInit(){
         return d!=='__active__' && d.indexOf('__matches__')!==0 && d.indexOf('__crossreject__')!==0;
       });
       if(draftRows.length){
+        // Reconciliación last-write-wins: si el navegador tiene una versión MÁS NUEVA
+        // (cambios que aún no llegaron a la base por el debounce/salida), esa gana.
+        var _localDrafts=[]; try{_localDrafts=JSON.parse(localStorage.getItem('belleDrafts')||'[]');}catch(e){}
+        var _localById={}; if(Array.isArray(_localDrafts))_localDrafts.forEach(function(d){ if(d&&d.id)_localById[d.id]=d; });
+        var _huboLocalGanador=false;
         drafts=draftRows.map(function(r){
-          return {id:r.draft_id,label:r.label||'Borrador',nombre:r.label||'Borrador',
+          var dbDraft={id:r.draft_id,label:r.label||'Borrador',nombre:r.label||'Borrador',
             items:safeParseJson(r.items,[]),
             proveedores:safeParseJson(r.proveedores,{}),
-            pedidos:safeParseJson(r.pedidos,{})};
+            pedidos:safeParseJson(r.pedidos,{}),
+            _ts:(r.updated_at?new Date(r.updated_at).getTime():0)};
+          var loc=_localById[r.draft_id];
+          if(loc && (loc._ts||0) > (dbDraft._ts||0)){
+            loc.id=r.draft_id; loc.label=loc.label||dbDraft.label; loc.nombre=loc.label; _huboLocalGanador=true;
+            return loc;
+          }
+          return dbDraft;
+        });
+        // Borradores creados en este navegador que todavía NO están en la base → conservarlos.
+        if(Array.isArray(_localDrafts))_localDrafts.forEach(function(loc){
+          if(loc&&loc.id&&!drafts.find(function(x){return x.id===loc.id;})){ drafts.push(loc); _huboLocalGanador=true; }
         });
         try{localStorage.setItem('belleDrafts',JSON.stringify(drafts));}catch(e){}
+        // Si el navegador tenía algo más nuevo, subirlo a la base para sincronizar.
+        if(_huboLocalGanador){ try{ clearTimeout(_draftTimer); _draftTimer=setTimeout(draftPersist,800); }catch(e){} }
         var lastActive=activeRow&&activeRow.extra;
         var found=lastActive&&drafts.find(function(x){return x.id===lastActive;});
         activeDraftId=found?lastActive:drafts[0].id;
@@ -24069,7 +24109,7 @@ function cpBuscRender(q){
   var allProds=Array.isArray(prods)&&prods.length?prods:[];
   if(!allProds.length){
     el.innerHTML='<div class="empty">Cargando...</div>';
-    apiGet('productos','select=id,nombre,empresa,ml,stock_actual&activo=is.true&order=empresa,nombre&limit=2000').then(function(data){
+    apiGet('productos','select=*&activo=is.true&order=empresa,nombre&limit=2000').then(function(data){
       if(Array.isArray(data))prods=data;cpBuscRender(q);
     });
     return;
@@ -32328,26 +32368,38 @@ function _bcAplicarAccionRapida(tipo){
 }
 
 // FEAT (2026-05-14): forzar recarga del catálogo desde Supabase
-function bcRecargarCatalogo(){
-  toast('Recargando catálogo...','tinfo');
+function bcRecargarCatalogo(silent){
+  if(!silent) toast('Recargando catálogo...','tinfo');
   // Invalidar caches del ayudante
   _bcResetFindCache();
   bcMatchCache = null;
-  // Recargar prods
-  if(typeof loadProds === 'function'){
-    apiGet('productos','select=*&activo=is.true&order=empresa,nombre&limit=2000').then(function(data){
-      if(!Array.isArray(data)){
-        toast('Error recargando','terr');
-        return;
-      }
-      prods = data;
-      toast('✅ Catálogo actualizado ('+prods.length+' productos)','tok');
-      // Re-renderizar vista actual
-      if(typeof bcRenderAllViews === 'function') bcRenderAllViews();
-    }).catch(function(e){
-      toast('Error: '+e.message,'terr');
-    });
-  }
+  return apiGet('productos','select=*&activo=is.true&order=empresa,nombre&limit=2000').then(function(data){
+    if(!Array.isArray(data)){
+      if(!silent) toast('Error recargando','terr');
+      return;
+    }
+    prods = data;
+    window._bcCatTs = Date.now();
+    var inf=document.getElementById('bcCatInfo');
+    if(inf){ var h=new Date().toLocaleTimeString('es-AR',{hour:'2-digit',minute:'2-digit'}); inf.textContent='catálogo '+prods.length+' · '+h; }
+    if(!silent) toast('✅ Catálogo actualizado ('+prods.length+' productos)','tok');
+    // Re-renderizar vista actual
+    if(typeof bcRenderAllViews === 'function') bcRenderAllViews();
+  }).catch(function(e){
+    if(!silent) toast('Error: '+(e&&e.message||''),'terr');
+  });
+}
+// Catálogo EN VIVO: refresca al abrir el Ayudante y cada 2 min mientras esté abierto.
+function _bcCatAutoRefresh(){
+  var last=window._bcCatTs||0;
+  if(Date.now()-last > 20000){ bcRecargarCatalogo(true); }
+  else { var inf=document.getElementById('bcCatInfo'); if(inf&&prods&&prods.length){ var h=new Date(last).toLocaleTimeString('es-AR',{hour:'2-digit',minute:'2-digit'}); inf.textContent='catálogo '+prods.length+' · '+h; } }
+  try{ if(window._bcCatTimer) clearInterval(window._bcCatTimer); }catch(e){}
+  window._bcCatTimer=setInterval(function(){
+    var pg=document.getElementById('page-compras-ia');
+    if(!pg || !pg.classList.contains('act')){ try{clearInterval(window._bcCatTimer);}catch(e){} window._bcCatTimer=null; return; }
+    if(document.visibilityState==='visible') bcRecargarCatalogo(true);
+  }, 120000);
 }
 
 // ════════════════════════════════════════════════════════════════
@@ -35764,7 +35816,7 @@ function navTo(pg,el){
   if(el)el.classList.add("act");
   var ti=document.getElementById("pageTitle");if(ti)ti.textContent=PAGE_TITLES[pg]||pg;
   if(pg==="blessing"){if(typeof blessingInit==="function")blessingInit();}
-  if(pg==="compras-ia"){if(!drafts.length)draftInit();else draftRenderTabs();if(typeof bcLoadManualMatches==='function')bcLoadManualMatches();if(typeof bcLoadCrossReject==='function')bcLoadCrossReject();bcRenderProvsList();if(typeof bcWarmMatchCache==='function')bcWarmMatchCache();}else{listaShowFloating(false);}
+  if(pg==="compras-ia"){if(!drafts.length)draftInit();else draftRenderTabs();if(typeof bcLoadManualMatches==='function')bcLoadManualMatches();if(typeof bcLoadCrossReject==='function')bcLoadCrossReject();bcRenderProvsList();if(typeof bcWarmMatchCache==='function')bcWarmMatchCache();if(typeof _bcCatAutoRefresh==='function')_bcCatAutoRefresh();}else{listaShowFloating(false);}
   if(pg==="dashboard"){loadDashMetrics();loadDashRendicion();}
   if(pg==="stock"){
     if(!prods||!prods.length){
@@ -45920,7 +45972,7 @@ function ppBuscarCat(q){
   var allProds=(typeof prods!=='undefined'&&Array.isArray(prods)&&prods.length>0)?prods:[];
   if(!allProds.length){
     el.innerHTML='<div class="empty" style="color:var(--yel)">Cargando productos...</div>';
-    apiGet('productos','select=id,nombre,empresa,ml,stock_actual,en_viaje&activo=is.true&order=empresa,nombre&limit=2000').then(function(data){
+    apiGet('productos','select=*&activo=is.true&order=empresa,nombre&limit=2000').then(function(data){
       if(Array.isArray(data)&&data.length&&typeof prods!=='undefined')prods=data;
       ppBuscarCat(q);
     });
@@ -50919,7 +50971,7 @@ var BELLE_IG_MODELOS_RAW=[
 
 </script>
 <!-- BUILD BELLE · 2026-08-02 ARG -->
-<div id="bcBuildStamp" style="position:fixed;bottom:4px;right:6px;z-index:2147483647;font-size:9px;line-height:1;color:#7c85a8;background:rgba(15,17,23,.6);padding:2px 6px;border-radius:4px;pointer-events:none;font-family:ui-monospace,monospace;letter-spacing:.02em;opacity:.7">v2026-08-02 · notis fix ARG</div>
+<div id="bcBuildStamp" style="position:fixed;bottom:4px;right:6px;z-index:2147483647;font-size:9px;line-height:1;color:#7c85a8;background:rgba(15,17,23,.6);padding:2px 6px;border-radius:4px;pointer-events:none;font-family:ui-monospace,monospace;letter-spacing:.02em;opacity:.55;font-size:7px">04/08 20:22 · ayudante</div>
 </body>
 <!-- build:20260418-195140-20260418-194515-20260330-001651 -->
 </html>
