@@ -30158,8 +30158,22 @@ function bcGetCatalogBrands(){
 // ════════════════════════════════════════════════════════════════
 window._bcCmpVista       = window._bcCmpVista       || 'todas';    // todas | catalogo | comparables | unicos | conDif | mejorPrecio
 window._bcCmpFiltroStock = window._bcCmpFiltroStock || 'todos';    // todos | sin | bajo | con
+window._bcCmpFiltroCat   = window._bcCmpFiltroCat   || 'todas';    // todas | S | 1 | 2 | ... (categoría del catálogo)
 window._bcCmpExpandidas  = window._bcCmpExpandidas  || {};         // {secciones expandidas/colapsadas}
 
+// ¿El match es sospechoso? True si el nombre del proveedor tiene una palabra significativa
+// (≥4 letras, que no sea concentración/tamaño/descriptor) que NO aparece en el nombre del catálogo.
+// Ej: "Khamrah Waha" vs "Khamrah" → "waha" no está → sospechoso (son productos distintos).
+// Se usa SOLO para el comparador (clasificación "en catálogo"), no toca el emparejador global.
+function _bcMatchSospechoso(provNombre, cat){
+  try{
+    var STOP={ml:1,edp:1,edt:1,edc:1,eau:1,parfum:1,cologne:1,perfume:1,spray:1,tester:1,vaporisateur:1,pour:1,homme:1,femme:1,para:1,hombre:1,mujer:1,unisex:1,men:1,women:1,woman:1,'for':1,'and':1,'the':1,nuevo:1,'new':1};
+    var catTxt=bcNorm((cat.empresa||'')+' '+(cat.nombre||''));
+    var pw=bcNorm(provNombre||'').split(' ').filter(function(w){ return w.length>=4 && !STOP[w] && !/^\d+(ml|g|gr|oz|cc)?$/.test(w); });
+    for(var i=0;i<pw.length;i++){ if(catTxt.indexOf(pw[i])<0) return true; }
+  }catch(e){}
+  return false;
+}
 function bcRenderComparativa(){
   var wrap=document.getElementById('bcCompareContent');
   if(!wrap) return;
@@ -30171,6 +30185,10 @@ function bcRenderComparativa(){
 
   var rows = bcGetMatches();
   var simMin = (parseFloat((document.getElementById('comprasSimilitud')||{value:90}).value)||90)/100;
+  // Umbral para considerar un item "en catálogo": respeta el % de Similitud (y baja a 75% si activás "Parciales").
+  // Así un match flojo (ej: "Khamrah Waha" ~ "Khamrah Qahwa") NO se cuenta como del catálogo si no llega al %.
+  var _bcAllowParcial = !!((document.getElementById('bcAllowParcial')||{}).checked);
+  var _bcCatThr = _bcAllowParcial ? 0.75 : simMin;
 
   // ═══ PASO 1: enriquecer cada row con datos de matcheo y stock ═══
   var enriched = rows.map(function(r){
@@ -30213,8 +30231,9 @@ function bcRenderComparativa(){
       minPrecio: minP,
       maxPrecio: maxP,
       difPct: difPct,
-      // categorización
-      esCatalogo: !!matchCat,
+      // categorización — "en catálogo" solo si: llega al umbral de similitud Y no es un match sospechoso
+      // (palabra distinta que el catálogo no tiene). Los matches manuales que vos linkeaste siempre valen.
+      esCatalogo: !!matchCat && (manualPid ? true : (matchScore >= _bcCatThr && !_bcMatchSospechoso(r.nombre, matchCat))),
       esComparable: provsConProd.length >= 2,
       esUnico: provsConProd.length === 1
     };
@@ -30244,6 +30263,13 @@ function bcRenderComparativa(){
   // ═══ PASO 4: aplicar filtros (vista + stock) ═══
   var vista = window._bcCmpVista;
   var fStock = window._bcCmpFiltroStock;
+  var fCat = window._bcCmpFiltroCat;
+  function _bcCatNorm(c){ return String(c==null?'':c).replace('.0','').trim().toUpperCase(); }
+  function pasaFiltroCat(e){
+    if(fCat==='todas') return true;
+    if(!e.esCatalogo || !e.matchCat) return false; // por categoría solo filtramos lo que está en catálogo
+    return _bcCatNorm(e.matchCat.cat)===fCat;
+  }
 
   function pasaFiltroStock(e){
     if(!e.esCatalogo) return fStock==='todos'; // si no está en catálogo, solo pasa con "todos"
@@ -30278,8 +30304,12 @@ function bcRenderComparativa(){
     bajo:  _catVista.filter(function(e){var s=e.matchCat.stock_actual||0;return s>0 && s<=3;}).length,
     con:   _catVista.filter(function(e){return (e.matchCat.stock_actual||0)>3;}).length
   };
+  // Categorías presentes en el catálogo (para el filtro por categoría S/1/2...)
+  var catCounts={};
+  enriched.forEach(function(e){ if(e.esCatalogo && e.matchCat){ var c=_bcCatNorm(e.matchCat.cat)||'—'; catCounts[c]=(catCounts[c]||0)+1; } });
+  var catList=Object.keys(catCounts).sort(function(a,b){ if(a===b)return 0; if(a==='S')return -1; if(b==='S')return 1; var na=parseInt(a),nb=parseInt(b); if(!isNaN(na)&&!isNaN(nb))return na-nb; return a<b?-1:1; });
 
-  enCatalogo       = enCatalogo.filter(pasaFiltroStock).filter(pasaVista);
+  enCatalogo       = enCatalogo.filter(pasaFiltroStock).filter(pasaFiltroCat).filter(pasaVista);
   comparablesNoCat = comparablesNoCat.filter(pasaVista).filter(function(e){return fStock==='todos';});
   unicos           = unicos.filter(pasaVista).filter(function(e){return fStock==='todos';});
 
@@ -30336,6 +30366,22 @@ function bcRenderComparativa(){
         'style="background:'+(act?'var(--acc)':'transparent')+';color:'+(act?'#000':'var(--tx)')+';'+
         'border:1px solid '+(act?'var(--acc)':'var(--bd)')+';border-radius:5px;padding:.22rem .5rem;cursor:pointer;'+
         'font-size:.68rem;font-weight:'+(act?'700':'500')+'">'+o.lbl+' ('+o.cnt+')</button>';
+    });
+    html += '</div>';
+  }
+
+  // Filtros de categoría (S/1/2...) - solo si hay items en catálogo
+  if((vista==='todas' || vista==='catalogo' || vista==='mejorPrecio') && catList.length){
+    var _totCat=catList.reduce(function(s,k){return s+catCounts[k];},0);
+    html += '<div style="display:flex;gap:.3rem;flex-wrap:wrap;align-items:center;margin-top:.4rem">';
+    html += '<span style="font-size:.62rem;color:var(--tx3);font-weight:700;text-transform:uppercase;letter-spacing:.04em;margin-right:.3rem">Categoría:</span>';
+    var _catOpts=[{v:'todas',lbl:'Todas',cnt:_totCat}].concat(catList.map(function(c){return {v:c,lbl:c,cnt:catCounts[c]};}));
+    _catOpts.forEach(function(o){
+      var act = fCat === o.v;
+      html += '<button onclick="window._bcCmpFiltroCat=\''+o.v+'\';bcRenderComparativa()" '+
+        'style="background:'+(act?'var(--acc)':'transparent')+';color:'+(act?'#000':'var(--tx)')+';'+
+        'border:1px solid '+(act?'var(--acc)':'var(--bd)')+';border-radius:5px;padding:.22rem .5rem;cursor:pointer;'+
+        'font-size:.68rem;font-weight:'+(act?'700':'500')+'">'+_esc(o.lbl)+' ('+o.cnt+')</button>';
     });
     html += '</div>';
   }
@@ -51133,7 +51179,7 @@ var BELLE_IG_MODELOS_RAW=[
 
 </script>
 <!-- BUILD BELLE · 2026-08-02 ARG -->
-<div id="bcBuildStamp" style="position:fixed;bottom:4px;right:6px;z-index:2147483647;font-size:9px;line-height:1;color:#7c85a8;background:rgba(15,17,23,.6);padding:2px 6px;border-radius:4px;pointer-events:none;font-family:ui-monospace,monospace;letter-spacing:.02em;opacity:.55;font-size:7px">04/08 21:27 · repo+extras</div>
+<div id="bcBuildStamp" style="position:fixed;bottom:4px;right:6px;z-index:2147483647;font-size:9px;line-height:1;color:#7c85a8;background:rgba(15,17,23,.6);padding:2px 6px;border-radius:4px;pointer-events:none;font-family:ui-monospace,monospace;letter-spacing:.02em;opacity:.55;font-size:7px">04/08 22:07 · comparador</div>
 </body>
 <!-- build:20260418-195140-20260418-194515-20260330-001651 -->
 </html>
