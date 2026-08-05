@@ -1848,6 +1848,13 @@ tr.row-hl:hover td, tr.row-hl:focus-within td{
         <input type="file" id="bcProvFile" accept=".pdf,.xlsx,.xls,.csv,.txt" style="display:none" onchange="bcCargarArchivo(this)">
       </label>
       <button class="btn btn-g" onclick="bcToggleTexto()" style="font-size:.72rem">&#128172; Texto</button>
+      <label class="btn btn-g" title="Sube un archivo de precios y le pega los precios a lo YA cargado, por código. No agrega productos nuevos (ideal Ataccado: primero el stock, después los precios bajos)." style="cursor:pointer;font-size:.72rem;color:var(--green);border-color:var(--green)">
+        &#128178; Precios bajos
+        <input type="file" accept=".pdf,.xlsx,.xls,.csv,.txt" style="display:none" onchange="bcCargarArchivo(this,'precios')">
+      </label>
+      <label title="Si lo tildás, cada lista que subas se SUMA a lo ya cargado del proveedor (varias listas). Si no, reemplaza." style="display:flex;align-items:center;gap:.25rem;font-size:.7rem;color:var(--tx2);cursor:pointer;background:var(--sur3);border:1px solid var(--bd);border-radius:var(--rs);padding:.28rem .5rem">
+        <input type="checkbox" id="bcSumarCheck" style="cursor:pointer">➕ Sumar (varias listas)
+      </label>
       <button class="btn btn-g" onclick="bcLimpiarTodo()" style="font-size:.72rem;color:var(--red)">&#10006; Limpiar todo</button>
     </div>
     <div id="bcTextoArea" style="display:none;margin-top:.5rem">
@@ -26926,7 +26933,8 @@ function bcCargarTexto(){
   var items=parsed.map(function(p){return {nombre_proveedor:p.nombre_proveedor,nombre_norm:bcNormalizarNombre(p.nombre_proveedor),precio_usd:p.precio_usd,proveedor:nombre,codigo:p.codigo||'',marca:p.marca||''};});
   if(!items.length) items=comprasParseAnyText(text,nombre);
   if(!items.length){toast('No se detectaron productos','twarn');return;}
-  bcGuardarProveedor(nombre,items);
+  var _modo=((document.getElementById('bcSumarCheck')||{}).checked)?'sumar':'reemplazar';
+  bcGuardarProveedor(nombre,items,_modo);
   document.getElementById('bcTexto').value='';
   document.getElementById('bcTextoArea').style.display='none';
 }
@@ -27009,13 +27017,15 @@ function _bcCodigoLimpio(v){
   return s;
 }
 
-function bcCargarArchivo(input){
+function bcCargarArchivo(input, modo){
   var nombre=_bcGetProvNombre();
   if(!nombre){toast('Selecciona un proveedor primero','twarn');input.value='';return;}
   var file=input.files[0];
   if(!file){return;}
   input.value='';
   var ext=file.name.split('.').pop().toLowerCase();
+  // modo de carga: 'precios' (forzado por el botón de precios bajos) o según el check "Sumar"
+  var _modo = modo || (((document.getElementById('bcSumarCheck')||{}).checked)?'sumar':'reemplazar');
   bcShowProvLoading(nombre);
 
   if(ext==='pdf'){
@@ -27054,7 +27064,7 @@ function bcCargarArchivo(input){
               var parsed=comprasParseText(allText);
               var items=parsed.map(function(p){return{nombre_proveedor:p.nombre_proveedor,nombre_norm:bcNormalizarNombre(p.nombre_proveedor),precio_usd:p.precio_usd,proveedor:nombre,codigo:p.codigo||'',marca:p.marca||''};});
               if(!items.length){items=comprasParseAnyText(allText,nombre).map(function(p){p.nombre_norm=bcNormalizarNombre(p.nombre_proveedor);return p;});}
-              bcGuardarProveedor(nombre,items);
+              bcGuardarProveedor(nombre,items,_modo);
               return;
             }
             setProgress(idx+1,totalPages);
@@ -27104,7 +27114,7 @@ function bcCargarArchivo(input){
             var parsed=comprasParseText(txt);
             var items=parsed.map(function(p){return{nombre_proveedor:p.nombre_proveedor,nombre_norm:bcNormalizarNombre(p.nombre_proveedor),precio_usd:p.precio_usd,proveedor:nombre,codigo:p.codigo||'',marca:p.marca||''};});
             if(!items.length){items=comprasParseAnyText(txt,nombre).map(function(p){p.nombre_norm=bcNormalizarNombre(p.nombre_proveedor);return p;});}
-            bcGuardarProveedor(nombre,items);
+            bcGuardarProveedor(nombre,items,_modo);
           }).catch(function(err){
             console.error('[bc] PDF parse error:',err);
             toast('Error procesando PDF: '+(err&&err.message||'desconocido'),'terr');
@@ -27201,7 +27211,7 @@ function bcCargarArchivo(input){
           if(!items.length){
             items=parseSheet(wbR,false); // fallback: valores formateados
           }
-          bcGuardarProveedor(nombre,items);
+          bcGuardarProveedor(nombre,items,_modo);
         }catch(err){toast('Error Excel: '+err.message,'terr');console.error(err);_bcLimpiarLoading(nombre);}
       };
       rd.onerror=function(){toast('Error leyendo Excel','terr');_bcLimpiarLoading(nombre);};
@@ -27218,7 +27228,7 @@ function bcCargarArchivo(input){
       var parsed=comprasParseText(e.target.result);
       var items=parsed.map(function(p){return {nombre_proveedor:p.nombre_proveedor,nombre_norm:bcNormalizarNombre(p.nombre_proveedor),precio_usd:p.precio_usd,proveedor:nombre};});
       if(!items.length) items=comprasParseAnyText(e.target.result,nombre).map(function(p){p.nombre_norm=bcNormalizarNombre(p.nombre_proveedor);return p;});
-      bcGuardarProveedor(nombre,items);
+      bcGuardarProveedor(nombre,items,_modo);
     };
     rd.readAsText(file,'utf-8');
   }
@@ -27243,22 +27253,57 @@ function _bcLimpiarLoading(nombre){
   if(loadEl&&loadEl.parentNode)loadEl.parentNode.removeChild(loadEl);
 }
 
-function bcGuardarProveedor(nombre, items){
+// Clave de código normalizada (para asociar entre listas: "132827-1 " -> "132827-1")
+function _bcCodKey(c){ return String(c==null?'':c).trim().toUpperCase().replace(/\s+/g,''); }
+// modo: 'reemplazar' (default) | 'sumar' (varias listas -> une+actualiza) | 'precios' (solo pisa precios por código, NO agrega nuevos)
+function bcGuardarProveedor(nombre, items, modo){
   var loadEl=document.getElementById('bcload-'+nombre);
   if(loadEl) loadEl.parentNode.removeChild(loadEl);
-  if(!items.length){toast(nombre+': 0 productos detectados','twarn');draftSave();
-  bcRenderProvsList(); return;}
-  bcProveedores[nombre]=items;
+  modo = modo || 'reemplazar';
+  var existentes = bcProveedores[nombre] || [];
+
+  if(modo==='precios'){
+    if(!existentes.length){ toast('Primero cargá la lista de STOCK de '+nombre+', después los precios bajos','twarn'); bcRenderProvsList(); return; }
+    if(!items.length){ toast(nombre+': no se detectaron precios en ese archivo','twarn'); return; }
+    var mapCod={}, mapNom={};
+    items.forEach(function(it){ if(it.precio_usd==null)return; var c=_bcCodKey(it.codigo); if(c)mapCod[c]=it.precio_usd; var n=bcNorm(it.nombre_proveedor||it.nombre_norm||''); if(n && mapNom[n]==null)mapNom[n]=it.precio_usd; });
+    var upd=0;
+    existentes.forEach(function(it){
+      var c=_bcCodKey(it.codigo);
+      var p=(c && mapCod.hasOwnProperty(c)) ? mapCod[c] : mapNom[bcNorm(it.nombre_proveedor||it.nombre_norm||'')];
+      if(p!=null){ it.precio_usd=p; it._precioBajo=true; upd++; }
+    });
+    bcProveedores[nombre]=existentes;
+    toast(nombre+': 💲 '+upd+' precios actualizados (por código)','tok');
+
+  } else if(modo==='sumar' && existentes.length){
+    if(!items.length){ toast(nombre+': 0 productos en esa lista','twarn'); return; }
+    var idx={};
+    existentes.forEach(function(it,i){ var k=_bcCodKey(it.codigo)||('n:'+bcNorm(it.nombre_proveedor||it.nombre_norm||'')); if(k)idx[k]=i; });
+    var add=0, upd2=0;
+    items.forEach(function(it){
+      var k=_bcCodKey(it.codigo)||('n:'+bcNorm(it.nombre_proveedor||it.nombre_norm||''));
+      if(k && idx.hasOwnProperty(k)){ existentes[idx[k]].precio_usd=it.precio_usd; upd2++; }
+      else { existentes.push(it); if(k)idx[k]=existentes.length-1; add++; }
+    });
+    bcProveedores[nombre]=existentes;
+    toast(nombre+': +'+add+' nuevos · '+upd2+' actualizados ('+existentes.length+' total)','tok');
+
+  } else {
+    if(!items.length){ toast(nombre+': 0 productos detectados','twarn'); draftSave(); bcRenderProvsList(); return; }
+    bcProveedores[nombre]=items;
+    toast(nombre+': '+items.length+' productos cargados','tok');
+  }
+
   if(!bcPedidos[nombre]) bcPedidos[nombre]={items:{}};
   bcMatchCache=null;
   // MEJORA (2026-05-12): invalidar cache de búsqueda
   _bcResetFindCache();
-  toast(nombre+': '+items.length+' productos cargados','tok');
   draftSave();
   bcRenderProvsList();
   bcRenderMain();
   if(typeof bcWarmMatchCache==='function') bcWarmMatchCache();
-  if(typeof bcPreciosCompararYGuardar==='function') bcPreciosCompararYGuardar(nombre, items);
+  if(typeof bcPreciosCompararYGuardar==='function') bcPreciosCompararYGuardar(nombre, bcProveedores[nombre]);
 }
 
 // MEJORA 2026-06: histórico de precios — comparar precio actual vs última lista del proveedor
@@ -51179,7 +51224,7 @@ var BELLE_IG_MODELOS_RAW=[
 
 </script>
 <!-- BUILD BELLE · 2026-08-02 ARG -->
-<div id="bcBuildStamp" style="position:fixed;bottom:4px;right:6px;z-index:2147483647;font-size:9px;line-height:1;color:#7c85a8;background:rgba(15,17,23,.6);padding:2px 6px;border-radius:4px;pointer-events:none;font-family:ui-monospace,monospace;letter-spacing:.02em;opacity:.55;font-size:7px">04/08 22:07 · comparador</div>
+<div id="bcBuildStamp" style="position:fixed;bottom:4px;right:6px;z-index:2147483647;font-size:9px;line-height:1;color:#7c85a8;background:rgba(15,17,23,.6);padding:2px 6px;border-radius:4px;pointer-events:none;font-family:ui-monospace,monospace;letter-spacing:.02em;opacity:.55;font-size:7px">05/08 00:00 · multi-lista</div>
 </body>
 <!-- build:20260418-195140-20260418-194515-20260330-001651 -->
 </html>
