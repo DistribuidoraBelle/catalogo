@@ -28857,6 +28857,14 @@ function _bcLoadMatchesUnificado(){
 function bcSaveCrossReject(){ _bcPersistMatches(); }
 function bcLoadCrossReject(){ _bcLoadMatchesUnificado(); }
 
+// Palabras significativas de un nombre (para indexar y acelerar el matcheo). Ignora
+// concentración/tamaño/genéricas que no distinguen. Se usa SOLO para pre-filtrar candidatos.
+var _BC_SIGSTOP={edp:1,edt:1,edc:1,eau:1,de:1,la:1,el:1,parfum:1,extrait:1,elixir:1,cologne:1,intense:1,extreme:1,perfume:1,spray:1,ml:1,'for':1,men:1,women:1,man:1,woman:1,fem:1,masc:1,pour:1,homme:1,femme:1,unisex:1};
+function _bcSigWords(nombre){
+  var out=[]; var ws=bcNorm(nombre||'').split(' ');
+  for(var i=0;i<ws.length;i++){ var w=ws[i]; if(w.length>=3 && !_BC_SIGSTOP[w] && !/^\d+(ml|g|gr|oz|cc)?$/.test(w)) out.push(w); }
+  return out;
+}
 function bcGetMatches(){
   if(bcMatchCache) return bcMatchCache;
   var keys=Object.keys(bcProveedores||{});
@@ -28884,6 +28892,17 @@ function bcGetMatches(){
   var baseList = bcProveedores[baseKey] || [];
   usados[baseKey] = {};
   keys.slice(1).forEach(function(k){usados[k]={};});
+
+  // Índice palabra→índices por proveedor (para pre-filtrar candidatos y no comparar todo contra todo).
+  var _wIdx={};
+  keys.slice(1).forEach(function(ok){
+    var wm={}; var list=bcProveedores[ok]||[];
+    for(var oi=0;oi<list.length;oi++){
+      var ws=_bcSigWords(list[oi].nombre_norm||list[oi].nombre_proveedor||'');
+      for(var wi=0;wi<ws.length;wi++){ (wm[ws[wi]]=wm[ws[wi]]||[]).push(oi); }
+    }
+    _wIdx[ok]=wm;
+  });
 
   baseList.forEach(function(base, bi){
     var row = {nombre: base.nombre_norm||base.nombre_proveedor, baseIdx: bi, baseKey: baseKey};
@@ -28930,19 +28949,22 @@ function bcGetMatches(){
         }
       }
 
-      // Sin manual: buscar el mejor match automático entre los no usados
+      // Sin manual: buscar el mejor match automático entre los no usados.
+      // PERF: comparar solo candidatos que comparten alguna palabra significativa (índice).
+      // Si no hay candidatos por índice, cae a scan completo (no pierde ningún match).
       var best = null, bestScore = 0;
-      (bcProveedores[ok]||[]).forEach(function(other, oi){
+      var _list = bcProveedores[ok]||[];
+      var _baseNombre = base.nombre_norm||base.nombre_proveedor;
+      function _tryOi(oi){
         if(usados[ok][oi]) return;
-        var s = bcSim(
-          base.nombre_norm||base.nombre_proveedor,
-          other.nombre_norm||other.nombre_proveedor
-        );
-        if(s > bestScore){
-          bestScore = s;
-          best = Object.assign({}, other, {idx: oi});
-        }
-      });
+        var other=_list[oi]; if(!other) return;
+        var s = bcSim(_baseNombre, other.nombre_norm||other.nombre_proveedor);
+        if(s > bestScore){ bestScore = s; best = Object.assign({}, other, {idx: oi}); }
+      }
+      var _bws=_bcSigWords(_baseNombre), _cand={}, _hasCand=false, _wmap=_wIdx[ok]||{};
+      for(var _wi=0;_wi<_bws.length;_wi++){ var _arr=_wmap[_bws[_wi]]; if(_arr){ _hasCand=true; for(var _z=0;_z<_arr.length;_z++)_cand[_arr[_z]]=1; } }
+      if(_hasCand){ for(var _ci in _cand){ _tryOi(parseInt(_ci)); } }
+      else { for(var _oi=0;_oi<_list.length;_oi++){ _tryOi(_oi); } }
 
       if(best && bestScore >= simMin){
         row[ok] = {
@@ -39632,20 +39654,24 @@ function bcAbrirMatchModal(itemKey,currentMatchId,provNombre){
 }
 function cerrarMoMatch(){var m=document.getElementById('moMatchProd');if(m)m.classList.remove('open');}
 function bcMatchSearchResults(){
-  var q=((document.getElementById('moMatchSearch')||{}).value||'').toLowerCase().trim();
+  var qRaw=((document.getElementById('moMatchSearch')||{}).value||'').trim();
   var el=document.getElementById('moMatchResults');if(!el)return;
   var mo=document.getElementById('moMatchProd');
-  var prov=(mo&&mo._provNombre)||q;
-  var filtered=(prods||[]).filter(function(p){
-    if(!q)return true;
-    return norm(p.nombre||'').indexOf(norm(q))>=0||norm(p.empresa||'').indexOf(norm(q))>=0;
+  var prov=(mo&&mo._provNombre)||'';
+  // Búsqueda por PARECIDO (no substring exacto): ranquea por palabras presentes + similitud.
+  // Así encuentra aunque cambie el orden, falten/sobren palabras (EDP, 100ml, Fem, Dourado...).
+  var qN=bcNorm(qRaw);
+  var qWords=qN.split(' ').filter(function(w){return w.length>=2;});
+  var base = qN || bcNorm(prov);
+  var arr=(prods||[]).map(function(p){
+    var hay=bcNorm((p.empresa||'')+' '+(p.nombre||''));
+    var wm=qWords.length ? (qWords.filter(function(w){return hay.indexOf(w)>=0;}).length/qWords.length) : 0;
+    var sim=bcSim(base, hay)||0;
+    return {p:p, score: (qWords.length? wm*0.65 : 0) + sim*0.45};
   });
-  // Ordenar por PARECIDO al producto del proveedor → los más similares primero
-  if(prov){
-    filtered=filtered.map(function(p){
-      return {p:p, s:bcSim(prov,(p.empresa||'')+' '+(p.nombre||''))};
-    }).sort(function(a,b){return b.s-a.s;}).map(function(o){return o.p;});
-  }
+  arr.sort(function(a,b){return b.score-a.score;});
+  var filtered=arr.filter(function(x){return x.score>0.08;}).map(function(x){return x.p;});
+  if(!filtered.length) filtered=arr.sort(function(a,b){return b.score-a.score;}).map(function(x){return x.p;});
   filtered=filtered.slice(0,40);
   if(!filtered.length){el.innerHTML="<div style='font-size:.72rem;color:var(--tx3);padding:.6rem;text-align:center'>Sin resultados</div>";return;}
   el.innerHTML=filtered.map(function(p){
@@ -51318,7 +51344,7 @@ var BELLE_IG_MODELOS_RAW=[
 
 </script>
 <!-- BUILD BELLE · 2026-08-02 ARG -->
-<div id="bcBuildStamp" style="position:fixed;bottom:4px;right:6px;z-index:2147483647;font-size:9px;line-height:1;color:#7c85a8;background:rgba(15,17,23,.6);padding:2px 6px;border-radius:4px;pointer-events:none;font-family:ui-monospace,monospace;letter-spacing:.02em;opacity:.55;font-size:7px">05/08 23:54 · comparativa ux</div>
+<div id="bcBuildStamp" style="position:fixed;bottom:4px;right:6px;z-index:2147483647;font-size:9px;line-height:1;color:#7c85a8;background:rgba(15,17,23,.6);padding:2px 6px;border-radius:4px;pointer-events:none;font-family:ui-monospace,monospace;letter-spacing:.02em;opacity:.55;font-size:7px">06/08 00:03 · match+perf</div>
 </body>
 <!-- build:20260418-195140-20260418-194515-20260330-001651 -->
 </html>
