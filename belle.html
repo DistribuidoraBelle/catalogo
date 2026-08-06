@@ -29096,24 +29096,32 @@ function _bcProvItDe(k, it){
   if(found) return found;
   return {nombre_norm:nom,nombre_proveedor:nom};
 }
-function bcToggleComp(k, ri, val, nombre, precio){
+// 🆕 2026-08: la Comparativa guarda con la MISMA clave que la vista Lista ('l'+índice
+// de la lista del proveedor). Antes usaba 'c'+renglón: el mismo producto físico podía
+// quedar DOS veces en el pedido (una por cada vista) y el aviso de "más barato"
+// terminaba comparando a un proveedor contra sí mismo (STAR vs STAR).
+function bcToggleComp(k, ri, val, nombre, precio, idx){
   var qty=Math.max(0,parseInt(val)||0);
   if(!bcPedidos[k]) bcPedidos[k]={items:{}};
-  var wasThere=!!(bcPedidos[k].items && bcPedidos[k].items['c'+ri]);
+  var listIdx=(typeof idx==='number' && idx>=0 && (bcProveedores[k]||[])[idx]) ? idx
+    : (bcProveedores[k]||[]).findIndex(function(p){return p.nombre_proveedor===nombre||p.nombre_norm===nombre;});
+  var key=(listIdx>=0)?('l'+listIdx):('c'+ri);
+  // migra la clave vieja 'c…' SOLO si es el mismo producto (los números de renglón cambian
+  // al recalcular la comparativa: ese lugar podría estar ocupado por otro producto viejo)
+  var _legacy=bcPedidos[k].items['c'+ri];
+  var _legacyMismo=!!(_legacy && bcNorm(_legacy.nombre||'')===bcNorm(nombre||''));
+  var wasThere=!!(bcPedidos[k].items[key] || _legacyMismo);
+  if(_legacyMismo && key!=='c'+ri) delete bcPedidos[k].items['c'+ri];
   if(qty===0){
-    delete bcPedidos[k].items['c'+ri];
+    delete bcPedidos[k].items[key];
   } else {
-    var provItC=(bcProveedores[k]||[]).find(function(p){return p.nombre_proveedor===nombre||p.nombre_norm===nombre;})||{};
-    bcPedidos[k].items['c'+ri]={nombre:nombre,precio:precio,qty:qty,key:'c'+ri,codigo:provItC.codigo||''};
+    var provItC=(listIdx>=0?(bcProveedores[k]||[])[listIdx]:null)||{};
+    bcPedidos[k].items[key]={nombre:nombre,precio:precio,qty:qty,key:key,codigo:provItC.codigo||''};
   }
   bcRenderFloating();
   bcRenderPedidos();
   draftSave();
-  // 🆕 2026-08 (bug 1): mismo aviso de repetido / más barato que en la vista Lista.
-  if(qty>0 && !wasThere){
-    var listIdx=(bcProveedores[k]||[]).findIndex(function(p){return p.nombre_proveedor===nombre||p.nombre_norm===nombre;});
-    if(listIdx>=0) _bcChequearDup(k, 'c'+ri, listIdx, precio, nombre);
-  }
+  if(qty>0 && !wasThere && listIdx>=0){ _bcChequearDup(k, key, listIdx, precio, nombre); }
 }
 
 // ── LISTA COMPLETA ───────────────────────────────────────────────
@@ -29128,6 +29136,12 @@ function bcToggleLista(k, idx, val, nombre, precio){
   } else {
     var provIt=(bcProveedores[k]||[])[idx]||{};
     bcPedidos[k].items['l'+idx]={nombre:nombre,precio:precio,qty:qty,key:'l'+idx,codigo:provIt.codigo||''};
+    // 🆕 2026-08: si un borrador viejo tenía este MISMO producto con clave de Comparativa
+    // ('c…'), sacarlo — es la misma línea física, no debe contarse dos veces en el pedido.
+    var _nrm=bcNorm(provIt.nombre_proveedor||provIt.nombre_norm||nombre||'');
+    Object.keys(bcPedidos[k].items).forEach(function(kk){
+      if(kk.charAt(0)==='c'){ var o=bcPedidos[k].items[kk]; if(o && bcNorm(o.nombre||'')===_nrm) delete bcPedidos[k].items[kk]; }
+    });
   }
   draftSave();
   bcRenderFloating();
@@ -29138,96 +29152,62 @@ function bcToggleLista(k, idx, val, nombre, precio){
 }
 
 // ── Aviso de producto repetido entre proveedores (2026-07) ──────────────
-// Devuelve el id de catálogo macheado para una línea de proveedor (o null si es nuevo/rechazado).
-function _bcCatIdDe(provKey, idx){
-  var provIt=(bcProveedores[provKey]||[])[idx];
-  if(!provIt) return null;
-  var mk=bcNorm(provIt.nombre_norm||provIt.nombre_proveedor||'');
-  if(typeof bcManualMatches!=='undefined' && bcManualMatches[mk]===-1) return null; // marcado NUEVO
-  var m=bcFindInProds(provIt);
-  return (m&&m.id)?m.id:null;
+// 🆕 2026-08 REHECHO: el aviso usa el RENGLÓN de la Comparativa (bcGetMatches), que es
+// exactamente lo que el usuario ve: un renglón = el mismo producto macheado entre
+// proveedores, con UNA entrada por proveedor. Nada de agrupar por id de catálogo
+// (agrupaba perfumes distintos que caían sobre el mismo id por macheo difuso, y hasta
+// llegó a comparar un proveedor contra sí mismo).
+// Busca el renglón de la Comparativa donde este proveedor tiene ESTA línea de su lista.
+function _bcRenglonDe(prov, idx){
+  var rows;
+  try{ rows=bcGetMatches()||[]; }catch(e){ return null; }
+  for(var i=0;i<rows.length;i++){
+    var e=rows[i][prov];
+    if(e && e.idx===idx) return rows[i];
+  }
+  return null;
 }
-// Busca el mismo producto de catálogo en los pedidos de TODOS los proveedores (excepto el recién agregado).
-function _bcDupsEnPedidos(catId, exclProv, exclKey){
-  var dups=[];
-  if(!catId) return dups;
-  Object.keys(bcPedidos||{}).forEach(function(prov){
-    var items=(bcPedidos[prov]||{}).items||{};
-    Object.keys(items).forEach(function(key){
-      if(prov===exclProv && key===exclKey) return;
-      var it=items[key]; if(!it||!it.qty) return;
-      if(String(key).charAt(0)!=='l') return; // solo líneas de proveedor
-      var idx=parseInt(String(key).slice(1));
-      if(_bcCatIdDe(prov, idx)===catId){
-        dups.push({prov:prov, key:key, idx:idx, precio:it.precio, qty:it.qty, nombre:it.nombre});
-      }
+// Alternativas del renglón en OTROS proveedores (precio actual de SU lista). Si ya está
+// agregado en el pedido de ese proveedor marca qty; si no, queda como "en su lista".
+function _bcAlternativasDe(row, provExcl){
+  var out=[];
+  Object.keys(bcProveedores||{}).forEach(function(ok){
+    if(ok===provExcl) return;
+    var e=row[ok]; if(!e || e.precio==null) return;
+    var alt={prov:ok, idx:e.idx, precio:e.precio, nombre:e.nombre||e.norm||'', _list:true};
+    var items=(bcPedidos[ok]||{}).items||{};
+    Object.keys(items).forEach(function(kk){
+      var it=items[kk]; if(!it || !it.qty) return;
+      var esLinea=(kk==='l'+e.idx);
+      var esComp=(kk.charAt(0)==='c') && bcNorm(it.nombre||'')===bcNorm(e.nombre||e.norm||'');
+      if(esLinea || esComp){ alt._list=false; alt.key=kk; alt.qty=it.qty; }
     });
-  });
-  return dups;
-}
-// 🆕 2026-08 (bug 1): mismo producto de catálogo presente en las LISTAS de precios de otros
-// proveedores (aunque todavía no esté agregado al pedido). Devuelve el más barato por proveedor.
-function _bcDupsEnListas(catId, exclProv, exclIdx){
-  var out=[]; if(!catId) return out;
-  Object.keys(bcProveedores||{}).forEach(function(prov){
-    var lista=bcProveedores[prov]||[];
-    var best=null;
-    for(var i=0; i<lista.length; i++){
-      if(prov===exclProv && i===exclIdx) continue;
-      if(_bcCatIdDe(prov, i)===catId){
-        var pr=(lista[i].precio_usd)||0;
-        if(!best || pr<best.precio){ best={prov:prov, idx:i, precio:pr, nombre:lista[i].nombre_proveedor||'', _list:true}; }
-      }
-    }
-    if(best) out.push(best);
+    out.push(alt);
   });
   return out;
 }
-// Chequeo unificado al agregar: junta duplicados ya en pedidos + los más baratos en las listas,
-// y si hay algún otro proveedor con el mismo producto, muestra el cartel para dejar el más barato.
-// 🆕 2026-08: dos ítems pueden caer sobre el MISMO id de catálogo por un macheo difuso
-// aunque sean perfumes distintos. Antes de avisar "está más barato en otro proveedor",
-// exigimos que los NOMBRES reales de los dos productos se parezcan de verdad, comparando
-// SOLO las palabras que distinguen (marca + nombre), sin el ruido de packaging/tipo/género.
-// Así no marcamos como "el mismo" a THE KINGDOM (u$d20) vs otro Lattafa (FAKHAR/YARA) que
-// quedó a u$d18,50 por un macheo flojo. Tolera variantes (branco) porque usa solapamiento.
-var _BC_DUPNOISE={perf:1,the:1,tester:1,caja:1,estuche:1,'set':1,kit:1,combo:1,pack:1,sellado:1,sellada:1,importado:1,importada:1,disponible:1,stock:1,unidad:1,unidades:1,oferta:1,promo:1,envio:1,garantia:1,original:1,dama:1,damas:1,caballero:1,caballeros:1,varon:1,varones:1,nuevo:1,'new':1};
-function _bcClaveWords(nombre){
-  return _bcSigWords(nombre).filter(function(w){ return !_BC_DUPNOISE[w]; });
-}
-function _bcMismoProducto(a, b){
-  if(!a || !b) return true;              // sin nombre no bloqueamos (respeta macheo manual)
-  if(bcNorm(a)===bcNorm(b)) return true;
-  var va=_bcExtraerVolumen(a), vb=_bcExtraerVolumen(b);
-  if(va!=null && vb!=null && va!==vb) return false;   // 100ml vs 50ml = distinto
-  var wa=_bcClaveWords(a), wb=_bcClaveWords(b);
-  if(!wa.length || !wb.length) return bcSim(a,b) >= 0.5;  // sin palabras clave → fallback
-  var shared=0, usados=new Array(wb.length);
-  for(var i=0;i<wa.length;i++){
-    for(var j=0;j<wb.length;j++){
-      if(!usados[j] && (wa[i]===wb[j] || _bcWordsCercanas(wa[i], wb[j]))){ usados[j]=true; shared++; break; }
-    }
-  }
-  var dice = 2*shared/(wa.length+wb.length);   // solapamiento de palabras distintivas
-  return dice >= 0.5;
-}
+// Chequeo al agregar: mira el renglón de ese producto en la Comparativa y, si algún OTRO
+// proveedor lo tiene más barato (en su lista o ya en su pedido), muestra el cartel.
 function _bcChequearDup(prov, key, idx, precio, nombre){
   if(window._bcSuppressDup) return; // en acciones masivas (Agregar todo) no molestamos con el modal por cada uno
-  try{
-    var catId=_bcCatIdDe(prov, idx);
-    if(!catId) return;
-    var dupsPed=_bcDupsEnPedidos(catId, prov, key).filter(function(d){ return _bcMismoProducto(nombre, d.nombre); });
-    var provsEnPed={}; dupsPed.forEach(function(d){ provsEnPed[d.prov]=true; });
-    var dupsLista=_bcDupsEnListas(catId, prov, idx).filter(function(d){ return d.prov!==prov && !provsEnPed[d.prov] && _bcMismoProducto(nombre, d.nombre); });
-    var dups=dupsPed.concat(dupsLista);
-    if(dups.length){
+  // Diferido: primero se actualiza la pantalla; si los renglones todavía no están
+  // calculados (bcGetMatches frío), el cálculo corre acá y no congela el tipeo.
+  setTimeout(function(){
+    try{
+      var it=((bcPedidos[prov]||{}).items||{})[key];
+      if(!it || !it.qty) return;                        // ya lo sacó mientras tanto
+      if(Object.keys(bcProveedores||{}).length<2) return; // con 1 proveedor no hay comparación
+      var row=_bcRenglonDe(prov, idx);
+      if(!row) return;
+      var dups=_bcAlternativasDe(row, prov);
+      if(!dups.length) return;
       // Si el que estás eligiendo ya es el MÁS BARATO (o empata), no molestamos con el cartel.
       var minDup=Infinity; dups.forEach(function(d){ var p=parseFloat(d.precio); if(!isNaN(p)&&p<minDup)minDup=p; });
       var pAdd=parseFloat(precio);
       if(!isNaN(pAdd) && (minDup===Infinity || pAdd<=minDup+0.001)) return; // sos el más barato → sin cartel
       _bcDupModal(prov, key, idx, precio, nombre, dups);
-    }
-  }catch(e){ console.warn('[bc dup]',e); }
+    }catch(e){ console.warn('[bc dup]',e); }
+  }, 30);
 }
 function _bcDupModal(prov, key, idx, precio, nombre, dups){
   var ex=document.getElementById('_moBcDup'); if(ex)ex.remove();
@@ -30712,8 +30692,9 @@ function bcRenderComparativa(){
         var pd = r[k];
         var isMin = pd && pd.precio === e.minPrecio && e.numProvs > 1;
         var isMax = pd && pd.precio === e.maxPrecio && e.numProvs > 1 && e.maxPrecio !== e.minPrecio;
-        var inOrd = bcPedidos[k] && bcPedidos[k].items && bcPedidos[k].items['c'+realRi];
-        var qty = inOrd ? bcPedidos[k].items['c'+realRi].qty : 0;
+        // 🆕 2026-08: clave unificada 'l'+idx (la 'c'+renglón queda solo como legado de borradores viejos)
+        var inOrdIt = pd ? ((bcPedidos[k]&&bcPedidos[k].items&&(bcPedidos[k].items['l'+pd.idx]||bcPedidos[k].items['c'+realRi]))||null) : null;
+        var qty = inOrdIt ? inOrdIt.qty : 0;
 
         // Celda del proveedor: NOMBRE como figura en SU lista + precio + confianza + acciones
         var _compKey = bcNorm(r.nombre);
@@ -30749,7 +30730,7 @@ function bcRenderComparativa(){
         h += '<td style="padding:.35rem .25rem;text-align:center">';
         if(pd){
           h += '<input type="number" min="0" max="99" value="'+qty+'" '+
-            'onchange="bcToggleComp(\''+k.replace(/\'/g,"")+'\','+realRi+',this.value,\''+(pd.nombre||'').replace(/[\'"]/g,'')+'\','+pd.precio+')" '+
+            'onchange="bcToggleComp(\''+k.replace(/\'/g,"")+'\','+realRi+',this.value,\''+(pd.nombre||'').replace(/[\'"]/g,'')+'\','+pd.precio+','+pd.idx+')" '+
             'style="width:42px;text-align:center;background:'+(qty>0?'rgba(34,197,94,.15)':'var(--sur)')+';'+
             'border:1px solid '+(qty>0?'#22c55e':'var(--bd)')+';border-radius:4px;'+
             'color:'+(qty>0?'#22c55e':'var(--tx)')+';font-size:.7rem;padding:.15rem;font-weight:'+(qty>0?'700':'400')+'">';
@@ -51385,7 +51366,7 @@ var BELLE_IG_MODELOS_RAW=[
 
 </script>
 <!-- BUILD BELLE · 2026-08-02 ARG -->
-<div id="bcBuildStamp" style="position:fixed;bottom:4px;right:6px;z-index:2147483647;font-size:9px;line-height:1;color:#7c85a8;background:rgba(15,17,23,.6);padding:2px 6px;border-radius:4px;pointer-events:none;font-family:ui-monospace,monospace;letter-spacing:.02em;opacity:.55;font-size:7px">06/08 01:05</div>
+<div id="bcBuildStamp" style="position:fixed;bottom:4px;right:6px;z-index:2147483647;font-size:9px;line-height:1;color:#7c85a8;background:rgba(15,17,23,.6);padding:2px 6px;border-radius:4px;pointer-events:none;font-family:ui-monospace,monospace;letter-spacing:.02em;opacity:.55;font-size:7px">06/08 01:45</div>
 </body>
 <!-- build:20260418-195140-20260418-194515-20260330-001651 -->
 </html>
