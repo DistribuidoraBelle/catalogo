@@ -28789,8 +28789,24 @@ function _bcAfterCrossPick(ctx,msg){
   bcMatchCache=null;
   bcCerrarCrossPicker();
   if(typeof toast==='function') toast(msg||'Guardado','tok');
-  if(ctx.mode==='comp'){ if(typeof bcRenderComparativa==='function') bcRenderComparativa(); }
+  if(ctx.mode==='comp'){
+    if(typeof bcRenderComparativa==='function') bcRenderComparativa();
+    // 🆕 2026-08: seguir a la fila — si al machear cambió de sección, la pantalla la busca
+    // y la resalta un momento, así no "desaparece" de la vista.
+    setTimeout(function(){ _bcFlashRow(ctx.key); }, 60);
+  }
   else { if(typeof bcRenderCruzadosTable==='function') bcRenderCruzadosTable(); }
+}
+// Busca la fila del comparador por su nombre normalizado, la centra en pantalla y la resalta.
+function _bcFlashRow(norm){
+  try{
+    var el=document.querySelector('tr[data-bcnorm="'+String(norm||'').replace(/["\\]/g,'')+'"]');
+    if(!el) return;
+    el.scrollIntoView({block:'center'});
+    var prev=el.style.outline;
+    el.style.outline='2px solid var(--acc)'; el.style.outlineOffset='-2px'; el.style.transition='outline-color .4s';
+    setTimeout(function(){ el.style.outlineColor='transparent'; setTimeout(function(){ el.style.outline=prev||''; },450); }, 1400);
+  }catch(e){}
 }
 
 // MEJORA 2026-06: descartar (toggle) un proveedor para un producto del catálogo en datos cruzados
@@ -29115,6 +29131,23 @@ function bcGetMatches(){
     var db = pb.length>1 ? Math.max.apply(null,pb)-Math.min.apply(null,pb) : 0;
     return db-da;
   });
+
+  // 🆕 2026-08: ORDEN ESTABLE — machear/desmachear cambia la diferencia de precio y antes
+  // eso hacía SALTAR la fila de lugar. La primera vez el orden queda fijado por diferencia;
+  // después cada fila HEREDA la posición de los ítems que contiene (si una fila se parte o
+  // se junta por un macheo, la nueva ocupa el lugar de la vieja). Filas realmente nuevas
+  // van al final. La memoria se resetea cuando cambian las listas cargadas.
+  var _osig = keys.map(function(k){ return k+':'+(bcProveedores[k]||[]).length; }).join('|');
+  var _omem = window._bcRowOrderMem;
+  if(!_omem || _omem.sig !== _osig){ _omem = window._bcRowOrderMem = {sig:_osig, itemMap:{}, next:0}; }
+  rows.forEach(function(r){
+    var best = Infinity;
+    keys.forEach(function(k){ var e=r[k]; if(e){ var s=_omem.itemMap[k+'#'+e.idx]; if(s!==undefined && s<best) best=s; } });
+    if(best === Infinity) best = _omem.next++;
+    r._ord = best;
+    keys.forEach(function(k){ var e=r[k]; if(e){ var kk=k+'#'+e.idx; if(_omem.itemMap[kk]===undefined) _omem.itemMap[kk]=best; } });
+  });
+  rows.sort(function(a,b){ return (a._ord-b._ord) || String(a.baseKey+'#'+a.baseIdx).localeCompare(String(b.baseKey+'#'+b.baseIdx)); });
 
   bcMatchCache = rows;
   return rows;
@@ -29992,6 +30025,47 @@ function bcExportPedidoPDF(k){
 // 🆕 TANDA 4 (2026-07): al generar el pedido, crear los productos NUEVOS
 // como OCULTOS, precargando la pantalla de edición, y sumarlos a "en viaje".
 // ═══════════════════════════════════════════════════════════════════
+// 🆕 2026-08: PREDATOS — deduce marca, ml, concentración, género y nombre base limpio
+// desde el nombre crudo de la lista del proveedor ("PERF MASC LATTAFA THE KINGDOM EDP
+// 100ML (BRANCO)" → marca LATTAFA, base "The Kingdom Branco", EDP, 100ml, masculino).
+// La marca se busca en cualquier posición del texto, contra las marcas conocidas MÁS
+// las empresas que ya existen en el catálogo.
+function _bcPredatosDe(raw){
+  var out={marca:'', base:'', conc:'', ml:null, genero:''};
+  if(!raw) return out;
+  var s=String(raw).trim();
+  var norm=bcNorm(s);
+  out.ml=_bcExtraerVolumen(s)||null;
+  var cm=s.match(/\b(EAU DE PARFUM|EAU DE TOILETTE|EXTRAIT DE PARFUM|EXTRAIT|EDP|EDT|EDC|ELIXIR|PARFUM|HAIR MIST|BODY MIST)\b/i);
+  if(cm){
+    var c=cm[1].toUpperCase();
+    out.conc = c==='EAU DE PARFUM'?'EDP'
+      : c==='EAU DE TOILETTE'?'EDT'
+      : (c==='EXTRAIT DE PARFUM'||c==='EXTRAIT')?'Extrait De Parfum'
+      : c==='PARFUM'?'Parfum' : c==='ELIXIR'?'Elixir'
+      : c==='HAIR MIST'?'Hair Mist' : c==='BODY MIST'?'Body Mist' : c;
+  }
+  if(/\b(fem|femme|female|mujer|dama|damas|woman|women|her)\b/.test(norm)) out.genero='fem';
+  else if(/\b(masc|male|hombre|caballero|caballeros|varon|man|men|homme|him)\b/.test(norm)) out.genero='mas';
+  else if(/\bunisex\b/.test(norm)) out.genero='U';
+  var cand={};
+  ((window._BC_MARCAS_CONOCIDAS)||[]).forEach(function(m){ var n=bcNorm(m); if(n) cand[n]=m; });
+  (typeof prods!=='undefined'?(prods||[]):[]).forEach(function(p){ if(p&&p.empresa){ var e=bcNorm(p.empresa); if(e && !cand[e]) cand[e]=p.empresa; } });
+  var mejorN='', spaced=' '+norm+' ';
+  Object.keys(cand).forEach(function(cn){ if(cn.length>=3 && spaced.indexOf(' '+cn+' ')>=0 && cn.length>mejorN.length) mejorN=cn; });
+  if(mejorN) out.marca=String(cand[mejorN]).toUpperCase();
+  var b=spaced;
+  if(mejorN) b=b.replace(' '+mejorN+' ',' ');
+  // sacar TODAS las menciones de concentración del nombre base (puede haber más de una)
+  var _concRe=/ (eau de parfum|eau de toilette|extrait de parfum|extrait|edp|edt|edc|elixir|parfum|hair mist|body mist) /g;
+  b=b.replace(_concRe,' '); b=b.replace(_concRe,' ');
+  b=b.replace(/ \d+([.,]\d+)? ?(ml|mls|cc) /g,' ');
+  var NOISE={perf:1,perfume:1,frag:1,fragancia:1,masc:1,fem:1,dama:1,damas:1,caballero:1,caballeros:1,hombre:1,mujer:1,varon:1,unisex:1,cx:1,caja:1,und:1,unid:1,unidad:1,imp:1,importado:1,importada:1,sellado:1,sellada:1,original:1,oferta:1,promo:1,us:1,usd:1};
+  var mlStr=out.ml?String(out.ml):'';
+  b=b.split(' ').filter(function(w){ return w && !NOISE[w] && w!==mlStr; }).join(' ');
+  out.base=formatProdNombre(b);
+  return out;
+}
 function bcProcesarNuevoEnViaje(){
   var q=window._bcGenViajeQueue||[];
   if(!q.length){ _bcGenViajeFin(); return; }
@@ -30007,8 +30081,25 @@ function bcProcesarNuevoEnViaje(){
 
   var _s=function(id,v){var e=document.getElementById(id);if(e)e.value=v;};
   var tit=document.getElementById("mProdTit"); if(tit)tit.textContent="🆕 Crear producto oculto ("+idx+"/"+total+")";
-  _s("fpNom", formatProdNombre(curr.nombre||""));
-  _s("fpEmp", (curr.marca||"").toUpperCase());
+  // 🆕 2026-08: precargar TODOS los predatos deducidos del nombre del proveedor.
+  // Antes: marca = nombre del PROVEEDOR (STAR…), y base/concentración/ml/género quedaban
+  // vacíos o con sobras del último producto editado.
+  var pre=(typeof _bcPredatosDe==='function')?_bcPredatosDe(curr.nombre||''):{};
+  _s("fpEmp", pre.marca||"");
+  _s("fpNomBase", pre.base||formatProdNombre(curr.nombre||""));
+  var concEl=document.getElementById("fpConc");
+  if(concEl){
+    var concOk=false; for(var _ci=0;_ci<concEl.options.length;_ci++){ if(concEl.options[_ci].value===pre.conc){concOk=true;break;} }
+    concEl.value=concOk?pre.conc:'EDP';
+    var cmd=document.getElementById('fpConcManualDiv'); if(cmd) cmd.style.display='none';
+    var cmi=document.getElementById('fpConcManual'); if(cmi) cmi.value='';
+  }
+  _s("fpMl", pre.ml||"");
+  var genEl=document.getElementById("fpGen"); if(genEl) genEl.value=pre.genero||"U";
+  var tipoEl=document.getElementById("fpTipo"); if(tipoEl && tipoEl.value!=='perfume'){ tipoEl.value='perfume'; try{ if(typeof _prodAplicarTipo==='function')_prodAplicarTipo('perfume'); }catch(e){} }
+  var catRotEl=document.getElementById("fpCat"); if(catRotEl) catRotEl.value='3'; // nuevo: rotación baja hasta que venda (editable)
+  if(typeof _fpAutoNombre==='function'){ _fpAutoNombre(); }
+  var nomHid=document.getElementById("fpNom"); if(nomHid && !nomHid.value) nomHid.value=formatProdNombre(curr.nombre||"");
   _s("fpCI", curr.precio||"0");   // costo indumentaria = precio del proveedor (u$d)
   _s("fpCL","0"); _s("fpGM","0"); _s("fpGE","0"); _s("fpML","0");
   _s("fpSA","0"); _s("fpSO","0"); _s("fpVD","0"); _s("fpVF","0");
@@ -30674,7 +30765,7 @@ function bcRenderComparativa(){
       var r = e.row;
       var rowBg = idx%2===1 ? 'var(--sur3)' : 'transparent';
 
-      h += '<tr class="row-hl" style="border-bottom:1px solid var(--bd);background:'+rowBg+'">';
+      h += '<tr class="row-hl" data-bcnorm="'+bcNorm(r.nombre||'')+'" style="border-bottom:1px solid var(--bd);background:'+rowBg+'">';
 
       // Producto
       h += '<td style="padding:.35rem .5rem;max-width:280px">';
@@ -30865,12 +30956,16 @@ function bcRenderComparativa(){
 
   var _bodyHtml = html;
   var _existingBody = document.getElementById('bcCompBody');
+  // 🆕 2026-08: conservar el scroll al re-renderizar (machear/desmachear ya no te manda arriba)
+  var _sEl = document.scrollingElement || document.documentElement;
+  var _sy = _sEl ? _sEl.scrollTop : 0;
   if(_existingBody && window._bcCompSearchOnly){
     // Solo búsqueda: actualizar el cuerpo, dejar el buscador intacto (no se pierde foco)
     _existingBody.innerHTML = _bodyHtml;
   } else {
     wrap.innerHTML = _headerHtml + '<div id="bcCompBody">' + _bodyHtml + '</div>';
   }
+  if(_sEl && _sy) _sEl.scrollTop = _sy;
   window._bcCompSearchOnly = false;
 }
 
@@ -51409,7 +51504,7 @@ var BELLE_IG_MODELOS_RAW=[
 
 </script>
 <!-- BUILD BELLE · 2026-08-02 ARG -->
-<div id="bcBuildStamp" style="position:fixed;bottom:4px;right:6px;z-index:2147483647;font-size:9px;line-height:1;color:#7c85a8;background:rgba(15,17,23,.6);padding:2px 6px;border-radius:4px;pointer-events:none;font-family:ui-monospace,monospace;letter-spacing:.02em;opacity:.55;font-size:7px">06/08 02:15</div>
+<div id="bcBuildStamp" style="position:fixed;bottom:4px;right:6px;z-index:2147483647;font-size:9px;line-height:1;color:#7c85a8;background:rgba(15,17,23,.6);padding:2px 6px;border-radius:4px;pointer-events:none;font-family:ui-monospace,monospace;letter-spacing:.02em;opacity:.55;font-size:7px">06/08 12:40</div>
 </body>
 <!-- build:20260418-195140-20260418-194515-20260330-001651 -->
 </html>
