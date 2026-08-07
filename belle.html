@@ -30466,7 +30466,43 @@ function bcGetCatalogBrands(){
 window._bcCmpVista       = window._bcCmpVista       || 'todas';    // todas | catalogo | comparables | unicos | conDif | mejorPrecio
 window._bcCmpFiltroStock = window._bcCmpFiltroStock || 'todos';    // todos | sin | bajo | con
 window._bcCmpFiltroCat   = window._bcCmpFiltroCat   || 'todas';    // todas | S | 1 | 2 | ... (categoría del catálogo)
+window._bcCmpFiltroGen   = window._bcCmpFiltroGen   || 'todos';    // 🆕 2026-08: todos | fem | mas | U
+window._bcCmpFiltroMarca = window._bcCmpFiltroMarca || '';         // 🆕 2026-08: '' | marca (mayúsculas)
 window._bcCmpExpandidas  = window._bcCmpExpandidas  || {};         // {secciones expandidas/colapsadas}
+
+// 🆕 2026-08: detectar la MARCA dentro de un texto (marcas conocidas + empresas del catálogo,
+// en cualquier posición; gana la más larga). Con caché del set de candidatas.
+function _bcMarcaCandSet(){
+  var n=(typeof prods!=='undefined'&&prods)?prods.length:0;
+  var c=window._bcMarcaCandCache;
+  if(c && c.n===n) return c.map;
+  var map={};
+  ((window._BC_MARCAS_CONOCIDAS)||[]).forEach(function(m){ var k=bcNorm(m); if(k&&k.length>=3) map[k]=m; });
+  (typeof prods!=='undefined'?(prods||[]):[]).forEach(function(p){ if(p&&p.empresa){ var e=bcNorm(p.empresa); if(e&&e.length>=3&&!map[e]) map[e]=p.empresa; } });
+  window._bcMarcaCandCache={n:n,map:map};
+  return map;
+}
+function _bcMarcaDeTexto(txt){
+  var map=_bcMarcaCandSet(); var spaced=' '+bcNorm(txt||'')+' '; var best='';
+  for(var k in map){ if(k.length>best.length && spaced.indexOf(' '+k+' ')>=0) best=k; }
+  return best?String(map[best]).toUpperCase():'';
+}
+// 🆕 2026-08: género de una fila del comparador: del catálogo si está macheada, si no
+// se deduce de las palabras del nombre (fem/masc/dama/caballero/homme/femme...).
+function _bcGenDeTexto(txt){
+  var hay=' '+bcNorm(txt||'')+' ';
+  if(/ (fem|femme|female|mujer|dama|damas|woman|women|her) /.test(hay)) return 'fem';
+  if(/ (masc|male|hombre|caballero|caballeros|varon|man|men|homme|him) /.test(hay)) return 'mas';
+  if(/ unisex /.test(hay)) return 'U';
+  return '';
+}
+function _bcGenDeProd(p){
+  var g=String((p&&p.genero)||'');
+  if(g.indexOf('♀')>=0||/^fem/i.test(g)) return 'fem';
+  if(g.indexOf('♂')>=0||/^mas/i.test(g)) return 'mas';
+  if(g==='U'||/^u$/i.test(g)||/unisex/i.test(g)) return 'U';
+  return '';
+}
 
 // ¿El match es sospechoso? True si el nombre del proveedor tiene una palabra significativa
 // (≥4 letras, que no sea concentración/tamaño/descriptor) que NO aparece en el nombre del catálogo.
@@ -30604,6 +30640,30 @@ function bcRenderComparativa(){
     return true;
   }
 
+  // 🆕 2026-08: filtros de GÉNERO y MARCA (aplican a todas las filas: si está en catálogo
+  // usa el dato del producto; si no, se deduce del nombre). Cacheado por fila.
+  var fGen = window._bcCmpFiltroGen || 'todos';
+  var fMarca = window._bcCmpFiltroMarca || '';
+  function _eGen(e){
+    if(e.row._gen !== undefined) return e.row._gen;
+    var g = e.matchCat ? _bcGenDeProd(e.matchCat) : '';
+    if(!g){
+      var t = e.row.nombre||'';
+      (e.provsConProd||[]).forEach(function(k){ if(e[k]) t += ' ' + (e[k].nombre||e[k].norm||''); });
+      g = _bcGenDeTexto(t);
+    }
+    e.row._gen = g;
+    return g;
+  }
+  function _eMarca(e){
+    if(e.row._marca !== undefined) return e.row._marca;
+    var m = (e.matchCat && e.matchCat.empresa) ? String(e.matchCat.empresa).toUpperCase() : _bcMarcaDeTexto(e.row.nombre||'');
+    e.row._marca = m;
+    return m;
+  }
+  function pasaGen(e){ if(fGen==='todos') return true; return _eGen(e)===fGen; }
+  function pasaMarca(e){ if(!fMarca) return true; return _eMarca(e)===fMarca; }
+
   // MEJORA 2026-06: contar el stock DENTRO de la vista activa, así el número del botón
   // coincide con lo que realmente se muestra (antes contaba todo el catálogo e inducía a error).
   // Conteos de stock CRUZADOS con la categoría activa (así el número del chip = lo que realmente se muestra)
@@ -30635,6 +30695,7 @@ function bcRenderComparativa(){
     (e.provsConProd||[]).forEach(function(k){ if(e[k]) hay += ' ' + bcNorm(e[k].nombre||e[k].norm||''); });
     return qWords.every(function(w){ return hay.indexOf(w) >= 0; });
   }
+  var genCounts=null, marcaCounts=null;
   if(qWords.length){
     enCatalogo       = enCatalogo.filter(pasaSearch);
     comparablesNoCat = comparablesNoCat.filter(pasaSearch);
@@ -30643,6 +30704,15 @@ function bcRenderComparativa(){
     enCatalogo       = enCatalogo.filter(pasaFiltroStock).filter(pasaFiltroCat).filter(pasaVista);
     comparablesNoCat = comparablesNoCat.filter(pasaVista).filter(function(e){return fStock==='todos';});
     unicos           = unicos.filter(pasaVista).filter(function(e){return fStock==='todos';});
+    // 🆕 2026-08: contadores de género/marca cruzados con los demás filtros, y aplicación
+    var _inter = enCatalogo.concat(comparablesNoCat).concat(unicos);
+    genCounts={todos:0,fem:0,mas:0,U:0};
+    _inter.filter(pasaMarca).forEach(function(e){ genCounts.todos++; var g=_eGen(e); if(genCounts[g]!==undefined) genCounts[g]++; });
+    marcaCounts={};
+    _inter.filter(pasaGen).forEach(function(e){ var m=_eMarca(e); if(m) marcaCounts[m]=(marcaCounts[m]||0)+1; });
+    enCatalogo       = enCatalogo.filter(pasaGen).filter(pasaMarca);
+    comparablesNoCat = comparablesNoCat.filter(pasaGen).filter(pasaMarca);
+    unicos           = unicos.filter(pasaGen).filter(pasaMarca);
   }
 
   // ═══ PASO 5: construir HTML ═══
@@ -30715,6 +30785,36 @@ function bcRenderComparativa(){
         'border:1px solid '+(act?'var(--acc)':'var(--bd)')+';border-radius:5px;padding:.22rem .5rem;cursor:pointer;'+
         'font-size:.68rem;font-weight:'+(act?'700':'500')+'">'+_esc(o.lbl)+' ('+o.cnt+')</button>';
     });
+    html += '</div>';
+  }
+
+  // 🆕 2026-08: Género + Marca (línea 4) — aplican a TODAS las filas (macheadas o no)
+  if(genCounts){
+    html += '<div style="display:flex;gap:.3rem;flex-wrap:wrap;align-items:center;margin-top:.4rem">';
+    html += '<span style="font-size:.62rem;color:var(--tx3);font-weight:700;text-transform:uppercase;letter-spacing:.04em;margin-right:.3rem">Género:</span>';
+    var _genOpts=[
+      {v:'todos',lbl:'Todos',cnt:genCounts.todos,col:'var(--acc)'},
+      {v:'fem',lbl:'♀ Fem',cnt:genCounts.fem,col:'#f472b6'},
+      {v:'mas',lbl:'♂ Masc',cnt:genCounts.mas,col:'#60a5fa'},
+      {v:'U',lbl:'⚧ Unisex',cnt:genCounts.U,col:'#a78bfa'}
+    ];
+    _genOpts.forEach(function(o){
+      var act = fGen === o.v;
+      html += '<button onclick="window._bcCmpFiltroGen=\''+o.v+'\';bcRenderComparativa()" '+
+        'style="background:'+(act?o.col:'transparent')+';color:'+(act?'#000':o.col)+';'+
+        'border:1px solid '+(act?o.col:'var(--bd)')+';border-radius:5px;padding:.22rem .5rem;cursor:pointer;'+
+        'font-size:.68rem;font-weight:'+(act?'700':'500')+'">'+o.lbl+' ('+o.cnt+')</button>';
+    });
+    var _mList=Object.keys(marcaCounts||{}).sort(function(a,b){ return (marcaCounts[b]-marcaCounts[a]) || (a<b?-1:1); });
+    if(fMarca && _mList.indexOf(fMarca)<0) _mList.unshift(fMarca);
+    html += '<span style="font-size:.62rem;color:var(--tx3);font-weight:700;text-transform:uppercase;letter-spacing:.04em;margin-left:.4rem">Marca:</span>';
+    html += '<select onchange="window._bcCmpFiltroMarca=this.value;bcRenderComparativa()" style="padding:.22rem .4rem;background:var(--sur2);border:1px solid '+(fMarca?'var(--acc)':'var(--bd)')+';border-radius:5px;color:'+(fMarca?'var(--acc)':'var(--tx)')+';font-size:.68rem;max-width:190px">';
+    html += '<option value="">Todas ('+(genCounts.todos)+')</option>';
+    _mList.forEach(function(m){ html += '<option value="'+_esc(m)+'"'+(fMarca===m?' selected':'')+'>'+_esc(m)+' ('+(marcaCounts[m]||0)+')</option>'; });
+    html += '</select>';
+    if(fGen!=='todos'||fMarca){
+      html += '<button onclick="window._bcCmpFiltroGen=\'todos\';window._bcCmpFiltroMarca=\'\';bcRenderComparativa()" style="background:transparent;border:1px solid var(--bd);border-radius:5px;color:var(--tx3);padding:.22rem .5rem;cursor:pointer;font-size:.66rem">✕ limpiar</button>';
+    }
     html += '</div>';
   }
 
@@ -31030,6 +31130,49 @@ function bcRenderListaCompleta(nombre){
   if(soloSinMatch){
     filtered = filtered.filter(function(it){ return !bcFindInProds(it); });
   }
+  // 🆕 2026-08: filtros de STOCK EN CATÁLOGO y GÉNERO (chips)
+  var fStockL=window._bcListaStockF||'';
+  var fGenL=window._bcListaGenF||'';
+  function _itStockOk(it,f){
+    if(!f) return true;
+    var m=bcFindInProds(it);
+    if(f==='nocat') return !m;
+    if(!m) return false;
+    var s=m.stock_actual||0;
+    if(f==='sin') return s===0;
+    if(f==='bajo') return s>=1&&s<=3;
+    if(f==='con') return s>3;
+    if(f==='viaje') return (m.en_viaje||0)>0;
+    return true;
+  }
+  function _itGen(it){
+    var m=bcFindInProds(it);
+    var g=m?_bcGenDeProd(m):'';
+    if(!g) g=_bcGenDeTexto(it.nombre_proveedor||'');
+    return g;
+  }
+  var _preFG=filtered;
+  filtered=filtered.filter(function(it){ return _itStockOk(it,fStockL) && (!fGenL || _itGen(it)===fGenL); });
+  // chips con contadores cruzados (cada grupo cuenta con el otro aplicado)
+  var _nEsc=nombre.replace(/'/g,"\\'");
+  function _lchip(varName,val,label,count,color){
+    var act=(window[varName]||'')===val;
+    return '<span onclick="window.'+varName+'=\''+val+'\';bcRenderListaCompleta(\''+_nEsc+'\')" style="cursor:pointer;padding:.2rem .5rem;border-radius:12px;font-size:.64rem;white-space:nowrap;border:1px solid '+(act?(color||'var(--acc)'):'var(--bd)')+';background:'+(act?(color||'var(--acc)')+'22':'var(--sur2)')+';color:'+(act?(color||'var(--acc)'):'var(--tx2)')+';font-weight:'+(act?'700':'400')+'">'+label+' <b>'+count+'</b></span>';
+  }
+  var _stCnt=function(v){ return _preFG.filter(function(it){ return _itStockOk(it,v) && (!fGenL || _itGen(it)===fGenL); }).length; };
+  var _gnCnt=function(v){ return _preFG.filter(function(it){ return _itStockOk(it,fStockL) && (!v || _itGen(it)===v); }).length; };
+  var chipsHtml='<span style="font-size:.6rem;color:var(--tx3)">Stock catálogo:</span>'+
+    _lchip('_bcListaStockF','','Todos',_stCnt(''))+
+    _lchip('_bcListaStockF','sin','🔴 Sin stock',_stCnt('sin'),'#ef4444')+
+    _lchip('_bcListaStockF','bajo','🟡 Poco (1-3)',_stCnt('bajo'),'#f59e0b')+
+    _lchip('_bcListaStockF','con','🟢 Con stock',_stCnt('con'),'#22c55e')+
+    _lchip('_bcListaStockF','viaje','✈️ En viaje',_stCnt('viaje'),'#38bdf8')+
+    _lchip('_bcListaStockF','nocat','⛔ No está en catálogo',_stCnt('nocat'),'#a855f7')+
+    '<span style="font-size:.6rem;color:var(--tx3);margin-left:.35rem">Género:</span>'+
+    _lchip('_bcListaGenF','','Todos',_gnCnt(''))+
+    _lchip('_bcListaGenF','fem','♀ Fem',_gnCnt('fem'),'#f472b6')+
+    _lchip('_bcListaGenF','mas','♂ Masc',_gnCnt('mas'),'#60a5fa')+
+    _lchip('_bcListaGenF','U','U',_gnCnt('U'),'#a78bfa');
   // MEJORA 2026-06: duplicados dentro de la lista (mismo nombre normalizado repetido)
   var _nameCount={};
   items.forEach(function(it){ var _n=bcNorm(it.nombre_proveedor||''); if(_n) _nameCount[_n]=(_nameCount[_n]||0)+1; });
@@ -31174,9 +31317,11 @@ function bcRenderListaCompleta(nombre){
     var ssBtn=document.getElementById('bcSoloSinMatchBtn');
     if(ssBtn){ ssBtn.style.background=soloSinMatch?'#f97316':'transparent'; ssBtn.style.color=soloSinMatch?'#000':'#f97316'; }
     var clearBtn=document.getElementById('bcListaClear');
-    if(clearBtn) clearBtn.style.display=(search||brandF||soloNuestras)?'':'none';
+    if(clearBtn) clearBtn.style.display=(search||brandF||soloNuestras||fStockL||fGenL)?'':'none';
     var nBtn=document.getElementById('bcFiltroNuestrasBtn');
     if(nBtn){nBtn.style.background=soloNuestras?'var(--acc)':'transparent';nBtn.style.color=soloNuestras?'#000':'var(--acc)';}
+    var chipsEl=document.getElementById('bcListaChips');
+    if(chipsEl) chipsEl.innerHTML=chipsHtml;
     var tbody=document.getElementById('bcListaTbody');
     if(tbody){ tbody.innerHTML=rows; _bcBindListaQty(tbody, nombre); return; }
   }
@@ -31213,9 +31358,10 @@ function bcRenderListaCompleta(nombre){
       '<button onclick="bcSugerirCantidades(\''+nombre.replace(/\'/g,"\\'")+'\')" class="btn" '+
         'style="font-size:.7rem;border:1px solid #fbbf24;background:transparent;color:#fbbf24" '+
         'title="Sugerir cantidades basado en stock y ventas">💡 Sugerir</button>'+
-      '<button id="bcListaClear" class="btn btn-g" style="font-size:.7rem;display:'+((search||brandF||soloNuestras)?'':'none')+'">&#10006; Limpiar</button>'+
+      '<button id="bcListaClear" class="btn btn-g" style="font-size:.7rem;display:'+((search||brandF||soloNuestras||fStockL||fGenL)?'':'none')+'">&#10006; Limpiar</button>'+
       '<span id="bcListaCounter" style="font-size:.7rem;color:var(--tx3)">✅ '+_matchedAll+'/'+items.length+' equip.</span>'+
     '</div>'+
+    '<div id="bcListaChips" style="display:flex;gap:.3rem;flex-wrap:wrap;align-items:center;margin-bottom:.5rem">'+chipsHtml+'</div>'+
     '<div class="tbl-wrap"><div class="tbl-scroll"><table style="width:100%">'+
       '<thead><tr style="font-size:.68rem;background:var(--sur2)">'+
         '<th style="padding:.3rem .4rem;text-align:left">Producto proveedor</th>'+
@@ -31254,7 +31400,7 @@ function bcRenderListaCompleta(nombre){
   var nuestrasBtn=document.getElementById('bcFiltroNuestrasBtn');
   if(nuestrasBtn) nuestrasBtn.onclick=function(){ bcFiltroNuestras[nombre]=!bcFiltroNuestras[nombre]; bcRenderListaCompleta(nombre); };
   var clearBtn2=document.getElementById('bcListaClear');
-  if(clearBtn2) clearBtn2.onclick=function(){ bcSearchLista[nombre]=''; bcBrandLista[nombre]=''; bcFiltroNuestras[nombre]=false; bcRenderListaCompleta(nombre); };
+  if(clearBtn2) clearBtn2.onclick=function(){ bcSearchLista[nombre]=''; bcBrandLista[nombre]=''; bcFiltroNuestras[nombre]=false; window._bcListaStockF=''; window._bcListaGenF=''; bcRenderListaCompleta(nombre); };
   var tbody2=document.getElementById('bcListaTbody');
   if(tbody2) _bcBindListaQty(tbody2, nombre);
 }
@@ -32365,6 +32511,11 @@ function bcRenderRecomendaciones(){
     var fMacheo = window._bcRecomFiltroMacheo; // 100, 90, 70, -1, 0
     var fTipo   = window._bcRecomFiltroTipo;
     var fProv   = window._bcRecomProvSel;
+    // 🆕 2026-08: búsqueda por texto + género + categoría rotación
+    var fQR = bcNorm(window._bcRecomQ||'');
+    var fQRw = fQR.split(' ').filter(function(w){return w.length>=1;});
+    var fGenR = window._bcRecomGen||'';
+    var fCatR = window._bcRecomCat||'';
 
     function passFilter(entry){
       // Filtro macheo
@@ -32381,6 +32532,23 @@ function bcRenderRecomendaciones(){
       // Filtro tipo
       if(fTipo !== 'todas'){
         if(entry.tipos.indexOf(fTipo) < 0) return false;
+      }
+      // 🆕 2026-08: búsqueda (nombre del proveedor + nombre del catálogo)
+      if(fQRw.length){
+        var hay = bcNorm((entry.item&&entry.item.nombre_proveedor)||'');
+        if(entry.prod) hay += ' ' + bcNorm((entry.prod.empresa||'')+' '+(entry.prod.nombre||''));
+        for(var _qi=0;_qi<fQRw.length;_qi++){ if(hay.indexOf(fQRw[_qi])<0) return false; }
+      }
+      // 🆕 2026-08: género (del catálogo si está macheado, si no del nombre del proveedor)
+      if(fGenR){
+        var g = entry.prod ? _bcGenDeProd(entry.prod) : '';
+        if(!g) g = _bcGenDeTexto((entry.item&&entry.item.nombre_proveedor)||'');
+        if(g!==fGenR) return false;
+      }
+      // 🆕 2026-08: categoría rotación (solo aplica a macheados)
+      if(fCatR){
+        if(!entry.prod) return false;
+        if(String(entry.prod.cat||'').replace('.0','').trim().toUpperCase()!==fCatR) return false;
       }
       return true;
     }
@@ -32409,6 +32577,24 @@ function bcRenderRecomendaciones(){
     // ═══ PASO 4: renderizar barra de filtros ═══
     var html = '';
     html += '<div style="background:var(--sur2);border:1px solid var(--bd);border-radius:8px;padding:.7rem;margin-bottom:.8rem">';
+
+    // 🆕 2026-08 Línea 0: búsqueda + género + categoría
+    html += '<div style="display:flex;gap:.4rem;flex-wrap:wrap;align-items:center;margin-bottom:.5rem">';
+    html += '<div class="sbox" style="flex:1;min-width:160px"><span class="sbi">🔍</span>'+
+      '<input id="bcRecomSearch" type="text" placeholder="Buscar en recomendaciones..." value="'+_esc(window._bcRecomQ||'')+'" autocomplete="off" '+
+      'oninput="window._bcRecomQ=this.value;clearTimeout(window._bcRecomQT);window._bcRecomQT=setTimeout(function(){bcRenderRecomendaciones();var _i=document.getElementById(\'bcRecomSearch\');if(_i){_i.focus();_i.setSelectionRange(_i.value.length,_i.value.length);}},250)" style="width:100%"></div>';
+    var _rGenOpts=[{v:'',lbl:'Todos'},{v:'fem',lbl:'♀ Fem',col:'#f472b6'},{v:'mas',lbl:'♂ Masc',col:'#60a5fa'},{v:'U',lbl:'⚧ U',col:'#a78bfa'}];
+    html += '<span style="font-size:.62rem;color:var(--tx3);font-weight:700;text-transform:uppercase">Género:</span>';
+    _rGenOpts.forEach(function(o){
+      var act=fGenR===o.v; var col=o.col||'var(--acc)';
+      html += '<button onclick="window._bcRecomGen=\''+o.v+'\';bcRenderRecomendaciones()" style="background:'+(act?col:'transparent')+';color:'+(act?'#000':col)+';border:1px solid '+(act?col:'var(--bd)')+';border-radius:5px;padding:.22rem .5rem;cursor:pointer;font-size:.68rem;font-weight:'+(act?'700':'500')+'">'+o.lbl+'</button>';
+    });
+    html += '<span style="font-size:.62rem;color:var(--tx3);font-weight:700;text-transform:uppercase;margin-left:.3rem">Cat:</span>';
+    [{v:'',lbl:'Todas'},{v:'S',lbl:'S',col:'#fbbf24'},{v:'1',lbl:'1'},{v:'2',lbl:'2'},{v:'3',lbl:'3'}].forEach(function(o){
+      var act=fCatR===o.v; var col=o.col||'var(--acc)';
+      html += '<button onclick="window._bcRecomCat=\''+o.v+'\';bcRenderRecomendaciones()" style="background:'+(act?col:'transparent')+';color:'+(act?'#000':col)+';border:1px solid '+(act?col:'var(--bd)')+';border-radius:5px;padding:.22rem .5rem;cursor:pointer;font-size:.68rem;font-weight:'+(act?'700':'500')+'">'+o.lbl+'</button>';
+    });
+    html += '</div>';
 
     // Línea 1: filtros de macheo
     html += '<div style="display:flex;gap:.3rem;flex-wrap:wrap;align-items:center;margin-bottom:.5rem">';
@@ -32952,6 +33138,17 @@ function bcRenderBusqueda(){
   html += '<input id="bcBusquedaInput" type="text" placeholder="Ej: khamrah, lattafa yara, afnan 9pm..." value="'+_esc(window._bcBusquedaQuery)+'" '+
     'style="width:100%;font-size:.85rem;padding:.5rem">';
   html += '</div>';
+  // 🆕 2026-08: filtros rápidos de género y stock sobre los resultados
+  var _bq=function(varName,val,label,color){
+    var act=(window[varName]||'')===val; var col=color||'var(--acc)';
+    return '<span onclick="window.'+varName+'=\''+val+'\';bcRenderBusqueda()" style="cursor:pointer;padding:.2rem .5rem;border-radius:12px;font-size:.64rem;white-space:nowrap;border:1px solid '+(act?col:'var(--bd)')+';background:'+(act?col+'22':'var(--sur)')+';color:'+(act?col:'var(--tx2)')+';font-weight:'+(act?'700':'400')+'">'+label+'</span>';
+  };
+  html += '<div style="display:flex;gap:.3rem;flex-wrap:wrap;align-items:center;margin-bottom:.4rem">';
+  html += '<span style="font-size:.6rem;color:var(--tx3)">Género:</span>'+
+    _bq('_bcBusqGen','','Todos')+_bq('_bcBusqGen','fem','♀ Fem','#f472b6')+_bq('_bcBusqGen','mas','♂ Masc','#60a5fa')+_bq('_bcBusqGen','U','U','#a78bfa');
+  html += '<span style="font-size:.6rem;color:var(--tx3);margin-left:.4rem">Stock:</span>'+
+    _bq('_bcBusqStock','','Todos')+_bq('_bcBusqStock','sin','🔴 Sin stock','#ef4444')+_bq('_bcBusqStock','bajo','🟡 Poco (1-3)','#f59e0b')+_bq('_bcBusqStock','con','🟢 Con stock','#22c55e');
+  html += '</div>';
   html += '<div style="font-size:.65rem;color:var(--tx3)">💡 Tip: ignora tildes, mayúsculas y orden de palabras.</div>';
   html += '</div>';
 
@@ -33004,12 +33201,39 @@ function _bcEjecutarBusqueda(){
     });
   });
   resultsProv.sort(function(a,b){return b.score - a.score;});
+  // 🆕 2026-08: filtros de género/stock sobre resultados de proveedores
+  var _fBG=window._bcBusqGen||'', _fBS=window._bcBusqStock||'';
+  if(_fBG||_fBS){
+    resultsProv=resultsProv.filter(function(r){
+      var m=bcFindInProds(r.item);
+      if(_fBG){
+        var g=m?_bcGenDeProd(m):'';
+        if(!g) g=_bcGenDeTexto(r.item.nombre_proveedor||'');
+        if(g!==_fBG) return false;
+      }
+      if(_fBS){
+        if(!m) return false;
+        var s=m.stock_actual||0;
+        if(_fBS==='sin'&&s!==0) return false;
+        if(_fBS==='bajo'&&!(s>=1&&s<=3)) return false;
+        if(_fBS==='con'&&!(s>3)) return false;
+      }
+      return true;
+    });
+  }
 
   // Buscar en catálogo Belle
   var resultsCat = []; // {prod, score}
   (prods||[]).forEach(function(p){
     var pn = bcNorm((p.empresa||'') + ' ' + (p.nombre||''));
     if(!pn) return;
+    if(_fBG && _bcGenDeProd(p)!==_fBG) return;
+    if(_fBS){
+      var _ps=p.stock_actual||0;
+      if(_fBS==='sin'&&_ps!==0) return;
+      if(_fBS==='bajo'&&!(_ps>=1&&_ps<=3)) return;
+      if(_fBS==='con'&&!(_ps>3)) return;
+    }
     var qWords = qNorm.split(' ').filter(function(w){return w.length>=2;});
     var allFound = qWords.every(function(qw){ return pn.indexOf(qw) >= 0; });
     if(allFound){
@@ -51617,7 +51841,7 @@ var BELLE_IG_MODELOS_RAW=[
 
 </script>
 <!-- BUILD BELLE · 2026-08-02 ARG -->
-<div id="bcBuildStamp" style="position:fixed;bottom:4px;right:6px;z-index:2147483647;font-size:9px;line-height:1;color:#7c85a8;background:rgba(15,17,23,.6);padding:2px 6px;border-radius:4px;pointer-events:none;font-family:ui-monospace,monospace;letter-spacing:.02em;opacity:.55;font-size:7px">06/08 13:10</div>
+<div id="bcBuildStamp" style="position:fixed;bottom:4px;right:6px;z-index:2147483647;font-size:9px;line-height:1;color:#7c85a8;background:rgba(15,17,23,.6);padding:2px 6px;border-radius:4px;pointer-events:none;font-family:ui-monospace,monospace;letter-spacing:.02em;opacity:.55;font-size:7px">06/08 13:45</div>
 </body>
 <!-- build:20260418-195140-20260418-194515-20260330-001651 -->
 </html>
