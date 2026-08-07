@@ -29789,8 +29789,14 @@ function bcAnalizarBorrador(){
 }
 
 function bcSetQtyPedido(k, key, val){
-  var qty=Math.max(1,parseInt(val)||1);
-  if(bcPedidos[k]&&bcPedidos[k].items[key]) bcPedidos[k].items[key].qty=qty;
+  // 🛠️ 2026-08 AUDITORÍA: 0 ahora BORRA la línea (antes Math.max(1,..) dejaba 1 en silencio,
+  // inconsistente con Lista/Comparativa) + draftSave (antes el cambio no se persistía).
+  var qty=Math.max(0,parseInt(val)||0);
+  if(bcPedidos[k]&&bcPedidos[k].items[key]){
+    if(qty===0){ delete bcPedidos[k].items[key]; }
+    else { bcPedidos[k].items[key].qty=qty; }
+  }
+  draftSave();
   bcRenderFloating();
   bcRenderPedidos();
 }
@@ -29850,6 +29856,7 @@ function bcPedidoDesmarcarNuevo(k, itemKeyPedido){
 
 function bcRemoveItemPedido(k, key){
   if(bcPedidos[k]) delete bcPedidos[k].items[key];
+  draftSave(); // 🛠️ 2026-08 AUDITORÍA: persistir el borrado (antes reaparecía al recargar)
   bcRenderFloating();
   bcRenderPedidos();
   // Refresh current view to update qty inputs
@@ -30253,13 +30260,16 @@ function bcConfirmarPedido(k){
   var nroSugerido='PED-'+Math.floor(100000+Math.random()*900000);
 
   // Pre-calcular cuántos items matchean con catálogo
+  // 🛠️ 2026-08 AUDITORÍA: usar la MISMA clave que la confirmación real (_bcPedidoMK vía
+  // _bcProvItDe) — antes normalizaba el título de display y el conteo del modal podía
+  // decir "matcheado" para un ítem marcado NUEVO (o al revés).
   var conMatch=0,sinMatch=0;
   sel.forEach(function(it){
-    var key=bcNorm(it.nombre);
-    var m=(bcManualMatches[key]===-1)?null:(bcManualMatches[key]?(prods||[]).find(function(p){return p.id===bcManualMatches[key];}):null);
+    var provIt=_bcProvItDe(k,it);
+    var key=bcNorm(provIt.nombre_norm||provIt.nombre_proveedor||it.nombre||'');
+    var m=(bcManualMatches[key]===-1)?null:(bcManualMatches[key]?_bcProdGet(bcManualMatches[key]):null);
     if(!m && bcManualMatches[key]!==-1){
-      // Auto-match con item completo (incluyendo nombre_norm calculado correctamente)
-      m=bcFindInProds({nombre_norm:bcNormalizarNombre(it.nombre),nombre_proveedor:it.nombre});
+      m=bcFindInProds(provIt);
     }
     if(m)conMatch++;else sinMatch++;
   });
@@ -30350,35 +30360,52 @@ function _bcConfirmarPedidoFinal(k){
         var key=bcNorm(provIt.nombre_norm||provIt.nombre_proveedor||it.nombre||'');
         var match;
         if(bcManualMatches[key]===-1){ match=null; }                                   // marcado NUEVO
-        else if(bcManualMatches[key]){ match=(prods||[]).find(function(p){return p.id===bcManualMatches[key];})||null; }
+        else if(bcManualMatches[key]){ match=_bcProdGet(bcManualMatches[key]); }
         else { match=bcFindInProds(provIt); }
         var prodId=match?match.id:null;
         return apiPost('pedidos_proveedor_items',{
-          pedido_id:pedidoId, nombre_proveedor:it.nombre, marca:k,
+          pedido_id:pedidoId, nombre_proveedor:(provIt.nombre_proveedor||it.nombre), marca:k,
           precio_usd:it.precio, cantidad_pedida:it.qty, cantidad_recibida:0,
           codigo_proveedor:it.codigo||'', producto_id:prodId,
           es_nuevo:!prodId, estado_item:(prodId?'borrador_match':'pendiente'), observacion:''
         }).then(function(ir){
-          var _itemId=(ir&&ir[0]?ir[0].id:null);
-          // 🆕 2026-07 FIX en_viaje: si está macheado a un producto EXISTENTE, sumar en_viaje ahora.
-          // Antes solo se sumaba a los NUEVOS y los macheados quedaban en viaje=0 (bug reportado).
-          // estado_item='borrador_match' marca que el en_viaje YA fue sumado → "Pedidos en viaje"
-          // no lo vuelve a sumar (evita doble conteo); igual que un item macheado a mano.
-          if(prodId){
-            return patchStockFresco(prodId,{en_viaje:+(it.qty||0)},'Pedido '+nro+' — en viaje (Ayudante)')
-              .then(function(){ return {it:it, itemId:_itemId, prodId:prodId}; },
-                    function(){ return {it:it, itemId:_itemId, prodId:prodId}; });
-          }
-          return {it:it, itemId:_itemId, prodId:prodId};
+          return {it:it, itemId:(ir&&ir[0]?ir[0].id:null), prodId:prodId};
+        }).catch(function(e){
+          // 🛠️ 2026-08 AUDITORÍA: capturar la falla POR LÍNEA (antes un solo insert fallido
+          // rechazaba todo, dejaba el pedido a medias y sin forma limpia de reintentar)
+          console.error('[bc confirm] línea falló:',it.nombre,e);
+          return {it:it, itemId:null, prodId:prodId, _fail:true, _key:it.key};
         });
       });
-      return Promise.all(proms).then(function(rows){return {nro:nro,pedidoId:pedidoId,rows:rows};});
+      return Promise.all(proms).then(function(rows){
+        // 🛠️ 2026-08 AUDITORÍA: en_viaje AGRUPADO por producto — dos líneas macheadas al
+        // mismo producto se pisaban entre sí (read-modify-write en paralelo perdía una).
+        var viaje={};
+        rows.forEach(function(r){ if(!r._fail && r.prodId && r.itemId) viaje[r.prodId]=(viaje[r.prodId]||0)+(r.it.qty||0); });
+        var vp=Object.keys(viaje).map(function(pid){
+          return patchStockFresco(parseInt(pid),{en_viaje:+viaje[pid]},'Pedido '+nro+' — en viaje (Ayudante)')
+            .catch(function(e){ console.error('[bc confirm] en_viaje:',e); toast('⚠️ No se pudo sumar "en viaje" de un producto — revisalo','twarn'); });
+        });
+        return Promise.all(vp).then(function(){ return {nro:nro,pedidoId:pedidoId,rows:rows}; });
+      });
     });
   }).then(function(result){
     window._bcConfirmandoPed=false;
     if(!result)return;
-    toast('Pedido '+result.nro+' guardado ✓','tok');
     var _m=document.getElementById('_moBcConfPed');if(_m)_m.remove();
+    // 🛠️ 2026-08 AUDITORÍA: si alguna línea NO se pudo guardar, dejar SOLO esas en el
+    // borrador (las OK ya están en el pedido) y avisar claro — antes quedaba todo a medias
+    // y reintentar con otro número duplicaba las líneas que sí habían entrado.
+    var _fallas=(result.rows||[]).filter(function(r){return r._fail;});
+    if(_fallas.length){
+      if(bcPedidos[k]&&bcPedidos[k].items){
+        (result.rows||[]).forEach(function(r){ if(!r._fail && r.it && r.it.key) delete bcPedidos[k].items[r.it.key]; });
+      }
+      draftSave(); bcRenderFloating(); bcRenderPedidos();
+      toast('⚠️ '+_fallas.length+' línea(s) NO entraron en el pedido '+result.nro+'. Quedaron en el borrador: confirmalas de nuevo con OTRO número.','terr');
+      return;
+    }
+    toast('Pedido '+result.nro+' guardado ✓','tok');
 
     // Guardar como borrador comprasItems
     var oldItems=typeof comprasItems!=='undefined'?comprasItems:[];
@@ -51960,7 +51987,7 @@ var BELLE_IG_MODELOS_RAW=[
 
 </script>
 <!-- BUILD BELLE · 2026-08-02 ARG -->
-<div id="bcBuildStamp" style="position:fixed;bottom:4px;right:6px;z-index:2147483647;font-size:9px;line-height:1;color:#7c85a8;background:rgba(15,17,23,.6);padding:2px 6px;border-radius:4px;pointer-events:none;font-family:ui-monospace,monospace;letter-spacing:.02em;opacity:.55;font-size:7px">06/08 17:00</div>
+<div id="bcBuildStamp" style="position:fixed;bottom:4px;right:6px;z-index:2147483647;font-size:9px;line-height:1;color:#7c85a8;background:rgba(15,17,23,.6);padding:2px 6px;border-radius:4px;pointer-events:none;font-family:ui-monospace,monospace;letter-spacing:.02em;opacity:.55;font-size:7px">06/08 17:25</div>
 </body>
 <!-- build:20260418-195140-20260418-194515-20260330-001651 -->
 </html>
