@@ -1794,7 +1794,7 @@ tr.row-hl:hover td, tr.row-hl:focus-within td{
       <span style="font-size:.7rem;color:var(--tx3);white-space:nowrap">Similitud</span>
       <input type="number" id="comprasSimilitud" value="90" min="30" max="99"
         style="width:46px;background:transparent;border:none;color:var(--acc);font-weight:700;font-size:.82rem;text-align:center;outline:none"
-        oninput="this.value=Math.max(30,Math.min(99,parseInt(this.value)||90));bcMatchCache=null;_bcResetFindCache();if(typeof bcRenderAllViews==='function')bcRenderAllViews()">
+        oninput="this.value=Math.max(30,Math.min(99,parseInt(this.value)||90));clearTimeout(window._bcSimT);window._bcSimT=setTimeout(function(){bcMatchCache=null;_bcResetFindCache();if(typeof bcRenderAllViews==='function')bcRenderAllViews();},500)">
       <span style="font-size:.7rem;color:var(--tx3)">%</span>
     </div>
     <label title="Si lo activás, también se muestran matches con score &gt;= 75% como 'a revisar'. Si lo desactivás, solo se matchea por encima del umbral exacto." style="display:flex;align-items:center;gap:.3rem;background:var(--sur3);border:1px solid var(--bd);border-radius:var(--rs);padding:.25rem .6rem;cursor:pointer">
@@ -31181,7 +31181,9 @@ function bcListaMarcarNuevo(mk, nombre){
   window._bcManualMatches=window._bcManualMatches||bcManualMatches||{};
   bcManualMatches[mk]=-1;
   window._bcManualMatches=bcManualMatches;
-  if(typeof _bcResetFindCache==='function')_bcResetFindCache();
+  // 🛠️ 2026-08 AUDITORÍA: invalidar SOLO esta clave (antes tiraba TODAS las cachés y
+  // re-macheaba miles de ítems por marcar UN producto)
+  try{ if(window._bcFindCache) delete window._bcFindCache[mk]; if(window._bcFindScoreCache) delete window._bcFindScoreCache[mk]; }catch(e){}
   bcMatchCache=null;
   _bcPersistMatches();
   if(typeof toast==='function')toast('Marcado como producto NUEVO — se creará al generar el pedido','tok');
@@ -31191,7 +31193,8 @@ function bcListaQuitarNuevo(mk, nombre){
   if(!mk) return;
   delete bcManualMatches[mk];
   window._bcManualMatches=bcManualMatches;
-  if(typeof _bcResetFindCache==='function')_bcResetFindCache();
+  // 🛠️ 2026-08 AUDITORÍA: invalidar SOLO esta clave (ver bcListaMarcarNuevo)
+  try{ if(window._bcFindCache) delete window._bcFindCache[mk]; if(window._bcFindScoreCache) delete window._bcFindScoreCache[mk]; }catch(e){}
   bcMatchCache=null;
   _bcPersistMatches();
   if(typeof toast==='function')toast('Volvió a la equiparación automática','tok');
@@ -31404,7 +31407,7 @@ function bcRenderListaCompleta(nombre){
       '<td style="padding:.2rem;text-align:center;width:28px">'+
         '<button class="bc-lupa" data-mk="'+bcNorm(it.nombre_norm||it.nombre_proveedor||'')+
         '" data-mi="'+(match?match.id:'null')+
-        '" data-mn="'+(it.nombre_proveedor||'')+
+        '" data-mn="'+(it.nombre_proveedor||'').replace(/"/g,"&quot;")+
         '" title="Buscar y equiparar" style="background:none;border:none;cursor:pointer;font-size:.9rem;opacity:.7;padding:.1rem">🔍</button>'+
       '</td>'+
     '</tr>';
@@ -32482,9 +32485,9 @@ function bcAgregarTodosRecom(provKey){
   if(!entries.length){ toast('No hay recomendaciones para agregar','twarn'); return; }
   if(!bcPedidos[provKey]) bcPedidos[provKey]={items:{}};
   // FIX 2026-08 (bug "mismo producto en todas las listas"): al agregar en bloque, solo sumar
-  // productos donde ESTE proveedor es el más barato. Reusa _bcIndiceProveedores (mismo patrón
-  // que "Armar pedido automático"). Así el mismo producto no se repite en varias listas.
-  var indice=_bcIndiceProveedores();
+  // productos donde ESTE proveedor es el más barato. Reusa el índice CACHEADO (🛠️ auditoría:
+  // la versión completa re-macheaba todo el catálogo en cada click de acción).
+  var indice=(typeof _bcGetProvIdxCached==='function')?_bcGetProvIdxCached():_bcIndiceProveedores();
   var agregados=0, omitidosCaro=0;
   entries.forEach(function(e){
     var it=e.item; var idx=it._idx;
@@ -32777,7 +32780,8 @@ function bcRenderRecomendaciones(){
     var provsAMostrar = (fProv === 'todos') ? keys : [fProv];
 
     // 🆕 2026-08: índice cruzado producto→proveedores para marcar el MÁS BARATO en cada fila.
-    var _recIndice = _bcIndiceProveedores();
+    // 🛠️ AUDITORÍA: versión cacheada — la completa re-macheaba TODO en cada tecla/chip del render
+    var _recIndice = (typeof _bcGetProvIdxCached==='function')?_bcGetProvIdxCached():_bcIndiceProveedores();
     provsAMostrar.forEach(function(provKey){
       var entries = byProv[provKey].filter(passFilter);
       if(!entries.length) return;
@@ -33299,7 +33303,7 @@ function _bcEjecutarBusqueda(){
       if(!itName) return;
       // Match: que TODAS las palabras de la query aparezcan en el nombre
       var qWords = qNorm.split(' ').filter(function(w){return w.length>=2;});
-      var allFound = qWords.every(function(qw){ return itName.indexOf(qw) >= 0; });
+      var allFound = qWords.length>0 && qWords.every(function(qw){ return itName.indexOf(qw) >= 0; }); // 🛠️ sin palabras válidas no matchea todo
       if(allFound){
         var sim = bcSim(qNorm, itName);
         resultsProv.push({prov:k, item:item, score:sim});
@@ -33341,7 +33345,7 @@ function _bcEjecutarBusqueda(){
       if(_fBS==='con'&&!(_ps>3)) return;
     }
     var qWords = qNorm.split(' ').filter(function(w){return w.length>=2;});
-    var allFound = qWords.every(function(qw){ return pn.indexOf(qw) >= 0; });
+    var allFound = qWords.length>0 && qWords.every(function(qw){ return pn.indexOf(qw) >= 0; }); // 🛠️ sin palabras válidas no matchea todo
     if(allFound){
       var sim = bcSim(qNorm, pn);
       resultsCat.push({prod:p, score:sim});
@@ -52011,7 +52015,7 @@ var BELLE_IG_MODELOS_RAW=[
 
 </script>
 <!-- BUILD BELLE · 2026-08-02 ARG -->
-<div id="bcBuildStamp" style="position:fixed;bottom:4px;right:6px;z-index:2147483647;font-size:9px;line-height:1;color:#7c85a8;background:rgba(15,17,23,.6);padding:2px 6px;border-radius:4px;pointer-events:none;font-family:ui-monospace,monospace;letter-spacing:.02em;opacity:.55;font-size:7px">06/08 17:45</div>
+<div id="bcBuildStamp" style="position:fixed;bottom:4px;right:6px;z-index:2147483647;font-size:9px;line-height:1;color:#7c85a8;background:rgba(15,17,23,.6);padding:2px 6px;border-radius:4px;pointer-events:none;font-family:ui-monospace,monospace;letter-spacing:.02em;opacity:.55;font-size:7px">06/08 18:05</div>
 </body>
 <!-- build:20260418-195140-20260418-194515-20260330-001651 -->
 </html>
