@@ -33393,6 +33393,14 @@ function bcStockBadge(item){
 }
 
 
+// 🆕 2026-08: filtros persistentes de Datos Cruzados (no se pierden al cambiar de pestaña)
+window._bcCruzQ=window._bcCruzQ||'';       // búsqueda
+window._bcCruzProv=window._bcCruzProv||''; // ''|'conprov'|'sinprov'|'p:<proveedor>'
+window._bcCruzStock=window._bcCruzStock||'';// ''|'sin'|'bajo'|'con'|'viaje'
+window._bcCruzCat=window._bcCruzCat||'';   // ''|'S'|'1'|'2'|'3'
+window._bcCruzGen=window._bcCruzGen||'';   // ''|'fem'|'mas'|'U'
+window._bcCruzPrecio=window._bcCruzPrecio||''; // ''|'masbarato'
+window._bcCruzOrden=window._bcCruzOrden||'';   // ''|'ahorro'|'precio'|'stock'|'vendidos'
 function bcRenderCruzados(){
   var wrap=document.getElementById('bcCruzadosContent');
   if(!wrap) return;
@@ -33404,17 +33412,24 @@ function bcRenderCruzados(){
   wrap.innerHTML="<div class='loading'><div class='spin'></div>Calculando...</div>";
   setTimeout(function(){
     var bar=document.createElement('div');
-    bar.style.cssText='display:flex;gap:.4rem;flex-wrap:wrap;align-items:center;margin-bottom:.7rem';
+    bar.style.cssText='display:flex;flex-direction:column;gap:.45rem;margin-bottom:.7rem';
+    var provOpts='<option value="">🏭 Proveedor: todos</option>'+
+      '<option value="conprov"'+(window._bcCruzProv==='conprov'?' selected':'')+'>Lo tiene ALGÚN proveedor</option>'+
+      '<option value="sinprov"'+(window._bcCruzProv==='sinprov'?' selected':'')+'>NINGÚN proveedor lo tiene</option>'+
+      keys.map(function(k){ var v='p:'+k; return '<option value="'+_esc(v)+'"'+(window._bcCruzProv===v?' selected':'')+'>Lo tiene '+_esc(k)+'</option>'; }).join('');
+    var ordOpts=[['','Orden: original'],['ahorro','💰 Mayor ahorro vs mi costo'],['precio','💲 Proveedor más barato'],['stock','📦 Menos stock primero'],['vendidos','🔥 Más vendidos primero']]
+      .map(function(o){ return '<option value="'+o[0]+'"'+(window._bcCruzOrden===o[0]?' selected':'')+'>'+o[1]+'</option>'; }).join('');
     bar.innerHTML=
-      '<input type="text" id="cruzSearch" placeholder="Buscar producto..." oninput="bcRenderCruzadosTable()" '+
-        'style="flex:1;min-width:150px;padding:.3rem .6rem;background:var(--sur2);border:1px solid var(--bd);border-radius:var(--rs);color:var(--tx);font-size:.75rem">'+
-      '<select id="cruzFiltro" onchange="bcRenderCruzadosTable()" '+
-        'style="padding:.3rem .5rem;background:var(--sur2);border:1px solid var(--bd);border-radius:var(--rs);color:var(--tx);font-size:.73rem">'+
-        '<option value="">Todos</option>'+
-        '<option value="conprov">En algun proveedor</option>'+
-        '<option value="sinprov">Sin proveedor</option>'+
-        '<option value="sinstock">Sin stock</option>'+
-      '</select>';
+      '<div style="display:flex;gap:.4rem;flex-wrap:wrap;align-items:center">'+
+        '<input type="text" id="cruzSearch" value="'+_esc(window._bcCruzQ||'')+'" placeholder="🔍 Buscar (también en nombres de proveedores)..." '+
+          'oninput="clearTimeout(window._bcCruzT);var v=this.value;window._bcCruzT=setTimeout(function(){window._bcCruzQ=v;bcRenderCruzadosTable();},200)" '+
+          'style="flex:1;min-width:170px;padding:.35rem .6rem;background:var(--sur2);border:1px solid var(--bd);border-radius:var(--rs);color:var(--tx);font-size:.75rem">'+
+        '<select id="cruzProvSel" onchange="window._bcCruzProv=this.value;bcRenderCruzadosTable()" '+
+          'style="padding:.35rem .5rem;background:var(--sur2);border:1px solid var(--bd);border-radius:var(--rs);color:var(--tx);font-size:.73rem">'+provOpts+'</select>'+
+        '<select id="cruzOrdenSel" onchange="window._bcCruzOrden=this.value;bcRenderCruzadosTable()" '+
+          'style="padding:.35rem .5rem;background:var(--sur2);border:1px solid var(--bd);border-radius:var(--rs);color:var(--tx);font-size:.73rem">'+ordOpts+'</select>'+
+      '</div>'+
+      '<div id="cruzChips"></div>';
     var tblWrap=document.createElement('div');
     tblWrap.id='cruzadosTable';
     wrap.innerHTML='';
@@ -33424,48 +33439,146 @@ function bcRenderCruzados(){
   },100);
 }
 
+// Macheo auto producto→proveedor con CACHÉ (antes recalculaba TODO el fuzzy en cada tecla)
+function _bcCruzMatchesDe(p, keys){
+  var sig=keys.map(function(k){return k+':'+(bcProveedores[k]||[]).length;}).join('|');
+  var cache=window._bcCruzMCache;
+  if(!cache || cache.sig!==sig){ cache=window._bcCruzMCache={sig:sig, map:{}}; }
+  var out={};
+  keys.forEach(function(k){
+    var manVal=(window._bcManualMatches||{})['cruz#'+p.id+'@@'+k];
+    if(manVal===-1){ return; } // descartado a mano
+    if(typeof manVal==='string'){
+      var mi=(bcProveedores[k]||[]).find(function(it){return (it.nombre_norm||bcNorm(it.nombre_proveedor||''))===manVal;});
+      if(mi){ out[k]={item:mi,score:1,manual:true}; return; }
+    }
+    var ck=p.id+'@@'+k;
+    if(cache.map.hasOwnProperty(ck)){
+      var c=cache.map[ck];
+      if(c && (bcProveedores[k]||[])[c.idx]) out[k]={item:(bcProveedores[k]||[])[c.idx],score:c.score};
+      return;
+    }
+    var best=null, bestScore=0, bestIdx=-1;
+    var pFull=(p.empresa||'')+' '+(p.nombre||'')+(p.ml?(' '+p.ml+'ml'):'');
+    var pN=bcNorm(pFull);
+    (bcProveedores[k]||[]).forEach(function(it,ii){
+      var s=bcSim(pN,bcNorm(it.nombre_proveedor||''));
+      if(s>bestScore){bestScore=s;best=it;bestIdx=ii;}
+    });
+    if(best&&bestScore>=0.90){ cache.map[ck]={idx:bestIdx,score:bestScore}; out[k]={item:best,score:bestScore}; }
+    else { cache.map[ck]=null; }
+  });
+  return out;
+}
 function bcRenderCruzadosTable(){
   var tbl=document.getElementById('cruzadosTable');
   if(!tbl) return;
   var keys=Object.keys(bcProveedores);
-  var search=((document.getElementById('cruzSearch')||{}).value||'').toLowerCase();
-  var filtro=(document.getElementById('cruzFiltro')||{}).value||'';
 
-  var rows=[];
+  var q=bcNorm(window._bcCruzQ||'');
+  var qw=q.split(' ').filter(function(w){return w.length>=1;});
+  var fProv=window._bcCruzProv||'', fStock=window._bcCruzStock||'', fCat=window._bcCruzCat||'';
+  var fGen=window._bcCruzGen||'', fPrecio=window._bcCruzPrecio||'', orden=window._bcCruzOrden||'';
+
+  // Armar la lista completa una vez (macheos cacheados)
+  var all=[];
   (prods||[]).forEach(function(p){
     if(!p.activo) return;
-    var nm=(p.nombre||'').toLowerCase(); var em=(p.empresa||'').toLowerCase();
-    if(search&&nm.indexOf(search)<0&&em.indexOf(search)<0) return;
-
-    var provMatches={};
-    keys.forEach(function(k){
-      // ¿Match manual o descarte para este producto+proveedor?
-      var manVal=(window._bcManualMatches||{})['cruz#'+p.id+'@@'+k];
-      if(manVal===-1){ return; } // descartado a mano
-      if(typeof manVal==='string'){
-        var mi=(bcProveedores[k]||[]).find(function(it){return (it.nombre_norm||bcNorm(it.nombre_proveedor||''))===manVal;});
-        if(mi){ provMatches[k]={item:mi,score:1,manual:true}; return; }
-      }
-      var best=null; var bestScore=0;
-      (bcProveedores[k]||[]).forEach(function(it){
-        // FIX (2026-05-13): comparar contra nombre+empresa, threshold 0.85
-        var pFull = (p.empresa||'') + ' ' + (p.nombre||'') + (p.ml? (' '+p.ml+'ml') : '');
-        var s=bcSim(bcNorm(pFull),bcNorm(it.nombre_proveedor||''));
-        if(s>bestScore){bestScore=s;best=it;}
-      });
-      if(bestScore>=0.90) provMatches[k]={item:best,score:bestScore};
-    });
-
-    var hasProv=Object.keys(provMatches).length>0;
-    if(filtro==='conprov'&&!hasProv) return;
-    if(filtro==='sinprov'&&hasProv) return;
-    if(filtro==='sinstock'&&(p.stock_actual||0)>0) return;
-    rows.push({prod:p,provMatches:provMatches});
+    var pm=_bcCruzMatchesDe(p, keys);
+    var mn=null;
+    Object.keys(pm).forEach(function(k){ var pr=pm[k].item.precio_usd||0; if(pr>0&&(mn===null||pr<mn)) mn=pr; });
+    all.push({prod:p, provMatches:pm, min:mn});
   });
 
-  if(!rows.length){tbl.innerHTML="<div class='empty'>Sin resultados.</div>";return;}
+  function okSearch(r){
+    if(!qw.length) return true;
+    var p=r.prod;
+    var hay=bcNorm((p.empresa||'')+' '+(p.nombre||'')+' '+(p.ml||''));
+    Object.keys(r.provMatches).forEach(function(k){ hay+=' '+bcNorm(r.provMatches[k].item.nombre_proveedor||''); });
+    return qw.every(function(w){ return hay.indexOf(w)>=0; });
+  }
+  function okProv(r){
+    var n=Object.keys(r.provMatches).length;
+    if(fProv==='conprov') return n>0;
+    if(fProv==='sinprov') return n===0;
+    if(fProv.indexOf('p:')===0) return !!r.provMatches[fProv.slice(2)];
+    return true;
+  }
+  function okStock(r){
+    var st=r.prod.stock_actual||0;
+    if(fStock==='sin') return st===0;
+    if(fStock==='bajo') return st>=1&&st<=3;
+    if(fStock==='con') return st>3;
+    if(fStock==='viaje') return (r.prod.en_viaje||0)>0;
+    return true;
+  }
+  function okCat(r){ if(!fCat) return true; return String(r.prod.cat||'').replace('.0','')===fCat; }
+  function okGen(r){
+    if(!fGen) return true;
+    var g=String(r.prod.genero||'');
+    if(fGen==='fem') return g.indexOf('♀')>=0||/^fem/i.test(g);
+    if(fGen==='mas') return g.indexOf('♂')>=0||/^mas/i.test(g);
+    return g==='U'||/^u$/i.test(g)||/unisex/i.test(g);
+  }
+  function okPrecio(r){
+    if(fPrecio!=='masbarato') return true;
+    return r.min!==null && (r.prod.costo_ind||0)>0 && r.min < r.prod.costo_ind-0.01;
+  }
 
-  tbl.innerHTML='<div style="font-size:.68rem;color:var(--tx3);margin-bottom:.4rem">'+rows.length+' productos</div>';
+  var rows=all.filter(function(r){ return okSearch(r)&&okProv(r)&&okStock(r)&&okCat(r)&&okGen(r)&&okPrecio(r); });
+
+  // Chips con contadores CRUZADOS (cada grupo cuenta con los demás filtros aplicados)
+  var chipsEl=document.getElementById('cruzChips');
+  if(chipsEl){
+    function cnt(fn){ return all.filter(fn).length; }
+    var sinMe_stock=function(r){ return okSearch(r)&&okProv(r)&&okCat(r)&&okGen(r)&&okPrecio(r); };
+    var sinMe_cat=function(r){ return okSearch(r)&&okProv(r)&&okStock(r)&&okGen(r)&&okPrecio(r); };
+    var sinMe_gen=function(r){ return okSearch(r)&&okProv(r)&&okStock(r)&&okCat(r)&&okPrecio(r); };
+    var sinMe_pre=function(r){ return okSearch(r)&&okProv(r)&&okStock(r)&&okCat(r)&&okGen(r); };
+    function chip(varName,val,label,count,color){
+      var cur=window[varName]||'';
+      var act=cur===val;
+      return '<span onclick="window.'+varName+'=\''+val+'\';bcRenderCruzadosTable()" style="cursor:pointer;padding:.22rem .55rem;border-radius:12px;font-size:.66rem;white-space:nowrap;border:1px solid '+(act?(color||'var(--acc)'):'var(--bd)')+';background:'+(act?(color||'var(--acc)')+'22':'var(--sur2)')+';color:'+(act?(color||'var(--acc)'):'var(--tx2)')+';font-weight:'+(act?'700':'400')+'">'+label+(count!=null?' <b>'+count+'</b>':'')+'</span>';
+    }
+    var stCount=function(v){ return cnt(function(r){ var old=fStock; fStock=v; var ok=sinMe_stock(r)&&okStock(r); fStock=old; return ok; }); };
+    var catCount=function(v){ return cnt(function(r){ var old=fCat; fCat=v; var ok=sinMe_cat(r)&&okCat(r); fCat=old; return ok; }); };
+    var genCount=function(v){ return cnt(function(r){ var old=fGen; fGen=v; var ok=sinMe_gen(r)&&okGen(r); fGen=old; return ok; }); };
+    var preCount=function(v){ return cnt(function(r){ var old=fPrecio; fPrecio=v; var ok=sinMe_pre(r)&&okPrecio(r); fPrecio=old; return ok; }); };
+    var h='<div style="display:flex;gap:.3rem;flex-wrap:wrap;align-items:center">';
+    h+='<span style="font-size:.6rem;color:var(--tx3)">Stock:</span>';
+    h+=chip('_bcCruzStock','','Todos',stCount(''));
+    h+=chip('_bcCruzStock','sin','🔴 Sin stock',stCount('sin'),'#ef4444');
+    h+=chip('_bcCruzStock','bajo','🟡 Poco (1-3)',stCount('bajo'),'#f59e0b');
+    h+=chip('_bcCruzStock','con','🟢 Con stock',stCount('con'),'#22c55e');
+    h+=chip('_bcCruzStock','viaje','✈️ En viaje',stCount('viaje'),'#38bdf8');
+    h+='<span style="font-size:.6rem;color:var(--tx3);margin-left:.35rem">Cat:</span>';
+    h+=chip('_bcCruzCat','','Todas',catCount(''));
+    ['S','1','2','3'].forEach(function(c){ h+=chip('_bcCruzCat',c,c,catCount(c),c==='S'?'#fbbf24':null); });
+    h+='<span style="font-size:.6rem;color:var(--tx3);margin-left:.35rem">Género:</span>';
+    h+=chip('_bcCruzGen','','Todos',genCount(''));
+    h+=chip('_bcCruzGen','fem','♀ Fem',genCount('fem'),'#f472b6');
+    h+=chip('_bcCruzGen','mas','♂ Masc',genCount('mas'),'#60a5fa');
+    h+=chip('_bcCruzGen','U','U',genCount('U'),'#a78bfa');
+    h+='<span style="font-size:.6rem;color:var(--tx3);margin-left:.35rem">Precio:</span>';
+    h+=chip('_bcCruzPrecio','','Todos',preCount(''));
+    h+=chip('_bcCruzPrecio','masbarato','💸 Prov. más barato que mi costo',preCount('masbarato'),'#22c55e');
+    h+='</div>';
+    chipsEl.innerHTML=h;
+  }
+
+  // Orden
+  function _ah(r){ return (r.min!==null && (r.prod.costo_ind||0)>0) ? (r.prod.costo_ind - r.min) : -1e9; }
+  if(orden==='ahorro') rows.sort(function(a,b){ return _ah(b)-_ah(a); });
+  else if(orden==='precio') rows.sort(function(a,b){ return (a.min===null?1e9:a.min)-(b.min===null?1e9:b.min); });
+  else if(orden==='stock') rows.sort(function(a,b){ return ((a.prod.stock_actual||0)+(a.prod.en_viaje||0))-((b.prod.stock_actual||0)+(b.prod.en_viaje||0)); });
+  else if(orden==='vendidos') rows.sort(function(a,b){ return (b.prod.vendido_david||0)-(a.prod.vendido_david||0); });
+
+  if(!rows.length){tbl.innerHTML="<div class='empty'>Sin resultados con estos filtros.</div>";return;}
+
+  var CAP=400;
+  var totalRows=rows.length;
+  if(rows.length>CAP) rows=rows.slice(0,CAP);
+  tbl.innerHTML='<div style="font-size:.68rem;color:var(--tx3);margin-bottom:.4rem">'+totalRows+' productos'+(totalRows>CAP?' · mostrando '+CAP+' (afiná filtros para ver el resto)':'')+'</div>';
   var container=document.createElement('div');
   container.style.overflowX='auto';
 
@@ -51504,7 +51617,7 @@ var BELLE_IG_MODELOS_RAW=[
 
 </script>
 <!-- BUILD BELLE · 2026-08-02 ARG -->
-<div id="bcBuildStamp" style="position:fixed;bottom:4px;right:6px;z-index:2147483647;font-size:9px;line-height:1;color:#7c85a8;background:rgba(15,17,23,.6);padding:2px 6px;border-radius:4px;pointer-events:none;font-family:ui-monospace,monospace;letter-spacing:.02em;opacity:.55;font-size:7px">06/08 12:40</div>
+<div id="bcBuildStamp" style="position:fixed;bottom:4px;right:6px;z-index:2147483647;font-size:9px;line-height:1;color:#7c85a8;background:rgba(15,17,23,.6);padding:2px 6px;border-radius:4px;pointer-events:none;font-family:ui-monospace,monospace;letter-spacing:.02em;opacity:.55;font-size:7px">06/08 13:10</div>
 </body>
 <!-- build:20260418-195140-20260418-194515-20260330-001651 -->
 </html>
