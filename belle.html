@@ -28788,7 +28788,9 @@ function bcCrossPickerRender(){
   var LIM=80, h='';
   arr.slice(0,LIM).forEach(function(o){
     var sel=(typeof curVal==='string' && curVal===o.nrm);
-    h+='<div class="bcPickItem'+(sel?' sel':'')+'" onclick="bcCrossPickItem(\''+o.nrm.replace(/'/g,"")+'\')">'+
+    // 🛠️ 2026-08 AUDITORÍA: pasar el ÍNDICE, no el string — antes se borraban los apóstrofes
+    // (Bade'e, L'Interdit) y la clave guardada nunca coincidía: el macheo manual "no hacía nada"
+    h+='<div class="bcPickItem'+(sel?' sel':'')+'" onclick="bcCrossPickItem('+o.ii+')">'+
       '<span class="nm">'+(sel?'✅ ':'')+_esc(o.titled)+'</span>'+
       '<span class="pr">u$d '+o.price.toFixed(2)+'</span>'+
     '</div>';
@@ -28796,7 +28798,12 @@ function bcCrossPickerRender(){
   if(arr.length>LIM) h+='<div style="padding:.5rem;text-align:center;color:var(--tx3);font-size:.66rem">Mostrando '+LIM+' de '+arr.length+'. Seguí escribiendo para afinar.</div>';
   list.innerHTML=h;
 }
-function bcCrossPickItem(norm){
+function bcCrossPickItem(ii){
+  // 🛠️ 2026-08 AUDITORÍA: recibe el índice y resuelve el nombre EXACTO del ítem (con
+  // apóstrofes y todo) — así la clave guardada coincide con la que compara bcGetMatches.
+  var o=(window._bcPickerItems||[])[ii];
+  var norm=o?o.nrm:(typeof ii==='string'?ii:null); // string = compat con llamadas viejas
+  if(norm==null){ toast('No se pudo identificar el producto','twarn'); return; }
   var ctx=window._bcPickerCtx||{}; window._bcManualMatches=window._bcManualMatches||{};
   window._bcManualMatches[_bcPickerStoreKey(ctx)]=norm;
   _bcAfterCrossPick(ctx,'Equiparado a mano ✓');
@@ -28889,6 +28896,10 @@ function _bcLoadMatchesUnificado(){
     function absorb(rows){ if(Array.isArray(rows)&&rows[0]&&rows[0].items){ try{var o=JSON.parse(rows[0].items); if(o&&typeof o==='object')Object.assign(merged,o);}catch(e){} } }
     absorb(res[1]); // crossreject historico
     absorb(res[0]); // matches historico (gana en colision)
+    // 🛠️ 2026-08 AUDITORÍA: NO pisar lo local — los macheos hechos en esta PC (o durante la
+    // carga, dentro del debounce de 700ms) que la base todavía no tiene se conservan.
+    var _cur=window._bcManualMatches||local||{};
+    Object.keys(_cur).forEach(function(k){ if(!(k in merged)) merged[k]=_cur[k]; });
     bcManualMatches=window._bcManualMatches=merged;
     try{localStorage.setItem('bcMatches_global',JSON.stringify(merged));}catch(e){}
     try{localStorage.setItem('bcCrossReject_global',JSON.stringify(merged));}catch(e){}
@@ -30976,7 +30987,9 @@ function bcRenderComparativa(){
         // Celda del proveedor: NOMBRE como figura en SU lista + precio + confianza + acciones
         var _compKey = bcNorm(r.nombre);
         var _ck = _compKey.replace(/'/g,"");
-        var _pk = k.replace(/'/g,"");
+        // 🛠️ 2026-08 AUDITORÍA: escapar (no borrar) — un proveedor con apóstrofe guardaba una
+        // clave distinta a la que después busca bcGetMatches y el macheo manual no aplicaba
+        var _pk = k.replace(/\\/g,'\\\\').replace(/'/g,"\\'").replace(/"/g,'&quot;');
         h += '<td style="padding:.4rem;vertical-align:top;'+(isMin?'background:rgba(34,197,94,.10);':'')+'">';
         if(pd){
           var scorePct = Math.round((pd.score||0)*100);
@@ -31046,6 +31059,16 @@ function bcRenderComparativa(){
   html = '';
 
   // SECCIÓN 1: En catálogo
+  // Ordenar enCatalogo por urgencia: sin stock primero, luego stock bajo, luego con dif precio
+  // 🛠️ 2026-08 AUDITORÍA: este sort corría DESPUÉS de renderizar la sección (código muerto):
+  // el cap de 200 filas recortaba en el orden crudo y los sin-stock quedaban sepultados.
+  enCatalogo.sort(function(a,b){
+    var stA = a.matchCat ? (a.matchCat.stock_actual||0) : 999;
+    var stB = b.matchCat ? (b.matchCat.stock_actual||0) : 999;
+    if(stA !== stB) return stA - stB; // menor stock primero
+    return b.difPct - a.difPct; // luego mayor diferencia
+  });
+
   html += renderSeccion(
     'En tu catálogo',
     '📚', '#22c55e',
@@ -31053,14 +31076,6 @@ function bcRenderComparativa(){
     'enCat',
     'Productos del proveedor que tenés matcheados con tu catálogo · ordenados por urgencia'
   );
-
-  // Ordenar enCatalogo por urgencia: sin stock primero, luego stock bajo, luego con dif precio
-  enCatalogo.sort(function(a,b){
-    var stA = a.matchCat ? (a.matchCat.stock_actual||0) : 999;
-    var stB = b.matchCat ? (b.matchCat.stock_actual||0) : 999;
-    if(stA !== stB) return stA - stB; // menor stock primero
-    return b.difPct - a.difPct; // luego mayor diferencia
-  });
 
   // SECCIÓN 2: Comparables sin catálogo
   html += renderSeccion(
@@ -33533,6 +33548,19 @@ function _bcMatchScore(provRaw, provMarca, p){
 }
 
 
+// 🛠️ 2026-08 AUDITORÍA: mapa id→producto con caché (se rehace solo si prods cambió).
+// Antes cada hit "cacheado" de bcFindInProds hacía un prods.find() lineal (hasta 2000
+// comparaciones POR LLAMADA) — era el multiplicador de lentitud de todo el módulo.
+function _bcProdGet(id){
+  if(typeof prods==='undefined'||!prods) return null;
+  var c=window._bcProdByIdCache;
+  if(!c || c.ref!==prods || c.n!==prods.length){
+    var map={};
+    for(var i=0;i<prods.length;i++){ map[prods[i].id]=prods[i]; }
+    c=window._bcProdByIdCache={ref:prods,n:prods.length,map:map};
+  }
+  return c.map[id]||null;
+}
 function bcFindInProds(item){
   // Try to match provider item against our catalog
   if(!prods||!prods.length) return null;
@@ -33544,14 +33572,14 @@ function bcFindInProds(item){
   if(typeof bcManualMatches!=="undefined"&&bcManualMatches[nombre]===-1) return null;
   // 1. Match manual tiene prioridad absoluta
   if(typeof bcManualMatches!=="undefined"&&bcManualMatches[nombre]){
-    var mp=(prods||[]).find(function(p){return p.id===bcManualMatches[nombre];});
+    var mp=_bcProdGet(bcManualMatches[nombre]);
     if(mp) return mp;
   }
   // 2. Cache: si ya calculamos para este nombre normalizado, devolver
   if(window._bcFindCache.hasOwnProperty(nombre)){
     var cachedId = window._bcFindCache[nombre];
     if(cachedId === null) return null;
-    return (prods||[]).find(function(p){return p.id===cachedId;}) || null;
+    return _bcProdGet(cachedId);
   }
   // 3. Calcular: encontrar TODOS los que matchean fuerte, no solo el primero
   // FIX (2026-05-14): si hay varios productos con score similar, preferir:
@@ -33961,7 +33989,7 @@ function bcRenderCruzadosTable(){
         } else {
           stockProvHtml='<div style="font-size:.58rem;color:var(--tx3)">stock: s/d</div>';
         }
-        var _cz_k=k.replace(/'/g,"");
+        var _cz_k=k.replace(/\\/g,'\\\\').replace(/'/g,"\\'").replace(/"/g,'&quot;');
         tdProv.innerHTML=
           '<div style="font-weight:700;color:var(--acc);font-size:.8rem">u$d '+precioProv.toFixed(2)+(m.manual?' <span style="color:#22c55e;font-size:.7rem" title="Equiparado a mano">✓</span>':'')+'</div>'+
           diffHtml+
@@ -33974,7 +34002,7 @@ function bcRenderCruzadosTable(){
             '<span onclick="bcCruzDescartar(\''+p.id+'\',\''+_cz_k+'\')" title="Este proveedor NO tiene este producto" style="cursor:pointer;color:#f87171;font-size:.64rem;font-weight:700">✕</span>'+
           '</div>';
       } else {
-        var _cz_k2=k.replace(/'/g,"");
+        var _cz_k2=k.replace(/\\/g,'\\\\').replace(/'/g,"\\'").replace(/"/g,'&quot;');
         var _czRej=(window._bcManualMatches||{})['cruz#'+p.id+'@@'+k]===-1;
         tdProv.innerHTML='<div style="color:var(--tx3);font-size:.68rem">'+(_czRej?'∅ descartado':'—')+'</div>'+
           '<div style="margin-top:.18rem;display:flex;justify-content:center;gap:.45rem">'+
@@ -51932,7 +51960,7 @@ var BELLE_IG_MODELOS_RAW=[
 
 </script>
 <!-- BUILD BELLE · 2026-08-02 ARG -->
-<div id="bcBuildStamp" style="position:fixed;bottom:4px;right:6px;z-index:2147483647;font-size:9px;line-height:1;color:#7c85a8;background:rgba(15,17,23,.6);padding:2px 6px;border-radius:4px;pointer-events:none;font-family:ui-monospace,monospace;letter-spacing:.02em;opacity:.55;font-size:7px">06/08 16:25</div>
+<div id="bcBuildStamp" style="position:fixed;bottom:4px;right:6px;z-index:2147483647;font-size:9px;line-height:1;color:#7c85a8;background:rgba(15,17,23,.6);padding:2px 6px;border-radius:4px;pointer-events:none;font-family:ui-monospace,monospace;letter-spacing:.02em;opacity:.55;font-size:7px">06/08 17:00</div>
 </body>
 <!-- build:20260418-195140-20260418-194515-20260330-001651 -->
 </html>
