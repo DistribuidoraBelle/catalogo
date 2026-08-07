@@ -27310,8 +27310,38 @@ function bcGuardarProveedor(nombre, items, modo){
 
   } else {
     if(!items.length){ toast(nombre+': 0 productos detectados','twarn'); draftSave(); bcRenderProvsList(); return; }
+    // 🛠️ 2026-08 AUDITORÍA: al REEMPLAZAR la lista, las claves del pedido ('l'+índice)
+    // seguían apuntando a las posiciones VIEJAS → la cantidad quedaba pegada a OTRO producto
+    // y al confirmar se sumaba en_viaje al producto equivocado (invisible: el nombre/precio
+    // mostrados eran los copiados en la línea). Ahora cada línea del pedido se remapea a su
+    // nueva posición (por código, si no por nombre); lo que no está en la lista nueva se quita con aviso.
+    var _viejaLista=bcProveedores[nombre]||[];
+    var _pedidoViejo=(bcPedidos[nombre]&&bcPedidos[nombre].items)||{};
+    var _idxNueva={};
+    items.forEach(function(it,i){
+      var kk=_bcCodKey(it.codigo)||''; if(kk && !(kk in _idxNueva)) _idxNueva[kk]=i;
+      var kn='n:'+bcNorm(it.nombre_proveedor||it.nombre_norm||''); if(kn!=='n:' && !(kn in _idxNueva)) _idxNueva[kn]=i;
+    });
+    var _nuevoItems={}, _perdidos=0;
+    Object.keys(_pedidoViejo).forEach(function(kk){
+      var ln=_pedidoViejo[kk]; if(!ln || !ln.qty) return;
+      var provItViejo=null;
+      if(kk.charAt(0)==='l'){ var oi=parseInt(kk.slice(1)); if(!isNaN(oi)) provItViejo=_viejaLista[oi]||null; }
+      var ni;
+      if(provItViejo){
+        var kc=_bcCodKey(provItViejo.codigo)||'';
+        if(kc && _idxNueva.hasOwnProperty(kc)) ni=_idxNueva[kc];
+        if(ni===undefined){ var kn1='n:'+bcNorm(provItViejo.nombre_proveedor||provItViejo.nombre_norm||''); if(_idxNueva.hasOwnProperty(kn1)) ni=_idxNueva[kn1]; }
+      }
+      if(ni===undefined && ln.nombre){ var kn2='n:'+bcNorm(ln.nombre); if(_idxNueva.hasOwnProperty(kn2)) ni=_idxNueva[kn2]; }
+      if(ni===undefined){ _perdidos++; return; }
+      var nit=items[ni];
+      _nuevoItems['l'+ni]={nombre:ln.nombre, precio:(nit.precio_usd!=null?nit.precio_usd:ln.precio), qty:ln.qty, key:'l'+ni, codigo:nit.codigo||ln.codigo||''};
+    });
     bcProveedores[nombre]=items;
-    toast(nombre+': '+items.length+' productos cargados','tok');
+    if(bcPedidos[nombre]) bcPedidos[nombre].items=_nuevoItems;
+    else if(Object.keys(_nuevoItems).length) bcPedidos[nombre]={items:_nuevoItems};
+    toast(nombre+': '+items.length+' productos cargados'+(_perdidos?' · ⚠️ '+_perdidos+' línea(s) del pedido quitada(s): no están en la lista nueva':''),'tok');
   }
 
   if(!bcPedidos[nombre]) bcPedidos[nombre]={items:{}};
@@ -29160,13 +29190,20 @@ function bcGetMatches(){
 function _bcProvItDe(k, it){
   var arr=bcProveedores[k]||[];
   var key=String((it&&it.key)||'');
+  var nom=(it&&it.nombre)||'';
   if(key.charAt(0)==='l'){
     var idx=parseInt(key.slice(1));
-    if(!isNaN(idx) && arr[idx]) return arr[idx];
+    if(!isNaN(idx) && arr[idx]){
+      // 🛠️ 2026-08 AUDITORÍA: validar que el índice siga apuntando al MISMO producto
+      // (si la lista se re-subió y quedó desalineada, resolver por nombre más abajo)
+      var cand=arr[idx];
+      if(!nom || bcNorm(cand.nombre_proveedor||cand.nombre_norm||'')===bcNorm(nom)) return cand;
+    }
   }
-  var nom=(it&&it.nombre)||'';
   var found=arr.find(function(p){return p.nombre_proveedor===nom||p.nombre_norm===nom;});
   if(found) return found;
+  var nomN=bcNorm(nom);
+  if(nomN){ found=arr.find(function(p){return bcNorm(p.nombre_proveedor||p.nombre_norm||'')===nomN;}); if(found) return found; }
   return {nombre_norm:nom,nombre_proveedor:nom};
 }
 // 🆕 2026-08: la Comparativa guarda con la MISMA clave que la vista Lista ('l'+índice
@@ -29811,6 +29848,7 @@ function bcRemoveItemPedido(k, key){
 
 function bcLimpiarPedido(k){
   if(bcPedidos[k]) bcPedidos[k].items={};
+  draftSave(); // 🛠️ 2026-08 AUDITORÍA: persistir la limpieza (antes el pedido confirmado seguía vivo en el borrador de la nube)
   bcRenderFloating();
   bcRenderPedidos();
   if(bcCurrentTab==='comparar') bcRenderComparativa();
@@ -30269,9 +30307,14 @@ function _bcConfirmarPedidoFinal(k){
   var notas=(document.getElementById('_bcNotas')||{value:''}).value.trim()||'Creado desde Bellcito Comparador';
   if(!nro){toast('Ingresá un número de pedido','twarn');return;}
 
+  // 🛠️ 2026-08 AUDITORÍA: anti doble-click — dos clicks rápidos pasaban los DOS chequeos de
+  // nro (async) y creaban el pedido duplicado con en_viaje sumado dos veces.
+  if(window._bcConfirmandoPed){ toast('Ya se está guardando el pedido…','twarn'); return; }
+  window._bcConfirmandoPed=true;
+
   var sel=Object.values(bcPedidos[k]&&bcPedidos[k].items||{}).filter(function(i){return i.qty>0;});
-  if(!sel.length){toast('Pedido vacio','twarn');return;}
-  var total=sel.reduce(function(s,i){return s+i.precio*i.qty;},0);
+  if(!sel.length){toast('Pedido vacio','twarn');window._bcConfirmandoPed=false;return;}
+  var total=Math.round(sel.reduce(function(s,i){return s+i.precio*i.qty;},0)*100)/100;
 
   // Verificar que el nro no exista
   apiGet('pedidos_proveedor','select=id&nro_pedido=eq.'+encodeURIComponent(nro)).then(function(existe){
@@ -30321,6 +30364,7 @@ function _bcConfirmarPedidoFinal(k){
       return Promise.all(proms).then(function(rows){return {nro:nro,pedidoId:pedidoId,rows:rows};});
     });
   }).then(function(result){
+    window._bcConfirmandoPed=false;
     if(!result)return;
     toast('Pedido '+result.nro+' guardado ✓','tok');
     var _m=document.getElementById('_moBcConfPed');if(_m)_m.remove();
@@ -30351,7 +30395,7 @@ function _bcConfirmarPedidoFinal(k){
 
     // Fix #9: Preguntar qué hacer con el borrador si todos los proveedores fueron confirmados
     _bcMaybePromptDraftClose();
-  }).catch(function(err){toast('Error: '+(err&&err.message||'desconocido'),'terr');console.error(err);});
+  }).catch(function(err){window._bcConfirmandoPed=false;toast('Error: '+(err&&err.message||'desconocido'),'terr');console.error(err);});
 }
 
 // Fix #9: si después de confirmar no quedan items pendientes en ningún proveedor, preguntar
@@ -51882,7 +51926,7 @@ var BELLE_IG_MODELOS_RAW=[
 
 </script>
 <!-- BUILD BELLE · 2026-08-02 ARG -->
-<div id="bcBuildStamp" style="position:fixed;bottom:4px;right:6px;z-index:2147483647;font-size:9px;line-height:1;color:#7c85a8;background:rgba(15,17,23,.6);padding:2px 6px;border-radius:4px;pointer-events:none;font-family:ui-monospace,monospace;letter-spacing:.02em;opacity:.55;font-size:7px">06/08 15:20</div>
+<div id="bcBuildStamp" style="position:fixed;bottom:4px;right:6px;z-index:2147483647;font-size:9px;line-height:1;color:#7c85a8;background:rgba(15,17,23,.6);padding:2px 6px;border-radius:4px;pointer-events:none;font-family:ui-monospace,monospace;letter-spacing:.02em;opacity:.55;font-size:7px">06/08 16:05</div>
 </body>
 <!-- build:20260418-195140-20260418-194515-20260330-001651 -->
 </html>
