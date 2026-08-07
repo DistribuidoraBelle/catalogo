@@ -27345,6 +27345,10 @@ function bcGuardarProveedor(nombre, items, modo){
   }
 
   if(!bcPedidos[nombre]) bcPedidos[nombre]={items:{}};
+  // 🛠️ 2026-08 AUDITORÍA: contador de versión de lista — las cachés que firmaban solo por
+  // cantidad de ítems no se invalidaban al re-subir una lista con la MISMA cantidad.
+  window._bcListaVer=window._bcListaVer||{};
+  window._bcListaVer[nombre]=(window._bcListaVer[nombre]||0)+1;
   bcMatchCache=null;
   // MEJORA (2026-05-12): invalidar cache de búsqueda
   _bcResetFindCache();
@@ -29175,7 +29179,7 @@ function bcGetMatches(){
   // después cada fila HEREDA la posición de los ítems que contiene (si una fila se parte o
   // se junta por un macheo, la nueva ocupa el lugar de la vieja). Filas realmente nuevas
   // van al final. La memoria se resetea cuando cambian las listas cargadas.
-  var _osig = keys.map(function(k){ return k+':'+(bcProveedores[k]||[]).length; }).join('|');
+  var _osig = keys.map(function(k){ return k+':'+(bcProveedores[k]||[]).length+':'+((window._bcListaVer||{})[k]||0); }).join('|');
   var _omem = window._bcRowOrderMem;
   if(!_omem || _omem.sig !== _osig){ _omem = window._bcRowOrderMem = {sig:_osig, itemMap:{}, next:0}; }
   rows.forEach(function(r){
@@ -29235,6 +29239,10 @@ function bcToggleComp(k, ri, val, nombre, precio, idx){
   if(_legacyMismo && key!=='c'+ri) delete bcPedidos[k].items['c'+ri];
   if(qty===0){
     delete bcPedidos[k].items[key];
+    // 🛠️ 2026-08 AUDITORÍA: limpiar también claves 'c…' legacy del MISMO producto por nombre
+    // (antes podía quedar una línea vieja huérfana sumando al pedido)
+    var _nrm0=bcNorm(nombre||'');
+    if(_nrm0){ Object.keys(bcPedidos[k].items).forEach(function(kk){ if(kk.charAt(0)==='c'){ var o=bcPedidos[k].items[kk]; if(o && bcNorm(o.nombre||'')===_nrm0) delete bcPedidos[k].items[kk]; } }); }
   } else {
     var provItC=(listIdx>=0?(bcProveedores[k]||[])[listIdx]:null)||{};
     bcPedidos[k].items[key]={nombre:nombre,precio:precio,qty:qty,key:key,codigo:provItC.codigo||''};
@@ -29372,7 +29380,9 @@ function _bcDupResolver(accion){
     if(elMin && elMin._list){
       if(!bcPedidos[elMin.prov]) bcPedidos[elMin.prov]={items:{}};
       var provItMin=(bcProveedores[elMin.prov]||[])[elMin.idx]||{};
-      bcPedidos[elMin.prov].items['l'+elMin.idx]={nombre:elMin.nombre,precio:elMin.precio,qty:1,key:'l'+elMin.idx,codigo:provItMin.codigo||''};
+      // 🛠️ 2026-08 AUDITORÍA: respetar la CANTIDAD que el usuario había pedido (antes qty:1 fija)
+      var _qtyElegida=(bcPedidos[c.prov]&&bcPedidos[c.prov].items&&bcPedidos[c.prov].items[c.key]&&bcPedidos[c.prov].items[c.key].qty)||1;
+      bcPedidos[elMin.prov].items['l'+elMin.idx]={nombre:elMin.nombre,precio:elMin.precio,qty:_qtyElegida,key:'l'+elMin.idx,codigo:provItMin.codigo||''};
     }
     // quitar del pedido los que son más caros que el mínimo (los _list no están en el pedido)
     c.todos.forEach(function(t){
@@ -31008,7 +31018,15 @@ function bcRenderComparativa(){
         var isMin = pd && pd.precio === e.minPrecio && e.numProvs > 1;
         var isMax = pd && pd.precio === e.maxPrecio && e.numProvs > 1 && e.maxPrecio !== e.minPrecio;
         // 🆕 2026-08: clave unificada 'l'+idx (la 'c'+renglón queda solo como legado de borradores viejos)
-        var inOrdIt = pd ? ((bcPedidos[k]&&bcPedidos[k].items&&(bcPedidos[k].items['l'+pd.idx]||bcPedidos[k].items['c'+realRi]))||null) : null;
+        // 🛠️ AUDITORÍA: la legacy solo se usa si es el MISMO producto (los renglones cambian de orden)
+        var inOrdIt = null;
+        if(pd && bcPedidos[k] && bcPedidos[k].items){
+          inOrdIt = bcPedidos[k].items['l'+pd.idx] || null;
+          if(!inOrdIt){
+            var _lg=bcPedidos[k].items['c'+realRi];
+            if(_lg && bcNorm(_lg.nombre||'')===bcNorm(pd.nombre||'')) inOrdIt=_lg;
+          }
+        }
         var qty = inOrdIt ? inOrdIt.qty : 0;
 
         // Celda del proveedor: NOMBRE como figura en SU lista + precio + confianza + acciones
@@ -33471,7 +33489,9 @@ function _bcResetFindCache(){
 // El trabajo pesado (bcFindInProds de cada item) se hace una vez, repartido en el
 // tiempo, en vez de todo de golpe la primera vez que abrís cada solapa.
 function bcWarmMatchCache(){
-  if(window._bcWarming) return;
+  // 🛠️ 2026-08 AUDITORÍA: si llega una lista NUEVA mientras se está calentando, re-lanzar al
+  // terminar (antes la segunda lista quedaba fuera del índice y Reposición decía "no está en tus listas")
+  if(window._bcWarming){ window._bcWarmPend=true; return; }
   if(typeof prods==='undefined' || !prods || !prods.length) return;
   var all=[];
   Object.keys(bcProveedores||{}).forEach(function(k){
@@ -33484,7 +33504,11 @@ function bcWarmMatchCache(){
     var end=Math.min(i+CH, all.length);
     for(; i<end; i++){ try{ bcFindInProds(all[i]); }catch(e){} }
     if(i<all.length){ setTimeout(step, 0); }
-    else { window._bcWarming=false; window._bcFindCacheReady=true; }
+    else {
+      window._bcWarming=false;
+      if(window._bcWarmPend){ window._bcWarmPend=false; setTimeout(bcWarmMatchCache,0); }
+      else { window._bcFindCacheReady=true; }
+    }
   }
   setTimeout(step, 0);
 }
@@ -33770,7 +33794,7 @@ function bcRenderCruzados(){
 
 // Macheo auto producto→proveedor con CACHÉ (antes recalculaba TODO el fuzzy en cada tecla)
 function _bcCruzMatchesDe(p, keys){
-  var sig=keys.map(function(k){return k+':'+(bcProveedores[k]||[]).length;}).join('|');
+  var sig=keys.map(function(k){return k+':'+(bcProveedores[k]||[]).length+':'+((window._bcListaVer||{})[k]||0);}).join('|');
   var cache=window._bcCruzMCache;
   if(!cache || cache.sig!==sig){ cache=window._bcCruzMCache={sig:sig, map:{}}; }
   var out={};
@@ -51987,7 +52011,7 @@ var BELLE_IG_MODELOS_RAW=[
 
 </script>
 <!-- BUILD BELLE · 2026-08-02 ARG -->
-<div id="bcBuildStamp" style="position:fixed;bottom:4px;right:6px;z-index:2147483647;font-size:9px;line-height:1;color:#7c85a8;background:rgba(15,17,23,.6);padding:2px 6px;border-radius:4px;pointer-events:none;font-family:ui-monospace,monospace;letter-spacing:.02em;opacity:.55;font-size:7px">06/08 17:25</div>
+<div id="bcBuildStamp" style="position:fixed;bottom:4px;right:6px;z-index:2147483647;font-size:9px;line-height:1;color:#7c85a8;background:rgba(15,17,23,.6);padding:2px 6px;border-radius:4px;pointer-events:none;font-family:ui-monospace,monospace;letter-spacing:.02em;opacity:.55;font-size:7px">06/08 17:45</div>
 </body>
 <!-- build:20260418-195140-20260418-194515-20260330-001651 -->
 </html>
