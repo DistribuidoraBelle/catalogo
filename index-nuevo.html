@@ -18325,6 +18325,314 @@ if('serviceWorker' in navigator){
 }
 </script>
 
+<script>
+/* ════════════════════════════════════════════════════════════════════
+   🛒 CARRITO PERSISTENTE + CONTROL DE STOCK (2026-08)
+   · El pedido NO se borra al recargar ni al cerrar el navegador.
+   · Si la persona tiene cuenta, el carrito la sigue en cualquier dispositivo
+     (tabla clientes_carrito, un registro por cliente).
+   · Si un producto se queda sin stock, sale del carrito activo y se muestra
+     APARTE, en gris, avisando. No suma al total y NO va en el pedido.
+     Si vuelve el stock, se reintegra solo.
+   · Al volver, se recuerda amablemente que hay un pedido a medio armar.
+   Bloque autocontenido: engancha funciones existentes, no las reemplaza.
+   ════════════════════════════════════════════════════════════════════ */
+(function(){
+  var LS_ANON='belleCart_anon', LS_PRE='belleCart_cli_';
+  window._cartSinStock = window._cartSinStock || {};   // items que se quedaron sin stock
+  var _guardarTimer=null, _restaurado=false, _avisoMostrado=false;
+
+  function _cli(){ try{ return (typeof _catCliente!=='undefined' && _catCliente && _catCliente.id) ? _catCliente.id : null; }catch(e){ return null; } }
+  function _lsKey(){ var c=_cli(); return c ? (LS_PRE+c) : LS_ANON; }
+
+  // ── qué producto es cada línea del carrito ──
+  function _prodIdDe(item){
+    if(!item || item.isCombo || item.isBonificado) return null;
+    return (item.isDecan||item.isCosm) ? item.prodId : item.id;
+  }
+  function _prodDe(item){
+    var pid=_prodIdDe(item);
+    if(pid==null) return null;
+    try{ return (allProds||[]).find(function(p){ return p.id===pid; })||null; }catch(e){ return null; }
+  }
+
+  // ── (1) GUARDAR ───────────────────────────────────────────────────
+  function _paquete(){
+    var activos={};
+    Object.keys(cart||{}).forEach(function(k){
+      var it=cart[k];
+      if(!it || it.isBonificado) return;   // los regalos se recalculan solos
+      activos[k]=it;
+    });
+    return {v:1, items:activos, sinStock:(window._cartSinStock||{}), ts:Date.now()};
+  }
+  function _guardarYa(){
+    var paq=_paquete();
+    try{ localStorage.setItem(_lsKey(), JSON.stringify(paq)); }catch(e){}
+    var c=_cli();
+    if(c && typeof apiPost==='function'){
+      // upsert por cliente_id (la tabla tiene UNIQUE en cliente_id)
+      fetch(SB_URL+'/rest/v1/clientes_carrito?on_conflict=cliente_id',{
+        method:'POST',
+        headers:{'Content-Type':'application/json','apikey':SB_KEY,
+                 'Authorization':'Bearer '+(_sbToken()||SB_KEY),
+                 'Prefer':'resolution=merge-duplicates,return=minimal'},
+        body:JSON.stringify({cliente_id:c, items:paq, updated_at:new Date().toISOString()})
+      }).catch(function(){});
+    }
+  }
+  window._cartGuardar=function(){
+    clearTimeout(_guardarTimer);
+    _guardarTimer=setTimeout(_guardarYa, 500);
+  };
+
+  // ── (2) CONTROL DE STOCK ──────────────────────────────────────────
+  // Devuelve {sacados:[nombres], recortados:[{nombre,max}], vueltos:[nombres]}
+  window._cartRevisarStock=function(){
+    var r={sacados:[],recortados:[],vueltos:[]};
+    if(typeof allProds==='undefined' || !allProds || !allProds.length) return r;
+
+    // a) del carrito activo → afuera los que se quedaron sin stock
+    Object.keys(cart||{}).forEach(function(k){
+      var it=cart[k];
+      if(!it || it.isBonificado || it.isCombo) return;
+      var p=_prodDe(it);
+      var stock=p?(p.stock_actual||0):0;
+      if(!p || stock<=0){
+        it._sinStock=true; it._nombreVista=it.nombre;
+        window._cartSinStock[k]=it;
+        delete cart[k];
+        r.sacados.push(it.nombre);
+      } else if(!it.isDecan && stock < it.qty){
+        it.qty=stock; r.recortados.push({nombre:it.nombre,max:stock});
+      }
+    });
+
+    // b) de los sin stock → vuelven si hay stock otra vez
+    Object.keys(window._cartSinStock||{}).forEach(function(k){
+      var it=window._cartSinStock[k];
+      if(!it) return;
+      var p=_prodDe(it);
+      var stock=p?(p.stock_actual||0):0;
+      if(p && stock>0){
+        delete it._sinStock;
+        if(!it.isDecan && stock < it.qty) it.qty=stock;
+        cart[k]=it;
+        delete window._cartSinStock[k];
+        r.vueltos.push(it.nombre);
+      }
+    });
+    return r;
+  };
+
+  function _avisarCambios(r, silencioso){
+    if(!r) return;
+    var lineas=[];
+    if(r.sacados.length)    lineas.push('😔 Sin stock por ahora: '+r.sacados.slice(0,3).join(', ')+(r.sacados.length>3?' y '+(r.sacados.length-3)+' más':''));
+    if(r.recortados.length) lineas.push('⚠️ Quedan menos unidades de: '+r.recortados.map(function(x){return x.nombre+' ('+x.max+')';}).slice(0,3).join(', '));
+    if(r.vueltos.length)    lineas.push('🎉 ¡Volvió el stock de '+r.vueltos.slice(0,3).join(', ')+'!');
+    if(!lineas.length || silencioso) return;
+    try{
+      if(typeof showToastInfo==='function') showToastInfo({titulo:'Tu pedido se actualizó', lineas:lineas, dur:6000});
+      else if(typeof showToast==='function') showToast(lineas[0]);
+    }catch(e){}
+  }
+
+  // ── (3) RESTAURAR ─────────────────────────────────────────────────
+  function _aplicarPaquete(paq){
+    if(!paq || !paq.items) return 0;
+    var n=0;
+    Object.keys(paq.items).forEach(function(k){ cart[k]=paq.items[k]; n++; });
+    if(paq.sinStock) Object.keys(paq.sinStock).forEach(function(k){ window._cartSinStock[k]=paq.sinStock[k]; });
+    return n;
+  }
+  function _leerLocal(){
+    try{ var s=localStorage.getItem(_lsKey()); return s?JSON.parse(s):null; }catch(e){ return null; }
+  }
+  window._cartRestaurar=function(forzar){
+    if(_restaurado && !forzar) return Promise.resolve();
+    _restaurado=true;
+    var local=_leerLocal();
+    var c=_cli();
+    var pedirNube = (c && typeof apiGet==='function')
+      ? apiGet('clientes_carrito','select=items,updated_at&cliente_id=eq.'+c).catch(function(){return null;})
+      : Promise.resolve(null);
+    return pedirNube.then(function(rows){
+      var nube=(Array.isArray(rows)&&rows[0]&&rows[0].items)?rows[0].items:null;
+      // gana el más nuevo (si uno solo existe, ese)
+      var elegido=local;
+      if(nube && (!local || (nube.ts||0) > (local.ts||0))) elegido=nube;
+      var n=_aplicarPaquete(elegido);
+      if(n){
+        var r=window._cartRevisarStock();
+        try{ if(typeof updateCartCount==='function') updateCartCount(); }catch(e){}
+        try{ if(typeof applyFilters==='function') applyFilters(); }catch(e){}
+        _avisarCambios(r, true);
+        _recordarPedido(r);
+      }
+      _guardarYa();
+    });
+  };
+
+  // ── (4) RECORDATORIO AMABLE ───────────────────────────────────────
+  function _recordarPedido(cambios){
+    if(_avisoMostrado) return;
+    var units=0; Object.values(cart||{}).forEach(function(i){ if(!i.isBonificado) units+=(i.qty||0); });
+    var sin=Object.keys(window._cartSinStock||{}).length;
+    if(units<=0 && !sin) return;
+    _avisoMostrado=true;
+    setTimeout(function(){
+      var ex=document.getElementById('cartRecordatorio'); if(ex) ex.remove();
+      var d=document.createElement('div');
+      d.id='cartRecordatorio';
+      d.style.cssText='position:fixed;left:50%;transform:translateX(-50%);bottom:calc(var(--bmBarH,0px) + env(safe-area-inset-bottom) + 90px);z-index:1450;'+
+        'background:var(--bg-header,#fff);border:1.5px solid var(--accent,#c4965a);border-radius:14px;'+
+        'box-shadow:0 8px 28px rgba(0,0,0,.18);padding:.7rem .8rem;display:flex;align-items:center;gap:.7rem;'+
+        'max-width:calc(100vw - 2rem);font-family:"DM Sans",sans-serif;animation:_catMoSlideIn .3s ease-out';
+      var txt = units>0
+        ? '<b style="color:var(--accent,#c4965a)">Seguí donde quedaste</b><br><span style="font-size:.72rem;color:var(--tx-mid,#777)">Tenés '+units+' producto'+(units===1?'':'s')+' en tu pedido'+(sin?' · '+sin+' sin stock':'')+'</span>'
+        : '<b style="color:var(--accent,#c4965a)">Tu pedido te espera</b><br><span style="font-size:.72rem;color:var(--tx-mid,#777)">'+sin+' producto'+(sin===1?'':'s')+' sin stock por ahora</span>';
+      d.innerHTML='<span style="font-size:1.4rem;line-height:1">🛍</span>'+
+        '<div style="line-height:1.25;font-size:.82rem;color:var(--tx-main,#1a1a1a)">'+txt+'</div>'+
+        '<button id="cartRecVer" style="background:var(--accent,#c4965a);color:#fff;border:none;border-radius:20px;padding:.4rem .8rem;font-size:.74rem;font-weight:700;cursor:pointer;white-space:nowrap;font-family:inherit">Ver</button>'+
+        '<button id="cartRecX" style="background:transparent;border:none;color:var(--tx-mid,#999);font-size:1.1rem;line-height:1;cursor:pointer;padding:0 .2rem">&times;</button>';
+      document.body.appendChild(d);
+      document.getElementById('cartRecVer').onclick=function(){ d.remove(); if(typeof toggleCart==='function') toggleCart(); };
+      document.getElementById('cartRecX').onclick=function(){ d.remove(); };
+      setTimeout(function(){ var e=document.getElementById('cartRecordatorio'); if(e) e.remove(); }, 12000);
+    }, 1200);
+  }
+
+  // ── (5) MOSTRAR LOS SIN STOCK EN EL PEDIDO (en gris) ──────────────
+  function _pintarSinStock(){
+    var db=document.getElementById('db'); if(!db) return;
+    var vieja=document.getElementById('cartSinStockBox'); if(vieja) vieja.remove();
+    var keys=Object.keys(window._cartSinStock||{});
+    if(!keys.length) return;
+    var box=document.createElement('div');
+    box.id='cartSinStockBox';
+    box.style.cssText='margin-top:.7rem;padding:.6rem .7rem;border:1px dashed var(--border-color,#e0d6c4);border-radius:10px;background:rgba(150,150,150,.07)';
+    var h='<div style="font-size:.7rem;font-weight:700;color:var(--tx-mid,#8a8a8a);margin-bottom:.45rem">'+
+      '😔 SIN STOCK POR AHORA <span style="font-weight:400">· no se cobran ni entran en el pedido</span></div>';
+    keys.forEach(function(k){
+      var it=window._cartSinStock[k]; if(!it) return;
+      h+='<div style="display:flex;align-items:center;gap:.5rem;padding:.35rem 0;opacity:.62;filter:grayscale(1)">'+
+        '<div style="flex:1;min-width:0">'+
+          '<div style="font-size:.78rem;color:var(--tx-main,#1a1a1a);text-decoration:line-through;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">'+String(it.nombre||'').replace(/[<>]/g,'')+'</div>'+
+          '<div style="font-size:.65rem;color:var(--tx-mid,#8a8a8a)">'+(it.qty||1)+' u · te avisamos cuando vuelva</div>'+
+        '</div>'+
+        '<button onclick="_cartQuitarSinStock(\''+String(k).replace(/'/g,"")+'\')" title="Quitar" style="background:transparent;border:none;color:var(--tx-mid,#999);font-size:1rem;cursor:pointer;padding:0 .3rem;filter:none">&times;</button>'+
+      '</div>';
+    });
+    box.innerHTML=h;
+    db.appendChild(box);
+  }
+  window._cartQuitarSinStock=function(k){
+    if(window._cartSinStock) delete window._cartSinStock[k];
+    _guardarYa();
+    try{ if(typeof renderDrawer==='function') renderDrawer(); }catch(e){}
+  };
+
+  // ── (6) ENGANCHES a lo que ya existe ──────────────────────────────
+  var _updOrig=window.updateCartCount;
+  var _teniaItems=false;
+  window.updateCartCount=function(){
+    var r=_updOrig.apply(this,arguments);
+    try{
+      var hay=Object.keys(cart||{}).length>0;
+      // Si el carrito pasó de tener cosas a quedar vacío (pedido enviado o vaciado a
+      // mano), también se limpian los "sin stock": ese pedido ya se cerró.
+      if(_teniaItems && !hay && Object.keys(window._cartSinStock||{}).length){
+        window._cartSinStock={};
+        try{ if(typeof _drawOrig==='function') _pintarSinStock(); }catch(e){}
+      }
+      _teniaItems=hay;
+    }catch(e){}
+    if(_restaurado) window._cartGuardar();
+    return r;
+  };
+  var _drawOrig=window.renderDrawer;
+  window.renderDrawer=function(){
+    var r=_drawOrig.apply(this,arguments);
+    try{ _pintarSinStock(); }catch(e){}
+    return r;
+  };
+  // Al confirmar: los sin stock NO viajan en el pedido (ya están fuera del cart)
+  var _sendOrig=window._sendWAOriginal;
+  if(typeof _sendOrig==='function'){
+    window._sendWAOriginal=function(){
+      try{
+        var r=window._cartRevisarStock();
+        _avisarCambios(r);
+        if(!Object.keys(cart||{}).length){
+          if(typeof showToast==='function') showToast('Los productos de tu pedido se quedaron sin stock 😔');
+          window._sendingOrder=false;
+          try{ if(typeof renderDrawer==='function') renderDrawer(); }catch(e){}
+          return;
+        }
+      }catch(e){}
+      return _sendOrig.apply(this,arguments);
+    };
+  }
+  // Pedido enviado → carrito limpio (también en la nube)
+  var _vaciarPrevio=window.vaciarCarrito;
+  window.vaciarCarrito=function(){
+    var r=_vaciarPrevio?_vaciarPrevio.apply(this,arguments):undefined;
+    window._cartSinStock={};
+    _guardarYa();
+    return r;
+  };
+
+  // ── (7) ARRANQUE ──────────────────────────────────────────────────
+  function _esperarProductos(intentos){
+    intentos=intentos||0;
+    if(typeof allProds!=='undefined' && allProds && allProds.length){ window._cartRestaurar(); return; }
+    if(intentos>40) { window._cartRestaurar(); return; }   // ~20s: restaurar igual
+    setTimeout(function(){ _esperarProductos(intentos+1); }, 500);
+  }
+  if(document.readyState==='complete') _esperarProductos();
+  else window.addEventListener('load',function(){ _esperarProductos(); });
+
+  // Al iniciar (o cerrar) sesión, traer el carrito que corresponde a esa cuenta.
+  // Se detecta solo, sin tocar el código de login.
+  var _cliPrev=_cli();
+  setInterval(function(){
+    var ahora=_cli();
+    if(ahora===_cliPrev) return;
+    var eraAnon=(_cliPrev===null);
+    _cliPrev=ahora;
+    if(!_restaurado) return;
+    if(ahora && eraAnon){
+      // Recién inició sesión: lo que tenía sin cuenta se conserva y se le suma lo guardado
+      _guardarYa();                       // sube lo actual a la cuenta
+      _avisoMostrado=true;                // sin cartelito en este caso
+      window._cartRestaurar(true);        // y trae/fusiona lo que ya tenía en la cuenta
+    } else if(!ahora){
+      // Cerró sesión: el pedido de esa cuenta no queda a la vista del siguiente
+      cart={}; window._cartSinStock={};
+      try{ if(typeof updateCartCount==='function') updateCartCount(); }catch(e){}
+      try{ if(typeof renderDrawer==='function') renderDrawer(); }catch(e){}
+    }
+  }, 1500);
+  // Revisar stock cada vez que se recarga el catálogo (cambios de stock en vivo)
+  var _reintentos=0;
+  setInterval(function(){
+    if(!_restaurado) return;
+    var cant=Object.keys(cart||{}).length+Object.keys(window._cartSinStock||{}).length;
+    if(!cant) return;
+    var r=window._cartRevisarStock();
+    if(r.sacados.length||r.recortados.length||r.vueltos.length){
+      _avisarCambios(r);
+      try{ if(typeof updateCartCount==='function') updateCartCount(); }catch(e){}
+      try{ if(typeof renderDrawer==='function') renderDrawer(); }catch(e){}
+    }
+  }, 60000);
+  // Guardar al salir (sin perder lo último que se tocó)
+  window.addEventListener('visibilitychange',function(){ if(document.visibilityState==='hidden') _guardarYa(); });
+  window.addEventListener('pagehide', _guardarYa);
+})();
+</script>
+
 <!-- ════════════════════════════════════════════════════════════════════
      🆕 SHELL MOBILE (prueba 2026-08) — barra superior fija con buscador +
      cuenta, pestañas más chicas arriba, y barra de iconos fija abajo.
@@ -18574,6 +18882,7 @@ if('serviceWorker' in navigator){
   bmActivo('inicio');
 })();
 </script>
+
 
 </body>
 </html>
