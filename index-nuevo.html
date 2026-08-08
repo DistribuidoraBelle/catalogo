@@ -2635,6 +2635,9 @@ function buildTabs(){
   //      estuviera vigente todavía, dando la sensación de "se activó de una"]
   // Las pestañas SIN campaña asociada se muestran siempre (no son pestañas de campaña)
   function pestanaDebeOcultarse(t){
+    // 🆕 2026-08: una pestaña ACTIVA pero VACÍA (campaña que ya terminó y le sacaron
+    // los productos, ej "Día del Padre") no se ofrece: no tiene nada para mostrar.
+    if(typeof _tabTieneProductos==='function' && !_tabTieneProductos(t)) return true;
     var c = campañaPorPestIdTodas[t.id];
     if(!c) return false;  // sin campaña asociada → mostrar normal
     if(c.activa === false) return true;
@@ -2757,6 +2760,43 @@ function catSwitchTabDesdeDrawer(slug){
   }
 }
 
+// 🆕 2026-08: ¿esta pestaña tiene productos para mostrar? (una campaña terminada
+// queda "activa" pero vacía y no tiene sentido ofrecerla; ej: Día del Padre)
+function _tabTieneProductos(t){
+  try{
+    if(!t) return false;
+    if(t.slug==='arabes'||t.slug==='internacionales') return true;
+    var hay=(allProds||[]).some(function(p){ return p.activo!==false && p.pestana_id===t.id; });
+    if(hay) return true;
+    var camp=(window._ofertaCampanias||[]).find(function(c){ return c.pestana_id===t.id; });
+    if(camp && window._ofertaCampaniaProductos && (window._ofertaCampaniaProductos[camp.id]||[]).length) return true;
+    return false;
+  }catch(e){ return true; }
+}
+// 🆕 2026-08: MISMA regla que usan las pestañas de arriba, ahora compartida, para que
+// el menú no muestre pestañas que la barra oculta (ej: campaña vencida "Día del Padre").
+function _pestanaOcultaGlobal(t){
+  try{
+    if(typeof _tabTieneProductos==='function' && !_tabTieneProductos(t)) return true;
+    var todas=window._ofertaCampaniasTodas||window._ofertaCampanias||[];
+    var c=todas.find(function(x){ return x.pestana_id===t.id; });
+    if(!c) return false;
+    if(c.activa===false) return true;
+    if(c.mostrar_pestana===false) return true;
+    var ofs=(window._ofertasTodas||window._ofertas||[]).filter(function(o){ return o.campania_id===c.id; });
+    if(ofs.length){
+      var ahora=Date.now();
+      var vig=ofs.some(function(o){
+        if(!o.activa) return false;
+        if(o.fecha_desde && new Date(o.fecha_desde).getTime()>ahora) return false;
+        if(o.fecha_hasta && new Date(o.fecha_hasta).getTime()<=ahora) return false;
+        return true;
+      });
+      if(!vig) return true;
+    }
+  }catch(e){}
+  return false;
+}
 function catAbrirTabsDrawer(){
   // 1) Rellenar la lista de pestañas
   var cont = document.getElementById('catTabsDrawerLista');
@@ -2774,6 +2814,7 @@ function catAbrirTabsDrawer(){
     pestanasCatalogo.forEach(function(t){
       var camp = campPorPestId[t.id];
       if(!camp || !camp.tab_destacada) return;
+      if(_pestanaOcultaGlobal(t)) return;   // campaña vencida / pausada / pestaña vacía
       // Verificar si la pestaña debe ocultarse (campaña pausada o oferta no vigente)
       var todasCamps = window._ofertaCampaniasTodas || camps;
       var cTodos = todasCamps.find(function(c){return c.pestana_id===t.id;});
@@ -2790,6 +2831,7 @@ function catAbrirTabsDrawer(){
       if(base.indexOf(t.slug) >= 0) return;
       var camp = campPorPestId[t.id];
       if(camp && camp.tab_destacada) return;
+      if(_pestanaOcultaGlobal(t)) return;   // campaña vencida / pausada / pestaña vacía
       var todasCamps = window._ofertaCampaniasTodas || camps;
       var cTodos = todasCamps.find(function(c){return c.pestana_id===t.id;});
       if(cTodos && (cTodos.activa===false || cTodos.mostrar_pestana===false)) return;
@@ -3391,9 +3433,20 @@ function catToggleFavsView(force){
       "<button onclick=\"catToggleFavsView(false)\" style='background:transparent;border:1px solid #c4965a;color:#a9763f;border-radius:18px;padding:.25rem .8rem;font-size:.72rem;cursor:pointer;font-family:inherit;white-space:nowrap'>Ver todo el catálogo</button>";
     var hEl=document.getElementById("homePage"); if(hEl) hEl.style.display="none";
     var d=document.getElementById("destacadosContainer"); if(d){ d.style.display="none"; d.innerHTML=""; }
+    // 🆕 2026-08: en favoritos NO se muestra nada más: ni banner, ni secciones de la
+    // pestaña, ni combos, ni el carrusel de marcas. Solo los favoritos.
+    document.body.classList.add('bmSoloFavs');
+    ['pestanaSeccionesContainer','combosSecCat','carousel','mcWrapTab','mcWrap','annBar'].forEach(function(id){
+      var e=document.getElementById(id); if(e) e.style.display='none';
+    });
   } else {
     if(b) b.style.display="none";
+    document.body.classList.remove('bmSoloFavs');
+    ['pestanaSeccionesContainer','combosSecCat','carousel','annBar'].forEach(function(id){
+      var e=document.getElementById(id); if(e) e.style.display='';
+    });
     if(typeof renderDestacados==='function') renderDestacados(curTab);
+    if(typeof _mcRender==='function'){ try{ _mcRender(); }catch(e){} }
   }
   if(typeof catCerrarTabsDrawer==='function') catCerrarTabsDrawer();
   if(typeof applyFilters==='function') applyFilters();
@@ -4898,6 +4951,15 @@ function cerrarServicios(){
 function switchTab(tab,el){
   // Marcar que el usuario navegó manualmente — no forzar pestaña de campaña al cargar
   window._catTabManual=true;
+  if(!window._bqAplicando){ window._bqTodas=false; window._bqCol=''; }   // reglas del Buscador solo mientras dure su búsqueda
+  // 🆕 2026-08: si venías mirando SOLO favoritos, al tocar una pestaña se sale de esa
+  // vista (antes quedaba prendida y la pestaña "no volvía": seguía filtrando favoritos).
+  if(window._soloFavs){
+    window._soloFavs=false;
+    var _fb=document.getElementById("favsBanner"); if(_fb) _fb.style.display="none";
+    document.body.classList.remove('bmSoloFavs');
+    var _lcF=document.getElementById("listContainer"); if(_lcF) _lcF.style.display="";
+  }
   curTab=tab;
   document.querySelectorAll(".tab").forEach(function(t){t.classList.remove("act");});
   el.classList.add("act");
@@ -6540,7 +6602,12 @@ function applyFilters(){
     window._fichaPorProd=_ixF; window._fichaPorProdN=_fLen;
   }
   // Si hay busqueda activa O vista de favoritos O filtro de familia/precio, buscar en TODAS las pestanas
-  var poolProds=(q||window._soloFavs||famF||precioF)?allProds:getTabProds();
+  // 🆕 2026-08: si venís del Buscador, mandan sus reglas: 'Todas' busca en todo el
+  // catálogo y una colección elegida NO se abandona aunque filtres por familia/precio.
+  var poolProds;
+  if(window._bqTodas) poolProds=allProds;
+  else if(window._bqCol) poolProds=getTabProds();
+  else poolProds=(q||window._soloFavs||famF||precioF)?allProds:getTabProds();
   var filtered=poolProds.filter(function(p){
     if(window._soloFavs && _catFavs.indexOf(p.id)<0) return false;
     if(genF){var g=p.genero||"";var _fem=g.indexOf("\u2640")>=0,_mas=g.indexOf("\u2642")>=0,_uni=(!g)||(g==="U")||(_fem&&_mas)||/unisex/i.test(g);if(genF==="fem"&&!(_fem||_uni))return false;if(genF==="mas"&&!(_mas||_uni))return false;if(genF==="U"&&g!=="U")return false;}
@@ -18769,7 +18836,7 @@ if('serviceWorker' in navigator){
   <button data-bm="inicio" onclick="bmGo('inicio')">
     <svg viewBox="0 0 24 24"><path d="M3 10.5 12 3l9 7.5"/><path d="M5 9.8V20a1 1 0 0 0 1 1h12a1 1 0 0 0 1-1V9.8"/></svg>Inicio</button>
   <button data-bm="cat" onclick="bmGo('cat')">
-    <svg viewBox="0 0 24 24"><rect x="3" y="3" width="7" height="7" rx="1.5"/><rect x="14" y="3" width="7" height="7" rx="1.5"/><rect x="3" y="14" width="7" height="7" rx="1.5"/><path d="M17.5 14v7M14 17.5h7"/></svg>Categorías</button>
+    <svg viewBox="0 0 24 24"><circle cx="10.5" cy="10.5" r="6"/><path d="M20 20l-4.6-4.6"/><path d="M7.6 8.6h5.8M8.9 11.4h3.2"/></svg>Buscador</button>
   <button data-bm="cart" onclick="bmGo('cart')">
     <svg viewBox="0 0 24 24"><path d="M3 4h2.2l2.2 11.2a1.6 1.6 0 0 0 1.6 1.3h8.4a1.6 1.6 0 0 0 1.6-1.3L21 7H6"/><circle cx="9.5" cy="20" r="1.3"/><circle cx="17.5" cy="20" r="1.3"/></svg>Carrito<span class="bmBadge" id="bmCartBadge">0</span></button>
   <button data-bm="fav" onclick="bmGo('fav')">
@@ -18781,7 +18848,8 @@ if('serviceWorker' in navigator){
 <div id="bmSheetOv" onclick="bmCerrarSheet()"></div>
 <div id="bmSheet">
   <div class="bmSheetGrip"></div>
-  <button onclick="bmCerrarSheet();toggleFiltrosMobile()"><span class="bmIc">&#128295;</span>Filtros y orden</button>
+  <button onclick="bmCerrarSheet();setTimeout(function(){if(typeof catAbrirTabsDrawer==='function')catAbrirTabsDrawer();},260)"><span class="bmIc">&#9776;</span>Categorías</button>
+  <button onclick="bmCerrarSheet();setTimeout(function(){if(typeof bqAbrir==='function')bqAbrir();},260)"><span class="bmIc">&#128269;</span>Buscador avanzado</button>
   <button onclick="bmCerrarSheet();toggleAcordesPanel()"><span class="bmIc">&#127800;</span>Acordes y notas</button>
   <button onclick="bmCerrarSheet();abrirModalComparador()"><span class="bmIc">&#9878;</span>Comparar perfumes</button>
   <button onclick="bmCerrarSheet();abrirDupeFinder()"><span class="bmIc">&#127919;</span>Tu versión árabe</button>
@@ -18900,7 +18968,7 @@ if('serviceWorker' in navigator){
       window.scrollTo({top:0,behavior:'smooth'});
       bmActivo('inicio');
     }
-    else if(k==='cat'){ if(typeof catAbrirTabsDrawer==='function') catAbrirTabsDrawer(); }
+    else if(k==='cat'){ if(typeof bqAbrir==='function') bqAbrir(); else if(typeof catAbrirTabsDrawer==='function') catAbrirTabsDrawer(); bmActivo('cat'); }
     else if(k==='cart'){ if(typeof toggleCart==='function') toggleCart(); }
     else if(k==='fav'){ if(typeof catToggleFavsView==='function') catToggleFavsView(true); bmActivo('fav'); }
     else if(k==='mas'){ bmAbrirSheet(); }
@@ -19554,6 +19622,305 @@ html[data-cards="2"] .hb-rect[data-cat="combos"]::after{background:linear-gradie
   function iniciar(){ if(listo) return; listo=true; colchon(); }
   if(document.readyState==='complete') iniciar();
   else window.addEventListener('load',iniciar);
+})();
+</script>
+
+<!-- ════════════════════════════════════════════════════════════════════
+     🔎 BUSCADOR (panel de búsqueda avanzada) — botón central de la barra
+     Secciones: colección → género → familia/notas → marca → precio → orden.
+     Va contando en vivo cuántos productos quedan mientras se marca.
+     ════════════════════════════════════════════════════════════════════ -->
+<style id="bqCSS">
+#bqOv{display:none;position:fixed;inset:0;background:rgba(30,24,16,.45);z-index:1300;backdrop-filter:blur(2px)}
+#bqOv.open{display:block}
+#bqPanel{position:fixed;left:0;right:0;bottom:-100%;z-index:1310;background:var(--bg-body,#faf8f4);
+  border-radius:18px 18px 0 0;box-shadow:0 -10px 40px rgba(30,24,16,.28);transition:bottom .28s cubic-bezier(.4,0,.2,1);
+  display:flex;flex-direction:column;max-height:92vh}
+#bqPanel.open{bottom:0}
+#bqHead{padding:.55rem .9rem .5rem;border-bottom:1px solid var(--border-color,#e8ddc9);background:var(--bg-header,#fff);border-radius:18px 18px 0 0}
+#bqGrip{width:38px;height:4px;border-radius:2px;background:var(--border-color,#e0d6c4);margin:0 auto .6rem}
+#bqSrchWrap{display:flex;align-items:center;gap:.5rem;border:1px solid var(--goldl,#e4d3b3);border-radius:6px;padding:.15rem .6rem;background:var(--bg-card,#fffdf9)}
+#bqSrch{flex:1;border:none;background:transparent;outline:none;font-family:inherit;font-size:.85rem;color:var(--tx-main);padding:.5rem 0}
+#bqBody{flex:1;overflow-y:auto;padding:.7rem .9rem 1rem;-webkit-overflow-scrolling:touch}
+.bq-sec{margin-bottom:1rem}
+.bq-tit{display:flex;align-items:center;gap:.5rem;margin-bottom:.5rem}
+.bq-tit b{font-size:.58rem;letter-spacing:.16em;text-transform:uppercase;color:var(--accent,#c4965a);font-weight:700;white-space:nowrap}
+.bq-tit i{flex:1;height:1px;background:linear-gradient(90deg,rgba(196,150,90,.32),transparent)}
+.bq-chips{display:flex;flex-wrap:wrap;gap:.35rem}
+.bq-ch{border:1px solid var(--goldl,#e4d3b3);background:var(--bg-card,#fffdf9);color:var(--tx-mid,#8c8071);
+  border-radius:16px;padding:.36rem .72rem;font-size:.68rem;font-family:inherit;cursor:pointer;font-weight:600;
+  transition:background .15s,color .15s,border-color .15s;-webkit-tap-highlight-color:transparent}
+.bq-ch.on{background:linear-gradient(135deg,#c4965a,#a9763f);border-color:#a9763f;color:#fff;box-shadow:0 2px 7px rgba(169,118,63,.28)}
+.bq-ch small{opacity:.7;font-weight:500;margin-left:.22rem}
+#bqFoot{padding:.6rem .9rem calc(.6rem + env(safe-area-inset-bottom));border-top:1px solid var(--border-color,#e8ddc9);
+  background:var(--bg-header,#fff);display:flex;gap:.5rem;align-items:center}
+#bqLimpiar{background:transparent;border:1px solid var(--goldl,#e4d3b3);color:var(--tx-mid,#8c8071);border-radius:5px;
+  padding:.6rem .8rem;font-size:.62rem;letter-spacing:.1em;text-transform:uppercase;font-weight:700;cursor:pointer;font-family:inherit;white-space:nowrap}
+#bqVer{flex:1;background:linear-gradient(135deg,#c4965a,#a9763f);border:none;color:#fff;border-radius:5px;padding:.72rem;
+  font-size:.68rem;letter-spacing:.12em;text-transform:uppercase;font-weight:700;cursor:pointer;font-family:inherit;
+  box-shadow:0 3px 12px rgba(169,118,63,.3)}
+#bqVer:disabled{opacity:.5;box-shadow:none}
+#bqPrev{display:flex;gap:.45rem;overflow-x:auto;padding:.15rem 0 .3rem;scrollbar-width:none}
+#bqPrev::-webkit-scrollbar{display:none}
+.bq-mini{flex:0 0 auto;width:62px;text-align:center}
+.bq-mini img{width:62px;height:62px;object-fit:contain;background:#fff;border:1px solid var(--border-color,#eee);border-radius:5px;padding:3px}
+.bq-mini span{display:block;font-size:.5rem;color:var(--tx-mid,#8c8071);margin-top:.2rem;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+[data-theme="dark"] #bqPanel{background:var(--bg-body)}
+</style>
+
+<div id="bqOv" onclick="bqCerrar()"></div>
+<div id="bqPanel">
+  <div id="bqHead">
+    <div id="bqGrip"></div>
+    <div id="bqSrchWrap">
+      <svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="#c4965a" stroke-width="1.6" stroke-linecap="round"><circle cx="11" cy="11" r="7"/><path d="M20 20l-3.6-3.6"/></svg>
+      <input id="bqSrch" type="text" placeholder="Nombre, marca o el perfume al que se parece…" autocomplete="off" oninput="bqCambio()">
+      <span onclick="bqCerrar()" style="cursor:pointer;color:var(--tx-mid);font-size:1.2rem;line-height:1;padding:0 .1rem">&times;</span>
+    </div>
+    <div id="bqPrev"></div>
+  </div>
+  <div id="bqBody"></div>
+  <div id="bqFoot">
+    <button id="bqLimpiar" onclick="bqLimpiar()">Limpiar</button>
+    <button id="bqVer" onclick="bqAplicar()">Ver productos</button>
+  </div>
+</div>
+
+<script>
+(function(){
+  var F={col:'',gen:'',fam:'',marca:'',precio:'',orden:'',q:''};
+
+  function _norm(s){ try{ return norm(s); }catch(e){ return String(s||'').toLowerCase(); } }
+
+  // ── Colecciones disponibles (pestañas con productos) ──
+  function colecciones(){
+    var out=[{k:'',n:'Todas'}];
+    try{
+      out.push({k:'arabes',n:'Árabes'},{k:'internacionales',n:'Internacionales'});
+      (pestanasCatalogo||[]).forEach(function(t){
+        if(t.slug==='arabes'||t.slug==='internacionales') return;
+        if(typeof _pestanaOcultaGlobal==='function' && _pestanaOcultaGlobal(t)) return;
+        out.push({k:t.slug,n:t.nombre});
+      });
+    }catch(e){}
+    return out;
+  }
+  function prodsDeColeccion(slug){
+    if(!slug) return (allProds||[]).filter(function(p){return p.activo!==false;});
+    if(slug==='arabes') return (allProds||[]).filter(function(p){return p.cat_catalogo==='arabes'||(!p.cat_catalogo&&!p.pestana_id);});
+    if(slug==='internacionales') return (allProds||[]).filter(function(p){return p.cat_catalogo==='internacionales';});
+    var t=(pestanasCatalogo||[]).find(function(x){return x.slug===slug;});
+    if(!t) return [];
+    var out=(allProds||[]).filter(function(p){return p.pestana_id===t.id;});
+    var camp=(window._ofertaCampanias||[]).find(function(c){return c.pestana_id===t.id;});
+    if(camp && window._ofertaCampaniaProductos && window._ofertaCampaniaProductos[camp.id]){
+      var ids=window._ofertaCampaniaProductos[camp.id], ya={};
+      out.forEach(function(p){ya[p.id]=1;});
+      out=out.concat((allProds||[]).filter(function(p){ return ids.indexOf(p.id)>=0 && !ya[p.id]; }));
+    }
+    return out;
+  }
+
+  // ── Filtrado en vivo (mismas reglas que el catálogo) ──
+  function pasaGen(p){
+    if(!F.gen) return true;
+    var g=p.genero||'', fem=g.indexOf('\u2640')>=0, mas=g.indexOf('\u2642')>=0;
+    var uni=(!g)||(g==='U')||(fem&&mas)||/unisex/i.test(g);
+    if(F.gen==='fem') return fem||uni;
+    if(F.gen==='mas') return mas||uni;
+    return g==='U'||uni;
+  }
+  function pasaFam(p){ if(!F.fam) return true; try{ return _prodEsFamilia(p,F.fam); }catch(e){ return true; } }
+  function pasaMarca(p){ if(!F.marca) return true; return String(p.nombre||'').indexOf(F.marca)===0 || String(p.empresa||'').toUpperCase()===F.marca; }
+  function precioDe(p){ try{ var r=calcP(p); return r.pi||r.pe||r.pm||0; }catch(e){ return 0; } }
+  function pasaPrecio(p){ if(!F.precio) return true; try{ return _prodEnRangoPrecioBq(p); }catch(e){ return true; } }
+  function _bqTramos(){
+    var ps=(allProds||[]).map(precioDe).filter(function(x){return x>0;}).sort(function(a,b){return a-b;});
+    if(!ps.length) return [0,0];
+    return [ps[Math.floor(ps.length/3)], ps[Math.floor(ps.length*2/3)]];
+  }
+  function _prodEnRangoPrecioBq(p){
+    var t=_bqTramos(), v=precioDe(p);
+    if(F.precio==='bajo') return v>0&&v<=t[0];
+    if(F.precio==='medio') return v>t[0]&&v<=t[1];
+    if(F.precio==='alto') return v>t[1];
+    return true;
+  }
+  function pasaTexto(p){
+    if(!F.q) return true;
+    var q=_norm(F.q);
+    var hay=_norm((p.empresa||'')+' '+(p.nombre||''));
+    try{
+      var f=(window._fichaPorProd||{})[p.id];
+      if(f && f.inspirado_en_nombre) hay+=' '+_norm(f.inspirado_en_nombre);
+    }catch(e){}
+    return q.split(' ').filter(Boolean).every(function(w){ return hay.indexOf(w)>=0; });
+  }
+  function resultado(){
+    return prodsDeColeccion(F.col).filter(function(p){
+      return p.activo!==false && pasaGen(p) && pasaFam(p) && pasaMarca(p) && pasaPrecio(p) && pasaTexto(p);
+    });
+  }
+
+  // ── Armado del panel ──
+  function chips(items, sel, fn){
+    return '<div class="bq-chips">'+items.map(function(it){
+      return '<button class="bq-ch'+(sel===it.k?' on':'')+'" onclick="'+fn+'(\''+String(it.k).replace(/'/g,"\\'")+'\')">'+
+        String(it.n).replace(/[<>]/g,'')+(it.c!=null?'<small>'+it.c+'</small>':'')+'</button>';
+    }).join('')+'</div>';
+  }
+  function sec(titulo, cuerpo){ return '<div class="bq-sec"><div class="bq-tit"><b>'+titulo+'</b><i></i></div>'+cuerpo+'</div>'; }
+
+  window.bqPintar=function(){
+    var body=document.getElementById('bqBody'); if(!body) return;
+    var base=prodsDeColeccion(F.col).filter(function(p){return p.activo!==false;});
+    function cuenta(test){ return base.filter(test).length; }
+
+    var h='';
+    // 1) Colección
+    h+=sec('Colección', chips(colecciones().map(function(c){
+      return {k:c.k,n:c.n,c:prodsDeColeccion(c.k).filter(function(p){return p.activo!==false;}).length};
+    }), F.col, 'bqSetCol'));
+    // 2) Género
+    h+=sec('Para quién', chips([
+      {k:'',n:'Todos'},
+      {k:'fem',n:'♀ Mujer',c:cuenta(function(p){var s=F.gen;F.gen='fem';var r=pasaGen(p);F.gen=s;return r;})},
+      {k:'mas',n:'♂ Hombre',c:cuenta(function(p){var s=F.gen;F.gen='mas';var r=pasaGen(p);F.gen=s;return r;})},
+      {k:'U',n:'⚧ Unisex',c:cuenta(function(p){var s=F.gen;F.gen='U';var r=pasaGen(p);F.gen=s;return r;})}
+    ], F.gen, 'bqSetGen'));
+    // 3) Familia olfativa
+    var fams=[{k:'',n:'Todas'}];
+    try{
+      _FAMILIAS.forEach(function(f){
+        var n=f.k.charAt(0).toUpperCase()+f.k.slice(1);
+        var c=base.filter(function(p){ return _prodEsFamilia(p,f.k); }).length;
+        if(c) fams.push({k:f.k,n:n,c:c});
+      });
+    }catch(e){}
+    h+=sec('Familia olfativa', chips(fams, F.fam, 'bqSetFam'));
+    // 4) Marca
+    var seen={},marcas=[{k:'',n:'Todas'}];
+    base.forEach(function(p){
+      var b=(typeof getBrand==='function')?getBrand(p.nombre):(p.empresa||'');
+      b=String(b||'').trim(); if(!b||seen[b]) return; seen[b]=1;
+      marcas.push({k:b,n:b,c:base.filter(function(x){ return String(x.nombre||'').indexOf(b)===0; }).length});
+    });
+    marcas=[marcas[0]].concat(marcas.slice(1).sort(function(a,b){ return b.c-a.c || a.n.localeCompare(b.n,'es'); }));
+    h+=sec('Marca', chips(marcas, F.marca, 'bqSetMarca'));
+    // 5) Precio
+    var t=_bqTramos();
+    var fk=function(v){ try{ return fmt(Math.round(v/1000)*1000); }catch(e){ return '$'+Math.round(v/1000)+'k'; } };
+    h+=sec('Precio', chips([
+      {k:'',n:'Cualquiera'},
+      {k:'bajo',n:'Hasta '+fk(t[0])},
+      {k:'medio',n:fk(t[0])+' – '+fk(t[1])},
+      {k:'alto',n:'Más de '+fk(t[1])}
+    ], F.precio, 'bqSetPrecio'));
+    // 6) Orden
+    h+=sec('Ordenar por', chips([
+      {k:'',n:'Recomendado'},
+      {k:'precio_asc',n:'Precio ↑'},
+      {k:'precio_desc',n:'Precio ↓'},
+      {k:'az',n:'A – Z'},
+      {k:'nuevo',n:'Más nuevos'},
+      {k:'vendidos',n:'Más vendidos'}
+    ], F.orden, 'bqSetOrden'));
+    body.innerHTML=h;
+    bqCambio(true);
+  };
+
+  // ── Contador + miniaturas en vivo ──
+  window.bqCambio=function(sinPintar){
+    var inp=document.getElementById('bqSrch'); if(inp) F.q=inp.value||'';
+    var res=resultado();
+    var btn=document.getElementById('bqVer');
+    if(btn){
+      btn.textContent = res.length ? ('Ver '+res.length+' producto'+(res.length===1?'':'s')) : 'Sin resultados';
+      btn.disabled = !res.length;
+    }
+    var prev=document.getElementById('bqPrev');
+    if(prev){
+      prev.innerHTML=res.slice(0,14).map(function(p){
+        var img=p.imagen_url?('<img src="'+String(p.imagen_url).replace(/"/g,'&quot;')+'" alt="" loading="lazy">')
+                            :'<div style="width:62px;height:62px;background:#f3ece0;border-radius:5px"></div>';
+        return '<div class="bq-mini">'+img+'<span>'+String(p.nombre||'').split(' - ').pop().replace(/[<>]/g,'')+'</span></div>';
+      }).join('');
+    }
+    if(!sinPintar && !window._bqPintando){
+      window._bqPintando=true;
+      clearTimeout(window._bqT);
+      window._bqT=setTimeout(function(){ window._bqPintando=false; bqPintar(); }, 260);
+    }
+  };
+  window.bqSetCol=function(v){ F.col=v; F.marca=''; bqPintar(); };
+  window.bqSetGen=function(v){ F.gen=v; bqPintar(); };
+  window.bqSetFam=function(v){ F.fam=v; bqPintar(); };
+  window.bqSetMarca=function(v){ F.marca=v; bqPintar(); };
+  window.bqSetPrecio=function(v){ F.precio=v; bqPintar(); };
+  window.bqSetOrden=function(v){ F.orden=v; bqPintar(); };
+  window.bqLimpiar=function(){ F={col:'',gen:'',fam:'',marca:'',precio:'',orden:'',q:''};
+    var i=document.getElementById('bqSrch'); if(i) i.value=''; bqPintar(); };
+
+  // ── Abrir / cerrar ──
+  window.bqAbrir=function(){
+    var ov=document.getElementById('bqOv'), pn=document.getElementById('bqPanel');
+    // arrancar con lo que ya está filtrado en la pantalla
+    try{
+      F.col=(curTab==='inicio')?'':curTab;
+      F.gen=genF||''; F.fam=famF||''; F.precio=precioF||''; F.orden=_ordenActual||'';
+      F.marca=(document.getElementById('brandFilter')||{}).value||'';
+      F.q=(document.getElementById('srch')||{}).value||'';
+      var i=document.getElementById('bqSrch'); if(i) i.value=F.q;
+    }catch(e){}
+    bqPintar();
+    if(ov) ov.classList.add('open');
+    if(pn) setTimeout(function(){ pn.classList.add('open'); },10);
+    if(typeof _catModalBackRegistrar==='function'){ try{ _catModalBackRegistrar('bqPanel', bqCerrar); }catch(e){} }
+  };
+  window.bqCerrar=function(){
+    var ov=document.getElementById('bqOv'), pn=document.getElementById('bqPanel');
+    if(pn) pn.classList.remove('open');
+    if(ov) setTimeout(function(){ ov.classList.remove('open'); },240);
+    if(typeof _catModalBackDesregistrar==='function'){ try{ _catModalBackDesregistrar('bqPanel'); }catch(e){} }
+  };
+
+  // ── Aplicar al catálogo ──
+  window.bqAplicar=function(){
+    try{
+      window._soloFavs=false;
+      var fb=document.getElementById('favsBanner'); if(fb) fb.style.display='none';
+      document.body.classList.remove('bmSoloFavs');
+      // colección → pestaña
+      var destino=F.col||'arabes';
+      window._bqAplicando=true;                     // evita que switchTab borre las reglas
+      var tabEl=null;
+      document.querySelectorAll('.tab').forEach(function(x){
+        var oc=x.getAttribute('onclick')||'';
+        if(oc.indexOf("switchTab('"+destino+"'")>=0) tabEl=x;
+      });
+      if(tabEl && typeof switchTab==='function') switchTab(destino,tabEl);
+      else { curTab=destino; }
+      window._bqAplicando=false;
+      window._bqTodas=!F.col;      // sin colección = buscar en TODO el catálogo
+      window._bqCol=F.col||'';     // con colección = quedarse dentro de ella
+      // filtros
+      genF=F.gen||''; famF=F.fam||''; precioF=F.precio||''; _ordenActual=F.orden||'';
+      var bf=document.getElementById('brandFilter');
+      if(bf){
+        var existe=false;
+        for(var i=0;i<bf.options.length;i++){ if(bf.options[i].value===F.marca) existe=true; }
+        if(!existe && F.marca){ var o=document.createElement('option'); o.value=F.marca; o.textContent=F.marca; bf.appendChild(o); }
+        bf.value=F.marca||'';
+      }
+      var of=document.getElementById('ordenFilter'); if(of) of.value=F.orden||'';
+      var sr=document.getElementById('srch'); if(sr) sr.value=F.q||'';
+      // reflejar en las pastillas de género del catálogo
+      document.querySelectorAll('#filtrosColapsables .pill').forEach(function(x){ x.classList.remove('act'); });
+      if(typeof applyFilters==='function') applyFilters();
+    }catch(e){ console.error('[buscador]',e); }
+    bqCerrar();
+    setTimeout(function(){ try{ window.scrollTo({top:0,behavior:'smooth'}); }catch(e){} },260);
+  };
 })();
 </script>
 
