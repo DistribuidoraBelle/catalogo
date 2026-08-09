@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<!-- BELLE_BUILD 20260808-2030 auditoria-completa+listas-inteligentes -->
+<!-- BELLE_BUILD 20260808-2115 modal-cobro-unico-o-cc -->
 <html lang="es">
 <head>
 <meta charset="UTF-8">
@@ -5957,212 +5957,95 @@ function verHistorialPedido(pedId){
   });
 }
 
-// ── Post-venta: vincular pedido a cliente y aplicar FIFO si es CC ──
+// ── 🆕 Modal "¿cómo se cobra?" para ventas con cliente asignado (2026-08-08) ──
+// Cobro único → sigue la venta normal y _postVentaCliente crea el pedido cobrado.
+// Cuenta corriente → se desvía al flujo Reservar+CC (queda debiendo, cuotas/FIFO).
+function _abrirModalModoCobro(){
+  var c=_carritoCliente; if(!c){return;}
+  var ex=document.getElementById('_moModoCobro'); if(ex)ex.remove();
+  var nom=((c.nombre||'')+' '+(c.apellido||'')).trim()||('Cliente #'+c.id);
+  var tieneCC=!!c.cuenta_corriente_habilitada;
+  var total=Object.values(cart).reduce(function(s,i){return s+(i.isBonificado?0:((i.price*i.qty)-(i.descuento||0)));},0);
+  var mo=document.createElement('div'); mo.id='_moModoCobro'; mo.className='mo open'; mo.style.zIndex='10004';
+  mo.innerHTML="<div class='md' style='max-width:430px;width:94%'>"+
+    "<div class='mh'><div class='mtt'>¿Cómo se cobra esta venta?</div>"+
+      "<button class='btn btn-g xb' onclick='_cerrarModalModoCobro()'>✕</button></div>"+
+    "<div class='mb'>"+
+      "<div style='font-size:.8rem;color:var(--tx2);margin-bottom:.75rem'>Cliente: <b style='color:var(--tx)'>"+_vcEsc(nom)+"</b> · Total: <b style='color:var(--acc)'>"+fmt(total)+"</b></div>"+
+      "<button onclick='_ventaModoElegido(\"unico\")' style='width:100%;background:linear-gradient(135deg,#2e7d4f,#1e5c38);border:none;border-radius:12px;padding:.9rem 1rem;margin-bottom:.55rem;color:#fff;cursor:pointer;display:flex;align-items:center;gap:.7rem;text-align:left'>"+
+        "<span style='font-size:1.5rem'>💵</span><span style='flex:1'><span style='display:block;font-size:.92rem;font-weight:800'>Cobro único</span>"+
+        "<span style='display:block;font-size:.7rem;opacity:.85'>El cliente paga ahora — la venta entra a tu dinero y queda registrada en su historial</span></span></button>"+
+      (tieneCC?
+        ("<button onclick='_ventaModoElegido(\"cc\")' style='width:100%;background:linear-gradient(135deg,#1e3a5f,#274c7a);border:none;border-radius:12px;padding:.9rem 1rem;color:#fff;cursor:pointer;display:flex;align-items:center;gap:.7rem;text-align:left'>"+
+        "<span style='font-size:1.5rem'>💳</span><span style='flex:1'><span style='display:block;font-size:.92rem;font-weight:800'>Cuenta corriente</span>"+
+        "<span style='display:block;font-size:.7rem;opacity:.85'>Queda debiendo — se genera el plan de cuotas y se cobra después (FIFO)</span></span></button>")
+        :
+        ("<div style='width:100%;background:var(--sur2);border:1px dashed var(--bd);border-radius:12px;padding:.75rem 1rem;color:var(--tx3);display:flex;align-items:center;gap:.7rem;font-size:.72rem'>"+
+        "<span style='font-size:1.3rem;opacity:.5'>💳</span>Este cliente no tiene cuenta corriente habilitada — habilitásela desde su ficha si querés venderle fiado.</div>"))+
+    "</div>"+
+    "<div class='mf'><button class='btn btn-g' onclick='_cerrarModalModoCobro()' style='width:100%'>Cancelar</button></div>"+
+  "</div>";
+  document.body.appendChild(mo);
+}
+function _cerrarModalModoCobro(){ var m=document.getElementById('_moModoCobro'); if(m)m.remove(); }
+function _ventaModoElegido(modo){
+  _cerrarModalModoCobro();
+  if(modo==='cc'){
+    if(!(_carritoCliente&&_carritoCliente.cuenta_corriente_habilitada)){ toast('Este cliente no tiene CC habilitada','twarn'); return; }
+    // Marcar el carrito como CC (checkbox del drawer incluido) y usar el flujo
+    // existente de Reservar: chequeo de crédito → pedido es_cc → plan de cuotas.
+    _carritoCliente.es_cc=true;
+    var cb=document.getElementById('drawerEsCC'); if(cb)cb.checked=true;
+    try{ toggleCCDrawer(true); }catch(e){}
+    abrirReservarPed();
+    return;
+  }
+  // Cobro único: retomar la venta normal (la marca se consume en confirmarVenta)
+  _carritoCliente.es_cc=false;
+  var cb2=document.getElementById('drawerEsCC'); if(cb2)cb2.checked=false;
+  try{ toggleCCDrawer(false); }catch(e){}
+  window._ventaModoCobro='unico';
+  confirmarVenta();
+}
+
+// ── Post-venta (cobro único): crear el pedido del cliente ya cobrado ──
+// 🐛 FIX + FEAT 2026-08-08: la versión vieja buscaba un pedido con este nro_orden
+// que NUNCA existía (executeVenta solo crea filas en "ventas") → asignar cliente a
+// una venta directa no guardaba nada. Ahora el modal "¿cobro único o CC?" decide:
+//   · Cobro único → esta función CREA el pedido vinculado al cliente, cobrado.
+//   · Cuenta corriente → ni pasa por acá: va por el flujo Reservar+CC (cuotas/FIFO).
 function _postVentaCliente(nroOrden, items, total){
   if(!_carritoCliente)return;
   var c=_carritoCliente;
-  var esCC=c.es_cc&&c.cuenta_corriente_habilitada;
-  var clienteId=c.id;
-
-  apiGet("pedidos_catalogo","select=id&nro_orden=eq."+nroOrden+"&limit=1").then(function(rows){
-    var pedId=rows&&rows[0]&&rows[0].id;
-    if(!pedId)return;
-    return apiPatch("pedidos_catalogo",{
-      cliente_id:c.id,
-      es_cc:esCC,
-      estado_envio:"en_preparacion"
-    },"id=eq."+pedId).then(function(){
-      _logEstadoPedidoV(pedId,'en_preparacion','Pedido asignado al cliente por '+VENDEDOR_NOMBRE);
-      // FIX BUG B: Si es CC, aplicar FIFO automático.
-      // Si NO es CC, solo actualizar ultimo_pedido y listo.
-      if(!esCC){
-        return apiPatch("clientes",{ultimo_pedido_at:new Date().toISOString()},"id=eq."+c.id);
-      }
-      // ── FLUJO CC con FIFO automático ──
-      // Buscar deudas previas del cliente (pedidos pendientes de cobro)
-      // INCLUYE vendedor_id/transferida_por_id/items para transferir el pedido al vendedor
-      // que está cobrando y crear comisión Marcela si aplica.
-      return apiGet("pedidos_catalogo",
-        "select=id,nro_orden,total,cobrado_total,created_at,vendedor_id,transferida_por_id,items&cliente_id=eq."+clienteId+
-        "&es_cc=eq.true&estado=neq.cancelado&estado=neq.cobrado&id=neq."+pedId+
-        "&order=created_at.asc"
-      ).then(function(deudas){
-        var deudasArr = Array.isArray(deudas)?deudas:[];
-        // Calcular saldo pendiente de cada deuda previa
-        var deudasConSaldo = deudasArr.map(function(d){
-          var pendiente = (parseFloat(d.total)||0) - (parseFloat(d.cobrado_total)||0);
-          return Object.assign({}, d, {pendiente: pendiente});
-        }).filter(function(d){return d.pendiente > 0.01;}); // ignorar centavos
-        var totalDeudaPrevia = deudasConSaldo.reduce(function(s,d){return s+d.pendiente;}, 0);
-        if(totalDeudaPrevia <= 0){
-          // No hay deuda previa: flujo simple (pedido nuevo queda como cobrado al toque)
-          // Marcar el pedido como saldado al instante (cobrado_total = total)
-          return apiPatch("pedidos_catalogo",{
-            cobrado_total: total,
-            estado: 'cobrado',
-            confirmado_cobro: true,
-            confirmado_at: new Date().toISOString()
-          },"id=eq."+pedId).then(function(){
-            return apiPatch("clientes",{ultimo_pedido_at:new Date().toISOString()},"id=eq."+c.id);
-          });
-        }
-        // SÍ hay deuda previa: aplicar FIFO
-        // El cliente acaba de pagar `total` (lo del carrito).
-        // Aplicar primero a deudas viejas, lo que sobre va al pedido nuevo, lo que sobre saldo a favor.
-        var dineroDisponible = total;
-        var aplicaciones = []; // {pedido_id, monto, cubrio_completo, ...}
-        // 1. Aplicar a deudas viejas (FIFO)
-        deudasConSaldo.forEach(function(d){
-          if(dineroDisponible <= 0) return;
-          var aplicar = Math.min(dineroDisponible, d.pendiente);
-          aplicaciones.push({
-            pedido_id: d.id,
-            monto: aplicar,
-            cubrio_completo: aplicar >= d.pendiente - 0.01,
-            nuevo_cobrado: (parseFloat(d.cobrado_total)||0) + aplicar,
-            total_pedido: parseFloat(d.total)||0,
-            // Datos extra para auto-transferir el pedido al cobrador
-            vendedor_anterior: d.vendedor_id,
-            transferida_por_anterior: d.transferida_por_id,
-            nro_orden: d.nro_orden,
-            items: d.items
-          });
-          dineroDisponible -= aplicar;
-        });
-        // 2. Lo que quedó va al pedido nuevo
-        var aplicadoAlNuevo = 0;
-        if(dineroDisponible > 0){
-          aplicadoAlNuevo = Math.min(dineroDisponible, total);
-          dineroDisponible -= aplicadoAlNuevo;
-        }
-        // 3. Lo que aún sobra → saldo a favor del cliente
-        var saldoAFavor = dineroDisponible;
-
-        // Crear el pago en cc_pagos con el TOTAL pagado
-        return apiPost("cc_pagos",{
-          cliente_id: clienteId,
-          monto: total,
-          forma_pago: 'efectivo', // por defecto, executeVenta no captura forma_cobro de cliente
-          fecha: new Date().toISOString().split("T")[0],
-          vendedor_id: VENDEDOR_ID,
-          registrado_por: VENDEDOR_NOMBRE || ('Vendedor '+VENDEDOR_ID),
-          nota: 'Cobro al toque cliente CC — pedido '+nroOrden+' (FIFO)',
-          saldo_a_favor: saldoAFavor
-        }).then(function(rows2){
-          var pago = Array.isArray(rows2)&&rows2.length ? rows2[0] : null;
-          if(!pago||!pago.id) return;
-          // Crear aplicaciones (a deudas previas)
-          var promsApp = aplicaciones.map(function(a){
-            // Patchear el pedido viejo con su nuevo cobrado_total y estado si saldó
-            var patchOld = {cobrado_total: a.nuevo_cobrado};
-            if(a.cubrio_completo){
-              patchOld.estado = 'cobrado';
-              patchOld.confirmado_cobro = true;
-              patchOld.confirmado_at = new Date().toISOString();
-              // ───────────────────────────────────────────────────────────
-              // AUTO-TRANSFERENCIA AL COBRAR FIFO:
-              // Si el pedido viejo NO era de quien está cobrando, transferirlo.
-              // El vendedor que cobra se queda con el pedido cuando lo salda.
-              // ───────────────────────────────────────────────────────────
-              if(a.vendedor_anterior && a.vendedor_anterior !== VENDEDOR_ID){
-                patchOld.vendedor_id = VENDEDOR_ID;
-                patchOld.transferida_por_id = a.vendedor_anterior;
-                patchOld.transferida_at = new Date().toISOString();
-                // Log de la transferencia automática
-                var _nA = _vendedorNombre(a.vendedor_anterior) || ("V#"+a.vendedor_anterior);
-                _logEstadoPedidoV(a.pedido_id, "transferido",
-                  "Transferencia automática al cobrar (FIFO) — de "+_nA+" a "+VENDEDOR_NOMBRE);
-                // Si el pedido venía originalmente transferido por Marcela (id=3),
-                // mantener ese rastro: aún si pasó por otro vendedor, la comisión sigue siendo de ella.
-                // Como reescribimos transferida_por_id arriba, restablecemos si era Marcela.
-                if(a.transferida_por_anterior === 3){
-                  patchOld.transferida_por_id = 3;
-                }
-              } else if(!a.vendedor_anterior){
-                // Pedido sin asignar — el cobro lo asigna automáticamente
-                patchOld.vendedor_id = VENDEDOR_ID;
-                _logEstadoPedidoV(a.pedido_id, "asignado",
-                  "Auto-asignado al cobrar (FIFO) por "+VENDEDOR_NOMBRE);
-              }
-              // Si vino transferido por Marcela → crear comisión correspondiente
-              if(a.transferida_por_anterior === 3 && a.nro_orden){
-                var itemsCom = [];
-                try{ itemsCom = typeof a.items==='string' ? JSON.parse(a.items) : (a.items||[]); }catch(e){}
-                _crearComisionMarcelaSiAplica({
-                  transferida_por_id: 3,
-                  nro_orden: a.nro_orden,
-                  items: itemsCom
-                });
-              }
-            }
-            apiPatch("pedidos_catalogo", patchOld, "id=eq."+a.pedido_id).catch(function(e){console.error('[belle] error silencioso:',e);});
-            // FEAT CC v2 (2026-05-14): aplicar a cuotas + registrar aplicación (en serie)
-            return _ccAplicarPagoACuotasPedido(a.pedido_id, a.monto).catch(function(e){
-              console.error('[cc cuotas] err:', e); // no bloquear: cuotas son secundarias al pago
-            }).then(function(){
-              return apiPost("cc_pagos_aplicaciones",{
-                pago_id: pago.id,
-                pedido_id: a.pedido_id,
-                monto_aplicado: a.monto,
-                cubrio_pedido_completo: a.cubrio_completo
-              });
-            });
-          });
-          // Aplicación al pedido nuevo (si aplica)
-          if(aplicadoAlNuevo > 0){
-            var cubrioNuevo = aplicadoAlNuevo >= total - 0.01;
-            var patchNuevo = {cobrado_total: aplicadoAlNuevo};
-            if(cubrioNuevo){
-              patchNuevo.estado = 'cobrado';
-              patchNuevo.confirmado_cobro = true;
-              patchNuevo.confirmado_at = new Date().toISOString();
-            }
-            apiPatch("pedidos_catalogo", patchNuevo, "id=eq."+pedId).catch(function(e){console.error('[belle] error silencioso:',e);});
-            // FEAT CC v2 (2026-05-14): cuotas del pedido nuevo, en serie con apiPost
-            promsApp.push(
-              _ccAplicarPagoACuotasPedido(pedId, aplicadoAlNuevo).catch(function(e){
-                console.error('[cc cuotas pedido nuevo] err:', e);
-              }).then(function(){
-                return apiPost("cc_pagos_aplicaciones",{
-                  pago_id: pago.id,
-                  pedido_id: pedId,
-                  monto_aplicado: aplicadoAlNuevo,
-                  cubrio_pedido_completo: cubrioNuevo
-                });
-              })
-            );
-          }
-          // Si quedó saldo a favor, sumarlo al cliente.saldo_cc
-          if(saldoAFavor > 0){
-            promsApp.push(
-              apiGet("clientes","select=saldo_cc&id=eq."+clienteId).then(function(rs){
-                var actual = (rs&&rs[0]?parseFloat(rs[0].saldo_cc)||0:0);
-                return apiPatch("clientes",{saldo_cc: actual + saldoAFavor, ultimo_pedido_at: new Date().toISOString()},"id=eq."+clienteId);
-              })
-            );
-          } else {
-            promsApp.push(apiPatch("clientes",{ultimo_pedido_at:new Date().toISOString()},"id=eq."+clienteId));
-          }
-          return Promise.all(promsApp).then(function(){
-            // Notificar al vendedor qué pasó (mensaje informativo)
-            var msgParts = [];
-            if(aplicaciones.length){
-              msgParts.push("FIFO aplicado: "+fmt(aplicaciones.reduce(function(s,a){return s+a.monto;},0))+" a "+aplicaciones.length+" deuda(s) vieja(s)");
-            }
-            if(aplicadoAlNuevo > 0){
-              msgParts.push(fmt(aplicadoAlNuevo)+" al pedido nuevo");
-            }
-            if(saldoAFavor > 0){
-              msgParts.push(fmt(saldoAFavor)+" como saldo a favor");
-            }
-            if(msgParts.length){
-              setTimeout(function(){toast(msgParts.join(" · "),"tok");}, 1200);
-            }
-          });
-        });
-      });
-    });
-  }).catch(function(e){console.error('[belle] _postVentaCliente FIFO error:',e);});
+  var ahora=new Date().toISOString();
+  var itemsData=(items||[]).map(function(it){
+    return {
+      producto_id:(it.isDecan||it.isCosm)?(it.prodId||null):(it.isCombo?null:it.id),
+      nombre:it.nombre, qty:it.qty,
+      segmento:it.isDecan?'decan':(it.isCombo?'combo':(it.isCosm?(it.cajaLabel||('Caja x'+(it.cajaCant||1))):(it.precioManual?'especial':(it.seg||'pi')))),
+      precio:it.price, total:(it.price*it.qty)-(it.descuento||0),
+      isDecan:!!it.isDecan, isCombo:!!it.isCombo, combo_id:it.comboId||null,
+      isCosm:!!it.isCosm, cajaCant:it.cajaCant||1,
+      descuento:it.descuento||0, descuento_motivo:it.descMotivo||''
+    };
+  });
+  apiPost("pedidos_catalogo",{
+    nro_orden:nroOrden, cliente_id:c.id,
+    items:JSON.stringify(itemsData), total:total,
+    estado:'cobrado', confirmado_cobro:true, confirmado_at:ahora, cobrado_at:ahora,
+    cobrado_parcial:total, cobrado_total:total,
+    // todos los items quedan marcados cobrados (nada para "re-cobrar" después)
+    items_cobrados:JSON.stringify(itemsData.map(function(_,i){return i;})),
+    vendedor_id:VENDEDOR_ID, es_cc:false,
+    periodo:(typeof periodoActual!=='undefined'&&periodoActual)?periodoActual:null,
+    notas:'Venta directa con cobro único ('+VENDEDOR_NOMBRE+')'
+  }).then(function(rows){
+    var ped=Array.isArray(rows)&&rows[0];
+    if(ped&&ped.id) _logEstadoPedidoV(ped.id,'cobrado','Venta directa cobro único — registrada por '+VENDEDOR_NOMBRE);
+    apiPatch("clientes",{ultimo_pedido_at:ahora},"id=eq."+c.id).catch(function(e){console.error('[belle] silencioso:',e);});
+    var _nomCli=((c.nombre||'')+' '+(c.apellido||'')).trim();
+    if(_nomCli) setTimeout(function(){toast('Venta vinculada a '+_nomCli+' ✓','tok');},900);
+  }).catch(function(e){ console.error('[postVenta cliente]',e); });
   _limpiarCarritoCliente();
 }
 
@@ -6397,6 +6280,15 @@ function confirmarVenta(){
   // ── MODO EDICIÓN: guardar directo sin validaciones de venta ────────
   if(window._editandoPedidoId){
     executeVenta(items,{});
+    return;
+  }
+  // ── 🆕 2026-08-08: venta con CLIENTE asignado → preguntar cómo se cobra ──
+  // "Cobro único" sigue por acá (venta normal + pedido del cliente cobrado).
+  // "Cuenta corriente" se desvía al flujo Reservar+CC (cuotas, FIFO, sin cobrar ahora).
+  var _modoCobroCli=window._ventaModoCobro; window._ventaModoCobro=null;   // se consume
+  if(_carritoCliente && _carritoCliente.id && !_modoCobroCli){
+    _confBtnLiberar();
+    _abrirModalModoCobro();
     return;
   }
   // ──────────────────────────────────────────────────────────────────
