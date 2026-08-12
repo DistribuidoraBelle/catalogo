@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<!-- BELLE_BUILD 20260811-2130 fix-reserva-cancelar-cobrar -->
+<!-- BELLE_BUILD 20260811-2210 cliente-en-titulo-pedidos -->
 <html lang="es">
 <head>
 <meta charset="UTF-8">
@@ -6798,6 +6798,21 @@ function loadPedidosWeb(){
     window._pedidosData=pedidos;
     window._transfData=transferidas;
     _renderPedidosFiltrados(window._pedFiltroEstado||"todos");
+    // 👤 2026-08-11: los pedidos guardan cliente_id, no el nombre → resolvemos los
+    // nombres para el título de las tarjetas (mismo mapa que usa el modo app).
+    try{
+      var _idsCli={};
+      pedidos.concat(transferidas).forEach(function(p){ if(p&&p.cliente_id!=null)_idsCli[p.cliente_id]=1; });
+      var _idArrCli=Object.keys(_idsCli);
+      if(_idArrCli.length){
+        apiGet("clientes","select=id,nombre,apellido&id=in.("+_idArrCli.join(",")+")&limit=1000").then(function(cs){
+          var mp={};
+          (Array.isArray(cs)?cs:[]).forEach(function(c){ mp[c.id]=((c.nombre||"")+" "+(c.apellido||"")).trim(); });
+          window._pedCliMap=mp; window._appPedCliMap=mp;
+          _renderPedidosFiltrados(window._pedFiltroEstado||"todos");
+        }).catch(function(e){console.error("[belle] nombres de cliente:",e);});
+      }
+    }catch(_eCli){console.error("[belle] nombres de cliente:",_eCli);}
   });
 }
 
@@ -7078,8 +7093,11 @@ function _gestionarPedido(tipo,id){
     var saldo=Math.max(0,total-cobradoYa);
 
     // Title
-    var titles={web:'🛒 Pedido web '+nroOrden,transferida:'📦 Transferida '+nroOrden,reserva:'📋 Reserva '+nroOrden};
-    document.getElementById('_mgTitle').textContent=titles[tipo]||('Gestionar '+nroOrden);
+    // 👤 2026-08-11: el título lleva el nombre del cliente además del número. Es la
+    // pantalla donde se cobra: sin el nombre, dos pedidos parecidos se ven idénticos
+    // (caso ORD-260845 duplicado, se cobró el equivocado). El emoji marca el tipo.
+    var _emoMg={web:'🛒',transferida:'📦',reserva:'📋'}[tipo]||'📄';
+    document.getElementById('_mgTitle').textContent=_emoMg+' '+_pedNombreCli(rec)+' · '+nroOrden;
 
     // Build body
     var html='';
@@ -7484,6 +7502,23 @@ function _mgConfirmarCobro(){
 // confirmarTransfConForma eliminada — flujo legacy ventas_transferidas
 
 
+// 👤 2026-08-11: nombre del cliente en el título de TODA tarjeta de pedido.
+// Antes solo salía en el modo app; en la PC dos pedidos del mismo cliente se veían
+// idénticos (caso ORD-260845 duplicado: el vendedor canceló uno y cobró el otro).
+// Orden de búsqueda: columnas del pedido → mapa de clientes por id → el nombre que
+// las reservas propias guardan dentro de notas ("Cliente: X | Tel: ...").
+function _pedNombreCli(p){
+  if(!p)return "Sin cliente";
+  var n=((p.cliente_nombre||"")+" "+(p.cliente_apellido||"")).trim();
+  if(n)return n;
+  var map=window._pedCliMap||window._appPedCliMap||{};
+  if(p.cliente_id!=null&&map[p.cliente_id])return map[p.cliente_id];
+  var m=/(?:^|\|)\s*Cliente\s*:\s*([^|]+)/i.exec(String(p.notas||""));
+  if(m&&m[1].trim())return m[1].trim();
+  if(p.cliente_id!=null)return "Cliente #"+p.cliente_id;
+  return "Sin cliente";
+}
+
 function renderPedCard(ped,cobrado){
   var fecha=new Date(ped.created_at).toLocaleString("es-AR",{day:"2-digit",month:"2-digit",year:"2-digit",hour:"2-digit",minute:"2-digit",timeZone:"America/Argentina/Buenos_Aires"});
   var items=[];try{items=typeof ped.items==="string"?JSON.parse(ped.items):ped.items;}catch(ex){}
@@ -7539,7 +7574,8 @@ function renderPedCard(ped,cobrado){
   }
   var html="<div class='ped-card"+(cobrado||cancelado?"":" nuevo")+"'>";
   html+="<div class='ped-header'>";
-  html+="<div><div style='font-size:.78rem;font-weight:500;color:var(--tx)'>Pedido web <span style='color:var(--acc);font-size:.7rem'>"+(ped.nro_orden||("#"+ped.id))+"</span>"+
+  html+="<div><div style='font-size:.86rem;font-weight:700;color:var(--tx);overflow:hidden;text-overflow:ellipsis;white-space:nowrap'>👤 "+_vcEsc(_pedNombreCli(ped))+"</div>"+
+    "<div style='font-size:.72rem;font-weight:500;color:var(--tx2);margin-top:.1rem'>Pedido web <span style='color:var(--acc);font-size:.7rem'>"+(ped.nro_orden||("#"+ped.id))+"</span>"+
     _asigBadge+
     _abandBadge+
     _transfBadge+
@@ -11975,21 +12011,17 @@ function _appVerPedidos(){
     var idArr=Object.keys(ids);
     if(idArr.length){
       apiGet("clientes","select=id,nombre,apellido&id=in.("+idArr.join(",")+")&limit=1000").then(function(cs){
-        window._appPedCliMap={}; (Array.isArray(cs)?cs:[]).forEach(function(c){ window._appPedCliMap[c.id]=((c.nombre||"")+" "+(c.apellido||"")).trim(); });
+        var _mpApp={}; (Array.isArray(cs)?cs:[]).forEach(function(c){ _mpApp[c.id]=((c.nombre||"")+" "+(c.apellido||"")).trim(); });
+        window._appPedCliMap=_mpApp; window._pedCliMap=_mpApp;
         _appPedRender(window._appPedTab||'pendientes');
       }).catch(function(){ window._appPedCliMap=window._appPedCliMap||{}; _appPedRender(window._appPedTab||'pendientes'); });
     } else { window._appPedCliMap={}; _appPedRender(window._appPedTab||'pendientes'); }
   }).catch(function(e){var b=document.getElementById('_appPedBody');if(b)b.innerHTML="<div style='color:var(--red);text-align:center;padding:1.5rem'>Error: "+(e&&e.message||'')+"</div>";});
 }
 function _appPedItems(p){ var its=[]; try{ its=(typeof p.items==='string')?JSON.parse(p.items):(p.items||[]); }catch(e){ its=[]; } return Array.isArray(its)?its:[]; }
-function _appPedNombre(p){
-  var n=((p.cliente_nombre||"")+" "+(p.cliente_apellido||"")).trim();
-  if(n) return n;
-  var map=window._appPedCliMap||{};
-  if(p.cliente_id!=null && map[p.cliente_id]) return map[p.cliente_id]+" (#"+p.cliente_id+")";
-  if(p.cliente_id!=null) return "Cliente #"+p.cliente_id;
-  return "Sin cliente";
-}
+// 👤 2026-08-11: unificado con la PC — usa el mismo resolvedor, así el modo app
+// también levanta el nombre que las reservas propias guardan dentro de notas.
+function _appPedNombre(p){ return _pedNombreCli(p); }
 function _appPedSetAsig(v){ window._appPedAsig=v; _appPedRender(); }
 function _appPedRender(tab){
   window._appPedTab=tab||window._appPedTab||'pendientes';
