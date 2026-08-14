@@ -19,7 +19,7 @@
     </div><!DOCTYPE html>
 <html lang="es">
 <head>
-<!-- BELLE_BUILD 20260812-0330 productos-campania-rehecho -->
+<!-- BELLE_BUILD 20260812-0500 campanias-auditoria-completa -->
 <meta charset="UTF-8">
 <link rel="icon" type="image/svg+xml" href="favicon.svg">
 <meta name="viewport" content="width=device-width,initial-scale=1">
@@ -15546,7 +15546,9 @@ function loadOfertasAdmin(){
     apiGet('ofertas_campanias','select=*&order=created_at.desc'),
     apiGet('ofertas','select=*&order=created_at.desc'),
     apiGet('ofertas_campania_productos','select=*'),
-    apiGet('pestanas_catalogo','select=id,nombre,slug&activa=is.true&order=orden')
+    // 👁 2026-08-12: TODAS las pestañas (también ocultas), para poder sincronizarlas
+    // con la suerte de su campaña y para que el modal muestre "(oculta)".
+    apiGet('pestanas_catalogo','select=id,nombre,slug,activa&order=orden')
   ]).then(function(r){
     window._campaniasData            = Array.isArray(r[0]) ? r[0] : [];
     var todasOfertas                 = Array.isArray(r[1]) ? r[1] : [];
@@ -15566,11 +15568,54 @@ function loadOfertasAdmin(){
     });
     renderCampaniasGrid();
     renderOfertasIndividualesGrid();
+    _campSyncPestanas();
   }).catch(function(e){
     console.error('[ofertas] load:', e);
     if(gridC) gridC.innerHTML = "<div class='empty' style='padding:2rem;color:var(--red)'>Error: "+(e.message||'')+
       ". <button class='btn btn-g' onclick='loadOfertasAdmin()' style='margin-left:.5rem'>Reintentar</button></div>";
   });
+}
+
+// ════════════════════════════════════════════════════════════════════
+// 👁 SYNC PESTAÑA ↔ CAMPAÑA (2026-08-12, pedido de Ger)
+// La pestaña de una campaña sigue la suerte de la campaña TAMBIÉN en el
+// sistema: campaña pausada, oculta o VENCIDA → su pestaña se desactiva y
+// deja de figurar en Stock, Precios y todos los selectores del admin
+// (que filtran activa=is.true). Al reactivarla / corregir fechas, vuelve.
+// Caso real que motivó esto: "Día del Padre" terminó el 22/6 y su pestaña
+// seguía apareciendo por todos lados.
+// ════════════════════════════════════════════════════════════════════
+function _campSyncPestanas(){
+  try{
+    var camps=window._campaniasData||[], ofs=window._ofertasDeCampanias||[];
+    var pests=window._pestanasParaCampanias||[];
+    var ahora=Date.now(), cambios=[];
+    camps.forEach(function(c){
+      if(!c.pestana_id) return;
+      var p=pests.find(function(x){return x.id===c.pestana_id;});
+      if(!p) return;
+      var of=ofs.find(function(o){return o.campania_id===c.id;});
+      // Vigencia de la oferta (sin oferta = campaña a medio armar → no se muestra aún)
+      var vigente=false;
+      if(of && of.activa!==false){
+        var d=of.fecha_desde?new Date(of.fecha_desde).getTime():null;
+        var h=of.fecha_hasta?new Date(of.fecha_hasta).getTime():null;
+        vigente=(!d||d<=ahora)&&(!h||h>ahora);
+      }
+      var deberia=(c.activa!==false)&&(c.mostrar_pestana!==false)&&vigente;
+      if(p.activa!==deberia){
+        cambios.push({p:p, a:deberia, camp:c.nombre});
+        p.activa=deberia; // reflejar en memoria ya
+      }
+    });
+    if(!cambios.length) return;
+    Promise.all(cambios.map(function(x){
+      return apiPatch('pestanas_catalogo',{activa:x.a},'id=eq.'+x.p.id);
+    })).then(function(){
+      var txt=cambios.map(function(x){return '"'+x.p.nombre+'" '+(x.a?'visible':'oculta');}).join(', ');
+      toast('👁 Pestañas sincronizadas con sus campañas: '+txt,'tok');
+    }).catch(function(e){ console.error('[ofertas] sync pestañas:',e); });
+  }catch(e){ console.error('[ofertas] sync pestañas:',e); }
 }
 
 // ── Helper: detectar si una oferta está vigente AHORA ──
@@ -15926,7 +15971,7 @@ function abrirModalCampania(id){
   if(existing) existing.remove();
   var pestanasOpts = '<option value="">— Sin pestaña asignada —</option>' +
     (window._pestanasParaCampanias||[]).map(function(t){
-      return '<option value="'+t.id+'"'+(camp&&camp.pestana_id===t.id?' selected':'')+'>'+_ofEsc(t.nombre)+'</option>';
+      return '<option value="'+t.id+'"'+(camp&&camp.pestana_id===t.id?' selected':'')+'>'+_ofEsc(t.nombre)+(t.activa===false?' (oculta)':'')+'</option>';
     }).join('') +
     '<option value="__nueva__">➕ Crear pestaña nueva…</option>';
 
@@ -15937,6 +15982,17 @@ function abrirModalCampania(id){
       var pad = function(n){return String(n).padStart(2,'0');};
       return d.getFullYear()+'-'+pad(d.getMonth()+1)+'-'+pad(d.getDate())+'T'+pad(d.getHours())+':'+pad(d.getMinutes());
     } catch(e){ return ''; }
+  }
+  // Parte fecha ('f' → YYYY-MM-DD) u hora ('h' → HH:MM) de un ISO, en hora local.
+  function _campFParte(iso, cual){
+    if(!iso) return '';
+    try{
+      var d=new Date(iso); if(isNaN(d.getTime())) return '';
+      var pad=function(n){return String(n).padStart(2,'0');};
+      return cual==='f'
+        ? d.getFullYear()+'-'+pad(d.getMonth()+1)+'-'+pad(d.getDate())
+        : pad(d.getHours())+':'+pad(d.getMinutes());
+    }catch(e){ return ''; }
   }
 
   // Botones de presets visuales rápidos (Hot Sale, Black Friday, etc.) — generados desde CAMP_PRESETS_VISUAL.
@@ -15981,9 +16037,9 @@ function abrirModalCampania(id){
     '<div class="mh"><div style="display:flex;align-items:center;gap:.5rem">🔥 <span>'+(id?'Editar campaña':'Nueva campaña')+'</span></div></div>'+
     '<div class="mb" style="overflow-y:auto">'+
       '<div class="fg" style="margin-bottom:.6rem"><label>Nombre *</label>'+
-        '<input class="fi" id="campNombre" type="text" placeholder="Ej: Hot Sale 2026" maxlength="80" value="'+_ofEsc(camp?camp.nombre:'')+'"></div>'+
+        '<input class="fi" id="campNombre" type="text" placeholder="Ej: Hot Sale 2026" maxlength="80" oninput="campRefreshPreview()" value="'+_ofEsc(camp?camp.nombre:'')+'"></div>'+
       '<div class="fg" style="margin-bottom:.6rem"><label>Descripción <span style="font-size:.6rem;color:var(--tx3)">(opcional)</span></label>'+
-        '<textarea class="fi" id="campDesc" rows="2" maxlength="200" placeholder="Aprovechá descuentos increíbles…">'+_ofEsc(camp?(camp.descripcion||''):'')+'</textarea></div>'+
+        '<textarea class="fi" id="campDesc" rows="2" maxlength="200" oninput="campRefreshPreview()" placeholder="Aprovechá descuentos increíbles…">'+_ofEsc(camp?(camp.descripcion||''):'')+'</textarea></div>'+
       '<hr style="border:0;border-top:1px solid var(--bd);margin:.8rem 0">'+
       '<div style="font-weight:600;color:#c45a3a;margin-bottom:.5rem;font-size:.85rem">🔥 Tipo de oferta</div>'+
       '<div class="fg" style="margin-bottom:.5rem"><label>Tipo</label>'+
@@ -16007,12 +16063,24 @@ function abrirModalCampania(id){
         '</div></div>'+
       '<div class="fg" style="margin-bottom:.5rem"><label>Etiqueta visual <span style="font-size:.6rem;color:var(--tx3)">(opcional)</span></label>'+
         '<input class="fi" id="campEtiqueta" type="text" maxlength="30" placeholder="Ej: HOT SALE / 30% OFF" value="'+_ofEsc(oferta?(oferta.etiqueta||''):'')+'" oninput="campRefreshPreview()"></div>'+
-      '<div style="display:grid;grid-template-columns:1fr 1fr;gap:.5rem;margin-bottom:.6rem">'+
+      // 📅 FIX 2026-08-12: antes era un solo campo "fecha y hora juntas" (datetime-local).
+      // Si quedaba a medio completar (típico: elegís el día y no tocás la hora), el
+      // navegador devuelve VACÍO y la fecha se guardaba en blanco — "puse la fecha y
+      // se borró". Ahora fecha y hora van separadas: con solo el día ya alcanza
+      // (desde = 00:00, hasta = 23:59).
+      '<div style="display:grid;grid-template-columns:1fr 1fr;gap:.5rem;margin-bottom:.15rem">'+
         '<div class="fg"><label>Desde <span style="font-size:.6rem;color:var(--tx3)">(vacío = ya)</span></label>'+
-          '<input class="fi" id="campDesde" type="datetime-local" value="'+(oferta?localISO(oferta.fecha_desde):'')+'"></div>'+
+          '<div style="display:flex;gap:.3rem">'+
+            '<input class="fi" id="campDesdeF" type="date" style="flex:1.4" value="'+_campFParte(oferta&&oferta.fecha_desde,'f')+'" onchange="_campFechasHintRefresh()">'+
+            '<input class="fi" id="campDesdeH" type="time" style="flex:1" value="'+_campFParte(oferta&&oferta.fecha_desde,'h')+'" onchange="_campFechasHintRefresh()">'+
+          '</div></div>'+
         '<div class="fg"><label>Hasta <span style="font-size:.6rem;color:var(--tx3)">(vacío = sin fin)</span></label>'+
-          '<input class="fi" id="campHasta" type="datetime-local" value="'+(oferta?localISO(oferta.fecha_hasta):'')+'"></div>'+
+          '<div style="display:flex;gap:.3rem">'+
+            '<input class="fi" id="campHastaF" type="date" style="flex:1.4" value="'+_campFParte(oferta&&oferta.fecha_hasta,'f')+'" onchange="_campFechasHintRefresh()">'+
+            '<input class="fi" id="campHastaH" type="time" style="flex:1" value="'+_campFParte(oferta&&oferta.fecha_hasta,'h')+'" onchange="_campFechasHintRefresh()">'+
+          '</div></div>'+
       '</div>'+
+      '<div id="campFechasHint" style="font-size:.66rem;margin-bottom:.6rem;line-height:1.4"></div>'+
       '<hr style="border:0;border-top:1px solid var(--bd);margin:.8rem 0">'+
       '<div style="font-weight:600;color:var(--acc);margin-bottom:.5rem;font-size:.85rem">📂 Pestaña asociada (opcional)</div>'+
       '<div class="fg" style="margin-bottom:.5rem"><label>Asignar a pestaña del catálogo</label>'+
@@ -16166,7 +16234,7 @@ function abrirModalCampania(id){
             '<label style="font-size:.6rem;color:var(--tx3);display:block;margin-bottom:.2rem">🖼️ Imagen de fondo (fija al scrollear)</label>'+
             '<div style="font-size:.55rem;color:var(--tx3);margin-bottom:.3rem;line-height:1.35">Recomendado: <b>1920×1080 px</b> (horizontal). Se ajusta a la pantalla y se recorta centrado, así que dejá lo importante en el centro.</div>'+
             '<div style="display:flex;align-items:center;gap:.4rem;flex-wrap:wrap">'+
-              '<input class="fi" id="campImagenFondo" value="'+_ofEsc(camp&&camp.imagen_fondo?camp.imagen_fondo:'')+'" placeholder="Subí una imagen o pegá una URL" style="flex:1;min-width:160px;font-size:.62rem;padding:.2rem .3rem" oninput="campRefreshFondoPrev()">'+
+              '<input class="fi" id="campImagenFondo" value="'+_ofEsc(camp&&camp.imagen_fondo?camp.imagen_fondo:'')+'" placeholder="Subí una imagen o pegá una URL" style="flex:1;min-width:160px;font-size:.62rem;padding:.2rem .3rem" oninput="campRefreshFondoPrev();campRefreshPreview()">'+
               '<label class="btn btn-a" style="cursor:pointer;font-size:.62rem;padding:.2rem .5rem;white-space:nowrap">📷 Subir<input type="file" accept="image/*" style="display:none" onchange="campUploadFondo(this)"></label>'+
               '<button type="button" onclick="document.getElementById(\'campImagenFondo\').value=\'\';campRefreshFondoPrev()" style="background:transparent;border:1px solid var(--bd);border-radius:3px;padding:.1rem .4rem;font-size:.7rem;cursor:pointer;color:var(--tx3)" title="Quitar">🗑️</button>'+
             '</div>'+
@@ -16206,7 +16274,7 @@ function abrirModalCampania(id){
       '</label>'+
       '<div class="fg" style="margin-top:.4rem">'+
         '<label>Texto explicativo (visible al cliente)</label>'+
-        '<input class="fi" id="campCondicionesPago" type="text" placeholder="Ej: Solo pago en efectivo. Sin transferencia ni tarjeta." value="'+_ofEsc(camp&&camp.condiciones_pago?camp.condiciones_pago:'')+'">'+
+        '<input class="fi" id="campCondicionesPago" type="text" oninput="campRefreshPreview()" placeholder="Ej: Solo pago en efectivo. Sin transferencia ni tarjeta." value="'+_ofEsc(camp&&camp.condiciones_pago?camp.condiciones_pago:'')+'">'+
         '<div style="display:flex;gap:.3rem;flex-wrap:wrap;margin-top:.4rem;align-items:center">'+
           '<span style="font-size:.58rem;color:var(--tx3)">Modelos rápidos:</span>'+
           CAMP_TEXTOS_MODELO.map(function(t,i){return '<button type="button" onclick="campSetTexto('+i+')" style="padding:.22rem .55rem;border:1px solid var(--bd);background:var(--sur2);color:var(--tx2);border-radius:20px;font-size:.62rem;cursor:pointer">'+_ofEsc(t.label)+'</button>';}).join('')+
@@ -16234,6 +16302,8 @@ function abrirModalCampania(id){
   setTimeout(function(){ campProdCargar(camp ? camp.pestana_id : null); }, 80);
   // Mostrar el bloque correcto según tipo seleccionado
   setTimeout(onChangeCampOfTipo, 30);
+  // Cartelito de estado de las fechas (vigente/programada/vencida)
+  setTimeout(_campFechasHintRefresh, 40);
 }
 
 function onChangeCampOfTipo(){
@@ -16340,6 +16410,40 @@ function cerrarModalCampania(){
   if(m) m.remove();
 }
 
+// 📅 Lee los pares fecha+hora del modal y devuelve {desde, hasta} en ISO (o null).
+// Con solo la fecha alcanza: desde asume 00:00 y hasta 23:59. La hora sola (sin
+// fecha) se ignora — no hay forma sensata de interpretarla.
+function _campLeerFechas(){
+  function arma(fId, hId, horaDef){
+    var f=((document.getElementById(fId)||{}).value||'').trim();
+    if(!f) return null;
+    var h=((document.getElementById(hId)||{}).value||'').trim() || horaDef;
+    var d=new Date(f+'T'+h);
+    return isNaN(d.getTime()) ? null : d.toISOString();
+  }
+  return { desde: arma('campDesdeF','campDesdeH','00:00'),
+           hasta: arma('campHastaF','campHastaH','23:59') };
+}
+
+// Cartelito vivo debajo de las fechas: dice en qué estado quedaría la campaña.
+function _campFechasHintRefresh(){
+  var el=document.getElementById('campFechasHint'); if(!el) return;
+  var fs=_campLeerFechas(), ahora=Date.now();
+  var d=fs.desde?new Date(fs.desde).getTime():null;
+  var h=fs.hasta?new Date(fs.hasta).getTime():null;
+  function fmtF(t){ return new Date(t).toLocaleString('es-AR',{day:'2-digit',month:'2-digit',year:'2-digit',hour:'2-digit',minute:'2-digit'}); }
+  var msg='', col='var(--tx3)';
+  if(d&&h&&d>=h){ msg='⚠️ La fecha "hasta" tiene que ser posterior a "desde".'; col='#e05c5c'; }
+  else if(h&&h<=ahora){ msg='⏱ Con estas fechas la campaña queda VENCIDA (terminó el '+fmtF(h)+'). No se va a ver en el catálogo.'; col='#e0a53a'; }
+  else if(d&&d>ahora){ msg='📅 Programada: arranca sola el '+fmtF(d)+(h?' y termina el '+fmtF(h):' (sin fecha de fin)')+'.'; col='#5b8dee'; }
+  else if(h){ msg='✅ Vigente desde ya, hasta el '+fmtF(h)+'.'; col='#1f9d57'; }
+  else if(d){ msg='✅ Vigente desde ya (sin fecha de fin).'; col='#1f9d57'; }
+  else { msg='✅ Sin fechas: vigente desde ya y sin vencimiento (la cortás vos a mano).'; col='#1f9d57'; }
+  el.style.color=col; el.textContent=msg;
+  // La vista previa muestra la cuenta regresiva → refrescarla junto con las fechas.
+  if(typeof campRefreshPreview==='function') try{ campRefreshPreview(); }catch(e){}
+}
+
 function _ofEsc(s){return String(s||'').replace(/[<>"'&]/g,function(c){return {'<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;','&':'&amp;'}[c];});}
 
 function guardarCampania(id){
@@ -16357,12 +16461,15 @@ function guardarCampania(id){
     if(lleva<=paga||paga<=0){toast('Multi: lleva debe ser mayor que paga','terr');return;}
     ofData.multi_lleva = lleva; ofData.multi_paga = paga;
   }
-  var fd = document.getElementById('campDesde').value;
-  var fh = document.getElementById('campHasta').value;
-  ofData.fecha_desde = fd ? new Date(fd).toISOString() : null;
-  ofData.fecha_hasta = fh ? new Date(fh).toISOString() : null;
+  // 📅 FIX 2026-08-12: inputs separados fecha+hora (ver comentario del modal).
+  var _fs = _campLeerFechas();
+  ofData.fecha_desde = _fs.desde;
+  ofData.fecha_hasta = _fs.hasta;
   if(ofData.fecha_desde && ofData.fecha_hasta && ofData.fecha_desde >= ofData.fecha_hasta){
     toast('La fecha "hasta" debe ser posterior a "desde"','terr');return;
+  }
+  if(ofData.fecha_hasta && new Date(ofData.fecha_hasta).getTime() <= Date.now()){
+    if(!confirm('⏱ La fecha "hasta" ya pasó: la campaña se guardaría VENCIDA y no se va a ver en el catálogo.\n\n¿Guardar igual?')) return;
   }
   ofData.etiqueta = (document.getElementById('campEtiqueta').value||'').trim() || null;
 
@@ -16867,6 +16974,8 @@ function _campColorOfVal(id){
   var v=(el.value||'').trim().toLowerCase();
   return (v && v!=='#c45a3a') ? v : null;
 }
+// Igual que _campColorOfVal pero para la vista previa (mismo criterio de "default").
+function _campColorOfVal2(id){ return _campColorOfVal(id); }
 
 // 🖼️ Subida/preview de imagen de fondo de la campaña (bucket "fondos").
 function campUploadFondo(input){
@@ -16940,6 +17049,27 @@ function campRefreshPreview(){
   var _muestra = _campPreviewProds();
   var _etiq = ((document.getElementById('campEtiqueta')||{value:''}).value||'').trim();
   var _f = function(n){ return (typeof fmt==='function') ? fmt(n) : ('$'+Math.round(n||0).toLocaleString('es-AR')); };
+  // Datos que necesita el clon exacto del catálogo:
+  var _tipoSel=(document.getElementById('campOfTipo')||{}).value||'';
+  var _mLl=parseInt((document.getElementById('campMultiLleva')||{}).value)||2;
+  var _mPg=parseInt((document.getElementById('campMultiPaga')||{}).value)||1;
+  var _ofEtiqBg=_campColorOfVal2('campColorOfEtiqueta')||'linear-gradient(135deg,#c45a3a,#a73a32)';
+  var _ofTx=_campColorOfVal2('campColorOfTexto')||pBtn;
+  var _imgFondo=((document.getElementById('campImagenFondo')||{value:''}).value||'').trim();
+  var _descCamp=((document.getElementById('campDesc')||{value:''}).value||'').trim();
+  var _condPago=((document.getElementById('campCondicionesPago')||{value:''}).value||'').trim();
+  // Cuenta regresiva (igual a la del catálogo) con la fecha "hasta" cargada
+  var _cd='';
+  try{
+    var _fsPrev=(typeof _campLeerFechas==='function')?_campLeerFechas():{};
+    if(_fsPrev.hasta){
+      var _msR=new Date(_fsPrev.hasta).getTime()-Date.now();
+      if(_msR>0){
+        var _dR=Math.floor(_msR/864e5), _hR=Math.floor(_msR%864e5/36e5), _mR=Math.floor(_msR%36e5/6e4);
+        _cd='⏰ Termina en '+(_dR>0?_dR+'d ':'')+_hR+'h '+_mR+'m';
+      } else _cd='⏱ VENCIDA';
+    }
+  }catch(e){}
 
   var _card = function(p){
     var cp=null; try{ if(p) cp=calcP(p); }catch(e){ cp=null; }
@@ -16955,11 +17085,22 @@ function campRefreshPreview(){
     var precioHtml = (oferta && oferta < normal)
       ? '<div style="display:flex;align-items:baseline;gap:.25rem;flex-wrap:wrap;margin-bottom:.3rem">'+
           '<span style="font-size:.52rem;color:#9a9184;text-decoration:line-through">'+_f(normal)+'</span>'+
-          '<span style="font-size:.68rem;color:'+pBtn+';font-weight:800">'+_f(oferta)+'</span>'+
+          '<span style="font-size:.68rem;color:'+_ofTx+';font-weight:800">'+_f(oferta)+'</span>'+
         '</div>'
       : '<div style="font-size:.66rem;color:'+pBtn+';font-weight:800;margin-bottom:.35rem">'+_f(normal)+'</div>';
-    return '<div style="flex:1;background:'+pCards+';border:1.5px solid '+pBorde+';border-radius:8px;padding:.45rem;min-width:0;position:relative">'+
-      (_etiq?'<div style="position:absolute;top:.3rem;left:.3rem;background:'+acento+';color:'+texto+';font-size:.44rem;font-weight:800;padding:.1rem .3rem;border-radius:3px;letter-spacing:.03em;z-index:2;max-width:80%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">'+_ofEsc(_etiq)+'</div>':'')+
+    // Badge de oferta IGUAL que el catálogo: arriba a la DERECHA, 🔥, mayúsculas,
+    // con el color de etiqueta configurado (o el degradé rojo por defecto).
+    var _lblOf=_etiq;
+    if(!_lblOf){
+      if(_tipoSel==='descuento_pct')_lblOf=(parseFloat((document.getElementById('campPctSim')||{}).value)||20)+'% OFF';
+      else if(_tipoSel==='precio_unico')_lblOf='OFERTA';
+      else if(_tipoSel==='x10_sin_minimo')_lblOf='PRECIO MAYOR';
+      else if(_tipoSel==='x3_sin_minimo')_lblOf='PRECIO X3';
+      else if(_tipoSel==='multixmenos')_lblOf=_mLl+'x'+_mPg;
+      else _lblOf='OFERTA';
+    }
+    return '<div style="flex:1;background:'+pCards+';border:1.5px solid '+pBorde+';border-radius:8px;padding:.45rem;padding-top:.85rem;min-width:0;position:relative;overflow:visible">'+
+      '<div style="position:absolute;top:-1px;right:8px;z-index:2;background:'+_ofEtiqBg+';color:#fff;font-size:.44rem;font-weight:800;letter-spacing:.06em;padding:.13rem .4rem;border-radius:0 0 5px 5px;text-transform:uppercase;white-space:nowrap;box-shadow:0 2px 5px rgba(0,0,0,.25)">🔥 '+_ofEsc(_lblOf)+'</div>'+
       '<div style="background:rgba(0,0,0,.05);border-radius:5px;height:52px;margin-bottom:.35rem;overflow:hidden;display:flex;align-items:center;justify-content:center">'+foto+'</div>'+
       '<div style="font-size:.58rem;color:#333;font-weight:600;margin-bottom:.1rem;white-space:nowrap;overflow:hidden;text-overflow:ellipsis" title="'+_ofEsc(nom)+'">'+_ofEsc(nom)+'</div>'+
       precioHtml+
@@ -16988,14 +17129,35 @@ function campRefreshPreview(){
   if(_campContraste('#333333', pCards) < 3)
     _avisos.push('El <b>nombre del producto</b> es oscuro y el fondo de las tarjetas también: no se van a distinguir.');
 
+  // ── Clon del catálogo (2026-08-12): misma pestaña que buildTabs (degradé,
+  // esquinas redondeadas arriba, logo GRANDE que sobresale, pulse si es destacada),
+  // banner de campaña con cuenta regresiva, y la foto de fondo real detrás. ──
+  var _logoPrev=logoUrl
+    ? '<img src="'+_ofEsc(logoUrl)+'" style="position:absolute;left:50%;top:50%;transform:translate(-50%,-50%);height:auto;width:auto;max-height:64px;max-width:130px;filter:drop-shadow(0 4px 8px rgba(0,0,0,.35));z-index:6" onerror="this.style.display=\'none\'">'
+    : '';
+  var _pillTxt=logoUrl?'<span style="opacity:0;font-size:.62rem">'+_ofEsc(nombreCamp)+'</span>'
+                      :'<span style="color:'+texto+';font-weight:800;font-size:.62rem;text-shadow:0 1px 2px rgba(0,0,0,.2)">'+_ofEsc(nombreCamp)+'</span>';
+  var _bannerPrev=
+    '<div style="background:linear-gradient(120deg,'+fondo+','+acento+');border-radius:8px;padding:.5rem .7rem;margin:.45rem 0;display:flex;align-items:center;gap:.6rem;flex-wrap:wrap;box-shadow:0 3px 10px '+_hexToRgba(fondo,.35)+'">'+
+      '<div style="flex:1;min-width:130px">'+
+        '<div style="color:'+texto+';font-weight:800;font-size:.74rem;letter-spacing:.03em">🔥 '+_ofEsc(nombreCamp)+'</div>'+
+        (_descCamp?'<div style="color:'+texto+';opacity:.9;font-size:.58rem;margin-top:.1rem;line-height:1.35">'+_ofEsc(_descCamp)+'</div>':'')+
+        (_condPago?'<div style="color:'+texto+';opacity:.75;font-size:.52rem;margin-top:.15rem;font-style:italic">'+_ofEsc(_condPago)+'</div>':'')+
+      '</div>'+
+      (_cd?'<div style="background:rgba(0,0,0,.28);color:#fff;font-size:.6rem;font-weight:800;padding:.28rem .55rem;border-radius:20px;white-space:nowrap">'+_cd+'</div>':'')+
+    '</div>';
+  var _zonaBg=_imgFondo
+    ? 'background-image:linear-gradient('+_hexToRgba(pFondo,.62)+','+_hexToRgba(pFondo,.62)+'),url(\''+_ofEsc(_imgFondo)+'\');background-size:cover;background-position:center'
+    : 'background:'+pFondo;
   wrap.innerHTML =
     '<div style="width:100%">'+
-    '<div style="background:'+pFondo+';border-radius:8px;padding:.6rem;border:1px solid rgba(0,0,0,.08)">'+
-      '<div style="display:flex;gap:.35rem;align-items:center;overflow:visible;padding:1.4rem .1rem .2rem">'+
-        '<div style="background:#fff;color:#888;padding:.35rem .6rem;border-radius:4px;font-size:.62rem;border:1px solid #ddd">🏠 Inicio</div>'+
-        '<div class="'+animClass+'" style="background:linear-gradient(135deg,'+fondo+','+acento+');padding:.35rem .7rem;border-radius:4px;display:flex;align-items:center;justify-content:center;min-width:80px;min-height:34px;box-shadow:0 2px 6px '+_hexToRgba(fondo, 0.4)+';overflow:visible;position:relative">'+contenidoTab+'</div>'+
-        '<div style="background:#fff;color:#888;padding:.35rem .6rem;border-radius:4px;font-size:.62rem;border:1px solid #ddd">'+_ofEsc(_vecina)+'</div>'+
+    '<div style="'+_zonaBg+';border-radius:8px;padding:.6rem;border:1px solid rgba(0,0,0,.08)">'+
+      '<div style="display:flex;gap:.35rem;align-items:flex-end;overflow:visible;padding:2.1rem .1rem 0;background:rgba(255,255,255,.92);border-radius:6px 6px 0 0;border-bottom:1px solid #e2ddd2;position:relative">'+
+        '<div style="background:#fff;color:#888;padding:.35rem .6rem;border-radius:4px 4px 0 0;font-size:.62rem;border:1px solid #eee;border-bottom:none">🏠 Inicio</div>'+
+        '<div class="'+animClass+'" style="background:linear-gradient(135deg,'+fondo+','+acento+');padding:.35rem .7rem;border-radius:6px 6px 0 0;display:flex;align-items:center;justify-content:center;min-width:86px;min-height:32px;box-shadow:0 2px 8px '+_hexToRgba(fondo, 0.4)+';overflow:visible;position:relative">'+_pillTxt+_logoPrev+'</div>'+
+        '<div style="background:#fff;color:#888;padding:.35rem .6rem;border-radius:4px 4px 0 0;font-size:.62rem;border:1px solid #eee;border-bottom:none">'+_ofEsc(_vecina)+'</div>'+
       '</div>'+
+      _bannerPrev+
       '<div style="background:'+pFiltros+';border-radius:6px;padding:.4rem .55rem;font-size:.6rem;color:#5b5347;margin:.5rem 0;font-weight:500">Filtros · Marca · Género · Precio</div>'+
       '<div style="display:flex;gap:.5rem;align-items:stretch">'+_cards+'</div>'+
     '</div>'+
@@ -17036,13 +17198,19 @@ function _campPreviewProds(){
   }catch(e){ out=[]; }
   return out;
 }
-// Precio que dejaría la oferta de la campaña (los tipos que se definen por
-// producto devuelven null: ahí no hay un precio único que mostrar).
+// Precio que dejaría la oferta de la campaña sobre un producto de la muestra.
+// Para "% de descuento" usa el % del simulador (el real va por producto) — así
+// las tarjetas de la vista previa muestran el tachado + precio nuevo de verdad.
 function _campPrecioOferta(cp){
   if(!cp) return null;
   var t=(document.getElementById('campOfTipo')||{}).value;
   if(t==='x10_sin_minimo') return cp.pm;
   if(t==='x3_sin_minimo')  return cp.pe;
+  if(t==='descuento_pct'){
+    var pct=parseFloat((document.getElementById('campPctSim')||{}).value);
+    if(isNaN(pct)||pct<=0||pct>95) pct=20;
+    return Math.round(cp.pi*(1-pct/100));
+  }
   if(t==='multixmenos'){
     var ll=parseInt((document.getElementById('campMultiLleva')||{}).value)||0;
     var pg=parseInt((document.getElementById('campMultiPaga')||{}).value)||0;
@@ -17439,6 +17607,14 @@ function _cpNecesitaValor(pid){
   var t = _cpTipoEf(pid);
   return t==='precio_unico' || t==='descuento_pct';
 }
+// 🎁 Promo NxM por producto (2026-08-12): un producto puntual puede ser "2x1"
+// aunque la campaña sea de precio único / % — aparece como PROMO en el catálogo.
+function _cpEsPromo(pid){ return _cpTipoEf(pid)==='multixmenos'; }
+function _cpPromoValida(pid){
+  var d=window._cpDatos[pid]||{};
+  var ll=parseInt(d.multi_lleva,10), pg=parseInt(d.multi_paga,10);
+  return !isNaN(ll)&&!isNaN(pg)&&ll>pg&&pg>0;
+}
 function _cpReg(pid){
   if(!window._cpDatos[pid]) window._cpDatos[pid] = {};
   return window._cpDatos[pid];
@@ -17454,6 +17630,7 @@ function _cpResultado(p){
   if(t==='descuento_pct') return (d.descuento_pct!=null && !isNaN(d.descuento_pct) && base) ? Math.round(base*(1-d.descuento_pct/100)) : null;
   if(t==='x10_sin_minimo') return c?c.pm:null;
   if(t==='x3_sin_minimo')  return c?c.pe:null;
+  if(t==='multixmenos') return (_cpPromoValida(pid)&&base) ? Math.round(base*parseInt(d.multi_paga,10)/parseInt(d.multi_lleva,10)) : null;
   return null;
 }
 
@@ -17486,8 +17663,10 @@ function _cpFiltrados(){
     if(f.estado==='en'      && !window._cpIn[p.id]) return false;
     if(f.estado==='fuera'   &&  window._cpIn[p.id]) return false;
     if(f.estado==='sinstock'&& (p.stock_actual||0)>0) return false;
+    if(f.estado==='promo'   && !_cpEsPromo(p.id)) return false;
     if(f.estado==='falta'){
       if(!window._cpIn[p.id]) return false;
+      if(_cpEsPromo(p.id)) return _cpPromoValida(p.id)?false:true;
       if(!_cpNecesitaValor(p.id)) return false;
       if(_cpResultado(p)!=null) return false;
     }
@@ -17512,11 +17691,15 @@ function _cpCuentaEn(){ return Object.keys(window._cpIn||{}).length; }
 function _cpSinValor(){
   var n=0;
   Object.keys(window._cpIn||{}).forEach(function(pid){
+    if(_cpEsPromo(pid)){ if(!_cpPromoValida(pid)) n++; return; }
     if(!_cpNecesitaValor(pid)) return;
     var p=(window._cpTodos||[]).find(function(x){return String(x.id)===String(pid);});
     if(p && _cpResultado(p)==null) n++;
   });
   return n;
+}
+function _cpCuentaPromos(){
+  return Object.keys(window._cpIn||{}).filter(function(pid){ return _cpEsPromo(pid); }).length;
 }
 
 function _cpRender(){
@@ -17547,6 +17730,8 @@ function _cpPintarChips(visibles){
     {k:'fuera',   lbl:'Sin agregar',      n:Math.max(0,total-enCamp)},
     {k:'sinstock',lbl:'Sin stock',        n:null}
   ];
+  var _nProm=_cpCuentaPromos();
+  if(_nProm>0) chips.push({k:'promo', lbl:'🎁 Promos', n:_nProm});
   if(faltan>0) chips.push({k:'falta', lbl:'⚠️ Sin precio cargado', n:faltan, alerta:true});
   box.innerHTML=chips.map(function(c){
     var on=(f.estado||'')===c.k;
@@ -17600,13 +17785,22 @@ function _cpFilaHTML(p){
     ? '<img src="'+_ofEsc(p.imagen_url)+'" style="width:34px;height:34px;object-fit:contain;border-radius:5px;background:#fff;flex-shrink:0" loading="lazy" onerror="this.style.visibility=\'hidden\'">'
     : '<div style="width:34px;height:34px;border-radius:5px;background:var(--sur2);flex-shrink:0"></div>';
 
-  // Override de tipo por producto
-  var opts=[['','(según campaña)'],['precio_unico','Precio único'],['descuento_pct','% descuento'],['x10_sin_minimo','Precio x10'],['x3_sin_minimo','Precio x3']];
-  var selTipo='<select onchange="_cpSetTipo('+pid+',this.value)" style="font-size:.6rem;padding:.16rem .2rem;background:var(--sur2);border:1px solid var(--bd);border-radius:5px;color:var(--tx3);max-width:118px">'+
+  // Override de tipo por producto — 🎁 Promo NxM permite un 2x1/3x2 puntual
+  // aunque la campaña entera sea de precio único o % (sale como PROMO en el catálogo).
+  var opts=[['','(según campaña)'],['precio_unico','Precio único'],['descuento_pct','% descuento'],['x10_sin_minimo','Precio x10'],['x3_sin_minimo','Precio x3'],['multixmenos','🎁 Promo NxM (2x1...)']];
+  var selTipo='<select onchange="_cpSetTipo('+pid+',this.value)" style="font-size:.6rem;padding:.16rem .2rem;background:var(--sur2);border:1px solid var(--bd);border-radius:5px;color:var(--tx3);max-width:130px">'+
     opts.map(function(o){return '<option value="'+o[0]+'"'+((d.tipo||'')===o[0]?' selected':'')+'>'+o[1]+'</option>';}).join('')+'</select>';
 
   var control;
-  if(_cpNecesitaValor(pid)){
+  if(_cpEsPromo(pid)){
+    var _ll=(d.multi_lleva!=null&&!isNaN(d.multi_lleva))?d.multi_lleva:'';
+    var _pg=(d.multi_paga!=null&&!isNaN(d.multi_paga))?d.multi_paga:'';
+    var _inpP='style="width:44px;padding:.28rem .3rem;background:var(--sur2);border:1.5px solid '+(dentro?'#b45fd1':'var(--bd)')+';border-radius:6px;color:var(--tx);font-size:.78rem;text-align:center;font-weight:700"';
+    control='<div style="display:flex;align-items:center;gap:.25rem;justify-content:flex-end;font-size:.66rem;color:var(--tx2)">'+
+      'Lleva <input type="number" min="2" inputmode="numeric" value="'+_ll+'" oninput="_cpValMulti('+pid+',\'multi_lleva\',this.value)" '+_inpP+'>'+
+      ' paga <input type="number" min="1" inputmode="numeric" value="'+_pg+'" oninput="_cpValMulti('+pid+',\'multi_paga\',this.value)" '+_inpP+'>'+
+      '</div>';
+  } else if(_cpNecesitaValor(pid)){
     var esPrecio=(t==='precio_unico');
     var val=esPrecio?d.precio_unico:d.descuento_pct;
     control='<div style="display:flex;align-items:center;gap:.3rem;justify-content:flex-end">'+
@@ -17622,8 +17816,9 @@ function _cpFilaHTML(p){
       '<input type="checkbox" '+(dentro?'checked':'')+' onchange="_cpIncluir('+pid+',this.checked)"> '+lbl+'</label>';
   }
 
+  var _esProm=_cpEsPromo(pid);
   return '<div id="_cpRow'+pid+'" style="display:flex;align-items:center;gap:.55rem;padding:.45rem .6rem;border-bottom:1px solid var(--bd);'+
-      (dentro?'background:rgba(31,157,87,.09);border-left:3px solid #1f9d57':'border-left:3px solid transparent')+'">'+
+      (dentro?(_esProm?'background:rgba(180,95,209,.10);border-left:3px solid #b45fd1':'background:rgba(31,157,87,.09);border-left:3px solid #1f9d57'):'border-left:3px solid transparent')+'">'+
     foto+
     '<div style="flex:1;min-width:0">'+
       (p.empresa?'<div style="font-size:.56rem;color:var(--acc);text-transform:uppercase;letter-spacing:.05em">'+_ofEsc(p.empresa)+'</div>':'')+
@@ -17645,11 +17840,31 @@ function _cpFilaHTML(p){
 
 function _cpResTexto(p){
   var res=_cpResultado(p), normal=_cpPrecioNormal(p);
+  if(_cpEsPromo(p.id)){
+    if(!_cpPromoValida(p.id)) return window._cpIn[p.id]
+      ? '<span style="color:#e0a53a">lleva &gt; paga para que sea promo</span>'
+      : '<span style="color:var(--tx3)">completá lleva/paga</span>';
+    var dd=window._cpDatos[p.id]||{};
+    return '<span style="color:#b45fd1;font-weight:800">🎁 '+parseInt(dd.multi_lleva,10)+'x'+parseInt(dd.multi_paga,10)+'</span>'+
+      (res!=null?'<span style="color:var(--tx3)"> · c/u queda '+fmt(res)+'</span>':'');
+  }
   if(res==null) return window._cpIn[p.id] && _cpNecesitaValor(p.id)
     ? '<span style="color:#e0a53a">falta cargar</span>' : '';
   var off = (normal>0 && res<normal) ? Math.round((1-res/normal)*100) : 0;
   return '<span style="color:#1f9d57;font-weight:700">queda '+fmt(res)+'</span>'+
     (off>0?'<span style="color:var(--tx3)"> · −'+off+'%</span>':'');
+}
+
+// 🎁 Editar lleva/paga de una promo: mientras la promo sea válida el producto
+// queda en la campaña; si deja de serlo, sale (mismo criterio que el precio/%).
+function _cpValMulti(pid, campo, valor){
+  var v=(valor===''||valor==null)?null:parseInt(valor,10);
+  if(v!=null&&(isNaN(v)||v<0))v=null;
+  _cpReg(pid)[campo]=v;
+  if(_cpPromoValida(pid)) window._cpIn[pid]=true; else delete window._cpIn[pid];
+  _cpRefrescarFila(pid);
+  _cpPintarResumen();
+  _cpPintarChips(_cpFiltrados().length);
 }
 
 // Escribir un valor: entra solo si el valor es válido; si lo borrás, sale.
@@ -17668,14 +17883,42 @@ function _cpVal(pid, valor){
 
 // Agregar / quitar sin tocar lo tipeado
 function _cpIncluir(pid, dentro){
-  if(dentro) window._cpIn[pid]=true; else delete window._cpIn[pid];
+  if(dentro){
+    // Un producto que necesita precio/% (o una promo sin lleva/paga válidos) no
+    // puede entrar "vacío": en vez de sumarlo roto, llevamos el foco al casillero.
+    if(_cpEsPromo(pid)&&!_cpPromoValida(pid)){
+      var r1=document.getElementById('_cpRow'+pid), i1=r1&&r1.querySelector('input[type=number]');
+      if(i1)i1.focus();
+      toast('Completá lleva/paga para la promo','twarn'); return;
+    }
+    if(_cpNecesitaValor(pid)){
+      var p=(window._cpTodos||[]).find(function(x){return String(x.id)===String(pid);});
+      if(p&&_cpResultado(p)==null){
+        var r2=document.getElementById('_cpRow'+pid), i2=r2&&r2.querySelector('input[type=number]');
+        if(i2)i2.focus();
+        toast('Cargale el '+(_cpTipoEf(pid)==='precio_unico'?'precio':'porcentaje')+' y entra solo','twarn'); return;
+      }
+    }
+    window._cpIn[pid]=true;
+  } else delete window._cpIn[pid];
   _cpRender();
 }
 
 function _cpSetTipo(pid, tipo){
   _cpReg(pid).tipo = tipo || null;
-  // Si el tipo nuevo no necesita valor, el producto entra directo.
-  if(!_cpNecesitaValor(pid)) window._cpIn[pid]=true;
+  if(tipo==='multixmenos'){
+    // Promo nueva: arranca 2x1 (editable) y entra directo.
+    var d=_cpReg(pid);
+    if(d.multi_lleva==null||isNaN(d.multi_lleva)) d.multi_lleva=2;
+    if(d.multi_paga==null||isNaN(d.multi_paga))  d.multi_paga=1;
+    window._cpIn[pid]=true;
+  } else if(!_cpNecesitaValor(pid)){
+    // x10 / x3 / (según campaña sin valor): entra directo.
+    window._cpIn[pid]=true;
+  } else if(_cpResultado((window._cpTodos||[]).find(function(x){return x.id===pid;})||{id:pid})==null){
+    // Cambió a precio/% y todavía no hay valor válido → sale hasta que lo cargue.
+    delete window._cpIn[pid];
+  }
   _cpRender();
 }
 
@@ -17686,11 +17929,14 @@ function _cpRefrescarFila(pid){
   var p=(window._cpTodos||[]).find(function(x){return String(x.id)===String(pid);});
   if(!p) return;
   var dentro=!!window._cpIn[pid];
+  var _promR=_cpEsPromo(pid);
+  var _colR=_promR?'#b45fd1':'#1f9d57';
   if(row){
-    row.style.background = dentro?'rgba(31,157,87,.09)':'';
-    row.style.borderLeft = dentro?'3px solid #1f9d57':'3px solid transparent';
-    var inp=row.querySelector('input[type=number]');
-    if(inp) inp.style.borderColor = dentro?'#1f9d57':'var(--bd)';
+    row.style.background = dentro?(_promR?'rgba(180,95,209,.10)':'rgba(31,157,87,.09)'):'';
+    row.style.borderLeft = dentro?('3px solid '+_colR):'3px solid transparent';
+    row.querySelectorAll('input[type=number]').forEach(function(inp){
+      inp.style.borderColor = dentro?_colR:'var(--bd)';
+    });
     var btn=row.querySelector('button');
     if(btn){
       btn.textContent = dentro?'✕':'+';
@@ -17758,6 +18004,7 @@ function guardarProductosCampania(){
         (window._cpTipoCamp==='precio_unico'?'precio':'porcentaje')+' cargado.\n\n'+
         'Se van a sacar de la campaña (podés verlos con el filtro "⚠️ Sin precio cargado").\n\n¿Guardar igual?')) return;
     Object.keys(window._cpIn).forEach(function(pid){
+      if(_cpEsPromo(pid)){ if(!_cpPromoValida(pid)) delete window._cpIn[pid]; return; }
       if(!_cpNecesitaValor(pid)) return;
       var p=(window._cpTodos||[]).find(function(x){return String(x.id)===String(pid);});
       if(p && _cpResultado(p)==null) delete window._cpIn[pid];
