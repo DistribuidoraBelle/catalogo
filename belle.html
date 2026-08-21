@@ -19,7 +19,7 @@
     </div><!DOCTYPE html>
 <html lang="es">
 <head>
-<!-- BELLE_BUILD 20260821-2300 almacenamiento-persistente -->
+<!-- BELLE_BUILD 20260821-2340 suscripcion-una-sola-puerta -->
 <meta charset="UTF-8">
 <link rel="icon" type="image/svg+xml" href="favicon.svg">
 <meta name="viewport" content="width=device-width,initial-scale=1">
@@ -5072,6 +5072,31 @@ function _iOSA(){ return /iphone|ipad|ipod/i.test(navigator.userAgent||"") || ((
 function _standaloneA(){ return (window.navigator.standalone===true) || !!(window.matchMedia&&window.matchMedia('(display-mode: standalone)').matches); }
 function _pushRefreshAdminBtn(){ var b=document.getElementById('sbNotifBtn'); if(!b)return; var p=(typeof Notification!=='undefined')?Notification.permission:'unsupported'; b.innerHTML=(p==='granted')?"🔔 Notificaciones activas · Probar":"🔔 Activar notificaciones"; }
 
+// ══ 🔑 UNA SOLA PUERTA PARA LA SUSCRIPCIÓN (2026-08-21) ══════════════════════
+// Antes cada función se suscribía por su cuenta y quedaba un agujero: si el
+// permiso del navegador YA estaba dado, _activarNotisAdmin() saltaba directo a
+// probar y NUNCA creaba la fila en push_subscriptions. Resultado: el panel decía
+// "activas", el envío del servidor devolvía 0 ("sin suscripciones") y no llegaba
+// nada. Pasó en la PC de Ger: permiso dado, cero filas guardadas.
+// Esta función garantiza las tres cosas juntas —service worker registrado,
+// suscripción viva y fila guardada— y devuelve una promesa.
+function _pushAsegurarSubA(){
+  if(!_pushSupportedA()) return Promise.reject(new Error("este navegador no soporta notificaciones"));
+  // Que Android/Chrome no desalojen los datos del sitio y se lleven la suscripción.
+  try{ if(navigator.storage&&navigator.storage.persist) navigator.storage.persist(); }catch(e){}
+  return navigator.serviceWorker.register("sw.js").then(function(reg){
+    return reg.pushManager.getSubscription().then(function(sub){
+      return sub||reg.pushManager.subscribe({userVisibleOnly:true,applicationServerKey:_urlB64ToUint8A(_VAPID_PUBLIC_A)});
+    });
+  }).then(function(sub){
+    var j=(sub&&sub.toJSON())||{}; var keys=j.keys||{};
+    if(!j.endpoint) throw new Error("el navegador no devolvio suscripcion");
+    return apiDelete("push_subscriptions","endpoint=eq."+encodeURIComponent(j.endpoint)).catch(function(){}).then(function(){
+      return apiPost("push_subscriptions",{rol:"admin",auth_user_id:(window._authUid||null),endpoint:j.endpoint,p256dh:keys.p256dh||null,auth:keys.auth||null,user_agent:navigator.userAgent,activa:true});
+    }).then(function(){ return sub; });
+  });
+}
+
 // ══ 🩹 AUTORREPARACIÓN DE LA SUSCRIPCIÓN PUSH (2026-08-21) ═══════════════════
 // El permiso del navegador (Notification.permission) puede seguir en "granted"
 // mientras la suscripción real está MUERTA: pasa si se desregistró el service
@@ -5084,24 +5109,9 @@ function _pushRepararAdmin(){
   try{
     if(typeof Notification==='undefined'||Notification.permission!=='granted') return;
     if(!_pushSupportedA()) return;
-    navigator.serviceWorker.register("sw.js").then(function(reg){
-      return reg.pushManager.getSubscription().then(function(sub){
-        // Sin suscripción viva (la mató un unregister o el navegador): rehacerla.
-        return sub||reg.pushManager.subscribe({userVisibleOnly:true,applicationServerKey:_urlB64ToUint8A(_VAPID_PUBLIC_A)});
-      });
-    }).then(function(sub){
-      if(!sub) return;
-      var j=sub.toJSON()||{}; var keys=j.keys||{};
-      if(!j.endpoint) return;
-      // ¿Ya está guardada y activa? Entonces no hay nada que hacer.
-      return apiGet("push_subscriptions","select=id,activa&endpoint=eq."+encodeURIComponent(j.endpoint)+"&limit=1").then(function(rows){
-        if(rows&&rows.length&&rows[0].activa===true) return;
-        // Limpiar cualquier fila vieja de ESTE dispositivo y volver a registrar.
-        return apiDelete("push_subscriptions","endpoint=eq."+encodeURIComponent(j.endpoint)).catch(function(){}).then(function(){
-          return apiPost("push_subscriptions",{rol:"admin",auth_user_id:(window._authUid||null),endpoint:j.endpoint,p256dh:keys.p256dh||null,auth:keys.auth||null,user_agent:navigator.userAgent,activa:true});
-        }).then(function(){ console.log("[push] suscripcion reparada"); });
-      });
-    }).catch(function(e){ console.warn("[push reparar]",e); });
+    _pushAsegurarSubA()
+      .then(function(){ console.log("[push] suscripcion al dia"); })
+      .catch(function(e){ console.warn("[push reparar]",e); });
   }catch(e){}
 }
 // 🐛 FIX 2026-08-21: _pushRefreshAdminBtn() solo se llamaba DESPUÉS de activar,
@@ -5122,20 +5132,9 @@ function _activarNotisAdmin(){
   }
   Notification.requestPermission().then(function(perm){
     if(perm!=="granted"){ alert("No activaste las notificaciones."); return; }
-    // 🩹 2026-08-21: pedir almacenamiento PERSISTENTE. Sin esto, Android/Chrome
-    // pueden desalojar los datos del sitio cuando el teléfono anda corto de
-    // espacio o pasa un limpiador, y ahí se lleva puesta la suscripción push
-    // (se vio: cada activación devolvía un endpoint nuevo = datos borrados).
-    try{ if(navigator.storage&&navigator.storage.persist) navigator.storage.persist(); }catch(e){}
-    navigator.serviceWorker.register("sw.js").then(function(reg){
-      return reg.pushManager.getSubscription().then(function(sub){ return sub||reg.pushManager.subscribe({userVisibleOnly:true,applicationServerKey:_urlB64ToUint8A(_VAPID_PUBLIC_A)}); });
-    }).then(function(sub){
-      var j=sub.toJSON()||{}; var keys=j.keys||{};
-      return apiDelete("push_subscriptions","endpoint=eq."+encodeURIComponent(j.endpoint)).catch(function(){}).then(function(){
-        return apiPost("push_subscriptions",{rol:"admin",auth_user_id:(window._authUid||null),endpoint:j.endpoint,p256dh:keys.p256dh||null,auth:keys.auth||null,user_agent:navigator.userAgent,activa:true});
-      });
-    }).then(function(){ _pushRefreshAdminBtn(); alert("¡Notificaciones activadas! 🔔"); })
-    .catch(function(e){ console.error("[push a]",e); alert("No se pudo activar, probá de nuevo."); });
+    _pushAsegurarSubA()
+      .then(function(){ _pushRefreshAdminBtn(); alert("¡Notificaciones activadas! 🔔"); })
+      .catch(function(e){ console.error("[push a]",e); alert("No se pudo activar, probá de nuevo."); });
   }).catch(function(e){ console.error("[push perm a]",e); });
 }
 function _probarNotiA(){
@@ -5148,17 +5147,29 @@ function _probarNotiA(){
       }).catch(function(){});
     }
   }catch(e){}
-  // 2) Envío REAL desde el servidor (apunta a este admin; si no tiene _authUid, a todos los admin).
+  // 2) Envío REAL desde el servidor.
+  // 🐛 FIX 2026-08-21: antes se mandaba de una, y si este dispositivo tenía el
+  // permiso dado pero NINGUNA fila guardada, el servidor devolvía 0 "sin
+  // suscripciones" y el cartel te mandaba a reactivar (que tampoco servía,
+  // porque con el permiso ya dado no volvía a suscribir). Ahora primero se
+  // garantiza la suscripción y recién después se manda.
+  _pushAsegurarSubA().catch(function(e){ console.warn("[push probar]",e); }).then(function(){
   var body = window._authUid ? {auth_user_ids:[window._authUid]} : {roles:["admin"]};
   body.titulo="🔔 Prueba Belle (servidor)"; body.mensaje="Esta llega aunque el panel esté cerrado."; body.url="./belle.html";
-  fetch(SB_URL+"/functions/v1/send-push",{
+  return fetch(SB_URL+"/functions/v1/send-push",{
     method:"POST",
     headers:{"Content-Type":"application/json","apikey":SB_KEY,"Authorization":"Bearer "+SB_KEY},
     body:JSON.stringify(body)
   }).then(function(r){return r.json().catch(function(){return null;});}).then(function(res){
-    if(res&&res.sent>0) alert("Prueba OK ✓ (local + "+res.sent+" del servidor)");
-    else alert("Notificación local mostrada. El push del servidor dio 0 — reactivá las notis en este dispositivo si no te llega estando cerrado.");
+    if(res&&res.sent>0){
+      alert("Prueba OK ✓\n\nSe mostró la local y el servidor mandó "+res.sent+".\n\nSi la del servidor (la que dice \"servidor\") no aparece, el mensaje llega al aparato pero el sistema no lo está mostrando.");
+    } else if(res&&res.fail>0){
+      alert("La local se mostró, pero el servidor no pudo entregar ("+res.fail+" fallida/s).\nLa suscripción de este dispositivo quedó vencida; volvé a entrar al panel y se rehace sola.");
+    } else {
+      alert("La local se mostró, pero este dispositivo no tiene suscripción guardada.\nProbá de nuevo en unos segundos.");
+    }
   }).catch(function(){ /* la local ya se mostró */ });
+  });
 }
 // ── Centro de notificaciones (campanita) del admin ──
 function _admNotisIcono(t){ return t==='pedido'?'🛒':t==='cobro'?'💵':t==='rendicion'?'💰':t==='gasto'?'🧾':t==='devolucion'?'↩️':t==='reclamo'?'📣':'🔔'; }
