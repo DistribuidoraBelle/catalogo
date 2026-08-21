@@ -19,7 +19,7 @@
     </div><!DOCTYPE html>
 <html lang="es">
 <head>
-<!-- BELLE_BUILD 20260821-1730 saca-texto-suelto -->
+<!-- BELLE_BUILD 20260821-2100 push-no-se-rompe -->
 <meta charset="UTF-8">
 <link rel="icon" type="image/svg+xml" href="favicon.svg">
 <meta name="viewport" content="width=device-width,initial-scale=1">
@@ -87,8 +87,16 @@
         bar.onclick=function(){
           bar.textContent='Actualizando...';
           var ps=[];
+          // 🐛 FIX 2026-08-21: acá antes se hacía unregister() de los service workers.
+          // Eso rompía las NOTIFICACIONES: la suscripción push vive adentro del
+          // service worker, así que al desregistrarlo el navegador la revoca y el
+          // servidor de Google devuelve 410 en el próximo envío (la suscripción
+          // queda muerta y el panel seguía diciendo "activas"). update() logra el
+          // mismo efecto —traer la versión nueva— sin tocar la suscripción.
           try{ if(navigator.serviceWorker&&navigator.serviceWorker.getRegistrations)
-            ps.push(navigator.serviceWorker.getRegistrations().then(function(rs){return Promise.all(rs.map(function(x){return x.unregister();}));})); }catch(e){}
+            ps.push(navigator.serviceWorker.getRegistrations().then(function(rs){
+              return Promise.all(rs.map(function(x){ return x.update(); }));
+            })); }catch(e){}
           try{ if(window.caches&&caches.keys)
             ps.push(caches.keys().then(function(ks){return Promise.all(ks.map(function(k){return caches.delete(k);}));})); }catch(e){}
           Promise.all(ps).catch(function(){}).then(function(){
@@ -5063,6 +5071,40 @@ function _urlB64ToUint8A(b){ var pad="=".repeat((4-b.length%4)%4); var s=(b+pad)
 function _iOSA(){ return /iphone|ipad|ipod/i.test(navigator.userAgent||"") || ((navigator.platform==='MacIntel')&&navigator.maxTouchPoints>1); }
 function _standaloneA(){ return (window.navigator.standalone===true) || !!(window.matchMedia&&window.matchMedia('(display-mode: standalone)').matches); }
 function _pushRefreshAdminBtn(){ var b=document.getElementById('sbNotifBtn'); if(!b)return; var p=(typeof Notification!=='undefined')?Notification.permission:'unsupported'; b.innerHTML=(p==='granted')?"🔔 Notificaciones activas · Probar":"🔔 Activar notificaciones"; }
+
+// ══ 🩹 AUTORREPARACIÓN DE LA SUSCRIPCIÓN PUSH (2026-08-21) ═══════════════════
+// El permiso del navegador (Notification.permission) puede seguir en "granted"
+// mientras la suscripción real está MUERTA: pasa si se desregistró el service
+// worker, si el navegador la rotó, o si se limpiaron datos. El panel decía
+// "Notificaciones activas" y no llegaba nada.
+// Al arrancar, si el permiso está dado, se vuelve a leer la suscripción viva del
+// service worker y se re-guarda en la base. Si el endpoint cambió, la fila vieja
+// se borra. Silencioso: no molesta con carteles.
+function _pushRepararAdmin(){
+  try{
+    if(typeof Notification==='undefined'||Notification.permission!=='granted') return;
+    if(!_pushSupportedA()) return;
+    navigator.serviceWorker.register("sw.js").then(function(reg){
+      return reg.pushManager.getSubscription().then(function(sub){
+        // Sin suscripción viva (la mató un unregister o el navegador): rehacerla.
+        return sub||reg.pushManager.subscribe({userVisibleOnly:true,applicationServerKey:_urlB64ToUint8A(_VAPID_PUBLIC_A)});
+      });
+    }).then(function(sub){
+      if(!sub) return;
+      var j=sub.toJSON()||{}; var keys=j.keys||{};
+      if(!j.endpoint) return;
+      // ¿Ya está guardada y activa? Entonces no hay nada que hacer.
+      return apiGet("push_subscriptions","select=id,activa&endpoint=eq."+encodeURIComponent(j.endpoint)+"&limit=1").then(function(rows){
+        if(rows&&rows.length&&rows[0].activa===true) return;
+        // Limpiar cualquier fila vieja de ESTE dispositivo y volver a registrar.
+        return apiDelete("push_subscriptions","endpoint=eq."+encodeURIComponent(j.endpoint)).catch(function(){}).then(function(){
+          return apiPost("push_subscriptions",{rol:"admin",auth_user_id:(window._authUid||null),endpoint:j.endpoint,p256dh:keys.p256dh||null,auth:keys.auth||null,user_agent:navigator.userAgent,activa:true});
+        }).then(function(){ console.log("[push] suscripcion reparada"); });
+      });
+    }).catch(function(e){ console.warn("[push reparar]",e); });
+  }catch(e){}
+}
+window.addEventListener('load',function(){ setTimeout(_pushRepararAdmin,6000); });
 function _activarNotisAdmin(){
   if((typeof Notification!=='undefined')&&Notification.permission==='granted'){ _probarNotiA(); return; }
   if(!_pushSupportedA()){
