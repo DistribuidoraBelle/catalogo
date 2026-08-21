@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<!-- BELLE_BUILD 20260821-1730 saca-texto-suelto -->
+<!-- BELLE_BUILD 20260821-1900 app-aurora-y-stock-listas -->
 <html lang="es">
 <head>
 <meta charset="UTF-8">
@@ -11683,23 +11683,58 @@ function _liProcesar(){
   _liRender();
 }
 function _liProd(id){ return (prods||[]).find(function(p){return p.id===id;})||null; }
+// 🐛 FIX 2026-08-21: la lista sumaba stock_actual + reserva y daba por disponible
+// lo que ya estaba comprometido a otros pedidos, así que dejaba cargar productos
+// con 0 libres. El criterio bueno es el que ya usa chgQty (FIX 2026-06-18):
+// DISPONIBLE = stock_actual. La reserva NO se puede vender.
+// Devuelve también cuánto queda libre descontando lo que ya está en el carrito.
+function _liDisp(p){
+  if(!p) return {disp:0,resv:0,enCarrito:0,libre:0};
+  var disp=Math.max(0,p.stock_actual||0);
+  var resv=Math.max(0,p.reserva||0);
+  var enCarrito=(cart&&cart[p.id]&&!cart[p.id].isDecan)?(cart[p.id].qty||0):0;
+  return {disp:disp,resv:resv,enCarrito:enCarrito,libre:Math.max(0,disp-enCarrito)};
+}
+// Texto corto del stock para mostrar en cada renglón
+function _liStockTxt(p){
+  var d=_liDisp(p);
+  if(d.libre>0){
+    return "<span style='color:#4caf80;font-weight:700'>"+d.libre+" disponible"+(d.libre>1?"s":"")+"</span>"+
+           (d.resv>0?" <span style='color:var(--tx3)'>("+d.resv+" reservada"+(d.resv>1?"s":"")+")</span>":"")+
+           (d.enCarrito>0?" <span style='color:var(--tx3)'>("+d.enCarrito+" ya en el carrito)</span>":"");
+  }
+  if(d.resv>0 && d.disp===0)
+    return "<span style='color:#e06464;font-weight:700'>SIN STOCK</span> <span style='color:var(--tx3)'>— las "+d.resv+" que hay están reservadas para otros pedidos</span>";
+  if(d.enCarrito>0)
+    return "<span style='color:#e8b86d;font-weight:700'>Ya cargaste las "+d.enCarrito+" que había</span>";
+  return "<span style='color:#e06464;font-weight:700'>SIN STOCK</span>";
+}
 function _liRender(){
   var st=window._liState; var body=document.getElementById('_liBody'); if(!st||!body) return;
   var h="<div style='font-size:.74rem;color:var(--tx2);margin-bottom:.55rem'>Revisá los macheos: podés cambiar el producto (🔍), corregir la cantidad o destildar lo que no va. Después confirmá y todo pasa al carrito.</div>";
+  var sinStock=[], recortados=[];
   st.rows.forEach(function(r,i){
     var p=r.prodId?_liProd(r.prodId):null;
-    var stockTotal=p?((p.stock_actual||0)+(p.reserva||0)):0;
+    var d=_liDisp(p);
+    // Sin unidades libres → no se puede agregar, punto. El tilde queda bloqueado.
+    var bloqueado=!!p && d.libre<=0;
+    if(bloqueado){ r.ok=false; sinStock.push(p.nombre); }
+    // Pidió más de lo que hay → se agrega lo que hay y se avisa
+    var recorte=(!!p && !bloqueado && r.qty>d.libre) ? d.libre : 0;
+    if(recorte) recortados.push({n:p.nombre,pidio:r.qty,hay:d.libre});
     var conf=r.score>=0.95?['#4caf80','seguro']:(r.score>=0.6?['#e8b86d','revisar']:['#e06464','dudoso']);
     var precio=''; if(p){ try{ var c=calcP(p); precio=fmt(c.pi||c.pe||c.pm||0); }catch(e){} }
-    h+="<div style='background:var(--sur2);border:1px solid "+(r.ok&&p?'var(--bd)':'rgba(224,100,100,.5)')+";border-radius:10px;padding:.55rem .65rem;margin-bottom:.5rem'>"+
+    var bordeFila=bloqueado?'rgba(224,100,100,.75)':(r.ok&&p?'var(--bd)':'rgba(224,100,100,.5)');
+    h+="<div style='background:"+(bloqueado?'rgba(224,100,100,.07)':'var(--sur2)')+";border:1px solid "+bordeFila+";border-radius:10px;padding:.55rem .65rem;margin-bottom:.5rem'>"+
       "<div style='display:flex;align-items:center;gap:.5rem;flex-wrap:wrap'>"+
-        "<input type='checkbox' "+(r.ok&&p?'checked':'')+" onchange='_liTog("+i+",this.checked)' style='accent-color:var(--acc);width:17px;height:17px;flex-shrink:0'"+((!p)?" disabled":"")+">"+
+        "<input type='checkbox' "+(r.ok&&p&&!bloqueado?'checked':'')+" onchange='_liTog("+i+",this.checked)' style='accent-color:var(--acc);width:17px;height:17px;flex-shrink:0'"+((!p||bloqueado)?" disabled":"")+">"+
         "<div style='flex:1;min-width:150px'>"+
           "<div style='font-size:.68rem;color:var(--tx3)'>"+_liEsc(r.raw)+"</div>"+
-          (p?("<div style='font-size:.84rem;font-weight:700;color:var(--tx)'>"+_liEsc(p.nombre)+"</div>"+
+          (p?("<div style='font-size:.84rem;font-weight:700;color:"+(bloqueado?'var(--tx2)':'var(--tx)')+"'>"+_liEsc(p.nombre)+"</div>"+
               "<div style='font-size:.66rem;color:var(--tx3)'>"+
                 "<span style='color:"+conf[0]+";font-weight:700'>● "+conf[1]+"</span>"+
-                " · stock "+stockTotal+(precio?" · "+precio:"")+"</div>")
+                " · "+_liStockTxt(p)+(precio?" · "+precio:"")+"</div>"+
+              (recorte?("<div style='font-size:.66rem;color:#e8b86d;margin-top:.15rem'>⚠ Pediste "+r.qty+" y hay "+recorte+" — se van a cargar "+recorte+"</div>"):""))
             :"<div style='font-size:.8rem;color:#e06464;font-weight:700'>Sin macheo — buscalo con la lupa</div>")+
         "</div>"+
         "<div style='display:flex;align-items:center;gap:.35rem;flex-shrink:0'>"+
@@ -11717,14 +11752,40 @@ function _liRender(){
         "<div id='_liBr"+i+"'></div></div>"):"")+
     "</div>";
   });
-  var listos=st.rows.filter(function(r){return r.ok&&r.prodId;}).length;
+  // ── Cartel de abajo: lo que NO se puede cargar y por qué ──
+  if(sinStock.length||recortados.length){
+    h+="<div style='background:rgba(224,100,100,.10);border:1px solid rgba(224,100,100,.45);border-radius:10px;padding:.6rem .75rem;margin-top:.2rem'>";
+    if(sinStock.length){
+      h+="<div style='font-size:.8rem;font-weight:800;color:#e06464;margin-bottom:.25rem'>⚠ "+sinStock.length+" producto"+(sinStock.length>1?"s":"")+" sin stock — no se puede"+(sinStock.length>1?"n":"")+" agregar</div>"+
+         "<div style='font-size:.72rem;color:var(--tx2);line-height:1.5'>"+sinStock.map(function(n){return "• "+_liEsc(n);}).join("<br>")+"</div>"+
+         "<div style='font-size:.68rem;color:var(--tx3);margin-top:.3rem'>Si figuran unidades reservadas, ya están comprometidas a otros pedidos: no se pueden vender.</div>";
+    }
+    if(recortados.length){
+      h+="<div style='font-size:.78rem;font-weight:800;color:#e8b86d;margin-top:"+(sinStock.length?".5rem":"0")+";margin-bottom:.25rem'>Estos entran, pero por menos cantidad</div>"+
+         "<div style='font-size:.72rem;color:var(--tx2);line-height:1.5'>"+recortados.map(function(x){
+            return "• "+_liEsc(x.n)+" — pediste "+x.pidio+", hay "+x.hay;
+         }).join("<br>")+"</div>";
+    }
+    h+="</div>";
+  }
+  var listos=st.rows.filter(function(r){ return r.ok && r.prodId && _liDisp(_liProd(r.prodId)).libre>0; }).length;
   body.innerHTML=h;
   var mf=document.querySelector('#_moLista .mf');
   if(mf) mf.innerHTML="<button class='btn btn-g' onclick='_liAbrir()'>← Pegar otra lista</button>"+
     "<button class='btn btn-a' onclick='_liConfirmar()' "+(listos?'':'disabled')+">🛒 Agregar "+listos+" al carrito</button>";
 }
-function _liTog(i,val){ var st=window._liState; if(st&&st.rows[i]){ st.rows[i].ok=!!val; _liRender(); } }
-function _liQty(i,val){ var st=window._liState; if(st&&st.rows[i]){ var q=parseInt(val)||1; st.rows[i].qty=Math.max(1,Math.min(99,q)); } }
+function _liTog(i,val){
+  var st=window._liState; if(!st||!st.rows[i]) return;
+  var r=st.rows[i];
+  // No se puede tildar algo sin unidades libres
+  if(val && r.prodId && _liDisp(_liProd(r.prodId)).libre<=0){
+    toast('Ese producto no tiene stock disponible','twarn');
+    r.ok=false; _liRender(); return;
+  }
+  r.ok=!!val; _liRender();
+}
+// Al cambiar la cantidad se redibuja, así el aviso de "pediste 5 y hay 2" se actualiza solo
+function _liQty(i,val){ var st=window._liState; if(st&&st.rows[i]){ var q=parseInt(val)||1; st.rows[i].qty=Math.max(1,Math.min(99,q)); _liRender(); } }
 function _liElegir(i,prodId){ var st=window._liState; if(st&&st.rows[i]){ st.rows[i].prodId=prodId; st.rows[i].score=1; st.rows[i].ok=true; st.rows[i].buscando=false; _liRender(); } }
 function _liBuscarTog(i){ var st=window._liState; if(st&&st.rows[i]){ st.rows[i].buscando=!st.rows[i].buscando; _liRender(); if(st.rows[i].buscando){ setTimeout(function(){var e=document.getElementById('_liBq'+i);if(e)e.focus();},60); } } }
 function _liBuscar(i){
@@ -11741,7 +11802,11 @@ function _liBuscar(i){
     res=_liMachear(e.value).map(function(c){return _liProd(c.id);}).filter(Boolean).slice(0,8);
   }
   out.innerHTML=res.map(function(p){
-    return "<div onclick='_liElegir("+i+","+p.id+")' style='padding:.45rem .55rem;border-bottom:1px solid var(--bd);cursor:pointer;font-size:.8rem;color:var(--tx)'>"+_liEsc(p.nombre)+" <span style='font-size:.64rem;color:var(--tx3)'>stock "+((p.stock_actual||0)+(p.reserva||0))+"</span></div>";
+    var d=_liDisp(p);
+    var etq=d.libre>0
+      ? "<span style='font-size:.64rem;color:#4caf80'>"+d.libre+" disp.</span>"
+      : "<span style='font-size:.64rem;color:#e06464;font-weight:700'>sin stock"+(d.resv>0?" ("+d.resv+" reservadas)":"")+"</span>";
+    return "<div onclick='_liElegir("+i+","+p.id+")' style='padding:.45rem .55rem;border-bottom:1px solid var(--bd);cursor:pointer;font-size:.8rem;color:"+(d.libre>0?'var(--tx)':'var(--tx3)')+"'>"+_liEsc(p.nombre)+" "+etq+"</div>";
   }).join('')||"<div style='padding:.45rem;font-size:.74rem;color:var(--tx3);font-style:italic'>Sin resultados</div>";
 }
 function _liConfirmar(){
@@ -11750,12 +11815,16 @@ function _liConfirmar(){
   st.rows.forEach(function(r){
     if(!r.ok||!r.prodId) return;
     var p=_liProd(r.prodId); if(!p){ avisos.push('“'+r.texto+'”: producto no encontrado'); return; }
-    var stockTotal=(p.stock_actual||0)+(p.reserva||0);
-    var ya=(cart[p.id]&&!cart[p.id].isDecan)?(cart[p.id].qty||0):0;
-    var disp=stockTotal-ya;
-    if(disp<=0){ avisos.push('“'+_liEsc(p.nombre)+'” sin stock — no se agregó'); return; }
-    var q=Math.min(r.qty,disp);
-    if(q<r.qty) avisos.push('“'+_liEsc(p.nombre)+'”: solo '+q+' de '+r.qty+' (stock)');
+    // DISPONIBLE = stock_actual menos lo que ya está en el carrito. La reserva NO cuenta:
+    // está comprometida a otros pedidos (mismo criterio que chgQty).
+    var d=_liDisp(p);
+    var ya=d.enCarrito;
+    if(d.libre<=0){
+      avisos.push('“'+p.nombre+'” sin stock'+(d.resv>0?' ('+d.resv+' reservada'+(d.resv>1?'s':'')+' para otros pedidos)':'')+' — no se agregó');
+      return;
+    }
+    var q=Math.min(r.qty,d.libre);
+    if(q<r.qty) avisos.push('“'+p.nombre+'”: entraron '+q+' de '+r.qty+' (es lo que hay disponible)');
     var nuevo=ya+q;
     var c=calcP(p);
     var seg=getBestSeg(getCartTotalUnits()+q,c);
@@ -11948,6 +12017,7 @@ function _appRenderHome(){
     {emo:'📖',lbl:'Catálogo',fn:"_appTool('catalogo','📖 Catálogo')"},
     {emo:'🔔',lbl:'Avisos',fn:"_appTool('avisos','🔔 Avisos')"},
     {emo:'🗺️',lbl:'Rutas',fn:"_appTool('rutas','🗺️ Rutas')"},
+    {emo:'🚚',lbl:'Pedidos en viaje',fn:"_appTool('pedidos-prov','🚚 Pedidos en viaje')"},
     {emo:'🧮',lbl:'Calculadora',fn:"_appTool('calculadora','🧮 Calculadora')"},
     {emo:'📝',lbl:'Cotizaciones',fn:"_appTool('cotizaciones','📝 Cotizaciones')"}
   ];
@@ -11970,7 +12040,7 @@ function _appRenderHome(){
   h+="<button onclick=\"_appVerPedidos()\" style='width:100%;background:linear-gradient(135deg,#1e3a5f,#2f5f96);color:#fff;border:none;border-radius:16px;padding:1.05rem 1.15rem;font-size:1.1rem;font-weight:800;cursor:pointer;display:flex;align-items:center;gap:.7rem;box-shadow:0 6px 20px rgba(47,95,150,.35);margin-bottom:1.1rem'><span style='font-size:1.6rem'>📋</span><span style='flex:1;text-align:left'>Mis pedidos</span><span id='_appPedHomeBadge' style='display:none;background:#e74c3c;color:#fff;border-radius:999px;min-width:22px;height:22px;font-size:.72rem;font-weight:800;align-items:center;justify-content:center;padding:0 6px'>0</span><span style='font-size:1.2rem'>›</span></button>";
   h+="<div style='display:grid;grid-template-columns:repeat(2,1fr);gap:.7rem'>";
   tiles.forEach(function(t){
-    h+="<button onclick=\""+t.fn+"\" style='background:var(--sur2,#26221e);border:1px solid var(--bd);border-radius:14px;padding:1rem .6rem;cursor:pointer;display:flex;flex-direction:column;align-items:center;gap:.45rem;min-height:96px;color:var(--tx);transition:transform .12s' ontouchstart='' onmousedown='this.style.transform=\"scale(.96)\"' onmouseup='this.style.transform=\"\"' onmouseleave='this.style.transform=\"\"'>"+
+    h+="<button class='_appTile' onclick=\""+t.fn+"\" style='background:var(--sur2,#26221e);border:1px solid var(--bd);border-radius:14px;padding:1rem .6rem;cursor:pointer;display:flex;flex-direction:column;align-items:center;gap:.45rem;min-height:96px;color:var(--tx);transition:transform .12s' ontouchstart='' onmousedown='this.style.transform=\"scale(.96)\"' onmouseup='this.style.transform=\"\"' onmouseleave='this.style.transform=\"\"'>"+
       "<span style='font-size:1.8rem'>"+t.emo+"</span>"+
       "<span style='font-size:.8rem;font-weight:600;text-align:center;line-height:1.15'>"+t.lbl+"</span></button>";
   });
@@ -19154,6 +19224,44 @@ function _rtBorrarDir(id){
     body.app-tool .cart-bar{padding:.9rem 1.1rem;z-index:140}
     body.app-tool .cart-bar .cb-total{font-size:1.15rem}
     body.app-tool .cart-bar .btn-a{padding:.68rem 1.2rem;font-size:1rem;font-weight:800}
+
+    /* ══════════════════════════════════════════════════════════════════
+       TEMA AURORA EN EL MODO APP — 2026-08-21
+       #appMobile es una capa fija que tapaba TODO con un color plano, así
+       que el modo app se veía sin el fondo del tema. Ahora lleva el mismo
+       aurora (tiene que ser opaco igual: atrás está el panel de PC).
+       ══════════════════════════════════════════════════════════════════ */
+    #appMobile{
+      background:
+        radial-gradient(80vw 42vh at 6% -4%,   rgba(232,184,109,.22), transparent 62%),
+        radial-gradient(86vw 46vh at 98% 6%,   rgba(120, 90,220,.26), transparent 60%),
+        radial-gradient(96vw 56vh at 50% 106%, rgba( 60,150,190,.20), transparent 62%),
+        var(--bg) !important;
+    }
+    /* Encabezado del modo app: vidrio esmerilado */
+    #appMobile > div:first-of-type{
+      background:rgba(14,18,30,.72) !important;
+      border-bottom:1px solid var(--gbd) !important;
+      -webkit-backdrop-filter:blur(16px); backdrop-filter:blur(16px);
+    }
+    /* Los botones de accesos rápidos, de vidrio */
+    #appMobile ._appTile{
+      background:var(--glass) !important;
+      border:1px solid var(--gbd) !important;
+      -webkit-backdrop-filter:blur(10px); backdrop-filter:blur(10px);
+    }
+    #appMobile ._appTile:active{ background:var(--glass2) !important; }
+    /* Barra de arriba cuando entrás a una herramienta (catálogo, rutas, etc.) */
+    #appToolBar{
+      background:rgba(14,18,30,.78) !important;
+      border-bottom:1px solid var(--gbd) !important;
+      -webkit-backdrop-filter:blur(16px); backdrop-filter:blur(16px);
+    }
+    /* La toolbar del catálogo en modo app también tapaba el fondo con color plano */
+    body.app-tool #pg-catalogo .toolbar{
+      background:rgba(10,13,22,.85) !important;
+      -webkit-backdrop-filter:blur(14px); backdrop-filter:blur(14px);
+    }
   </style>
   <div id="appMobile" style="display:none;position:fixed;inset:0;z-index:900;background:var(--bg,#12100e);flex-direction:column;overflow-y:auto;overflow-x:hidden;-webkit-overflow-scrolling:touch">
     <div style="position:sticky;top:0;background:var(--sur,#1c1917);border-bottom:1px solid var(--bd);padding:.8rem 1rem;display:flex;align-items:center;justify-content:space-between;z-index:2">
