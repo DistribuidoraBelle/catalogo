@@ -742,7 +742,7 @@ body{
     <div class="sb-item admin-only" onclick="navTo('deposito',this)"><span>&#127968;</span><span>Depósito Marcela</span></div>
     <!-- Marcela sidebar -->
     <div class="sb-item deposito-only" onclick="navTo('deposito-marcela',this)" style="display:none"><span>&#127968;</span><span>Mi Depósito</span></div>
-    <div class="sb-item deposito-only" onclick="navTo('reservas',this)" style="display:none"><span>&#128205;</span><span>Reservas</span></div>
+    <div class="sb-item deposito-only" onclick="navTo('reservas',this)" style="display:none"><span>&#128205;</span><span>P. Pendientes</span></div>
   
     <div class="sb-item admin-only" onclick="navTo('estadisticas',this)"><span>&#128202;</span><span>Estadisticas</span></div>
     
@@ -1043,9 +1043,9 @@ body{
     <div class="tbl-wrap" style="padding:.8rem">
       <div class="db-sec-title">&#128230; Stock</div>
       <div style="display:grid;grid-template-columns:repeat(3,1fr);gap:.35rem;margin-bottom:.5rem">
-        <div class="db-stat"><div class="db-stat-lbl">Total perfumes</div><div class="db-stat-val" id="dStkTotal">-</div></div>
+        <div class="db-stat"><div class="db-stat-lbl">Total perfumes (físico)</div><div class="db-stat-val" id="dStkTotal">-</div></div>
         <div class="db-stat"><div class="db-stat-lbl">Disponible</div><div class="db-stat-val sv-green" id="dStkDisp">-</div></div>
-        <div class="db-stat"><div class="db-stat-lbl">Reservas</div><div class="db-stat-val sv-blue" id="dStkRes">-</div></div>
+        <div class="db-stat"><div class="db-stat-lbl" title="Unidades apartadas por pedidos pendientes (web sin confirmar + confirmados)">P. Pendientes</div><div class="db-stat-val sv-blue" id="dStkRes">-</div></div>
         <div class="db-stat"><div class="db-stat-lbl">Con stock</div><div class="db-stat-val sv-green" id="dStkCon">-</div></div>
         <div class="db-stat"><div class="db-stat-lbl">Sin stock</div><div class="db-stat-val sv-red" id="dStkSin">-</div></div>
         <div class="db-stat"><div class="db-stat-lbl">Dep. Marcela</div><div class="db-stat-val sv-blue" id="dStkDep">-</div></div>
@@ -1160,7 +1160,7 @@ body{
 
     <!-- Reservas activas -->
     <div class="tbl-wrap" style="padding:.75rem;cursor:pointer;border-left:3px solid var(--blue)" onclick="navTo('auditoria-stock',null)">
-      <div class="db-stat-lbl" style="margin-bottom:.3rem">📦 Reservas activas</div>
+      <div class="db-stat-lbl" style="margin-bottom:.3rem" title="Stock apartado por pedidos pendientes (web sin confirmar + confirmados)">📦 P. Pendientes (stock apartado)</div>
       <div style="display:flex;justify-content:space-between;align-items:flex-end">
         <div>
           <div style="font-size:1.3rem;font-weight:700;color:var(--blue)" id="dKpiReservasUnid">0u</div>
@@ -6094,10 +6094,12 @@ function loadDashboard(){
     var perfumes=todosProds.filter(function(p){
       return PERF_REGEX.test(p.nombre) && !EXCL_REGEX.test(p.nombre);
     });
-    var stTotal=perfumes.reduce(function(s,p){return s+(p.stock_actual||0);},0);
+    // FIX 2026-08 (auditoría reservas): en este sistema stock_actual YA es lo disponible
+    // (reservar hace stock_actual−N / reserva+N). Antes se restaba reserva DOS veces.
+    // Físico real = disponible + apartado (P. Pendientes).
+    var stDisp=perfumes.reduce(function(s,p){return s+(p.stock_actual||0);},0);
     var stReserva=perfumes.reduce(function(s,p){return s+(p.reserva||0);},0);
-    // Disponible = stock fisico total MENOS reservas
-    var stDisp=Math.max(0, stTotal-stReserva);
+    var stTotal=stDisp+stReserva;
     var stDep=perfumes.reduce(function(s,p){return s+(p.deposito_m||0);},0);
     var conStock=perfumes.filter(function(p){return(p.stock_actual||0)>0;}).length;
     var sinStock=perfumes.filter(function(p){return(p.stock_actual||0)===0;}).length;
@@ -9769,10 +9771,11 @@ function _renderPedidosChips(){
   var cTransf=transf.length;
   var cTransfPend=transf.filter(function(t){return t.estado==='pendiente';}).length;
 
+  // 🆕 2026-08 (unificación): Pendientes + Reservados = un solo bucket "P. Pendientes"
+  // (ambos tienen stock reservado; la card distingue "sin confirmar" para los web nuevos).
   var chips=[
     {key:'',label:'Todos',count:cTodos,color:'var(--acc)'},
-    {key:'pendiente',label:'⏳ Pendientes',count:cPend,color:'var(--yel)'},
-    {key:'reservado',label:'📦 Reservados',count:cReserv,color:'var(--cyan)'},
+    {key:'ppend',label:'📦 P. Pendientes',count:cPend+cReserv,color:'var(--cyan)',sub:cPend?cPend+' sin conf.':''},
     {key:'parcial',label:'💰 Cobro parcial',count:cParcial,color:'var(--blue)'},
     {key:'cobrado',label:'✅ Cobrados',count:cCobr,color:'var(--green)'},
     {key:'cancelado',label:'❌ Cancelados',count:cCanc,color:'var(--red)'},
@@ -9827,6 +9830,10 @@ function renderPedidos(){
         var c=window._pedidosClienteCache[p.cliente_id];
         if(!c||!c.cuenta_corriente_habilitada)return false;
       }
+    } else if(est==='ppend'||est==='pendiente'||est==='reservado'){
+      // 🆕 bucket unificado "P. Pendientes": pendiente (sin confirmar) + reservado (confirmado)
+      var _er2=_pedidoEstadoReal(p);
+      if(_er2!=='pendiente'&&_er2!=='reservado')return false;
     } else if(est && _pedidoEstadoReal(p)!==est)return false;
     if(vend==='__sin'){if(p.vendedor_id)return false;}
     else if(vend && String(p.vendedor_id)!==vend)return false;
@@ -9890,7 +9897,8 @@ function renderPedidos(){
   cont.innerHTML=data.map(function(p){
     var estReal=_pedidoEstadoReal(p);
     var estColors={pendiente:'var(--yel)',reservado:'var(--cyan)',parcial:'var(--blue)',cobrado:'var(--green)',cancelado:'var(--red)'};
-    var estLabels={pendiente:'⏳ Pendiente',reservado:'📦 Reservado',parcial:'💰 Cobro parcial',cobrado:'✅ Cobrado',cancelado:'❌ Cancelado'};
+    // 🆕 2026-08 (unificación): ambos son "P. Pendiente"; el interno 'pendiente' = web sin confirmar.
+    var estLabels={pendiente:'🕐 P. Pendiente · sin confirmar',reservado:'📦 P. Pendiente',parcial:'💰 Cobro parcial',cobrado:'✅ Cobrado',cancelado:'❌ Cancelado'};
     var estColor=estColors[estReal]||'var(--tx3)';
     var estLabel=estLabels[estReal]||estReal;
 
@@ -34230,11 +34238,11 @@ function bcRenderRecomendaciones(){
           entry.tipos.push('nuevo');
           entry.info = 'No está en tu catálogo';
         } else {
-          // 🆕 2026-08 (mejora): usar disponible LIBRE (stock físico − reservado), igual que el
-          // resto del sistema, para no recomendar reponer algo cuyo stock ya está comprometido.
-          var stockFis = match.stock_actual||0;
+          // FIX 2026-08 (auditoría reservas): en este sistema stock_actual YA es lo disponible
+          // (reservar hace stock−N / reserva+N). Antes acá se restaba reserva OTRA vez y se
+          // sub-estimaba el disponible (recomendaba reponer de más). La reserva queda como info.
           var reserva = match.reserva||0;
-          var stock = Math.max(0, stockFis - reserva);
+          var stock = match.stock_actual||0;
           var enViaje = match.en_viaje||0;
           var cat = String(match.cat||'3').replace('.0','');
           var costo = match.costo_ind||0;
@@ -34693,7 +34701,8 @@ function bcAccionRapida(tipo){
       if(score < 0.90) return;
 
       // 🆕 2026-08 (mejora): disponible LIBRE (stock físico − reservado), consistente con recomendaciones.
-      var stock = Math.max(0,(match.stock_actual||0)-(match.reserva||0)), enViaje = match.en_viaje||0;
+      // FIX 2026-08 (auditoría reservas): stock_actual YA es lo disponible (no restar reserva de nuevo).
+      var stock = (match.stock_actual||0), enViaje = match.en_viaje||0;
       var cat = String(match.cat||'3').replace('.0',''), costo = match.costo_ind||0;
       var tipos = [];
       if(stock===0 && enViaje===0) tipos.push('nunca');
@@ -44777,11 +44786,66 @@ function loadReservasAdmin(){
   pg.innerHTML="<div class='loading'><div class='spin'></div>Cargando...</div>";
   Promise.all([
     apiGet('productos','select=id,nombre,empresa,stock_actual,reserva&reserva=gt.0&order=empresa,nombre'),
-    apiGet('encargos','select=*&estado=eq.pendiente&order=created_at.desc&limit=100')
+    apiGet('encargos','select=*&estado=eq.pendiente&order=created_at.desc&limit=100'),
+    // 🆕 2026-08 (unificación P. Pendientes): detalle real por pedido activo
+    apiGet('pedidos_catalogo','select=nro_orden,estado,items,cliente_nombre,cliente_id,created_at&estado=in.(pendiente,reservado)&order=created_at.desc&limit=300').catch(function(){return [];})
   ]).then(function(res){
     var prods=Array.isArray(res[0])?res[0]:[];
     var enc=Array.isArray(res[1])?res[1]:[];
+    var peds=Array.isArray(res[2])?res[2]:[];
+
+    // Explotar items de pedidos activos → filas producto·orden·cliente·fecha
+    var filas=[]; var cliIds={};
+    peds.forEach(function(p){
+      var its=[]; try{its=typeof p.items==='string'?JSON.parse(p.items):(p.items||[]);}catch(e){}
+      if(!Array.isArray(its))return;
+      its.forEach(function(it){
+        if(it&&it.isDecan)return; // los decants no apartan stock del producto
+        filas.push({
+          producto:(it&&it.nombre)||'(ítem)', qty:(it&&it.qty)||1,
+          esCombo:!!(it&&it.isCombo),
+          orden:p.nro_orden||'', estado:p.estado, cliente:(p.cliente_nombre||'').trim(),
+          cliente_id:p.cliente_id, created_at:p.created_at
+        });
+        if(!((p.cliente_nombre||'').trim()) && p.cliente_id) cliIds[p.cliente_id]=true;
+      });
+    });
+    var idsFalt=Object.keys(cliIds);
+    var pCli = idsFalt.length
+      ? apiGet('clientes','select=id,nombre,apellido&id=in.('+idsFalt.join(',')+')').catch(function(){return [];})
+      : Promise.resolve([]);
+    return pCli.then(function(clis){
+      var cmap={}; (clis||[]).forEach(function(c){cmap[c.id]=((c.nombre||'')+' '+(c.apellido||'')).trim();});
+      filas.forEach(function(f){ if(!f.cliente && f.cliente_id && cmap[f.cliente_id]) f.cliente=cmap[f.cliente_id]; });
+      filas.sort(function(a,b){ return (a.producto||'').localeCompare(b.producto||'','es',{sensitivity:'base'}); });
+      return {prods:prods, enc:enc, filas:filas, nOrd:peds.length};
+    });
+  }).then(function(d){
+    var prods=d.prods, enc=d.enc, filas=d.filas;
     var html='';
+    // ── Detalle: qué pedido aparta cada producto ──
+    var totU=filas.reduce(function(s,f){return s+(f.qty||0);},0);
+    html+="<div style='font-size:.8rem;font-weight:700;color:var(--cyan);margin-bottom:.45rem'>📦 P. Pendientes — detalle por producto ("+d.nOrd+" pedidos · "+filas.length+" renglones · "+totU+" u)</div>";
+    if(filas.length){
+      html+="<div class='tbl-wrap' style='overflow-x:auto;margin-bottom:.9rem'><table style='width:100%;border-collapse:collapse;font-size:.72rem'>";
+      html+="<tr style='color:var(--tx3);text-align:left'><th style='padding:.35rem .5rem'>Producto</th><th style='padding:.35rem .4rem;text-align:right'>Cant.</th><th style='padding:.35rem .5rem'>Orden</th><th style='padding:.35rem .5rem'>Cliente</th><th style='padding:.35rem .5rem;white-space:nowrap'>Fecha y hora</th><th style='padding:.35rem .4rem'></th></tr>";
+      filas.forEach(function(f){
+        var fh=f.created_at?new Date(f.created_at).toLocaleString('es-AR',{day:'2-digit',month:'2-digit',hour:'2-digit',minute:'2-digit',timeZone:'America/Argentina/Buenos_Aires'}):'';
+        var sinConf=(f.estado==='pendiente')?"<span style='font-size:.55rem;background:rgba(232,160,32,.16);color:#e8a020;border:1px solid rgba(232,160,32,.5);border-radius:4px;padding:.05rem .3rem;font-weight:700;white-space:nowrap'>🕐 sin confirmar</span>":"";
+        var cmb=f.esCombo?"<span style='font-size:.55rem;background:rgba(140,120,220,.16);color:#9b8ae0;border:1px solid rgba(140,120,220,.5);border-radius:4px;padding:.05rem .3rem;font-weight:700'>combo</span> ":"";
+        html+="<tr style='border-top:1px solid var(--bd)'>"+
+          "<td style='padding:.32rem .5rem;color:var(--tx)'>"+cmb+_admEsc(f.producto)+"</td>"+
+          "<td style='padding:.32rem .4rem;text-align:right;font-weight:700;color:var(--cyan)'>"+f.qty+"</td>"+
+          "<td style='padding:.32rem .5rem;color:var(--acc);white-space:nowrap'>"+_admEsc(f.orden)+"</td>"+
+          "<td style='padding:.32rem .5rem;color:var(--tx2)'>"+(_admEsc(f.cliente)||'—')+"</td>"+
+          "<td style='padding:.32rem .5rem;color:var(--tx3);white-space:nowrap'>"+fh+"</td>"+
+          "<td style='padding:.32rem .4rem'>"+sinConf+"</td>"+
+        "</tr>";
+      });
+      html+="</table></div>";
+    } else {
+      html+="<div class='empty' style='padding:.8rem;margin-bottom:.9rem'>No hay pedidos pendientes con stock apartado</div>";
+    }
     if(enc.length){
       html+="<div style='font-size:.75rem;font-weight:700;color:var(--acc);margin-bottom:.5rem'>Encargos pendientes ("+enc.length+")</div>";
       html+=enc.map(function(e){
@@ -44797,7 +44861,7 @@ function loadReservasAdmin(){
       }).join('');
     }
     if(prods.length){
-      html+="<div style='font-size:.75rem;font-weight:700;color:var(--cyan);margin:.8rem 0 .4rem'>Stock reservado ("+prods.length+")</div>";
+      html+="<div style='font-size:.75rem;font-weight:700;color:var(--cyan);margin:.8rem 0 .4rem'>Resumen por producto — contador de apartado ("+prods.length+")</div>";
       html+=prods.map(function(p){
         return "<div class='tbl-wrap' style='padding:.6rem .9rem;margin-bottom:.3rem;display:flex;justify-content:space-between;align-items:center'>"+
           "<div><div style='font-size:.78rem;color:var(--tx)'>"+p.nombre+"</div>"+
@@ -54066,7 +54130,7 @@ var BELLE_IG_MODELOS_RAW=[
 
 </script>
 <!-- BUILD BELLE · 2026-08-08 ARG -->
-<div id="bcBuildStamp" style="position:fixed;bottom:4px;right:6px;z-index:2147483647;font-size:9px;line-height:1;color:#7c85a8;background:rgba(15,17,23,.6);padding:2px 6px;border-radius:4px;pointer-events:none;font-family:ui-monospace,monospace;letter-spacing:.02em;opacity:.55;font-size:7px">08/08 17:00</div>
+<div id="bcBuildStamp" style="position:fixed;bottom:4px;right:6px;z-index:2147483647;font-size:9px;line-height:1;color:#7c85a8;background:rgba(15,17,23,.6);padding:2px 6px;border-radius:4px;pointer-events:none;font-family:ui-monospace,monospace;letter-spacing:.02em;opacity:.55;font-size:7px">26/08 · p-pendientes</div>
 </body>
 <!-- build:20260418-195140-20260418-194515-20260330-001651 -->
 </html>

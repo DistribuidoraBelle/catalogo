@@ -3971,11 +3971,18 @@ function _vcContinuarPedido(clienteId,clienteNombre,accion,items,total,segKey,sk
       reservaChain=reservaChain.then(function(){
         return patchStockFresco(it.producto_id,{stock_actual:-it.qty*(it.cajaCant||1),reserva:+it.qty*(it.cajaCant||1)},"Reserva pedido cliente "+nroOrden)
           .then(function(){
-            return apiPost("movimientos_stock",{
+            // FIX 2026-08 (auditoría): antes un fallo acá era 100% silencioso y el movimiento
+            // se PERDÍA (la reserva quedaba sin rastro). Ahora reintenta 1 vez con espera.
+            var _mv={
               producto_id:it.producto_id,producto_nombre:it.nombre,tipo:"reserva",
               cantidad:it.qty,motivo:"Reserva pedido "+nroOrden+" - cliente "+clienteNombre,
               usuario:VENDEDOR_NOMBRE||"vendedor",periodo:periodoActual
-            }).catch(function(e){console.error("[belle] error silencioso:",e);});
+            };
+            return apiPost("movimientos_stock",_mv).catch(function(){
+              return new Promise(function(res){setTimeout(res,1500);}).then(function(){
+                return apiPost("movimientos_stock",_mv);
+              }).catch(function(e){console.error("[belle] movimiento de reserva PERDIDO tras reintento:",nroOrden,it.producto_id,e);});
+            });
           });
       });
     });
@@ -6052,7 +6059,7 @@ function verHistorialPedido(pedId){
 
     // Estado tipos a labels
     var labels={
-      pendiente:"Pendiente",reservado:"Reservado",cobrado:"Cobrado",cancelado:"Cancelado",cobrado_parcial:"Cobro parcial",
+      pendiente:"P. Pendiente (sin confirmar)",reservado:"P. Pendiente (confirmado)",cobrado:"Cobrado",cancelado:"Cancelado",cobrado_parcial:"Cobro parcial",
       en_preparacion:"En preparación",en_reparto:"En reparto",entregado:"Entregado",
       asignado:"✋ Vendedor asignado",transferido:"↪ Vendedor transferido",
       cliente_asignado:"+ Cliente asignado",cliente_cambiado:"↪ Cliente cambiado",cliente_desasignado:"✕ Cliente desasignado"
@@ -7025,10 +7032,11 @@ function _renderPedidosFiltrados(filtroEstado){
   }
   var cAband=dataFiltAsig.filter(esAbandonado).length;
 
+  // 🆕 2026-08 (unificación): "Pendientes" + "Reservados" ahora son UN solo bucket "P. Pendientes"
+  // (ambos tienen el stock reservado; internamente el estado sigue distinguiendo web sin confirmar).
   var chipsEstado=[
     {key:"todos",      label:"Todos",       count:cTodos},
-    {key:"pendientes", label:"Pendientes",  count:cPend},
-    {key:"reservados", label:"Reservados",  count:cRes},
+    {key:"ppendientes",label:"P. Pendientes",count:cPend},
     {key:"parcial",    label:"Cob. parcial",count:cParc},
     {key:"abandonados",label:"🕒 Abandonados (+7d)",count:cAband},
     {key:"cobrados",   label:"Cobrados",    count:cCob},
@@ -7090,9 +7098,10 @@ function _renderPedidosFiltrados(filtroEstado){
   // ── Aplicar filtro de ESTADO sobre dataFiltAsig ──
   var filtered, isTransf=false;
   var fE=window._pedFiltroEstado;
+  // compat: claves viejas guardadas ("pendientes"/"reservados") mapean al bucket unificado
+  if(fE==="pendientes"||fE==="reservados"){fE="ppendientes";window._pedFiltroEstado="ppendientes";}
   if(fE==="todos"){filtered=dataFiltAsig;}
-  else if(fE==="pendientes"){filtered=dataFiltAsig.filter(function(p){return !esCobrado(p)&&p.estado!=="cancelado";});}
-  else if(fE==="reservados"){filtered=dataFiltAsig.filter(function(p){return p.estado==="reservado"&&!esCobrado(p);});}
+  else if(fE==="ppendientes"){filtered=dataFiltAsig.filter(function(p){return !esCobrado(p)&&p.estado!=="cancelado";});}
   else if(fE==="parcial"){filtered=dataFiltAsig.filter(function(p){return p.estado==="cobrado_parcial"||(!esCobrado(p)&&_cobMax(p)>0);});}
   else if(fE==="abandonados"){filtered=dataFiltAsig.filter(esAbandonado);}
   else if(fE==="cobrados"){filtered=dataFiltAsig.filter(function(p){return esCobrado(p);});}
@@ -7129,15 +7138,13 @@ function _renderPedidosFiltrados(filtroEstado){
   }
 
   if(fE==="todos"){
-    // 🐛 FIX 2026-08-08: los parciales aparecían DOS veces (en "Pendientes" y en
-    // "Cobro parcial") — ahora Pendientes excluye a los que tienen cobro parcial.
-    var pend=filtered.filter(function(p){return !esCobrado(p)&&p.estado!=="cancelado"&&p.estado!=="reservado"&&!(p.estado==="cobrado_parcial"||_cobMax(p)>0);});
-    var resv=filtered.filter(function(p){return p.estado==="reservado"&&!esCobrado(p);});
+    // 🆕 2026-08 (unificación): una sola sección "P. Pendientes" (antes Pendientes + Reservados).
+    // Se conserva el FIX 2026-08-08: los de cobro parcial NO se duplican acá (van en su sección).
+    var pend=filtered.filter(function(p){return !esCobrado(p)&&p.estado!=="cancelado"&&!(p.estado==="cobrado_parcial"||_cobMax(p)>0);});
     var parc=filtered.filter(function(p){return p.estado==="cobrado_parcial"||(!esCobrado(p)&&_cobMax(p)>0);});
     var cob=filtered.filter(function(p){return esCobrado(p);});
     var canc=filtered.filter(function(p){return p.estado==="cancelado";});
-    if(pend.length){html+="<div class='sec-title'>Pendientes <span style='color:var(--red)'>"+pend.length+"</span></div>";pend.forEach(function(p){html+=renderPedCard(p,false);});}
-    if(resv.length){html+="<div class='sec-title' style='margin-top:.6rem'>Reservados <span style='color:var(--cyan)'>"+resv.length+"</span></div>";resv.forEach(function(p){html+=renderPedCard(p,false);});}
+    if(pend.length){html+="<div class='sec-title'>P. Pendientes <span style='color:var(--cyan)'>"+pend.length+"</span></div>";pend.forEach(function(p){html+=renderPedCard(p,false);});}
     if(parc.length){html+="<div class='sec-title' style='margin-top:.6rem'>Cobro parcial</div>";parc.forEach(function(p){html+=renderPedCard(p,false);});}
     // NOTA: ya NO se agrega sección "Transferidas" aparte porque ahora son pedidos_catalogo
     // y ya aparecen dentro de Pendientes/Cobrados/etc según estado. El filtro chip 'Transferidas' sigue funcionando.
@@ -7713,10 +7720,15 @@ function renderPedCard(ped,cobrado){
       _abandBadge="<span style='margin-left:.4rem;font-size:.55rem;color:#fff;background:var(--red);padding:.1rem .4rem;border-radius:4px;font-weight:700'>🕒 ABANDONADO "+_dias+"d</span>";
     }
   }
+  // 🆕 2026-08 (unificación P. Pendientes): el estado interno 'pendiente' = todavía sin confirmar.
+  var _sinConfBadge=(!cobrado&&!cancelado&&ped.estado==="pendiente")
+    ? "<span class='badge' style='font-size:.55rem;margin-left:.4rem;background:rgba(232,160,32,.16);color:#e8a020;border:1px solid rgba(232,160,32,.5);font-weight:700'>🕐 Sin confirmar</span>"
+    : "";
   var html="<div class='ped-card"+(cobrado||cancelado?"":" nuevo")+"'>";
   html+="<div class='ped-header'>";
   html+="<div><div style='font-size:.86rem;font-weight:700;color:var(--tx);overflow:hidden;text-overflow:ellipsis;white-space:nowrap'>👤 "+_vcEsc(_pedNombreCli(ped))+"</div>"+
     "<div style='font-size:.72rem;font-weight:500;color:var(--tx2);margin-top:.1rem'>Pedido web <span style='color:var(--acc);font-size:.7rem'>"+(ped.nro_orden||("#"+ped.id))+"</span>"+
+    _sinConfBadge+
     _asigBadge+
     _abandBadge+
     _transfBadge+
