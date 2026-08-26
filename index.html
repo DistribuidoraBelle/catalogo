@@ -10829,6 +10829,12 @@ function _sendWAOriginal(){
           cant_total: resultados.length,
           fallidas: fallidas.map(function(f){return {pid:f.pid, qty:f.qty, error:f.error};})
         }, {exito:false, error_msg:'Reservas no pudieron aplicarse: '+fallidas.length+'/'+resultados.length});
+        // 🆕 2026-08: avisar a los vendedores por WhatsApp (antes quedaba solo en un log invisible)
+        try{
+          var _det=fallidas.map(function(f){ return f.qty+'x '+String(qtxNombre[f.pid]||('Prod #'+f.pid)).split(' - ').pop(); }).join(', ');
+          var _msgF='⚠️ ATENCIÓN pedido '+nroOrden+'\nNo se pudo apartar stock de: '+_det+'\nRevisá el pedido antes de confirmar (puede faltar mercadería).';
+          sendCallMeBot(cmApiKeyDavid||'4580535','5493515121193',_msgF);
+        }catch(eN){ console.warn('[belle-cat] aviso reservas fallidas:',eN); }
       }
     });
     // FIX: window.open y vaciado del carrito DENTRO del .then() — solo si el pedido se guardó
@@ -10925,7 +10931,7 @@ function _sendWAOriginal(){
     items.forEach(function(it){ if(it.isBonificado&&it.prodId){var pid=parseInt(it.prodId);if(pid)_req[pid]=(_req[pid]||0)+(it.qty||1);} });
     var _ids=Object.keys(_req);
     if(!_ids.length){ _crearPedidoBelle(); return; }
-    apiGet("productos","select=id,nombre,stock_actual&id=in.("+_ids.join(",")+")").then(function(_fr){
+    var _evaluar=function(_fr){
       _fr=Array.isArray(_fr)?_fr:[];
       var _m={}; _fr.forEach(function(p){_m[p.id]=p;});
       var _falla=null;
@@ -10938,7 +10944,18 @@ function _sendWAOriginal(){
         return;
       }
       _crearPedidoBelle();
-    }).catch(function(){ _crearPedidoBelle(); }); // si la verificación falla por red, no bloquear (la RPC igual impide reservar de más)
+    };
+    // FIX 2026-08: si la verificación falla por red, REINTENTAR una vez antes de dejar pasar
+    // (antes un fallo de red salteaba el control; la RPC igual impide reservar de más, pero
+    // el pedido podía quedar creado con un renglón sin apartar y sin aviso al cliente).
+    var _intento=function(n){
+      apiGet("productos","select=id,nombre,stock_actual&id=in.("+_ids.join(",")+")").then(_evaluar)
+      .catch(function(){
+        if(n<1){ setTimeout(function(){_intento(n+1);},1200); }
+        else { _crearPedidoBelle(); } // red caída persistente: no bloquear la venta
+      });
+    };
+    _intento(0);
   })();
 }
 

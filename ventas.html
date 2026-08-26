@@ -922,6 +922,38 @@ function patchStockFresco(prodId, delta, motivo){
   });
 }
 
+// 🆕 2026-08 ANTI-SOBREVENTA VENDEDOR: revalida stock FRESCO de la BD antes de crear un pedido
+// (los datos locales pueden estar viejos: otro pudo vender/reservar mientras armabas el carrito,
+// y patchStockFresco recorta en 0 sin avisar → pedido "reservado" sin respaldo físico).
+// items: [{producto_id|id, qty, cajaCant, isDecan, isCombo, nombre}] — decans y combos no apartan acá.
+// Devuelve Promise<faltas> ([] = todo OK) o null si falló la red (no bloquear: la creación sigue).
+function _verifStockFrescoPedido(items){
+  var req={}, nom={};
+  (items||[]).forEach(function(it){
+    if(!it||it.isDecan||it.isCombo)return;
+    var pid=parseInt(it.producto_id!=null?it.producto_id:it.id,10);
+    if(!pid||isNaN(pid))return;
+    req[pid]=(req[pid]||0)+(it.qty||1)*(it.cajaCant||1);
+    if(it.nombre)nom[pid]=it.nombre;
+  });
+  var ids=Object.keys(req);
+  if(!ids.length)return Promise.resolve([]);
+  return apiGet("productos","select=id,nombre,stock_actual&id=in.("+ids.join(",")+")").then(function(rows){
+    var m={};(Array.isArray(rows)?rows:[]).forEach(function(p){m[p.id]=p;});
+    var faltas=[];
+    ids.forEach(function(k){
+      var p=m[k], disp=p?(p.stock_actual||0):0;
+      if(req[k]>disp)faltas.push({nombre:(p&&p.nombre)||nom[k]||("Prod #"+k), pedido:req[k], disp:disp});
+    });
+    return faltas;
+  }).catch(function(e){ console.warn("[verif stock fresco]",e); return null; });
+}
+function _msgFaltasStock(faltas){
+  return "⚠️ SIN STOCK suficiente:\n\n"+faltas.map(function(f){
+    return "· "+String(f.nombre).slice(0,48)+" — pedís "+f.pedido+", disponible: "+(f.disp>0?f.disp:"0 (agotado)");
+  }).join("\n")+"\n\n¿Crear el pedido IGUAL? El stock quedará apartado incompleto.";
+}
+
 // comboIdDeItem (2026-06-03 auditoría stock): resuelve el combo_id de un item de pedido, sea cual sea su formato.
 //  · Formato A (nuevo):     {isCombo:true, combo_id:"11"}  → 11
 //  · Formato B (viejo):     {producto_id:"combo_10"}        → 10
@@ -3935,10 +3967,21 @@ function _vcConfirmarPedido(clienteId,clienteNombre,accion){
 }
 
 // _vcContinuarPedido: continúa el flujo después de validación CC
-function _vcContinuarPedido(clienteId,clienteNombre,accion,items,total,segKey,skipConfirm){
+function _vcContinuarPedido(clienteId,clienteNombre,accion,items,total,segKey,skipConfirm,_stockOk){
   var nroOrden="ORD-"+Math.floor(100000+Math.random()*900000);
   var labelAccion=accion==="cobrar"?"Cobrar al toque":"Reservar para entregar";
   if(!skipConfirm && !confirm(labelAccion+" - "+fmt(total)+" para "+clienteNombre+"?"))return;
+
+  // 🆕 2026-08 anti-sobreventa: revalidar stock FRESCO antes de crear (igual que la web).
+  // Si falta stock de algo, avisa QUÉ y CUÁNTO hay, y el vendedor decide si crear igual.
+  if(!_stockOk){
+    return _verifStockFrescoPedido(items).then(function(faltas){
+      if(faltas && faltas.length && !confirm(_msgFaltasStock(faltas))){
+        toast("Pedido cancelado — ajustá las cantidades","twarn"); return;
+      }
+      return _vcContinuarPedido(clienteId,clienteNombre,accion,items,total,segKey,true,true);
+    });
+  }
 
   // Estado del pedido según acción
   // reservar → estado='reservado', estado_envio='en_preparacion', confirmado_cobro=false
@@ -9626,6 +9669,17 @@ function confirmarReservarPed(){
 }
 
 function _confirmarReservarPedContinuar(){
+  // 🆕 2026-08 anti-sobreventa: stock FRESCO antes de reservar; avisa qué falta y deja elegir.
+  if(!window._resStockOk){
+    _verifStockFrescoPedido(Object.values(cart)).then(function(faltas){
+      if(faltas && faltas.length && !confirm(_msgFaltasStock(faltas))){
+        toast("Reserva cancelada — ajustá las cantidades","twarn"); return;
+      }
+      window._resStockOk=true;
+      try{ _confirmarReservarPedContinuar(); } finally { window._resStockOk=false; }
+    });
+    return;
+  }
   var cliente=document.getElementById("resClienteNombre").value.trim();
   var tel=document.getElementById("resClienteTel").value.trim();
   var nota=document.getElementById("resClienteNota").value.trim();

@@ -2894,11 +2894,52 @@ function abrirReservarPed(){
   document.getElementById("moReservarPed").classList.add("open");
 }
 
+// 🆕 2026-08 ANTI-SOBREVENTA: revalida stock FRESCO antes de crear el pedido (los datos locales
+// pueden estar viejos). Devuelve Promise<faltas> ([]=OK) o null si falló la red (no bloquear).
+function _verifStockFrescoPedido(items){
+  var req={}, nom={};
+  (items||[]).forEach(function(it){
+    if(!it||it.isDecan||it.isCombo)return;
+    var pid=parseInt(it.producto_id!=null?it.producto_id:it.id,10);
+    if(!pid||isNaN(pid))return;
+    req[pid]=(req[pid]||0)+(it.qty||1)*(it.cajaCant||1);
+    if(it.nombre)nom[pid]=it.nombre;
+  });
+  var ids=Object.keys(req);
+  if(!ids.length)return Promise.resolve([]);
+  return apiGet("productos","select=id,nombre,stock_actual&id=in.("+ids.join(",")+")").then(function(rows){
+    var m={};(Array.isArray(rows)?rows:[]).forEach(function(p){m[p.id]=p;});
+    var faltas=[];
+    ids.forEach(function(k){
+      var p=m[k], disp=p?(p.stock_actual||0):0;
+      if(req[k]>disp)faltas.push({nombre:(p&&p.nombre)||nom[k]||("Prod #"+k), pedido:req[k], disp:disp});
+    });
+    return faltas;
+  }).catch(function(e){ console.warn("[verif stock fresco]",e); return null; });
+}
+function _msgFaltasStock(faltas){
+  return "⚠️ SIN STOCK suficiente:\n\n"+faltas.map(function(f){
+    return "· "+String(f.nombre).slice(0,48)+" — pedís "+f.pedido+", disponible: "+(f.disp>0?f.disp:"0 (agotado)");
+  }).join("\n")+"\n\n¿Crear el pedido IGUAL? El stock quedará apartado incompleto.";
+}
+
 function confirmarReservarPed(){
   if(window._reservandoPedM){toast("Espera, procesando...","twarn");return;}
   window._reservandoPedM=true;
+  // 🆕 2026-08 anti-sobreventa: stock FRESCO antes de reservar; avisa qué falta y deja elegir.
+  if(!window._resStockOkM){
+    _verifStockFrescoPedido(Object.values(cart)).then(function(faltas){
+      if(faltas && faltas.length && !confirm(_msgFaltasStock(faltas))){
+        toast("Reserva cancelada — ajustá las cantidades","twarn");
+        window._reservandoPedM=false; return;
+      }
+      window._resStockOkM=true; window._reservandoPedM=false;
+      try{ confirmarReservarPed(); } finally { window._resStockOkM=false; }
+    });
+    return; // el candado sigue tomado mientras se verifica (evita doble click)
+  }
   var cliente=document.getElementById("resClienteNombre").value.trim();
-  if(!cliente){toast("Ingresa el nombre del cliente","twarn");return;}
+  if(!cliente){toast("Ingresa el nombre del cliente","twarn");window._reservandoPedM=false;return;} // FIX: liberar candado
   var tel=document.getElementById("resClienteTel").value.trim();
   var nota=document.getElementById("resClienteNota").value.trim();
   var entregaFecha=(document.getElementById("resEntregaFecha")||{}).value||"";
