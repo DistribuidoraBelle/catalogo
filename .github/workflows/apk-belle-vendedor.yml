@@ -1,0 +1,101 @@
+# ══════════════════════════════════════════════════════════════════════════
+#  Arma el APK de Belle Vendedor en la nube (GitHub Actions).
+#  Abre DIRECTO en el modo app (ventas.html?app=1): sin vista de escritorio.
+#  No hace falta instalar nada en la computadora.
+#
+#  Para correrlo: en GitHub -> pestania "Actions" -> "Armar APK - Belle Vendedor"
+#  -> boton "Run workflow". Cuando termina (unos 4 minutos), el APK queda para
+#  descargar abajo de todo, en "Artifacts".
+#
+#  La llave de firma llega desde el secreto ANDROID_KEYSTORE_B64. Nunca se
+#  guarda en el repositorio porque es publico.
+# ══════════════════════════════════════════════════════════════════════════
+name: Armar APK - Belle Vendedor
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - 'app-android-vendedor/**'
+      - '.github/workflows/apk-belle-vendedor.yml'
+
+jobs:
+  apk:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Traer el codigo
+        uses: actions/checkout@v4
+
+      - name: Preparar Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Preparar el kit de Android
+        uses: android-actions/setup-android@v3
+
+      - name: Preparar Gradle
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.9'
+
+      - name: Poner la llave de firma
+        id: llave
+        env:
+          KEYSTORE_B64: ${{ secrets.ANDROID_KEYSTORE_B64 }}
+        run: |
+          if [ -n "$KEYSTORE_B64" ]; then
+            echo "$KEYSTORE_B64" | tr -d '\n' | base64 -d > app-android-vendedor/app/belle-vendedor.p12
+            echo "firmada=si" >> "$GITHUB_OUTPUT"
+            echo "Llave cargada desde el secreto."
+          else
+            echo "firmada=no" >> "$GITHUB_OUTPUT"
+            echo "::warning::No esta cargado el secreto ANDROID_KEYSTORE_B64. Se firma con una llave descartable: la app se instala igual, pero va a mostrar la barra con la direccion arriba y no se va a poder actualizar encima de una instalacion anterior."
+            keytool -genkeypair -v -storetype PKCS12 \
+              -keystore app-android-vendedor/app/belle-vendedor.p12 \
+              -alias belle -keyalg RSA -keysize 2048 -validity 10000 \
+              -storepass belle-admin-2026 -keypass belle-admin-2026 \
+              -dname "CN=Belle Vendedor, O=Distribuidora Belle, C=AR"
+          fi
+
+      - name: Compilar
+        working-directory: app-android-vendedor
+        env:
+          BELLE_KEYSTORE_PASS: ${{ secrets.ANDROID_KEYSTORE_PASS || 'belle-admin-2026' }}
+        run: gradle :app:assembleRelease --no-daemon --stacktrace
+
+      - name: Verificar la huella de la firma
+        run: |
+          APK=$(find app-android-vendedor/app/build/outputs/apk/release -name '*.apk' | head -1)
+          echo "APK: $APK"
+          BT=$(ls -d "$ANDROID_HOME"/build-tools/* | sort -V | tail -1)
+          "$BT/apksigner" verify --print-certs "$APK" | grep -i "SHA-256 digest" || true
+
+      - name: Renombrar
+        run: |
+          mkdir -p salida
+          cp "$(find app-android-vendedor/app/build/outputs/apk/release -name '*.apk' | head -1)" salida/BelleVendedor.apk
+          ls -lh salida/
+
+      - name: Guardar el APK para descargar
+        uses: actions/upload-artifact@v4
+        with:
+          name: BelleVendedor-apk
+          path: salida/BelleVendedor.apk
+          retention-days: 90
+
+      - name: Resumen
+        run: |
+          {
+            echo "## APK de Belle Vendedor"
+            echo ""
+            if [ "${{ steps.llave.outputs.firmada }}" = "si" ]; then
+              echo "Firmado con la llave oficial. Se instala a pantalla completa, sin barra de direcciones, y abre directo en el modo app."
+            else
+              echo "**Ojo:** se firmo con una llave descartable porque falta cargar el secreto \`ANDROID_KEYSTORE_B64\`."
+              echo "La app se instala igual, pero va a mostrar la barra con la direccion arriba."
+            fi
+            echo ""
+            echo "Descargalo abajo de todo, en **Artifacts** -> BelleVendedor-apk."
+          } >> "$GITHUB_STEP_SUMMARY"
