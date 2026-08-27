@@ -7920,6 +7920,92 @@ function _finDiasVencida(v){ var h=_finHoy(); if(v>=h)return 0;
   var a=v.split('-').map(Number), b=h.split('-').map(Number);
   return Math.round((new Date(b[0],b[1]-1,b[2])-new Date(a[0],a[1]-1,a[2]))/86400000); }
 function _finEsc(s){ return String(s==null?'':s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;'); }
+// ── ⚖️ MOTOR DE MORA (2026-08-27) ───────────────────────────────────
+// Config por plan: tipo (fija/diaria/mensual) · modo (% de la cuota o $ fijo)
+// · días de gracia · tope máximo (% de la cuota). La mora NO se guarda en el
+// monto: se CALCULA en vivo según el atraso y se cobra junto con la cuota
+// (queda asentada en recargo_aplicado y en pagada_monto al cobrar).
+function _finMoraDe(cuota, f){
+  if(!cuota || cuota.pagada || !f) return 0;
+  var tipo=f.mora_tipo||'ninguna', val=parseFloat(f.mora_valor)||0;
+  if(tipo==='ninguna' || val<=0) return 0;
+  var dias=_finDiasVencida(String(cuota.vencimiento).slice(0,10));
+  var efectivos=dias-(parseInt(f.mora_gracia_dias)||0);
+  if(efectivos<=0) return 0;
+  var base=parseFloat(cuota.monto)||0;
+  var unidad=(f.mora_modo==='monto')?val:base*(val/100);
+  var mora=0;
+  if(tipo==='fija') mora=unidad;                              // una sola vez
+  else if(tipo==='diaria') mora=unidad*efectivos;             // por cada día
+  else if(tipo==='mensual') mora=unidad*Math.ceil(efectivos/30); // por mes (o fracción)
+  var tope=parseFloat(f.mora_tope_pct)||0;
+  if(tope>0) mora=Math.min(mora, base*(tope/100));
+  return Math.round(mora);
+}
+function _finMoraTxt(f){
+  if(!f || (f.mora_tipo||'ninguna')==='ninguna' || !(parseFloat(f.mora_valor)>0)) return 'Sin mora';
+  var v=parseFloat(f.mora_valor);
+  var q=(f.mora_modo==='monto')?fmt(v):(v+'%');
+  var cad=f.mora_tipo==='fija'?'por única vez':f.mora_tipo==='diaria'?'por día':'por mes';
+  var g=(parseInt(f.mora_gracia_dias)||0);
+  return q+' '+cad+(g>0?(' · '+g+'d de gracia'):'')+(parseFloat(f.mora_tope_pct)>0?(' · tope '+f.mora_tope_pct+'%'):'');
+}
+function _finMoraTotal(f){
+  return (f.cuotas||[]).reduce(function(s,c){ return s+_finMoraDe(c,f); },0);
+}
+// Bloque de configuración de mora (se usa al crear y al editar el plan)
+function _finMoraForm(f, pref){
+  f=f||{}; pref=pref||'';
+  var t=f.mora_tipo||'ninguna', m=f.mora_modo||'pct';
+  var sel=function(v,cur){ return v===cur?" selected":""; };
+  return "<div style='display:grid;grid-template-columns:1fr 1fr;gap:.45rem'>"+
+      "<div class='fg'><label style='font-size:.64rem;color:var(--tx3)'>Cuándo se aplica</label>"+
+        "<select class='fi finMoraCfg' id='"+pref+"finMoraTipo' style='font-size:.76rem'>"+
+          "<option value='ninguna'"+sel('ninguna',t)+">Sin mora</option>"+
+          "<option value='fija'"+sel('fija',t)+">Una sola vez (fija)</option>"+
+          "<option value='diaria'"+sel('diaria',t)+">Por cada día de atraso</option>"+
+          "<option value='mensual'"+sel('mensual',t)+">Por mes de atraso</option>"+
+        "</select></div>"+
+      "<div class='fg'><label style='font-size:.64rem;color:var(--tx3)'>Cómo se calcula</label>"+
+        "<select class='fi finMoraCfg' id='"+pref+"finMoraModo' style='font-size:.76rem'>"+
+          "<option value='pct'"+sel('pct',m)+">% de la cuota</option>"+
+          "<option value='monto'"+sel('monto',m)+">$ fijo</option>"+
+        "</select></div>"+
+      "<div class='fg'><label style='font-size:.64rem;color:var(--tx3)'>Valor (% o $)</label>"+
+        "<input class='fi finMoraCfg' id='"+pref+"finMoraValor' type='number' min='0' step='0.5' value='"+(parseFloat(f.mora_valor)||0)+"' style='font-size:.8rem'></div>"+
+      "<div class='fg'><label style='font-size:.64rem;color:var(--tx3)'>Días de gracia</label>"+
+        "<input class='fi finMoraCfg' id='"+pref+"finMoraGracia' type='number' min='0' value='"+(parseInt(f.mora_gracia_dias)||0)+"' style='font-size:.8rem'></div>"+
+      "<div class='fg' style='grid-column:1/-1'><label style='font-size:.64rem;color:var(--tx3)'>Tope máximo de mora (% de la cuota · 0 = sin tope)</label>"+
+        "<input class='fi finMoraCfg' id='"+pref+"finMoraTope' type='number' min='0' step='5' value='"+(parseFloat(f.mora_tope_pct)||0)+"' style='font-size:.8rem'></div>"+
+    "</div>"+
+    "<div id='"+pref+"finMoraPrev' style='font-size:.68rem;color:var(--cyan);background:rgba(64,180,200,.07);border-radius:6px;padding:.35rem .5rem;margin-top:.4rem'></div>";
+}
+function _finMoraLeer(pref){
+  pref=pref||'';
+  var g=function(id){ return document.getElementById(pref+id)||{}; };
+  return {
+    mora_tipo:(g('finMoraTipo').value)||'ninguna',
+    mora_modo:(g('finMoraModo').value)||'pct',
+    mora_valor:parseFloat(g('finMoraValor').value)||0,
+    mora_gracia_dias:parseInt(g('finMoraGracia').value)||0,
+    mora_tope_pct:parseFloat(g('finMoraTope').value)||0
+  };
+}
+// Ejemplo en vivo: "si se atrasa 10 días, una cuota de $X paga $Y de mora"
+function _finMoraPreview(pref, montoEjemplo){
+  pref=pref||'';
+  var el=document.getElementById(pref+'finMoraPrev'); if(!el)return;
+  var cfg=_finMoraLeer(pref);
+  if(cfg.mora_tipo==='ninguna'||cfg.mora_valor<=0){ el.innerHTML="Sin mora: las cuotas vencidas no suman recargo automático."; return; }
+  var base=montoEjemplo||40000;
+  var sim=[7,15,30].map(function(d){
+    var fake={monto:base,pagada:false,vencimiento:_finAddDias(_finHoy(),-d)};
+    var mora=_finMoraDe(fake,cfg);
+    return d+"d → <b>"+(mora>0?("+"+fmt(mora)):"$0")+"</b>";
+  }).join(" · ");
+  el.innerHTML="⚖️ <b>"+_finMoraTxt(cfg)+"</b><br>Sobre una cuota de "+fmt(base)+": "+sim;
+}
+
 function _finFormaSel(id,extra){
   return "<select id='"+id+"' class='fi' style='font-size:.74rem;padding:.3rem .45rem;"+(extra||'')+"'>"+
     "<option value='efectivo'>💵 Efectivo</option><option value='transferencia'>🏦 Transferencia</option>"+
@@ -7978,6 +8064,11 @@ function _finCrear(pedId, refiDe, saldoRefi){
             "<span style='font-size:.66rem;color:var(--tx3);white-space:nowrap'>Forma:</span>"+_finFormaSel('finPagoIniForma','flex:1')+
           "</div>"+
         "</div>"+
+        // ⚖️ Interés por mora
+        "<div style='background:var(--sur2);border:1px solid var(--bd);border-radius:9px;padding:.55rem .7rem;margin:.6rem 0'>"+
+          "<div style='font-size:.62rem;color:var(--tx3);text-transform:uppercase;font-weight:700;letter-spacing:.04em;margin-bottom:.4rem'>⚖️ Interés por mora (si se atrasa)</div>"+
+          _finMoraForm(null,'')+
+        "</div>"+
         "<label style='display:flex;align-items:center;gap:.45rem;font-size:.76rem;color:var(--tx2);margin:.6rem 0;cursor:pointer;background:var(--sur2);border:1px solid var(--bd);border-radius:7px;padding:.45rem .6rem'>"+
           "<input type='checkbox' id='finEntregar'"+(refiDe?" disabled":"")+"> 📦 Entrego la mercadería AHORA (el stock reservado pasa a vendido)"+
         "</label>"+
@@ -7997,8 +8088,17 @@ function _finCrear(pedId, refiDe, saldoRefi){
       var r=document.querySelector('.finPagoIniOpt[value=monto]'); if(r&&!r.checked){r.checked=true;var fb=document.getElementById('finPagoIniFormaBox');if(fb)fb.style.display='flex';}
       _finSimRender();
     });
+    document.querySelectorAll('.finMoraCfg').forEach(function(inp){
+      inp.addEventListener('input',function(){_finMoraPreviewCrear();});
+      inp.addEventListener('change',function(){_finMoraPreviewCrear();});
+    });
     _finGenerarFilas();
   });
+}
+// preview de mora usando el monto real de la 1ª cuota que se está armando
+function _finMoraPreviewCrear(){
+  var m1=0; var i=document.querySelector('.finMonto'); if(i)m1=Math.round(parseFloat(i.value)||0);
+  _finMoraPreview('', m1||40000);
 }
 function _finPagoIniSel(){ var r=document.querySelector('.finPagoIniOpt:checked'); return r?r.value:'no'; }
 function _finPagoIniMonto(montos){
@@ -8034,6 +8134,7 @@ function _finGenerarFilas(){
   document.getElementById('finFilas').innerHTML=html;
   document.querySelectorAll('.finMonto,.finFecha').forEach(function(inp){ inp.addEventListener('input',_finSimRender); inp.addEventListener('change',_finSimRender); });
   _finSimRender();
+  try{ _finMoraPreviewCrear(); }catch(e){}
 }
 // 📅 SIMULACIÓN VISUAL: cronograma prolijo de cómo queda el plan (se actualiza en vivo)
 function _finSimRender(){
@@ -8086,6 +8187,7 @@ function _finGuardar(){
   var suma=montos.reduce(function(s,m){return s+m;},0);
   var inte=parseFloat((document.getElementById('finInt')||{}).value)||0;
   var entregar=!!(document.getElementById('finEntregar')||{}).checked;
+  var mora=_finMoraLeer('');
   var pre=refiDe?apiPatch("financiaciones",{estado:'refinanciada'},"id=eq."+refiDe):Promise.resolve();
   pre.then(function(){
     return apiPost("financiaciones",{
@@ -8093,6 +8195,8 @@ function _finGuardar(){
       cliente_nombre:(ped.cliente_nombre||'').trim()||((window._pedCliMap||{})[ped.cliente_id]||null),
       vendedor_id:VENDEDOR_ID||null, // quien crea el plan lo gestiona y recibe los avisos
       total_base:window._finSaldoTmp||0, interes_pct:inte, total_plan:suma,
+      mora_tipo:mora.mora_tipo, mora_modo:mora.mora_modo, mora_valor:mora.mora_valor,
+      mora_gracia_dias:mora.mora_gracia_dias, mora_tope_pct:mora.mora_tope_pct||null,
       estado:'activa', notif_activas:true,
       entregado:refiDe?!!(window._finRefiEntregado):entregar,
       notas:refiDe?('Refinancia el plan #'+refiDe):null
@@ -8185,6 +8289,7 @@ function _finVer(finId){
     var pct=totalPlan>0?Math.min(100,Math.round(pagado/totalPlan*100)):0;
     var proxima=f.cuotas.filter(function(c){return !c.pagada;})[0]||null;
     var nVencidas=f.cuotas.filter(function(c){return !c.pagada&&String(c.vencimiento).slice(0,10)<hoy;}).length;
+    var moraTot=_finMoraTotal(f);
 
     var filas=f.cuotas.map(function(c){
       var chip, borde, fondo="var(--sur2)";
@@ -8195,8 +8300,11 @@ function _finVer(finId){
         else if(v===hoy){ chip="<span style='font-size:.6rem;font-weight:800;color:#000;background:var(--yel);padding:.12rem .45rem;border-radius:10px'>🟠 Vence HOY</span>"; borde="var(--yel)"; }
         else { chip="<span style='font-size:.62rem;color:var(--tx3)'>⏳ Vence "+_finFmtF(v)+"</span>"; borde="var(--bd2)"; }
       }
+      // ⚖️ mora calculada en vivo para esta cuota
+      var _mora=_finMoraDe(c,f);
+      var _moraHtml=_mora>0?("<div style='font-size:.64rem;color:var(--red);font-weight:700;margin-top:.1rem'>⚖️ + "+fmt(_mora)+" de mora → total <b>"+fmt((parseFloat(c.monto)||0)+_mora)+"</b></div>"):"";
       var acciones=c.pagada?"":(
-        "<button class='btn btn-green' style='font-size:.68rem;padding:.28rem .6rem' onclick='_finCobrarCuota("+f.id+","+c.id+")'>💵 Cobrar</button>"+
+        "<button class='btn btn-green' style='font-size:.68rem;padding:.28rem .6rem' onclick='_finCobrarCuota("+f.id+","+c.id+")'>💵 Cobrar"+(_mora>0?" "+fmt((parseFloat(c.monto)||0)+_mora):"")+"</button>"+
         "<button class='btn btn-g' style='font-size:.68rem;padding:.28rem .45rem' title='Editar monto/fecha' onclick='_finEditarCuota("+c.id+")'>✏️</button>"+
         (f.cuotas.filter(function(x){return !x.pagada;}).length>1?"<button class='btn btn-g' style='font-size:.68rem;padding:.28rem .45rem;color:var(--red)' title='Eliminar cuota' onclick='_finEliminarCuota("+f.id+","+c.id+")'>🗑</button>":"")
       );
@@ -8205,8 +8313,8 @@ function _finVer(finId){
           "<div style='display:flex;align-items:center;gap:.55rem;min-width:0'>"+
             "<div style='width:26px;height:26px;border-radius:50%;flex-shrink:0;background:"+(c.pagada?"var(--green)":"var(--sur3)")+";color:"+(c.pagada?"#fff":"var(--tx2)")+";font-weight:800;font-size:.72rem;display:flex;align-items:center;justify-content:center'>"+(c.pagada?"✓":c.nro)+"</div>"+
             "<div><b style='font-size:.82rem;color:var(--tx)'>"+fmt(c.monto)+"</b>"+
-            (c.recargo_aplicado>0?" <span style='font-size:.58rem;color:var(--yel)' title='Incluye recargo por mora'>+"+fmt(c.recargo_aplicado)+" mora</span>":"")+
-            "<div>"+chip+"</div></div>"+
+            (c.recargo_aplicado>0?" <span style='font-size:.58rem;color:var(--yel)' title='Recargo ya aplicado al monto'>+"+fmt(c.recargo_aplicado)+"</span>":"")+
+            "<div>"+chip+"</div>"+_moraHtml+"</div>"+
           "</div>"+
           "<div style='display:flex;align-items:center;gap:.35rem'>"+acciones+"</div>"+
         "</div>"+
@@ -8230,9 +8338,13 @@ function _finVer(finId){
             "<div style='height:100%;width:"+pct+"%;background:linear-gradient(90deg,var(--cyan),var(--green));border-radius:6px;transition:width .3s'></div>"+
           "</div>"+
           "<div style='display:flex;justify-content:space-between;flex-wrap:wrap;gap:.3rem;margin-top:.45rem;font-size:.68rem;color:var(--tx3)'>"+
-            "<span>Restan: <b style='color:"+(restan>0?"var(--yel)":"var(--green)")+"'>"+fmt(restan)+"</b>"+(nVencidas?" · <b style='color:var(--red)'>"+nVencidas+" vencida"+(nVencidas>1?"s":"")+"</b>":"")+"</span>"+
+            "<span>Restan: <b style='color:"+(restan>0?"var(--yel)":"var(--green)")+"'>"+fmt(restan)+"</b>"+(nVencidas?" · <b style='color:var(--red)'>"+nVencidas+" vencida"+(nVencidas>1?"s":"")+"</b>":"")+(moraTot>0?" · ⚖️ mora <b style='color:var(--red)'>"+fmt(moraTot)+"</b>":"")+"</span>"+
             (proxima?"<span>Próx.: cuota "+proxima.nro+" el <b>"+_finFmtF(proxima.vencimiento)+"</b></span>":"")+
             "<span>Mercadería: "+(f.entregado?"<b style='color:var(--green)'>entregada ✓</b>":"<b>sin entregar</b>")+"</span>"+
+          "</div>"+
+          "<div style='display:flex;justify-content:space-between;align-items:center;gap:.4rem;border-top:1px dashed var(--bd);margin-top:.4rem;padding-top:.35rem'>"+
+            "<span style='font-size:.68rem;color:var(--tx3)'>⚖️ Mora: <b style='color:"+((f.mora_tipo||'ninguna')!=='ninguna'?'var(--yel)':'var(--tx3)')+"'>"+_finMoraTxt(f)+"</b></span>"+
+            "<button class='btn btn-g' style='font-size:.64rem;padding:.2rem .5rem' onclick='_finMoraEditar("+f.id+")'>Configurar</button>"+
           "</div>"+
         "</div>"+
         // Forma de cobro global
@@ -8275,14 +8387,15 @@ function _finAdelToggle(){
 }
 // Simula a qué cuotas se aplica el adelanto (preview en vivo)
 function _finAdelCalcular(monto){
-  var f=window._finVerTmp||{}; var resta=monto; var full=[], parcial=null;
+  var f=window._finVerTmp||{}; var resta=monto; var full=[], parcial=null, moraTot=0;
   (f.cuotas||[]).filter(function(c){return !c.pagada;}).forEach(function(c){
     if(resta<=0)return;
-    var m=parseFloat(c.monto)||0;
-    if(resta>=m){ full.push(c); resta-=m; }
-    else if(!parcial){ parcial={c:c,aplica:resta}; resta=0; }
+    var mora=_finMoraDe(c,f);                 // ⚖️ cancelar una cuota vencida cuesta monto+mora
+    var m=(parseFloat(c.monto)||0)+mora;
+    if(resta>=m){ full.push(c); moraTot+=mora; resta-=m; }
+    else if(!parcial){ parcial={c:c,aplica:resta,mora:mora}; resta=0; }
   });
-  return {full:full,parcial:parcial,sobra:resta};
+  return {full:full,parcial:parcial,sobra:resta,mora:moraTot};
 }
 function _finAdelPreview(){
   var el=document.getElementById('finAdelPrev'); if(!el)return;
@@ -8290,7 +8403,7 @@ function _finAdelPreview(){
   if(monto<=0){el.innerHTML='';return;}
   var r=_finAdelCalcular(monto);
   var partes=[];
-  if(r.full.length)partes.push("cancela cuota"+(r.full.length>1?"s":"")+" "+r.full.map(function(c){return c.nro;}).join(", "));
+  if(r.full.length)partes.push("cancela cuota"+(r.full.length>1?"s":"")+" "+r.full.map(function(c){return c.nro;}).join(", ")+(r.mora>0?" <span style='color:var(--red)'>(incluye "+fmt(r.mora)+" de mora)</span>":""));
   if(r.parcial)partes.push("descuenta "+fmt(r.parcial.aplica)+" de la cuota "+r.parcial.c.nro+" (queda "+fmt((parseFloat(r.parcial.c.monto)||0)-r.parcial.aplica)+")");
   if(r.sobra>0)partes.push("<span style='color:var(--yel)'>sobran "+fmt(r.sobra)+" (el plan queda saldado — no se cobra de más)</span>");
   el.innerHTML="→ "+partes.join(" · ");
@@ -8316,7 +8429,8 @@ function _finAdelantar(finId){
     // 2) Cuotas: enteras pagadas + parcial reducida
     var chain=Promise.resolve();
     r.full.forEach(function(c){
-      chain=chain.then(function(){ return apiPatch("financiacion_cuotas",{pagada:true,pagada_at:new Date().toISOString(),pagada_monto:c.monto,forma_cobro:forma},"id=eq."+c.id); });
+      var _mo=_finMoraDe(c,f);
+      chain=chain.then(function(){ return apiPatch("financiacion_cuotas",{pagada:true,pagada_at:new Date().toISOString(),pagada_monto:(parseFloat(c.monto)||0)+_mo,forma_cobro:forma,recargo_aplicado:(parseFloat(c.recargo_aplicado)||0)+_mo},"id=eq."+c.id); });
     });
     if(r.parcial){
       var nuevoMonto=(parseFloat(r.parcial.c.monto)||0)-r.parcial.aplica;
@@ -8363,16 +8477,20 @@ function _finCobrarCuota(finId, cuotaId){
     if(!c||c.pagada){toast(c?"Esa cuota ya está pagada":"Cuota no encontrada","twarn");window._finCobrando=false;return;}
     var f=window._finVerTmp||{};
     var totC=(f.cuotas||[]).length||'?';
+    // ⚖️ mora acumulada de esta cuota (calculada por la config del plan)
+    var mora=_finMoraDe(c,f);
+    var totalCobrar=(parseFloat(c.monto)||0)+mora;
+    if(mora>0 && !confirm("Cuota "+c.nro+": "+fmt(c.monto)+"\n⚖️ Mora por atraso: +"+fmt(mora)+"\n─────────────\nTOTAL A COBRAR: "+fmt(totalCobrar)+"\n\n¿Confirmás el cobro con la mora incluida?\n(Cancelá si querés perdonarle la mora: configurá 'Sin mora' o poné días de gracia)")){ window._finCobrando=false; return; }
     apiPost("ventas",{
       vendedor_id:VENDEDOR_ID, producto_id:null, // 💰 la plata es de QUIEN COBRA (asignación = informativa)
-      producto_nombre:"💳 Cuota "+c.nro+"/"+totC+" — "+(f.nro_orden||('fin#'+finId))+(f.cliente_nombre?" ("+f.cliente_nombre+")":""),
-      cantidad:1, precio_unitario:c.monto, segmento:"financiacion", total:c.monto,
+      producto_nombre:"💳 Cuota "+c.nro+"/"+totC+" — "+(f.nro_orden||('fin#'+finId))+(f.cliente_nombre?" ("+f.cliente_nombre+")":"")+(mora>0?" [+"+fmt(mora)+" mora]":""),
+      cantidad:1, precio_unitario:totalCobrar, segmento:"financiacion", total:totalCobrar,
       periodo:periodoActual, estado:"confirmada", origen:"financiacion", forma_cobro:forma, nro_orden:f.nro_orden||null
     }).then(function(){
-      return apiPatch("financiacion_cuotas",{pagada:true,pagada_at:new Date().toISOString(),pagada_monto:c.monto,forma_cobro:forma},"id=eq."+cuotaId);
+      return apiPatch("financiacion_cuotas",{pagada:true,pagada_at:new Date().toISOString(),pagada_monto:totalCobrar,forma_cobro:forma,recargo_aplicado:(parseFloat(c.recargo_aplicado)||0)+mora},"id=eq."+cuotaId);
     }).then(function(){
       return apiGet("pedidos_catalogo","select=cobrado_parcial,cobrado_total,total&id=eq."+f.pedido_id).then(function(pr){
-        var p=pr&&pr[0]||{}; var nuevo=(Math.max(parseFloat(p.cobrado_parcial)||0,parseFloat(p.cobrado_total)||0))+(parseFloat(c.monto)||0);
+        var p=pr&&pr[0]||{}; var nuevo=(Math.max(parseFloat(p.cobrado_parcial)||0,parseFloat(p.cobrado_total)||0))+totalCobrar;
         return apiPatch("pedidos_catalogo",{cobrado_parcial:nuevo,cobrado_total:nuevo},"id=eq."+f.pedido_id);
       });
     }).then(function(){
@@ -8380,7 +8498,7 @@ function _finCobrarCuota(finId, cuotaId){
         if(Array.isArray(rest)&&rest.length===0) return _finCompletar(f);
       });
     }).then(function(){
-      toast("💵 Cuota "+c.nro+" cobrada: "+fmt(c.monto)+" ✓","tok",4500);
+      toast("💵 Cuota "+c.nro+" cobrada: "+fmt(totalCobrar)+(mora>0?" (incluye "+fmt(mora)+" de mora)":"")+" ✓","tok",4500);
       window._finCobrando=false; _finVer(finId); loadPedidosWeb();
     }).catch(function(e){console.error("[fin cobrar]",e);toast("Error al cobrar la cuota: "+(e.message||""),"terr");window._finCobrando=false;});
   }).catch(function(){window._finCobrando=false;});
@@ -8397,12 +8515,52 @@ function _finCompletar(f){
     toast("🎉 ¡Financiación COMPLETA! El pedido quedó cobrado y saldado.","tok",6000);
   });
 }
+// ⚖️ Configurar / cambiar la mora de un plan ya creado
+function _finMoraEditar(finId){
+  var f=window._finVerTmp; if(!f||f.id!==finId)return;
+  var impagas=(f.cuotas||[]).filter(function(c){return !c.pagada;});
+  var base=impagas.length?(parseFloat(impagas[0].monto)||0):40000;
+  var prev=document.getElementById('_moFinMora'); if(prev)prev.remove();
+  var mo=document.createElement('div'); mo.id='_moFinMora'; mo.className='mo';
+  mo.innerHTML="<div class='md' style='max-width:480px;width:95%'>"+
+    "<div class='md-h'><span>⚖️ Interés por mora</span><button class='xb' onclick='document.getElementById(\"_moFinMora\").remove()'>✕</button></div>"+
+    "<div class='md-b'>"+
+      "<div style='font-size:.7rem;color:var(--tx3);margin-bottom:.5rem'>Se aplica automáticamente a las cuotas <b>vencidas impagas</b> y se cobra junto con la cuota. Podés cambiarlo cuando quieras (o ponerlo en «Sin mora» para perdonarla).</div>"+
+      _finMoraForm(f,'ed')+
+      "<div style='display:flex;gap:.5rem;margin-top:.7rem'>"+
+        "<button class='btn btn-green' style='flex:1' onclick='_finMoraGuardar("+finId+")'>💾 Guardar</button>"+
+        "<button class='btn btn-g' onclick='document.getElementById(\"_moFinMora\").remove()'>Cancelar</button>"+
+      "</div>"+
+    "</div></div>";
+  document.body.appendChild(mo); mo.classList.add('open');
+  document.querySelectorAll('.finMoraCfg').forEach(function(inp){
+    if(inp.id.indexOf('ed')!==0)return;
+    inp.addEventListener('input',function(){_finMoraPreview('ed',base);});
+    inp.addEventListener('change',function(){_finMoraPreview('ed',base);});
+  });
+  _finMoraPreview('ed',base);
+}
+function _finMoraGuardar(finId){
+  var cfg=_finMoraLeer('ed');
+  apiPatch("financiaciones",{mora_tipo:cfg.mora_tipo,mora_modo:cfg.mora_modo,mora_valor:cfg.mora_valor,
+    mora_gracia_dias:cfg.mora_gracia_dias,mora_tope_pct:cfg.mora_tope_pct||null},"id=eq."+finId).then(function(){
+    toast("⚖️ Mora actualizada: "+_finMoraTxt(cfg),"tok",4000);
+    var m=document.getElementById('_moFinMora'); if(m)m.remove();
+    _finVer(finId); loadPedidosWeb();
+  }).catch(function(e){toast("Error: "+(e.message||""),"terr");});
+}
+
 // ♻️ Refinanciar: cierra el plan actual y arma uno nuevo con el saldo impago
 function _finRefinanciar(finId){
   var f=window._finVerTmp; if(!f||f.id!==finId)return;
   var restan=(f.cuotas||[]).filter(function(c){return !c.pagada;}).reduce(function(s,c){return s+(parseFloat(c.monto)||0);},0);
+  var moraAcum=_finMoraTotal(f);
   if(restan<=0){toast("No hay saldo impago para refinanciar","twarn");return;}
-  if(!confirm("♻️ Refinanciar el saldo impago de "+fmt(restan)+"?\n\nEl plan actual se cierra como 'refinanciado' (lo pagado queda registrado) y armás un plan nuevo con nuevas cuotas, interés y fechas."))return;
+  var incluirMora=false;
+  if(moraAcum>0) incluirMora=confirm("⚖️ Hay "+fmt(moraAcum)+" de mora acumulada.\n\nACEPTAR: se suma al saldo a refinanciar ("+fmt(restan+moraAcum)+")\nCANCELAR: se perdona la mora y refinanciás solo "+fmt(restan));
+  var totalRefi=restan+(incluirMora?moraAcum:0);
+  if(!confirm("♻️ Refinanciar "+fmt(totalRefi)+"?\n\nEl plan actual se cierra como 'refinanciado' (lo pagado queda registrado) y armás un plan nuevo con nuevas cuotas, interés y fechas."))return;
+  restan=totalRefi;
   window._finRefiEntregado=!!f.entregado;
   _finCrear(f.pedido_id, finId, restan);
 }
@@ -8475,7 +8633,7 @@ function _finCancelarPlan(finId){
 // Cadencia: 1 aviso al vencer y luego 1 cada 4 días, hasta que se pague o silencien.
 function _finChequearVencimientos(){
   var hoy=_finHoy();
-  apiGet("financiaciones","select=id,nro_orden,cliente_nombre,vendedor_id,notif_activas,financiacion_cuotas(*)&estado=eq.activa&notif_activas=eq.true&limit=300").then(function(fins){
+  apiGet("financiaciones","select=id,nro_orden,cliente_nombre,vendedor_id,notif_activas,mora_tipo,mora_modo,mora_valor,mora_gracia_dias,mora_tope_pct,financiacion_cuotas(*)&estado=eq.activa&notif_activas=eq.true&limit=300").then(function(fins){
     (Array.isArray(fins)?fins:[]).forEach(function(f){
       var totC=(f.financiacion_cuotas||[]).length;
       (f.financiacion_cuotas||[]).forEach(function(c){
@@ -8485,7 +8643,8 @@ function _finChequearVencimientos(){
         var dv=_finDiasVencida(v);
         if(c.ultimo_aviso){ var da=_finDiasVencida(String(c.ultimo_aviso).slice(0,10)); if(da<4)return; }
         var titulo=dv>0?"💳 Cuota VENCIDA hace "+dv+" día"+(dv>1?"s":""):"💳 Cuota vence HOY";
-        var msj="Cuota "+c.nro+"/"+totC+" de "+fmt(c.monto)+" — pedido "+(f.nro_orden||'')+(f.cliente_nombre?" · "+f.cliente_nombre:"")+" (vto "+_finFmtF(v)+")";
+        var _mo=_finMoraDe(c,f);
+        var msj="Cuota "+c.nro+"/"+totC+" de "+fmt(c.monto)+(_mo>0?(" + "+fmt(_mo)+" de mora = "+fmt((parseFloat(c.monto)||0)+_mo)):"")+" — pedido "+(f.nro_orden||'')+(f.cliente_nombre?" · "+f.cliente_nombre:"")+" (vto "+_finFmtF(v)+")";
         apiPost("notificaciones_staff",{rol:'vendedor',vendedor_id:f.vendedor_id||VENDEDOR_ID,tipo:'financiacion',titulo:titulo,mensaje:msj,ref_id:f.id})
           .then(function(){ return apiPatch("financiacion_cuotas",{ultimo_aviso:hoy},"id=eq."+c.id); })
           .then(function(){ try{ if(typeof _appNotisBadge==='function')_appNotisBadge(); }catch(_e){} })
