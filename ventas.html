@@ -7044,6 +7044,7 @@ function loadPedidosWeb(){
     _renderPedidosFiltrados(window._pedFiltroEstado||"ppendientes");
     // 💳 avisos de cuotas por vencer/vencidas (financiación)
     try{ _finChequearVencimientos(); }catch(_eF){}
+    try{ _ccChequearCuotas(); }catch(_eC){}
     // 👤 2026-08-11: los pedidos guardan cliente_id, no el nombre → resolvemos los
     // nombres para el título de las tarjetas (mismo mapa que usa el modo app).
     try{
@@ -7725,6 +7726,9 @@ function _mgConfirmarCobro(){
       });
     }
   }).then(function(){
+    // 🔔 queda en MI campanita (sin push: lo estoy haciendo yo ahora)
+    try{ _avisoPropio('cobro', esSaldado?'✅ Pedido cobrado':'💰 Cobro parcial registrado',
+      (rec.nro_orden||('#'+id))+' — '+fmt(montoCobrar)+' ('+forma+')'+(esSaldado?' · pedido saldado':' · van '+fmt(nuevoCobrado)+' de '+fmt(totalPed)), id); }catch(e){}
     var lineasC = ['Monto: '+fmt(montoCobrar)+' ('+forma+')'];
     if(esSaldado) lineasC.push('✅ Pedido saldado');
     else lineasC.push('Cobrado parcial: '+fmt(nuevoCobrado)+' / '+fmt(totalPed));
@@ -8511,6 +8515,7 @@ function _finCobrarCuota(finId, cuotaId){
       });
     }).then(function(){
       toast("💵 Cuota "+c.nro+" cobrada: "+fmt(totalCobrar)+(mora>0?" (incluye "+fmt(mora)+" de mora)":"")+" ✓","tok",4500);
+      try{ _avisoPropio('financiacion','💵 Cuota cobrada','Cuota '+c.nro+'/'+totC+' de '+fmt(totalCobrar)+(mora>0?' (incluye '+fmt(mora)+' de mora)':'')+' — '+(f.nro_orden||'')+(f.cliente_nombre?' · '+f.cliente_nombre:''), finId); }catch(e){}
       window._finCobrando=false; _finVer(finId); loadPedidosWeb();
     }).catch(function(e){console.error("[fin cobrar]",e);toast("Error al cobrar la cuota: "+(e.message||""),"terr");window._finCobrando=false;});
   }).catch(function(){window._finCobrando=false;});
@@ -8525,6 +8530,7 @@ function _finCompletar(f){
   return cierre.then(function(){
     apiPost("pedidos_estados_log",{pedido_id:f.pedido_id,pedido_tabla:'pedidos_catalogo',estado:'cobrado',nota:'Financiación completada: todas las cuotas pagadas. Pedido saldado.'}).catch(function(){});
     toast("🎉 ¡Financiación COMPLETA! El pedido quedó cobrado y saldado.","tok",6000);
+    try{ _avisoPropio('financiacion','🎉 Financiación completa','Se pagaron todas las cuotas de '+(f.nro_orden||'')+'. El pedido quedó saldado.', f.id); }catch(e){}
   });
 }
 // ⚖️ Configurar / cambiar la mora de un plan ya creado
@@ -12877,6 +12883,57 @@ function _probarNotiV(){
     if(res&&res.sent>0) toast("Push del servidor OK ✓ ("+res.sent+")","tok");
   }).catch(function(){});
 }
+// ══════════════════════════════════════════════════════════════════════
+// 🔔 AVISO PROPIO (2026-08-27): deja el registro en MI campanita, sin push
+// al celular (no tiene sentido vibrar por algo que acabo de hacer yo).
+// ══════════════════════════════════════════════════════════════════════
+function _avisoPropio(tipo, titulo, mensaje, refId){
+  try{
+    if(typeof VENDEDOR_ID==='undefined')return;
+    apiPost("notificaciones_staff",{rol:'vendedor',vendedor_id:VENDEDOR_ID,tipo:tipo||'aviso',
+      titulo:titulo||'',mensaje:mensaje||'',ref_id:refId||null})
+      .then(function(){ try{ if(typeof _appNotisBadge==='function')_appNotisBadge(); }catch(e){} })
+      .catch(function(e){ console.warn('[aviso propio]',e); });
+  }catch(e){}
+}
+
+// ── 💳 Cuotas de CUENTA CORRIENTE: avisar las que vencen hoy o están vencidas ──
+// Mismo criterio que las financiaciones: 1 aviso al vencer y luego 1 cada 4 días.
+function _ccChequearCuotas(){
+  if(typeof VENDEDOR_ID==='undefined')return;
+  var hoy=new Date().toLocaleDateString('en-CA',{timeZone:'America/Argentina/Buenos_Aires'});
+  apiGet("cc_cuotas","select=id,pedido_id,nro_cuota,monto,monto_pagado,fecha_vencimiento,estado&estado=in.(pendiente,parcial,vencida)&fecha_vencimiento=lte."+hoy+"&order=fecha_vencimiento.asc&limit=200")
+  .then(function(cuotas){
+    cuotas=Array.isArray(cuotas)?cuotas:[];
+    if(!cuotas.length)return;
+    var pids=[];cuotas.forEach(function(c){ if(c.pedido_id&&pids.indexOf(c.pedido_id)<0)pids.push(c.pedido_id); });
+    if(!pids.length)return;
+    return apiGet("pedidos_catalogo","select=id,nro_orden,cliente_id,vendedor_id&id=in.("+pids.join(',')+")").then(function(peds){
+      var pm={};(Array.isArray(peds)?peds:[]).forEach(function(p){pm[p.id]=p;});
+      // solo las de MIS pedidos (o sin vendedor asignado)
+      var mias=cuotas.filter(function(c){ var p=pm[c.pedido_id]; return p&&(!p.vendedor_id||p.vendedor_id===VENDEDOR_ID); });
+      if(!mias.length)return;
+      // evitar repetir el mismo aviso el mismo día (marca local por cuota)
+      var yaKey='belle_ccAvisos_'+VENDEDOR_ID, ya={};
+      try{ ya=JSON.parse(localStorage.getItem(yaKey)||'{}'); }catch(e){}
+      var nuevos=0;
+      mias.forEach(function(c){
+        var prev=ya['c'+c.id];
+        if(prev){ var dd=Math.round((new Date(hoy)-new Date(prev))/86400000); if(dd<4)return; }
+        var p=pm[c.pedido_id]||{};
+        var saldo=(parseFloat(c.monto)||0)-(parseFloat(c.monto_pagado)||0);
+        var venc=String(c.fecha_vencimiento).slice(0,10);
+        var dias=Math.round((new Date(hoy)-new Date(venc))/86400000);
+        var titulo=dias>0?("💳 Cuota CC VENCIDA hace "+dias+" día"+(dias>1?"s":"")):"💳 Cuota CC vence HOY";
+        var msj="Cuota "+(c.nro_cuota||'')+" de "+fmt(saldo)+" — pedido "+(p.nro_orden||('#'+c.pedido_id))+" (vto "+venc.split('-').reverse().join('/')+")";
+        _avisoPropio('cc_cuota',titulo,msj,c.id);
+        ya['c'+c.id]=hoy; nuevos++;
+      });
+      if(nuevos){ try{ localStorage.setItem(yaKey,JSON.stringify(ya)); }catch(e){} }
+    });
+  }).catch(function(){});
+}
+
 // ── Centro de notificaciones (campanita) del vendedor ──
 function _appNotisBadge(){
   if(typeof VENDEDOR_ID==='undefined')return;
@@ -12885,7 +12942,7 @@ function _appNotisBadge(){
     if(b){ b.textContent=n>9?'9+':String(n); b.style.display=n>0?'flex':'none'; }
   }).catch(function(){});
 }
-function _appNotisIcono(t){ return t==='pedido'?'🛒':t==='cobro'?'💵':t==='rendicion'?'💰':t==='gasto'?'🧾':t==='devolucion'?'↩️':t==='reclamo'?'📣':'🔔'; }
+function _appNotisIcono(t){ return t==='pedido'?'🛒':t==='cobro'?'💵':t==='rendicion'?'💰':t==='gasto'?'🧾':t==='devolucion'?'↩️':t==='reclamo'?'📣':t==='financiacion'?'💳':t==='cc_cuota'?'🏦':'🔔'; }
 function _appNotisIr(link){
   if(link==='pedidos-web'){ _appVerPedidos(); return; }
   if(link==='dinero'){ _appVerDinero(); return; }
@@ -13286,7 +13343,7 @@ function _appPedRender(tab){
       _appChip(fa,'sinasignar',"_appPedSetAsig('sinasignar')","Sin asignar ("+nSin+")");
   }
   var tabs=document.getElementById('_appPedTabs');
-  if(tabs)tabs.innerHTML=_appChip(window._appPedTab,'pendientes',"_appPedRender('pendientes')","⏳ Pendientes ("+pend.length+")")+_appChip(window._appPedTab,'cobrados',"_appPedRender('cobrados')","✅ Cobrados ("+cob.length+")");
+  if(tabs)tabs.innerHTML=_appChip(window._appPedTab,'pendientes',"_appPedRender('pendientes')","📦 P. Pendientes ("+pend.length+")")+_appChip(window._appPedTab,'cobrados',"_appPedRender('cobrados')","✅ Cobrados ("+cob.length+")");
   var list=window._appPedTab==='cobrados'?cob:pend;
   if(q){ list=list.filter(function(p){ return ((_appPedNombre(p)+" "+(p.nro_orden||"")+" "+tel(p)+" #"+p.id).toLowerCase().indexOf(q)>=0); }); }
   var b=document.getElementById('_appPedBody'); if(!b)return;
@@ -13304,8 +13361,13 @@ function _appPedRender(tab){
     var t=tel(p);
     var envio=(p.modo_entrega==='envio'||p.direccion_entrega_texto)?true:false;
     var cm=cobMax(p);
-    var estado=esCob(p)?"Cobrado":(cm>0?"Parcial":(p.estado==="reservado"?"Reservado":"Pendiente"));
-    var ecol=esCob(p)?"#4caf80":(cm>0?"#e8b86d":(p.estado==="reservado"?"#5b9fe0":"#e06464"));
+    // 🆕 2026-08-27: un solo término y color para todo lo activo — "P. Pendiente"
+    // (antes "Reservado" azul vs "Pendiente" rojo confundía: los dos apartan stock igual).
+    // Solo se diferencia el cobro parcial, y aparte se avisa si hay ERROR de reserva.
+    var estado=esCob(p)?"Cobrado":(cm>0?"Cobro parcial":"P. Pendiente");
+    var ecol=esCob(p)?"#4caf80":(cm>0?"#e8b86d":"#5b9fe0");
+    var _rrApp=''; try{ _rrApp=_resumenReservaPed(its); }catch(e){}
+    var alertaRes=(!esCob(p)&&_rrApp==='err')?"<div style='font-size:.68rem;color:#e74c3c;font-weight:700;margin-top:.25rem'>⚠️ Revisar reserva — algún producto sin stock apartado</div>":"";
     // Viendo "Todos": aclarar de quién es cada pedido (o si está sin asignar)
     var deQuien='';
     if(window._appPedAsig!=='mios'){
@@ -13322,6 +13384,8 @@ function _appPedRender(tab){
       (nItems?"<div style='font-size:.72rem;color:var(--tx2);margin-top:.4rem'>📦 "+nItems+" u."+(primeros?" · "+primeros:"")+"</div>":"")+
       (t?"<div style='font-size:.7rem;color:var(--tx3);margin-top:.15rem'>📞 "+t+"</div>":"")+
       (cm>0&&!esCob(p)?"<div style='font-size:.7rem;color:#e8b86d;margin-top:.15rem'>Cobrado "+fmt(cm)+" de "+fmt(p.total||0)+"</div>":"")+
+      (!esCob(p)&&_rrApp==='ok'?"<div style='font-size:.66rem;color:#4caf80;margin-top:.15rem'>✅ Stock reservado</div>":"")+
+      alertaRes+
     "</div>";
   });
   b.innerHTML=h;
