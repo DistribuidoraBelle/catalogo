@@ -6993,7 +6993,9 @@ function loadPedidosWeb(){
     // Stock fresco: para que los badges R/! reflejen la reserva real (evita falsos "!")
     apiGet("productos","select=id,stock_actual,reserva&activo=is.true&limit=2000").catch(function(){return [];}),
     // Combos + componentes: para el badge de reserva de combos
-    apiGet("combos","select=id,combo_items(producto_id,cantidad)&activo=is.true").catch(function(){return [];})
+    apiGet("combos","select=id,combo_items(producto_id,cantidad)&activo=is.true").catch(function(){return [];}),
+    // 💳 Financiaciones activas + sus cuotas (sistema de cuotas 2026-08)
+    apiGet("financiaciones","select=*,financiacion_cuotas(*)&estado=eq.activa&order=created_at.desc&limit=300").catch(function(){return [];})
   ]).then(function(res){
     var sinCobrar=(Array.isArray(res[0])?res[0]:[]).concat(Array.isArray(res[1])?res[1]:[]);
     var seen={}; sinCobrar=sinCobrar.filter(function(p){if(seen[p.id])return false;seen[p.id]=true;return true;});
@@ -7014,9 +7016,22 @@ function loadPedidosWeb(){
       window._comboCompCache={};
       _fc.forEach(function(c){ if(c && c.id!=null) window._comboCompCache[c.id]=c.combo_items||[]; });
     }catch(_e2){}
+    // 💳 Cache de financiaciones: pedido_id → financiación (con cuotas ordenadas)
+    try{
+      var _ff=Array.isArray(res[7])?res[7]:[];
+      window._finPorPedido={};
+      _ff.forEach(function(f){
+        if(f&&f.pedido_id!=null){
+          f.cuotas=(f.financiacion_cuotas||[]).sort(function(a,b){return (a.nro||0)-(b.nro||0);});
+          window._finPorPedido[f.pedido_id]=f;
+        }
+      });
+    }catch(_e3){}
     window._pedidosData=pedidos;
     window._transfData=transferidas;
     _renderPedidosFiltrados(window._pedFiltroEstado||"ppendientes");
+    // 💳 avisos de cuotas por vencer/vencidas (financiación)
+    try{ _finChequearVencimientos(); }catch(_eF){}
     // 👤 2026-08-11: los pedidos guardan cliente_id, no el nombre → resolvemos los
     // nombres para el título de las tarjetas (mismo mapa que usa el modo app).
     try{
@@ -7863,14 +7878,388 @@ function renderPedCard(ped,cobrado){
     var btnRuta = _enReparto
       ? ""
       : "<button class='btn btn-g' onclick='_rbAgregarPedidoModal("+ped.id+")' title='Agregar a un borrador de ruta' style='padding:.4rem .55rem;flex-shrink:0'>🚚</button>";
+    // 💳 Financiación (2026-08): badge del plan si existe, o botón para crearlo
+    var _fin=(window._finPorPedido||{})[ped.id];
+    var btnFin="";
+    if(_fin){
+      var _fT=(_fin.cuotas||[]).length, _fP=(_fin.cuotas||[]).filter(function(c){return c.pagada;}).length;
+      var _fHoy=_finHoy();
+      var _fVenc=(_fin.cuotas||[]).some(function(c){return !c.pagada&&c.vencimiento<=_fHoy;});
+      btnFin="<button class='btn btn-g' onclick='_finVer("+_fin.id+")' style='padding:.4rem .6rem;flex-shrink:0;font-weight:700;"+(_fVenc?"color:var(--red);border-color:var(--red)":"color:var(--cyan);border-color:var(--cyan)")+"' title='"+(_fVenc?"¡Hay cuotas vencidas! Ver plan":"Ver plan de cuotas")+"'>💳 "+_fP+"/"+_fT+(_fVenc?" ⚠":"")+"</button>";
+    } else {
+      btnFin="<button class='btn btn-g' onclick='_finCrear("+ped.id+")' style='padding:.4rem .55rem;flex-shrink:0' title='Financiar en cuotas'>💳</button>";
+    }
     html+="<div style='display:flex;gap:.4rem;flex-wrap:wrap'>"+
       "<button class='btn btn-a' onclick='_gestionarPedido(\"web\","+ped.id+")' style='flex:1;justify-content:center;min-width:110px'>🗂 Gestionar</button>"+
+      btnFin+
       btnRuta+
     "</div>";
   } else {
     html+="<span class='badge bg-green'>Cobrado</span>";
   }
   html+="</div>";return html;
+}
+
+// ════════════════════════════════════════════════════════════════════
+// 💳 FINANCIACIÓN EN CUOTAS (2026-08) — NO es Cuenta Corriente.
+// El vendedor arma un plan de cuotas sobre un pedido: montos manuales o
+// automáticos con interés %, fecha por cuota, avisos al vencer (y cada 4
+// días si sigue vencida), replanificación, recargo por mora y cierre
+// automático del pedido al saldar la última cuota.
+// La plata de cada cuota entra como una VENTA (segmento 'financiacion'),
+// así queda en Mi dinero / rendición sin doble contabilidad.
+// ════════════════════════════════════════════════════════════════════
+function _finHoy(){ return new Date().toLocaleDateString('en-CA',{timeZone:'America/Argentina/Buenos_Aires'}); }
+function _finFmtF(d){ if(!d)return''; var p=String(d).slice(0,10).split('-'); return p.length===3?(p[2]+'/'+p[1]+'/'+p[0].slice(2)):d; }
+function _finAddDias(d,n){ var p=String(d).slice(0,10).split('-').map(Number); var dt=new Date(p[0],p[1]-1,p[2]+n);
+  return dt.getFullYear()+'-'+String(dt.getMonth()+1).padStart(2,'0')+'-'+String(dt.getDate()).padStart(2,'0'); }
+function _finDiasVencida(v){ var h=_finHoy(); if(v>=h)return 0;
+  var a=v.split('-').map(Number), b=h.split('-').map(Number);
+  return Math.round((new Date(b[0],b[1]-1,b[2])-new Date(a[0],a[1]-1,a[2]))/86400000); }
+
+// ── CREAR PLAN ──────────────────────────────────────────────────────
+function _finCrear(pedId){
+  apiGet("pedidos_catalogo","select=id,nro_orden,total,cobrado_parcial,cobrado_total,cliente_id,cliente_nombre,vendedor_id,estado&id=eq."+pedId).then(function(rows){
+    var ped=rows&&rows[0]; if(!ped){toast("No se encontró el pedido","terr");return;}
+    if(ped.estado==='cobrado'||ped.estado==='cancelado'){toast("Este pedido ya está "+ped.estado,"twarn");return;}
+    var cobrado=Math.max(parseFloat(ped.cobrado_parcial)||0,parseFloat(ped.cobrado_total)||0);
+    var saldo=Math.max(0,(parseFloat(ped.total)||0)-cobrado);
+    if(saldo<=0){toast("El pedido no tiene saldo pendiente para financiar","twarn");return;}
+    window._finPedTmp=ped; window._finSaldoTmp=saldo;
+    var mo=document.getElementById("moFinCrear");
+    if(!mo){ mo=document.createElement("div"); mo.id="moFinCrear"; mo.className="mo"; document.body.appendChild(mo); }
+    mo.innerHTML="<div class='md' style='max-width:560px;width:96%;max-height:92vh;overflow-y:auto'>"+
+      "<div class='md-h'><span>💳 Financiar "+(ped.nro_orden||('#'+ped.id))+"</span>"+
+      "<button class='xb' onclick='document.getElementById(\"moFinCrear\").classList.remove(\"open\")'>✕</button></div>"+
+      "<div class='md-b'>"+
+        "<div style='background:var(--sur3);border-radius:7px;padding:.5rem .7rem;margin-bottom:.6rem;font-size:.75rem'>"+
+          "<div style='display:flex;justify-content:space-between'><span style='color:var(--tx3)'>Total pedido</span><b>"+fmt(ped.total||0)+"</b></div>"+
+          (cobrado>0?"<div style='display:flex;justify-content:space-between'><span style='color:var(--tx3)'>Ya cobrado</span><b style='color:var(--green)'>"+fmt(cobrado)+"</b></div>":"")+
+          "<div style='display:flex;justify-content:space-between;border-top:1px solid var(--bd);margin-top:.2rem;padding-top:.2rem'><span style='color:var(--tx3)'>Saldo a financiar</span><b style='color:var(--acc)'>"+fmt(saldo)+"</b></div>"+
+        "</div>"+
+        "<div style='display:grid;grid-template-columns:1fr 1fr 1fr;gap:.5rem;margin-bottom:.5rem'>"+
+          "<div class='fg'><label style='font-size:.68rem;color:var(--tx3)'>Cuotas</label><input class='fi' id='finN' type='number' min='1' max='36' value='3' style='font-size:.8rem'></div>"+
+          "<div class='fg'><label style='font-size:.68rem;color:var(--tx3)'>Interés %</label><input class='fi' id='finInt' type='number' min='0' step='0.5' value='0' style='font-size:.8rem'></div>"+
+          "<div class='fg'><label style='font-size:.68rem;color:var(--tx3)'>Cada (días)</label><input class='fi' id='finFrec' type='number' min='1' value='30' style='font-size:.8rem'></div>"+
+        "</div>"+
+        "<div class='fg' style='margin-bottom:.5rem'><label style='font-size:.68rem;color:var(--tx3)'>Primer vencimiento</label>"+
+          "<input class='fi' id='finF1' type='date' value='"+_finAddDias(_finHoy(),30)+"' style='font-size:.8rem'></div>"+
+        "<button class='btn btn-g' style='width:100%;font-size:.75rem;margin-bottom:.6rem' onclick='_finGenerarFilas()'>⚙️ Generar cuotas (después podés retocar monto y fecha a mano)</button>"+
+        "<div id='finFilas'></div>"+
+        "<div id='finResumen' style='font-size:.72rem;color:var(--tx3);margin:.4rem 0'></div>"+
+        "<label style='display:flex;align-items:center;gap:.4rem;font-size:.74rem;color:var(--tx2);margin:.5rem 0;cursor:pointer'>"+
+          "<input type='checkbox' id='finEntregar'> Entrego la mercadería AHORA (el stock reservado pasa a vendido)"+
+        "</label>"+
+        "<div style='display:flex;gap:.5rem'>"+
+          "<button class='btn btn-green' style='flex:1' onclick='_finGuardar()'>💾 Crear financiación</button>"+
+          "<button class='btn btn-g' onclick='document.getElementById(\"moFinCrear\").classList.remove(\"open\")'>Cancelar</button>"+
+        "</div>"+
+      "</div></div>";
+    mo.classList.add("open");
+    _finGenerarFilas();
+  });
+}
+function _finGenerarFilas(){
+  var saldo=window._finSaldoTmp||0;
+  var n=Math.max(1,Math.min(36,parseInt((document.getElementById('finN')||{}).value)||1));
+  var inte=parseFloat((document.getElementById('finInt')||{}).value)||0;
+  var frec=Math.max(1,parseInt((document.getElementById('finFrec')||{}).value)||30);
+  var f1=(document.getElementById('finF1')||{}).value||_finAddDias(_finHoy(),30);
+  var totalPlan=Math.round(saldo*(1+inte/100));
+  var base=Math.floor(totalPlan/n); var resto=totalPlan-base*n;
+  var html="<div style='border:1px solid var(--bd);border-radius:7px;overflow:hidden'>";
+  for(var i=0;i<n;i++){
+    var monto=base+(i===n-1?resto:0);
+    var fecha=_finAddDias(f1,frec*i);
+    html+="<div style='display:flex;align-items:center;gap:.4rem;padding:.35rem .5rem;"+(i%2?"background:var(--sur3);":"")+"'>"+
+      "<span style='font-size:.72rem;color:var(--tx3);width:44px;flex-shrink:0'>Cuota "+(i+1)+"</span>"+
+      "<input class='fi finMonto' type='number' min='0' step='100' value='"+monto+"' style='flex:1;font-size:.78rem;padding:.25rem .4rem'>"+
+      "<input class='fi finFecha' type='date' value='"+fecha+"' style='width:135px;font-size:.74rem;padding:.25rem .3rem'>"+
+    "</div>";
+  }
+  html+="</div>";
+  document.getElementById('finFilas').innerHTML=html;
+  document.querySelectorAll('.finMonto').forEach(function(inp){inp.addEventListener('input',_finResumenCalc);});
+  _finResumenCalc();
+}
+function _finResumenCalc(){
+  var saldo=window._finSaldoTmp||0;
+  var suma=0; document.querySelectorAll('.finMonto').forEach(function(inp){suma+=parseFloat(inp.value)||0;});
+  var el=document.getElementById('finResumen'); if(!el)return;
+  var dif=suma-saldo;
+  el.innerHTML="Suma de cuotas: <b style='color:var(--acc)'>"+fmt(suma)+"</b> · Saldo base: "+fmt(saldo)+
+    (dif>0?" · <span style='color:var(--cyan)'>interés incluido: +"+fmt(dif)+"</span>":dif<0?" · <span style='color:var(--red)'>⚠ faltan "+fmt(-dif)+" (queda por debajo del saldo)</span>":" · sin interés");
+}
+function _finGuardar(){
+  if(window._finGuardando)return; window._finGuardando=true;
+  var ped=window._finPedTmp; if(!ped){window._finGuardando=false;return;}
+  var montos=[],fechas=[],ok=true;
+  document.querySelectorAll('.finMonto').forEach(function(inp){montos.push(Math.round(parseFloat(inp.value)||0));});
+  document.querySelectorAll('.finFecha').forEach(function(inp){fechas.push(inp.value);});
+  if(!montos.length){toast("Generá las cuotas primero","twarn");window._finGuardando=false;return;}
+  montos.forEach(function(m,i){ if(m<=0||!fechas[i])ok=false; });
+  if(!ok){toast("Revisá: todas las cuotas necesitan monto (>0) y fecha","twarn");window._finGuardando=false;return;}
+  var suma=montos.reduce(function(s,m){return s+m;},0);
+  var inte=parseFloat((document.getElementById('finInt')||{}).value)||0;
+  var entregar=!!(document.getElementById('finEntregar')||{}).checked;
+  apiPost("financiaciones",{
+    pedido_id:ped.id, nro_orden:ped.nro_orden||null,
+    cliente_nombre:(ped.cliente_nombre||'').trim()||((window._pedCliMap||{})[ped.cliente_id]||null),
+    vendedor_id:ped.vendedor_id||VENDEDOR_ID||null,
+    total_base:window._finSaldoTmp||0, interes_pct:inte, total_plan:suma,
+    estado:'activa', notif_activas:true, entregado:entregar
+  }).then(function(res){
+    var fin=res&&res[0]; if(!fin||!fin.id)throw new Error("No se pudo crear la financiación");
+    var cuotas=montos.map(function(m,i){return {financiacion_id:fin.id,nro:i+1,monto:m,vencimiento:fechas[i]};});
+    return apiPost("financiacion_cuotas",cuotas).then(function(){return fin;});
+  }).then(function(fin){
+    var post=Promise.resolve();
+    if(entregar) post=_finEntregarStock(ped, fin.id);
+    return post.then(function(){
+      toast("💳 Financiación creada: "+montos.length+" cuotas por "+fmt(suma)+" ✓","tok",5000);
+      document.getElementById("moFinCrear").classList.remove("open");
+      window._finGuardando=false;
+      loadPedidosWeb();
+    });
+  }).catch(function(e){ console.error("[fin crear]",e); toast("Error al crear la financiación: "+(e.message||""),"terr"); window._finGuardando=false; });
+}
+// Entrega financiada: el stock reservado pasa a vendido (la plata entra después, por cuotas)
+function _finEntregarStock(ped, finId){
+  return apiGet("pedidos_catalogo","select=items,estado_envio&id=eq."+ped.id).then(function(rows){
+    var p=rows&&rows[0]; if(!p)return;
+    var items=[]; try{items=typeof p.items==='string'?JSON.parse(p.items):(p.items||[]);}catch(e){}
+    var chain=Promise.resolve();
+    (items||[]).forEach(function(it){
+      if(!it||it.isDecan||it.isCombo||!it.producto_id)return;
+      var qty=(it.qty||1)*(it.cajaCant||1);
+      chain=chain.then(function(){
+        return patchStockFresco(parseInt(it.producto_id,10),_dV(ped.vendedor_id||VENDEDOR_ID,+qty,{reserva:-qty}),"Entrega financiada "+(ped.nro_orden||''))
+          .then(function(){
+            return apiPost("movimientos_stock",{producto_id:it.producto_id,producto_nombre:it.nombre||'',tipo:"venta",cantidad:qty,
+              motivo:"Entrega financiada "+(ped.nro_orden||'')+" (se cobra por cuotas)",usuario:VENDEDOR_NOMBRE||"vendedor",periodo:periodoActual}).catch(function(e){console.error("[fin mov]",e);});
+          });
+      });
+    });
+    return chain.then(function(){
+      return apiPatch("pedidos_catalogo",{estado_envio:'entregado',entregado_at:new Date().toISOString()},"id=eq."+ped.id).catch(function(){});
+    });
+  });
+}
+
+// ── VER / GESTIONAR PLAN ────────────────────────────────────────────
+function _finVer(finId){
+  apiGet("financiaciones","select=*,financiacion_cuotas(*)&id=eq."+finId).then(function(rows){
+    var f=rows&&rows[0]; if(!f){toast("No se encontró la financiación","terr");return;}
+    f.cuotas=(f.financiacion_cuotas||[]).sort(function(a,b){return (a.nro||0)-(b.nro||0);});
+    window._finVerTmp=f;
+    var hoy=_finHoy();
+    var pagado=f.cuotas.filter(function(c){return c.pagada;}).reduce(function(s,c){return s+(parseFloat(c.pagada_monto!=null?c.pagada_monto:c.monto)||0);},0);
+    var restan=f.cuotas.filter(function(c){return !c.pagada;}).reduce(function(s,c){return s+(parseFloat(c.monto)||0);},0);
+    var filas=f.cuotas.map(function(c){
+      var chip, borde;
+      if(c.pagada){ chip="<span style='font-size:.6rem;font-weight:700;color:var(--green);background:rgba(76,175,128,.12);padding:.1rem .4rem;border-radius:4px'>✅ Pagada "+(c.pagada_at?_finFmtF(c.pagada_at):"")+"</span>"; borde="var(--green)"; }
+      else { var dv=_finDiasVencida(c.vencimiento);
+        if(dv>0){ chip="<span style='font-size:.6rem;font-weight:700;color:#fff;background:var(--red);padding:.1rem .4rem;border-radius:4px'>🔴 Vencida hace "+dv+"d</span>"; borde="var(--red)"; }
+        else if(c.vencimiento===hoy){ chip="<span style='font-size:.6rem;font-weight:700;color:#000;background:var(--yel);padding:.1rem .4rem;border-radius:4px'>🟠 Vence HOY</span>"; borde="var(--yel)"; }
+        else { chip="<span style='font-size:.6rem;color:var(--tx3);background:var(--sur3);padding:.1rem .4rem;border-radius:4px'>⏳ Vence "+_finFmtF(c.vencimiento)+"</span>"; borde="var(--bd)"; }
+      }
+      var acciones=c.pagada?"":(
+        "<button class='btn btn-green' style='font-size:.66rem;padding:.22rem .5rem' onclick='_finCobrarCuota("+f.id+","+c.id+")'>💵 Cobrar</button>"+
+        "<button class='btn btn-g' style='font-size:.66rem;padding:.22rem .4rem' title='Editar monto/fecha' onclick='_finEditarCuota("+c.id+")'>✏️</button>"+
+        (f.cuotas.filter(function(x){return !x.pagada;}).length>1?"<button class='btn btn-g' style='font-size:.66rem;padding:.22rem .4rem;color:var(--red)' title='Eliminar cuota' onclick='_finEliminarCuota("+f.id+","+c.id+")'>🗑</button>":"")
+      );
+      return "<div id='finC"+c.id+"' style='border-left:3px solid "+borde+";background:var(--sur2);border-radius:6px;padding:.45rem .6rem;margin-bottom:.35rem'>"+
+        "<div style='display:flex;justify-content:space-between;align-items:center;gap:.4rem;flex-wrap:wrap'>"+
+          "<div style='display:flex;align-items:center;gap:.5rem'><b style='font-size:.78rem'>Cuota "+c.nro+"</b>"+chip+
+            (c.recargo_aplicado>0?"<span style='font-size:.58rem;color:var(--yel)' title='Recargo por mora aplicado'>+"+fmt(c.recargo_aplicado)+" mora</span>":"")+"</div>"+
+          "<div style='display:flex;align-items:center;gap:.35rem'>"+
+            "<b style='font-size:.82rem;color:var(--acc)'>"+fmt(c.monto)+"</b>"+acciones+
+          "</div>"+
+        "</div>"+
+        "<div id='finEdit"+c.id+"' style='display:none;margin-top:.4rem;gap:.4rem' data-monto='"+c.monto+"' data-fecha='"+String(c.vencimiento).slice(0,10)+"'></div>"+
+      "</div>";
+    }).join("");
+    var mo=document.getElementById("moFinVer");
+    if(!mo){ mo=document.createElement("div"); mo.id="moFinVer"; mo.className="mo"; document.body.appendChild(mo); }
+    mo.innerHTML="<div class='md' style='max-width:580px;width:96%;max-height:92vh;overflow-y:auto'>"+
+      "<div class='md-h'><span>💳 Financiación "+(f.nro_orden||'')+(f.cliente_nombre?" · "+f.cliente_nombre:"")+"</span>"+
+      "<button class='xb' onclick='document.getElementById(\"moFinVer\").classList.remove(\"open\")'>✕</button></div>"+
+      "<div class='md-b'>"+
+        "<div style='background:var(--sur3);border-radius:7px;padding:.5rem .7rem;margin-bottom:.6rem;font-size:.73rem;display:grid;grid-template-columns:1fr 1fr;gap:.15rem .8rem'>"+
+          "<div>Plan total: <b style='color:var(--acc)'>"+fmt(f.total_plan)+"</b>"+(f.interes_pct>0?" <span style='color:var(--tx3)'>(interés "+f.interes_pct+"%)</span>":"")+"</div>"+
+          "<div>Pagado: <b style='color:var(--green)'>"+fmt(pagado)+"</b></div>"+
+          "<div>Restan: <b style='color:"+(restan>0?"var(--yel)":"var(--green)")+"'>"+fmt(restan)+"</b></div>"+
+          "<div>Mercadería: "+(f.entregado?"<b style='color:var(--green)'>entregada ✓</b>":"<b style='color:var(--tx3)'>sin entregar</b>")+"</div>"+
+        "</div>"+
+        "<div style='margin-bottom:.5rem'>"+filas+"</div>"+
+        "<div style='display:flex;gap:.35rem;flex-wrap:wrap;border-top:1px solid var(--bd);padding-top:.55rem'>"+
+          "<button class='btn btn-g' style='font-size:.68rem' onclick='_finAgregarCuota("+f.id+")'>➕ Cuota</button>"+
+          "<button class='btn btn-g' style='font-size:.68rem' onclick='_finRecargo("+f.id+")'>％ Recargo mora</button>"+
+          "<button class='btn btn-g' style='font-size:.68rem' onclick='_finCorrerFechas("+f.id+")'>📅 Nuevo plazo</button>"+
+          (f.entregado?"":"<button class='btn btn-g' style='font-size:.68rem' onclick='_finEntregarAhora("+f.id+")'>📦 Entregar ahora</button>")+
+          "<button class='btn btn-g' style='font-size:.68rem' onclick='_finToggleAvisos("+f.id+","+(f.notif_activas?"true":"false")+")'>"+(f.notif_activas?"🔕 Silenciar avisos":"🔔 Activar avisos")+"</button>"+
+          "<button class='btn btn-g' style='font-size:.68rem;color:var(--red);margin-left:auto' onclick='_finCancelarPlan("+f.id+")'>✕ Cancelar plan</button>"+
+        "</div>"+
+        (f.notif_activas?"":"<div style='font-size:.66rem;color:var(--yel);margin-top:.4rem'>🔕 Avisos silenciados: no vas a recibir alertas de vencimiento de este plan.</div>")+
+      "</div></div>";
+    mo.classList.add("open");
+  });
+}
+function _finEditarCuota(cuotaId){
+  var box=document.getElementById('finEdit'+cuotaId); if(!box)return;
+  if(box.style.display==='flex'){box.style.display='none';return;}
+  box.style.display='flex';
+  box.innerHTML="<input class='fi' id='finEm"+cuotaId+"' type='number' min='0' step='100' value='"+box.dataset.monto+"' style='flex:1;font-size:.76rem;padding:.25rem .4rem'>"+
+    "<input class='fi' id='finEf"+cuotaId+"' type='date' value='"+box.dataset.fecha+"' style='width:132px;font-size:.72rem;padding:.25rem .3rem'>"+
+    "<button class='btn btn-a' style='font-size:.68rem;padding:.25rem .6rem' onclick='_finGuardarCuota("+cuotaId+")'>💾</button>";
+}
+function _finGuardarCuota(cuotaId){
+  var m=Math.round(parseFloat((document.getElementById('finEm'+cuotaId)||{}).value)||0);
+  var fch=(document.getElementById('finEf'+cuotaId)||{}).value;
+  if(m<=0||!fch){toast("Monto (>0) y fecha requeridos","twarn");return;}
+  apiPatch("financiacion_cuotas",{monto:m,vencimiento:fch,ultimo_aviso:null},"id=eq."+cuotaId+"&pagada=eq.false").then(function(){
+    toast("Cuota actualizada ✓","tok"); _finVer(window._finVerTmp.id); loadPedidosWeb();
+  }).catch(function(e){toast("Error: "+(e.message||""),"terr");});
+}
+function _finCobrarCuota(finId, cuotaId){
+  if(window._finCobrando)return; window._finCobrando=true;
+  var forma=prompt("Forma de cobro: efectivo / transferencia / debito / credito","efectivo");
+  if(forma===null){window._finCobrando=false;return;}
+  forma=(forma||'efectivo').toLowerCase().trim()||'efectivo';
+  apiGet("financiacion_cuotas","select=*&id=eq."+cuotaId).then(function(rows){
+    var c=rows&&rows[0];
+    if(!c||c.pagada){toast(c?"Esa cuota ya está pagada":"Cuota no encontrada","twarn");window._finCobrando=false;return;}
+    var f=window._finVerTmp||{};
+    var totC=(f.cuotas||[]).length||'?';
+    // 1) La plata entra como VENTA (Mi dinero / rendición) — sin producto, segmento financiacion
+    apiPost("ventas",{
+      vendedor_id:f.vendedor_id||VENDEDOR_ID, producto_id:null,
+      producto_nombre:"💳 Cuota "+c.nro+"/"+totC+" — "+(f.nro_orden||('fin#'+finId))+(f.cliente_nombre?" ("+f.cliente_nombre+")":""),
+      cantidad:1, precio_unitario:c.monto, segmento:"financiacion", total:c.monto,
+      periodo:periodoActual, estado:"confirmada", origen:"financiacion", forma_cobro:forma, nro_orden:f.nro_orden||null
+    }).then(function(){
+      // 2) Marcar cuota pagada
+      return apiPatch("financiacion_cuotas",{pagada:true,pagada_at:new Date().toISOString(),pagada_monto:c.monto,forma_cobro:forma},"id=eq."+cuotaId);
+    }).then(function(){
+      // 3) Reflejar el avance en el pedido (cobro parcial acumulado)
+      return apiGet("pedidos_catalogo","select=cobrado_parcial,cobrado_total,total&id=eq."+f.pedido_id).then(function(pr){
+        var p=pr&&pr[0]||{}; var nuevo=(Math.max(parseFloat(p.cobrado_parcial)||0,parseFloat(p.cobrado_total)||0))+(parseFloat(c.monto)||0);
+        return apiPatch("pedidos_catalogo",{cobrado_parcial:nuevo,cobrado_total:nuevo},"id=eq."+f.pedido_id);
+      });
+    }).then(function(){
+      // 4) ¿Era la última? → completar plan y cerrar pedido
+      return apiGet("financiacion_cuotas","select=id&financiacion_id=eq."+finId+"&pagada=eq.false").then(function(rest){
+        if(Array.isArray(rest)&&rest.length===0) return _finCompletar(f);
+      });
+    }).then(function(){
+      toast("💵 Cuota "+c.nro+" cobrada: "+fmt(c.monto)+" ✓","tok",4500);
+      window._finCobrando=false; _finVer(finId); loadPedidosWeb();
+    }).catch(function(e){console.error("[fin cobrar]",e);toast("Error al cobrar la cuota: "+(e.message||""),"terr");window._finCobrando=false;});
+  }).catch(function(){window._finCobrando=false;});
+}
+function _finCompletar(f){
+  var cierre=apiPatch("financiaciones",{estado:'completada'},"id=eq."+f.id)
+    .then(function(){ return apiPatch("pedidos_catalogo",{estado:'cobrado',confirmado_cobro:true,confirmado_at:new Date().toISOString()},"id=eq."+f.pedido_id); });
+  if(!f.entregado){
+    cierre=cierre.then(function(){ return _finEntregarStock({id:f.pedido_id,nro_orden:f.nro_orden,vendedor_id:f.vendedor_id},f.id); })
+      .then(function(){ return apiPatch("financiaciones",{entregado:true},"id=eq."+f.id); });
+  }
+  return cierre.then(function(){
+    apiPost("pedidos_estados_log",{pedido_id:f.pedido_id,pedido_tabla:'pedidos_catalogo',estado:'cobrado',nota:'Financiación completada: todas las cuotas pagadas ('+fmt(f.total_plan)+'). Pedido saldado.'}).catch(function(){});
+    toast("🎉 ¡Financiación COMPLETA! El pedido quedó cobrado y saldado.","tok",6000);
+  });
+}
+function _finEntregarAhora(finId){
+  var f=window._finVerTmp; if(!f||f.id!==finId)return;
+  if(!confirm("¿Entregar la mercadería ahora? El stock reservado pasa a vendido (la plata sigue entrando por cuotas)."))return;
+  _finEntregarStock({id:f.pedido_id,nro_orden:f.nro_orden,vendedor_id:f.vendedor_id},finId).then(function(){
+    return apiPatch("financiaciones",{entregado:true},"id=eq."+finId);
+  }).then(function(){ toast("📦 Mercadería entregada ✓","tok"); _finVer(finId); loadPedidosWeb(); })
+  .catch(function(e){toast("Error: "+(e.message||""),"terr");});
+}
+function _finAgregarCuota(finId){
+  var f=window._finVerTmp||{}; var maxN=(f.cuotas||[]).reduce(function(m,c){return Math.max(m,c.nro||0);},0);
+  var ultima=(f.cuotas||[]).slice(-1)[0];
+  apiPost("financiacion_cuotas",{financiacion_id:finId,nro:maxN+1,monto:0,vencimiento:_finAddDias(ultima?String(ultima.vencimiento).slice(0,10):_finHoy(),30)}).then(function(){
+    apiPatch("financiaciones",{total_plan:(parseFloat(f.total_plan)||0)},"id=eq."+finId).catch(function(){});
+    toast("Cuota agregada — editále el monto ✏️","tok"); _finVer(finId);
+  }).catch(function(e){toast("Error: "+(e.message||""),"terr");});
+}
+function _finEliminarCuota(finId,cuotaId){
+  if(!confirm("¿Eliminar esta cuota impaga? El monto del plan queda repartido en las demás (ajustalas si hace falta)."))return;
+  apiDelete("financiacion_cuotas","id=eq."+cuotaId+"&pagada=eq.false").then(function(){
+    toast("Cuota eliminada","tok"); _finVer(finId); loadPedidosWeb();
+  }).catch(function(e){toast("Error: "+(e.message||""),"terr");});
+}
+function _finRecargo(finId){
+  var f=window._finVerTmp||{};
+  var pct=parseFloat(prompt("Recargo por mora: % a aplicar sobre las cuotas VENCIDAS impagas","10"));
+  if(!pct||pct<=0)return;
+  var hoy=_finHoy();
+  var vencidas=(f.cuotas||[]).filter(function(c){return !c.pagada&&c.vencimiento<hoy;});
+  if(!vencidas.length){toast("No hay cuotas vencidas impagas","twarn");return;}
+  var chain=Promise.resolve(); var extra=0;
+  vencidas.forEach(function(c){
+    var delta=Math.round((parseFloat(c.monto)||0)*pct/100); extra+=delta;
+    chain=chain.then(function(){ return apiPatch("financiacion_cuotas",{monto:(parseFloat(c.monto)||0)+delta,recargo_aplicado:(parseFloat(c.recargo_aplicado)||0)+delta},"id=eq."+c.id); });
+  });
+  chain.then(function(){
+    return apiPatch("financiaciones",{total_plan:(parseFloat(f.total_plan)||0)+extra},"id=eq."+finId);
+  }).then(function(){ toast("Recargo del "+pct+"% aplicado a "+vencidas.length+" cuota(s): +"+fmt(extra),"tok",4500); _finVer(finId); })
+  .catch(function(e){toast("Error: "+(e.message||""),"terr");});
+}
+function _finCorrerFechas(finId){
+  var f=window._finVerTmp||{};
+  var dias=parseInt(prompt("Nuevo plazo: ¿cuántos días corro los vencimientos de TODAS las cuotas impagas?","15"));
+  if(!dias)return;
+  var impagas=(f.cuotas||[]).filter(function(c){return !c.pagada;});
+  var chain=Promise.resolve();
+  impagas.forEach(function(c){
+    chain=chain.then(function(){ return apiPatch("financiacion_cuotas",{vencimiento:_finAddDias(String(c.vencimiento).slice(0,10),dias),ultimo_aviso:null},"id=eq."+c.id); });
+  });
+  chain.then(function(){ toast("📅 Vencimientos corridos "+dias+" días ("+impagas.length+" cuotas)","tok"); _finVer(finId); loadPedidosWeb(); })
+  .catch(function(e){toast("Error: "+(e.message||""),"terr");});
+}
+function _finToggleAvisos(finId, activas){
+  apiPatch("financiaciones",{notif_activas:!activas},"id=eq."+finId).then(function(){
+    toast(activas?"🔕 Avisos silenciados para este plan":"🔔 Avisos activados","tok"); _finVer(finId);
+  }).catch(function(e){toast("Error: "+(e.message||""),"terr");});
+}
+function _finCancelarPlan(finId){
+  var f=window._finVerTmp||{};
+  if(!confirm("¿Cancelar este plan de financiación?\n\n• Las cuotas impagas se dan de baja\n• Lo ya cobrado queda registrado\n"+(f.entregado?"• OJO: la mercadería figura ENTREGADA — arreglá el stock a mano si corresponde":"• El pedido sigue con su reserva, como estaba")))return;
+  apiPatch("financiaciones",{estado:'cancelada'},"id=eq."+finId).then(function(){
+    toast("Plan cancelado","twarn"); document.getElementById("moFinVer").classList.remove("open"); loadPedidosWeb();
+  }).catch(function(e){toast("Error: "+(e.message||""),"terr");});
+}
+
+// ── AVISOS DE VENCIMIENTO ───────────────────────────────────────────
+// Al abrir Pedidos (y cada 10 min): cuotas impagas vencidas o que vencen hoy,
+// de planes activos con avisos prendidos → campanita staff (y push si está activo).
+// Cadencia: 1 aviso al vencer y luego 1 cada 4 días, hasta que se pague o silencien.
+function _finChequearVencimientos(){
+  var hoy=_finHoy();
+  apiGet("financiaciones","select=id,nro_orden,cliente_nombre,vendedor_id,notif_activas,financiacion_cuotas(*)&estado=eq.activa&notif_activas=eq.true&limit=300").then(function(fins){
+    (Array.isArray(fins)?fins:[]).forEach(function(f){
+      var totC=(f.financiacion_cuotas||[]).length;
+      (f.financiacion_cuotas||[]).forEach(function(c){
+        if(c.pagada)return;
+        var v=String(c.vencimiento).slice(0,10);
+        if(v>hoy)return; // futura
+        var dv=_finDiasVencida(v);
+        // cadencia: sin aviso previo, o pasaron >=4 días del último
+        if(c.ultimo_aviso){ var da=_finDiasVencida(String(c.ultimo_aviso).slice(0,10)); if(da<4)return; }
+        var titulo=dv>0?"💳 Cuota VENCIDA hace "+dv+" día"+(dv>1?"s":""):"💳 Cuota vence HOY";
+        var msj="Cuota "+c.nro+"/"+totC+" de "+fmt(c.monto)+" — pedido "+(f.nro_orden||'')+(f.cliente_nombre?" · "+f.cliente_nombre:"")+" (vto "+_finFmtF(v)+")";
+        apiPost("notificaciones_staff",{rol:'vendedor',vendedor_id:f.vendedor_id||VENDEDOR_ID,tipo:'financiacion',titulo:titulo,mensaje:msj,ref_id:f.id})
+          .then(function(){ return apiPatch("financiacion_cuotas",{ultimo_aviso:hoy},"id=eq."+c.id); })
+          .then(function(){ try{ if(typeof _appNotisBadge==='function')_appNotisBadge(); }catch(_e){} })
+          .catch(function(e){ console.warn("[fin aviso]",e); });
+        if((f.vendedor_id||VENDEDOR_ID)===VENDEDOR_ID) toast(titulo+" · "+msj,"twarn",6000);
+      });
+    });
+  }).catch(function(){});
+  if(!window._finChkTimer){ window._finChkTimer=setInterval(_finChequearVencimientos, 10*60*1000); }
 }
 
 function confirmarCobro(pedId,btn){
