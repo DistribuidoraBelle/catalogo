@@ -15217,6 +15217,11 @@ function _catFinalizarCargaCliente(){
   if(typeof catActualizarBoton === 'function') catActualizarBoton();
   if(typeof catCargarFavsIds === 'function') catCargarFavsIds();
   if(typeof _catCargarNotifs === 'function') _catCargarNotifs();
+  // Catálogos del cliente: si Belle cambió precios desde la última vez, deja
+  // UN aviso simple en la campanita (sin mostrar ningún precio).
+  if(_catCliente && _catCliente.puede_crear_catalogos && typeof _catCatChequearPrecios === 'function'){
+    setTimeout(function(){ _catCatChequearPrecios(function(){ if(typeof _catCargarNotifs==='function')_catCargarNotifs(); }); }, 2500);
+  }
   // Si el drawer está abierto, re-renderizarlo
   var dw = document.getElementById("drawerCuenta");
   if(dw && dw.classList.contains("open") && typeof catRenderDrawer === 'function'){
@@ -15820,9 +15825,41 @@ function _catCargarCatalogos(cb){
         var cnt={}; (rows||[]).forEach(function(r){ cnt[r.catalogo_id]=(cnt[r.catalogo_id]||0)+1; });
         _catCatList.forEach(function(c){ c._nprod=cnt[c.id]||0; });
         if(cb)cb();
+        // Chequeo de precios viejos: refresca el cartelito de "Actualizar precios"
+        // y deja UN aviso simple en la campanita si hace falta.
+        _catCatChequearPrecios(function(){ if(_catPanelTab==='catalogos'){ var b=document.getElementById('_catTabBody'); if(b)_catRenderTabCatalogos(b); } });
       }).catch(function(){ if(cb)cb(); });
     } else { if(cb)cb(); }
   });
+}
+
+// ══════════════════════════════════════════════════════════════════
+// MIS CATÁLOGOS — plantillas, precios y aviso de actualización
+// (v3 2026-08: 5 plantillas, vista previa fiel en vivo, ajuste de precios
+//  por porcentaje sobre selección, aviso simple de cambios de precio y
+//  generación de PDF con caché de imágenes en dataURL)
+// ══════════════════════════════════════════════════════════════════
+var _catCatCambios = {};   // {catalogo_id: cuántos precios de Belle cambiaron}
+var _catCatCambiosMin = 3; // mínimo para avisar (lo define catalogos_config)
+
+function _catRpcCat(fn, body){
+  var tok=(typeof _sbToken==='function')?_sbToken():null;
+  var auth=tok?("Bearer "+tok):("Bearer "+SB_KEY);
+  return fetch(SB_URL+"/rest/v1/rpc/"+fn,{method:'POST',headers:{'Content-Type':'application/json','apikey':SB_KEY,'Authorization':auth},body:JSON.stringify(body||{})})
+    .then(function(r){ if(!r.ok){ return r.text().then(function(t){ throw new Error('HTTP '+r.status+': '+t.slice(0,140)); }); } return r.json(); });
+}
+
+// Pregunta a la base si los catálogos del cliente quedaron con precios viejos.
+// El RPC deja UN aviso simple en la campanita (sin detalle de precios).
+function _catCatChequearPrecios(cb){
+  if(!_catCliente || !_catCliente.id || !_catCliente.puede_crear_catalogos){ if(cb)cb(); return; }
+  _catRpcCat('catalogo_chequear_precios').then(function(res){
+    var d=Array.isArray(res)?res[0]:res;
+    if(d && d.min)_catCatCambiosMin=d.min;
+    _catCatCambios={};
+    ((d&&d.catalogos)||[]).forEach(function(c){ _catCatCambios[c.id]=c.cambios||0; });
+    if(cb)cb();
+  }).catch(function(e){ console.warn('[cat precios]',e); if(cb)cb(); });
 }
 
 function _catRenderTabCatalogos(box){
@@ -15840,7 +15877,7 @@ function _catRenderTabCatalogos(box){
   h+="<div style='font-size:1.05rem;font-weight:700;color:#5a4a30;font-family:\"Cormorant Garamond\",serif'>Mis Catálogos</div>";
   if(!alcanzo){ h+="<button onclick='_catCatNuevo()' style='background:linear-gradient(135deg,#c4965a,#a9763f);color:#fff;border:none;border-radius:8px;padding:.45rem .85rem;font-size:.74rem;font-weight:700;cursor:pointer;font-family:inherit'>+ Nuevo</button>"; }
   h+="</div>";
-  h+="<div style='font-size:.74rem;color:#9a8870;margin-bottom:.9rem'>Armá tu catálogo en PDF con tu marca y tus precios. Podés tener varios y editarlos cuando quieras.</div>";
+  h+="<div style='font-size:.74rem;color:#9a8870;margin-bottom:.9rem'>Armá tu catálogo en PDF con tu marca y tus precios. Elegí entre varias plantillas y mirá cómo queda antes de descargarlo.</div>";
   if(alcanzo){ h+="<div style='font-size:.7rem;color:#b8860b;background:#fff8ec;border:1px solid #f0dca6;border-radius:8px;padding:.5rem .7rem;margin-bottom:.8rem'>Llegaste al máximo de "+max+" catálogos. Borrá uno para crear otro.</div>"; }
   if(!_catCatList.length){
     h+="<div style='padding:1.6rem 1rem;text-align:center;color:#9a8870;font-size:.82rem;border:1px dashed #e8d9bf;border-radius:10px'><div style='font-size:1.9rem;margin-bottom:.3rem'>&#128212;</div>Todavía no tenés catálogos.<br>Tocá <b>+ Nuevo</b> para armar el primero.</div>";
@@ -15848,13 +15885,22 @@ function _catRenderTabCatalogos(box){
     _catCatList.forEach(function(cat){
       var nprod = cat._nprod!=null?cat._nprod:null;
       var fecha = cat.updated_at?new Date(cat.updated_at).toLocaleDateString('es-AR'):"";
+      var tpl=_catTplDef((cat.config&&cat.config.plantilla)||'tabla');
+      var camb=_catCatCambios[cat.id]||0;
       h+="<div style='border:1px solid #e8d9bf;border-radius:11px;padding:.8rem .9rem;margin-bottom:.7rem;background:#fffdf9'>";
-      h+="<div style='font-size:.95rem;font-weight:700;color:#5a4a30'>"+_catEsc(cat.nombre||'Catálogo')+"</div>";
+      h+="<div style='display:flex;align-items:center;gap:.4rem'><div style='font-size:.95rem;font-weight:700;color:#5a4a30;flex:1;min-width:0'>"+_catEsc(cat.nombre||'Catálogo')+"</div>";
+      h+="<span style='font-size:.6rem;font-weight:700;color:#a9763f;background:#f7efe1;border:1px solid #ecdcc0;border-radius:999px;padding:.15rem .5rem;white-space:nowrap'>"+_catEsc(tpl.nombre)+"</span></div>";
       h+="<div style='font-size:.66rem;color:#aa9a80;margin-top:.15rem'>"+(nprod!=null?(nprod+" producto"+(nprod===1?'':'s')+" · "):"")+"editado "+fecha+"</div>";
+      if(camb>=_catCatCambiosMin){
+        h+="<div style='margin-top:.55rem;background:#fff8ec;border:1px solid #f0dca6;border-radius:9px;padding:.5rem .65rem'>";
+        h+="<div style='font-size:.72rem;color:#8a6a2a;line-height:1.35'>&#9888;&#65039; Hubo actualizaciones de precios. Actualizá tu catálogo para que salga con los valores de hoy.</div>";
+        h+="<button onclick='_catCatActualizarPrecios("+cat.id+")' style='margin-top:.45rem;background:#b8860b;color:#fff;border:none;border-radius:7px;padding:.4rem .8rem;font-size:.72rem;font-weight:700;cursor:pointer;font-family:inherit'>Actualizar precios</button>";
+        h+="</div>";
+      }
       h+="<div style='display:flex;gap:.4rem;margin-top:.7rem;flex-wrap:wrap'>";
       h+="<button onclick='_catCatElegirProductos("+cat.id+")' style='flex:1;min-width:140px;background:linear-gradient(135deg,#c4965a,#a9763f);color:#fff;border:none;border-radius:8px;padding:.5rem;font-size:.74rem;font-weight:700;cursor:pointer;font-family:inherit'>Productos y precios →</button>";
       h+="<button onclick='_catCatPdfGenerar("+cat.id+")' style='flex:1;min-width:120px;background:#fff;border:1.5px solid #c4965a;color:#a9763f;border-radius:8px;padding:.5rem;font-size:.74rem;font-weight:700;cursor:pointer;font-family:inherit'>📄 Descargar PDF</button>";
-      h+="<button onclick='_catCatEditarFormato("+cat.id+")' style='background:#fff;border:1px solid #d4ba8a;color:#a9763f;border-radius:8px;padding:.5rem .7rem;font-size:.72rem;cursor:pointer;font-family:inherit'>Formato</button>";
+      h+="<button onclick='_catCatEditarFormato("+cat.id+")' style='background:#fff;border:1px solid #d4ba8a;color:#a9763f;border-radius:8px;padding:.5rem .7rem;font-size:.72rem;cursor:pointer;font-family:inherit'>Diseño</button>";
       h+="<button onclick='_catCatDuplicar("+cat.id+")' title='Duplicar' style='background:#fff;border:1px solid #d4ba8a;color:#a9763f;border-radius:8px;padding:.5rem .65rem;font-size:.82rem;cursor:pointer;font-family:inherit'>&#128203;</button>";
       h+="<button onclick='_catCatBorrar("+cat.id+")' title='Borrar' style='background:#fff;border:1px solid #f0dad6;color:#cc6b62;border-radius:8px;padding:.5rem .65rem;font-size:.82rem;cursor:pointer;font-family:inherit'>&#128465;</button>";
       h+="</div>";
@@ -15864,28 +15910,141 @@ function _catRenderTabCatalogos(box){
   box.innerHTML=h;
 }
 
+// ── PLANTILLAS ────────────────────────────────────────────────────
+// pp = productos por hoja según densidad: [primera hoja, resto].
+// La primera lleva menos porque arriba va el banner grande (salvo que la
+// portada sea hoja aparte, ahí todas usan el número de "resto").
+function _catTplDefs(){ return [
+  {id:'tabla',     nombre:'Lista clásica', icon:'&#9636;', desc:'Filas con foto chica, precio, notas y acordes. Entran muchos perfumes por hoja.',
+   cols:1, pp:{comoda:[5,7],  normal:[7,10], compacta:[9,13]}},
+  {id:'editorial', nombre:'Editorial',     icon:'&#10022;', desc:'Un perfume por bloque, foto grande y tipografía de revista de lujo.',
+   cols:1, pp:{comoda:[2,3],  normal:[3,4],  compacta:[4,5]}},
+  {id:'revista',   nombre:'Revista',       icon:'&#9635;', desc:'Tarjetas grandes en dos columnas, con foto destacada y acordes.',
+   cols:2, pp:{comoda:[2,4],  normal:[4,6],  compacta:[6,8]}},
+  {id:'galeria',   nombre:'Galería',       icon:'&#9638;', desc:'Grilla de fotos en tres columnas. Nombre y precio, puro impacto visual.',
+   cols:3, pp:{comoda:[6,9],  normal:[9,12], compacta:[12,15]}},
+  {id:'minimal',   nombre:'Minimalista',   icon:'&#8801;', desc:'Lista de texto en dos columnas, sin fotos. Se genera en segundos.',
+   cols:2, pp:{comoda:[16,20],normal:[22,28],compacta:[30,38]}}
+];}
+function _catTplHabilitadas(){
+  var cfg=_catCatConfig||{};
+  var wl=Array.isArray(cfg.plantillas_habilitadas)?cfg.plantillas_habilitadas:[];
+  var all=_catTplDefs();
+  if(!wl.length)return all;
+  var out=all.filter(function(t){return wl.indexOf(t.id)>=0;});
+  return out.length?out:all;
+}
+function _catTplDef(id){
+  var all=_catTplDefs();
+  return all.filter(function(t){return t.id===id;})[0] || all[0];
+}
+function _catTplPerPage(cfg){
+  var t=_catTplDef(cfg.plantilla||'tabla');
+  var d=cfg.densidad||'normal';
+  var pp=t.pp[d]||t.pp.normal;
+  var first=pp[0], rest=pp[1];
+  if((cfg.portada_modo||'banner')!=='banner') first=rest;   // sin banner arriba entran los mismos
+  return [Math.max(1,first), Math.max(1,rest)];
+}
+function _catTplFont(cfg){
+  var t=cfg.tipografia||'elegante';
+  if(t==='moderna') return {head:'"Helvetica Neue",Arial,sans-serif', body:'Arial,"Helvetica Neue",Helvetica,sans-serif'};
+  if(t==='clasica') return {head:'Georgia,"Times New Roman",serif', body:'Georgia,"Times New Roman",serif'};
+  return {head:'"Cormorant Garamond",Georgia,serif', body:'"DM Sans",Arial,Helvetica,sans-serif'};
+}
+
+// ── CACHÉ DE IMÁGENES ─────────────────────────────────────────────
+// Para el PDF convertimos cada foto UNA vez a dataURL (redimensionada).
+// Así html2canvas no vuelve a pedirla por red en cada hoja: es la mayor
+// ganancia de tiempo cuando el catálogo tiene muchas páginas.
+var _catImgCache = {};
+var _catImgLive = false; // true = vista previa en pantalla (usa la URL directa)
+function _catImgOk(u){ if(!u)return false; if(_catImgLive)return true; return !!_catImgCache[u]; }
+function _catImgSrc(u){ if(!u)return ''; if(_catImgLive)return u; return _catImgCache[u]||''; }
+function _catImgPrep(url, maxW, cb){
+  if(!url){ cb(); return; }
+  if(_catImgCache[url]!==undefined){ cb(); return; }
+  var im=new Image(); try{ im.crossOrigin='anonymous'; }catch(e){}
+  var done=false;
+  var t=setTimeout(function(){ if(done)return; done=true; _catImgCache[url]=''; cb(); }, 9000);
+  im.onload=function(){
+    if(done)return; done=true; clearTimeout(t);
+    try{
+      var w=im.naturalWidth||im.width, hh=im.naturalHeight||im.height;
+      if(!w||!hh){ _catImgCache[url]=''; cb(); return; }
+      var sc=Math.min(1,(maxW||420)/w);
+      var cw=Math.max(1,Math.round(w*sc)), ch=Math.max(1,Math.round(hh*sc));
+      var cv=document.createElement('canvas'); cv.width=cw; cv.height=ch;
+      var ctx=cv.getContext('2d'); ctx.fillStyle='#ffffff'; ctx.fillRect(0,0,cw,ch); ctx.drawImage(im,0,0,cw,ch);
+      _catImgCache[url]=cv.toDataURL('image/jpeg',0.82);
+    }catch(e){ _catImgCache[url]=''; }
+    cb();
+  };
+  im.onerror=function(){ if(done)return; done=true; clearTimeout(t); _catImgCache[url]=''; cb(); };
+  im.src=url;
+}
+// Baja TODAS las imágenes del catálogo en paralelo (de a 6) antes de dibujar.
+function _catImgPreloadAll(list, onProg, cb){
+  var uniq=[], seen={};
+  (list||[]).forEach(function(o){ if(o&&o.url&&!seen[o.url]){ seen[o.url]=1; uniq.push(o); } });
+  var total=uniq.length; if(!total){ cb&&cb(); return; }
+  var i=0, done=0, CONC=6, running=0, finished=false;
+  function next(){
+    if(finished)return;
+    while(running<CONC && i<total){
+      var it=uniq[i++]; running++;
+      _catImgPrep(it.url, it.max, function(){
+        running--; done++;
+        if(onProg)onProg(done/total);
+        if(done>=total){ if(!finished){ finished=true; cb&&cb(); } }
+        else next();
+      });
+    }
+  }
+  next();
+}
+
+// ── CONFIG DEL CATÁLOGO (defaults / clamp) ────────────────────────
 function _catCatDefaults(){
+  // base + lo último que usó el cliente (solo para catálogos NUEVOS)
+  var base=_catCatBase();
+  var last=(_catCatList&&_catCatList.length&&_catCatList[0].config)?_catCatList[0].config:null;
+  if(last){ _catCatKeys().forEach(function(k){ if(last[k]!=null)base[k]=last[k]; }); }
+  return base;
+}
+// Valores por defecto puros: los usa todo lo que TIENE que respetar el config
+// guardado del catálogo (generar PDF, editar el diseño) para no heredar sin
+// querer el formato de otro catálogo del mismo cliente.
+function _catCatBase(){
   var cfg=_catCatConfig||{};
   var firstP = (cfg.modo_x1_habilitado!==false)?'x1':((cfg.modo_sugerido_habilitado!==false)?'sugerido':'manual');
   var firstN = (cfg.notas_fotos_habilitado!==false)?'fotos':'escritas';
-  var base={ nombre:'', banner_modo:'default', banner_imagen_url:'', banner_preset_id:'',
+  var base={ nombre:'', plantilla:'tabla', densidad:'normal', tipografia:'elegante',
+    portada_modo:'banner',
+    banner_modo:'default', banner_imagen_url:'', banner_preset_id:'',
     banner_texto1:(cfg.texto_default||'CATÁLOGO'), banner_texto2:'',
     banner_bg:(cfg.color_fondo_default||'#1a1a1a'), banner_fg:'#ffffff',
     hoja_modo:'none', hoja_imagen_url:'', hoja_texto:'', hoja_bg:(cfg.color_fondo_default||'#1a1a1a'), hoja_fg:'#ffffff',
-    cat_bg:'#fdfbf7', precio_color:'#a9763f',
+    cat_bg:'#fdfbf7', precio_color:'#a9763f', precio_estilo:'plano',
     precio_modo:firstP, notas_modo:firstN,
+    mostrar_marca:true, mostrar_meta:true, mostrar_notas:true, mostrar_acordes:true,
+    mostrar_numeracion:false, mostrar_paginas:true, borde_hoja:false,
     incluir_contacto:false, contacto_texto:'', contacto_nombre:'', contacto_telefono:((_catCliente&&_catCliente.telefono_principal)||''), contacto_nota:'' };
-  // recordar último formato (del catálogo más reciente)
-  var last=(_catCatList&&_catCatList.length&&_catCatList[0].config)?_catCatList[0].config:null;
-  if(last){ ['banner_modo','banner_imagen_url','banner_preset_id','banner_texto1','banner_texto2','banner_bg','banner_fg','hoja_modo','hoja_imagen_url','hoja_texto','hoja_bg','hoja_fg','cat_bg','precio_color','precio_modo','notas_modo','incluir_contacto','contacto_texto','contacto_nombre','contacto_telefono','contacto_nota'].forEach(function(k){ if(last[k]!=null)base[k]=last[k]; }); }
   return base;
 }
+function _catCatKeys(){ return ['plantilla','densidad','tipografia','portada_modo','banner_modo','banner_imagen_url','banner_preset_id','banner_texto1','banner_texto2','banner_bg','banner_fg','hoja_modo','hoja_imagen_url','hoja_texto','hoja_bg','hoja_fg','cat_bg','precio_color','precio_estilo','precio_modo','notas_modo','mostrar_marca','mostrar_meta','mostrar_notas','mostrar_acordes','mostrar_numeracion','mostrar_paginas','borde_hoja','incluir_contacto','contacto_texto','contacto_nombre','contacto_telefono','contacto_nota']; }
 function _catCatClamp(s){
   var cfg=_catCatConfig||{};
   var pE=[]; if(cfg.modo_x1_habilitado!==false)pE.push('x1'); if(cfg.modo_sugerido_habilitado!==false)pE.push('sugerido'); if(cfg.modo_manual_habilitado!==false)pE.push('manual'); pE.push('sinprecio');
   if(pE.indexOf(s.precio_modo)<0)s.precio_modo=pE[0]||'x1';
   var nE=[]; if(cfg.notas_fotos_habilitado!==false)nE.push('fotos'); if(cfg.notas_escritas_habilitado!==false)nE.push('escritas');
   if(nE.indexOf(s.notas_modo)<0)s.notas_modo=nE[0]||'fotos';
+  var tE=_catTplHabilitadas().map(function(t){return t.id;});
+  if(tE.indexOf(s.plantilla)<0)s.plantilla=tE[0]||'tabla';
+  if(['comoda','normal','compacta'].indexOf(s.densidad)<0)s.densidad='normal';
+  if(['clasica','moderna','elegante'].indexOf(s.tipografia)<0)s.tipografia='elegante';
+  if(['ninguna','banner','hoja'].indexOf(s.portada_modo)<0)s.portada_modo='banner';
+  if(['plano','pastilla','borde'].indexOf(s.precio_estilo)<0)s.precio_estilo='plano';
   return s;
 }
 
@@ -15900,6 +16059,10 @@ function _catCatPrecioSugerido(precioMin,cfg){
   cfg=cfg||{}; var pct=(cfg.precio_sugerido_pct!=null)?cfg.precio_sugerido_pct:7; var red=cfg.precio_redondeo?cfg.precio_redondeo:1000;
   var v=(precioMin||0)*(1+pct/100); if(red>0)v=Math.round(v/red)*red; else v=Math.round(v); return v;
 }
+
+// ══════════════════════════════════════════════════════════════════
+// PRODUCTOS Y PRECIOS (selección + ajuste por porcentaje)
+// ══════════════════════════════════════════════════════════════════
 var _catCatProd=null;
 function _catCatElegirProductos(id){
   var cat=_catCatList.filter(function(x){return x.id===id;})[0]; if(!cat){ _catToast('Catálogo no encontrado','twarn'); return; }
@@ -15923,7 +16086,7 @@ function _catCatElegirProductos(id){
 function _catCatProdAbrir(){
   var st=_catCatProd; if(!st)return;
   var prev=document.getElementById('_catCatProdOv'); if(prev)prev.remove();
-  var modoLbl = st.modo==='manual'?'Vos ponés los precios':(st.modo==='sugerido'?'Precio sugerido':'Precio minorista Belle');
+  var modoLbl = st.modo==='manual'?'Vos ponés los precios':(st.modo==='sugerido'?'Precio sugerido':(st.modo==='sinprecio'?'Sin precios':'Precio minorista Belle'));
   var ov=document.createElement('div'); ov.id='_catCatProdOv';
   ov.style.cssText='position:fixed;inset:0;z-index:99990;background:#fdfbf7;display:flex;flex-direction:column';
   var h="";
@@ -15933,10 +16096,16 @@ function _catCatProdAbrir(){
   h+="<div style='font-size:.68rem;opacity:.92;white-space:nowrap;overflow:hidden;text-overflow:ellipsis'>"+_catEsc(st.nombre)+" · "+modoLbl+"</div></div></div>";
   h+="<div style='padding:.7rem 1rem;background:#fff;border-bottom:1px solid #efe7d8;flex-shrink:0'>";
   h+="<input id='_catCatProdSearch' type='text' placeholder='Buscar perfume o marca…' oninput='_catCatProdSearch(this.value)' style='width:100%;border:1px solid #e0d4bd;border-radius:9px;padding:.55rem .7rem;font-size:.85rem;font-family:inherit;box-sizing:border-box;margin-bottom:.5rem'>";
-  h+="<div style='display:flex;align-items:center;gap:.5rem'>";
+  h+="<div style='display:flex;align-items:center;gap:.4rem;flex-wrap:wrap'>";
   h+="<button onclick='_catCatProdTodos(true)' style='background:#f3ead8;color:#8a6a3a;border:none;border-radius:7px;padding:.35rem .6rem;font-size:.7rem;font-weight:600;cursor:pointer;font-family:inherit'>Marcar todos</button>";
   h+="<button onclick='_catCatProdTodos(false)' style='background:#f3ead8;color:#8a6a3a;border:none;border-radius:7px;padding:.35rem .6rem;font-size:.7rem;font-weight:600;cursor:pointer;font-family:inherit'>Ninguno</button>";
-  h+="<div style='flex:1'></div><div id='_catCatProdCount' style='font-size:.72rem;color:#6a5a40;font-weight:600'></div></div></div>";
+  h+="<button onclick='_catCatProdVisibles(true)' style='background:#f3ead8;color:#8a6a3a;border:none;border-radius:7px;padding:.35rem .6rem;font-size:.7rem;font-weight:600;cursor:pointer;font-family:inherit'>Marcar los que veo</button>";
+  if(st.modo!=='sinprecio'){
+    h+="<button id='_ccpPctBtn' onclick='_catCatProdPctToggle()' style='background:linear-gradient(135deg,#c4965a,#a9763f);color:#fff;border:none;border-radius:7px;padding:.35rem .7rem;font-size:.7rem;font-weight:700;cursor:pointer;font-family:inherit'>% Ajustar precios</button>";
+  }
+  h+="<div style='flex:1'></div><div id='_catCatProdCount' style='font-size:.72rem;color:#6a5a40;font-weight:600'></div></div>";
+  h+="<div id='_ccpPctBox' style='display:none;margin-top:.6rem'></div>";
+  h+="</div>";
   if(st.modo==='manual'){
     h+="<div style='padding:.45rem 1rem;background:#faf6ee;border-bottom:1px solid #f0e7d6;font-size:.68rem;color:#8a7a5a;flex-shrink:0'>Escribí el precio de cada perfume. Los que dejes vacíos los resolvés al guardar.</div>";
   }
@@ -15949,30 +16118,118 @@ function _catCatProdAbrir(){
   _catCatProdRenderList();
   _catCatProdCount();
 }
+
+// ── Ajuste masivo de precios (%) ──────────────────────────────────
+function _catCatProdPctToggle(){
+  var box=document.getElementById('_ccpPctBox'); if(!box)return;
+  if(box.style.display==='block'){ box.style.display='none'; box.innerHTML=''; return; }
+  box.style.display='block';
+  var inp="border:1px solid #e0d4bd;border-radius:8px;padding:.45rem .55rem;font-size:.82rem;font-family:inherit;box-sizing:border-box;background:#fff;color:#5a4a30";
+  var h="<div style='background:#faf6ee;border:1px solid #ecdcc0;border-radius:11px;padding:.7rem .8rem'>";
+  h+="<div style='font-size:.76rem;font-weight:700;color:#8a6a3a;margin-bottom:.5rem'>Ajustar precios en bloque</div>";
+  h+="<div style='display:flex;gap:.4rem;flex-wrap:wrap;align-items:center'>";
+  h+="<select id='_ccpPctDir' style='"+inp+"'><option value='sube'>Aumentar</option><option value='baja'>Bajar</option></select>";
+  h+="<input id='_ccpPctVal' type='number' inputmode='decimal' value='10' style='"+inp+";width:78px;text-align:right'>";
+  h+="<select id='_ccpPctUni' style='"+inp+"'><option value='pct'>%</option><option value='monto'>$ fijo</option></select>";
+  h+="<select id='_ccpPctAmb' style='"+inp+"'><option value='sel'>a los marcados</option><option value='vis'>a los que veo</option><option value='todos'>a todos</option></select>";
+  h+="<select id='_ccpPctRed' style='"+inp+"'><option value='0'>sin redondear</option><option value='100'>redondear a 100</option><option value='500'>redondear a 500</option><option value='1000' selected>redondear a 1.000</option></select>";
+  h+="<button onclick='_catCatProdPctAplicar()' style='background:linear-gradient(135deg,#c4965a,#a9763f);color:#fff;border:none;border-radius:8px;padding:.5rem .9rem;font-size:.76rem;font-weight:700;cursor:pointer;font-family:inherit'>Aplicar</button>";
+  h+="<button onclick='_catCatProdPctReset()' title='Volver a los precios automáticos' style='background:#fff;color:#8a6a3a;border:1px solid #d8c4a0;border-radius:8px;padding:.5rem .8rem;font-size:.76rem;font-weight:600;cursor:pointer;font-family:inherit'>Deshacer todo</button>";
+  h+="</div>";
+  h+="<div style='font-size:.66rem;color:#9a8870;margin-top:.45rem;line-height:1.35'>Se aplica sobre el precio que hoy muestra cada perfume. Podés repetirlo las veces que quieras.</div>";
+  h+="</div>";
+  box.innerHTML=h;
+}
+// Precio que hoy muestra un producto en la lista (manual > override > modo del catálogo)
+function _catCatProdPrecioEfectivo(p){
+  var st=_catCatProd; if(!st)return 0;
+  if(st.sinp && st.sinp[p.id]) return null;
+  if(st.modo==='manual'){
+    var raw=(st.manual[p.id]!=null?String(st.manual[p.id]):'').replace(/\D/g,'');
+    return raw?parseInt(raw):0;
+  }
+  if(st.over && st.over[p.id]!=null){
+    var o=String(st.over[p.id]).replace(/\D/g,'');
+    if(o)return parseInt(o);
+  }
+  if(st.modo==='sugerido') return _catCatPrecioSugerido(p.precio_min_ars,st.cfg);
+  if(st.modo==='sinprecio') return null;
+  return p.precio_min_ars||0;
+}
+function _catCatProdPctAplicar(){
+  var st=_catCatProd; if(!st)return;
+  var dir=(document.getElementById('_ccpPctDir')||{}).value||'sube';
+  var val=parseFloat((document.getElementById('_ccpPctVal')||{}).value||'0')||0;
+  var uni=(document.getElementById('_ccpPctUni')||{}).value||'pct';
+  var amb=(document.getElementById('_ccpPctAmb')||{}).value||'sel';
+  var red=parseInt((document.getElementById('_ccpPctRed')||{}).value||'0')||0;
+  if(val<=0){ _catToast('Poné un valor mayor a 0','twarn'); return; }
+  var visibles=null;
+  if(amb==='vis'){
+    visibles={};
+    var rows=document.querySelectorAll('#_catCatProdList ._ccpRow');
+    for(var i=0;i<rows.length;i++){ if(rows[i].style.display!=='none'){ var pid=parseInt(rows[i].getAttribute('data-pid')); if(pid)visibles[pid]=1; } }
+  }
+  var n=0;
+  st.perfumes.forEach(function(p){
+    if(amb==='sel' && !st.sel[p.id])return;
+    if(amb==='vis' && !(visibles&&visibles[p.id]))return;
+    if(st.sinp && st.sinp[p.id])return;
+    var base=_catCatProdPrecioEfectivo(p);
+    if(base==null || !(base>0))return;
+    var nuevo = (uni==='monto') ? (dir==='baja'? base-val : base+val)
+                                : (dir==='baja'? base*(1-val/100) : base*(1+val/100));
+    nuevo=Math.round(nuevo);
+    if(red>0)nuevo=Math.round(nuevo/red)*red;
+    if(nuevo<0)nuevo=0;
+    if(!nuevo)return;
+    if(st.modo==='manual'){ st.manual[p.id]=String(nuevo); }
+    else { if(!st.over)st.over={}; st.over[p.id]=String(nuevo); }
+    n++;
+  });
+  _catCatProdRenderList();
+  _catToast(n?('Precios ajustados en '+n+' perfume'+(n===1?'':'s')):'No había precios para ajustar', n?'tok':'twarn');
+}
+function _catCatProdPctReset(){
+  var st=_catCatProd; if(!st)return;
+  var hacer=function(){
+    st.over={};
+    if(st.modo==='manual')st.manual={};
+    _catCatProdRenderList();
+    _catToast('Volvimos a los precios automáticos','tok');
+  };
+  if(typeof _catModalConfirm==='function'){
+    _catModalConfirm({titulo:'Deshacer ajustes', mensaje:'Se borran los precios que cambiaste a mano y vuelven los automáticos. ¿Seguimos?', confirmTxt:'Sí, deshacer', cancelTxt:'No', icono:'↺', onConfirm:hacer});
+  } else hacer();
+}
+
 function _catCatProdRenderList(){
   var st=_catCatProd; var box=document.getElementById('_catCatProdList'); if(!st||!box)return;
-  var cfg=st.cfg; var h="";
+  var h="";
   st.perfumes.forEach(function(p){
-    var pid=p.id; var on=!!st.sel[pid];
-    var marca=(p.empresa||'').trim();
+    var pid=p.id, on=!!st.sel[pid];
+    var marca=String(p.empresa||'').trim();
     var ml=p.ml?(' · '+p.ml+' ml'):'';
-    h+="<div class='_ccpRow' data-s='"+_catEsc(((p.nombre||'')+' '+marca).toLowerCase())+"' style='display:flex;align-items:center;gap:.55rem;padding:.5rem .1rem;border-bottom:1px solid #f0e8d8'>";
+    var s=((p.nombre||'')+' '+marca).toLowerCase();
+    h+="<div class='_ccpRow' data-pid='"+pid+"' data-s=\""+_catEsc(s)+"\" style='display:flex;align-items:center;gap:.6rem;padding:.5rem .1rem;border-bottom:1px solid #f2ece0'>";
     h+="<input type='checkbox' id='_ccpChk"+pid+"' "+(on?'checked':'')+" onchange='_catCatProdToggle("+pid+",this.checked)' style='width:19px;height:19px;accent-color:#c4965a;flex-shrink:0'>";
     h+="<div style='flex:1;min-width:0' onclick='_catCatProdRowTap("+pid+")'><div style='font-weight:600;font-size:.8rem;color:#3a2f1c;white-space:nowrap;overflow:hidden;text-overflow:ellipsis'>"+_catEsc(p.nombre||'')+"</div><div style='font-size:.65rem;color:#9a8a6a;white-space:nowrap;overflow:hidden;text-overflow:ellipsis'>"+_catEsc(marca)+ml+"</div></div>";
     h+="<div id='_ccpPrice"+pid+"' style='display:flex;align-items:center;gap:.15rem;flex-shrink:0'>"+_catCatProdPriceCellInner(p)+"</div>";
     h+="</div>";
   });
   box.innerHTML=h;
+  var q=(document.getElementById('_catCatProdSearch')||{}).value||'';
+  if(q)_catCatProdSearch(q);
 }
 function _catCatProdPriceCellInner(p){
   var st=_catCatProd; var pid=p.id; var cfg=st.cfg;
   var sug=_catCatPrecioSugerido(p.precio_min_ars,cfg);
-  if(st.modo==='sinprecio'){ return "<span style='color:#9a8a6a;font-size:.72rem;font-style:italic'>Sin precio</span>"; }
+  if(st.modo==='sinprecio')return "<span style='color:#b8a888;font-size:.72rem'>sin precio</span>";
   if(st.sinp && st.sinp[pid]){
     return "<span style='color:#8a6a3a;font-size:.72rem;font-weight:700'>🚫 Sin precio</span><button onclick='_catCatProdSinPrecio("+pid+",false)' title='Volver a poner precio' style='background:none;border:none;cursor:pointer;font-size:.9rem;padding:0 .15rem;opacity:.8'>↺</button>";
   }
   if(st.modo==='manual'){
-    var mv=(st.manual[pid]!=null)?_catEsc(String(st.manual[pid])):"";
+    var mv=st.manual[pid]!=null?_catEsc(String(st.manual[pid])):'';
     return "<span style='color:#b09a72;font-size:.8rem'>$</span><input type='number' inputmode='numeric' value='"+mv+"' placeholder='"+sug+"' oninput='_catCatProdManual("+pid+",this.value)' style='width:68px;border:1px solid #e0d4bd;border-radius:7px;padding:.35rem .4rem;font-size:.8rem;font-family:inherit;text-align:right;box-sizing:border-box'><button onclick='_catCatProdSinPrecio("+pid+",true)' title='Dejar sin precio' style='background:none;border:none;cursor:pointer;font-size:.9rem;padding:0 .15rem;opacity:.7'>🚫</button>";
   }
   if(st.over && st.over[pid]!=null){
@@ -15991,15 +16248,27 @@ function _catCatProdRowTap(pid){ var st=_catCatProd; if(!st)return; var on=!st.s
 function _catCatProdToggle(pid,checked){ var st=_catCatProd; if(!st)return; st.sel[pid]=checked; _catCatProdCount(); }
 function _catCatProdManual(pid,val){ var st=_catCatProd; if(!st)return; st.manual[pid]=val; }
 function _catCatProdTodos(val){ var st=_catCatProd; if(!st)return; st.perfumes.forEach(function(p){ st.sel[p.id]=val; }); _catCatProdRenderList(); _catCatProdCount(); }
+function _catCatProdVisibles(val){
+  var st=_catCatProd; if(!st)return;
+  var rows=document.querySelectorAll('#_catCatProdList ._ccpRow'), n=0;
+  for(var i=0;i<rows.length;i++){
+    if(rows[i].style.display==='none')continue;
+    var pid=parseInt(rows[i].getAttribute('data-pid')); if(!pid)continue;
+    st.sel[pid]=val; n++;
+    var chk=document.getElementById('_ccpChk'+pid); if(chk)chk.checked=val;
+  }
+  _catCatProdCount();
+  _catToast(n+' perfume'+(n===1?'':'s')+(val?' marcados':' desmarcados'),'tok');
+}
 function _catCatProdSearch(q){ q=(q||'').trim().toLowerCase(); var rows=document.querySelectorAll('#_catCatProdList ._ccpRow'); for(var i=0;i<rows.length;i++){ var s=rows[i].getAttribute('data-s')||''; rows[i].style.display=(!q||s.indexOf(q)>=0)?'flex':'none'; } }
 function _catCatProdCount(){ var st=_catCatProd; if(!st)return; var n=0; st.perfumes.forEach(function(p){ if(st.sel[p.id])n++; }); var el=document.getElementById('_catCatProdCount'); if(el)el.textContent=n+' elegidos'; }
 function _catCatProdCerrar(){ var ov=document.getElementById('_catCatProdOv'); if(ov)ov.remove(); _catCatProd=null; }
 function _catCatProdGuardar(){
   var st=_catCatProd; if(!st)return;
-  var seleccionados=st.perfumes.filter(function(p){ return st.sel[p.id]; });
+  var seleccionados=st.perfumes.filter(function(p){ return !!st.sel[p.id]; });
   if(!seleccionados.length){ _catToast('Elegí al menos un perfume','twarn'); return; }
   if(st.modo==='manual'){
-    var faltan=seleccionados.filter(function(p){ if(st.sinp && st.sinp[p.id]) return false; var v=(st.manual[p.id]!=null?String(st.manual[p.id]):'').replace(/\D/g,''); return !(v && parseInt(v)>0); });
+    var faltan=seleccionados.filter(function(p){ if(st.sinp&&st.sinp[p.id])return false; var raw=(st.manual[p.id]!=null?String(st.manual[p.id]):'').replace(/\D/g,''); return !(raw&&parseInt(raw)>0); });
     if(faltan.length){ _catCatProdResolverFaltantes(faltan.length, function(choice){ _catCatProdPersistir(seleccionados, choice); }); return; }
   }
   _catCatProdPersistir(seleccionados, null);
@@ -16009,7 +16278,8 @@ function _catCatProdPersistir(seleccionados, faltanChoice){
   var rows=[], orden=0;
   seleccionados.forEach(function(p){
     var precio=null, manual=false, incluir=true;
-    if(st.sinp && st.sinp[p.id]){ rows.push({catalogo_id:st.catId, producto_id:p.id, precio:null, precio_manual:false, orden:orden++}); return; }
+    var base=(p.precio_min_ars!=null)?p.precio_min_ars:null;
+    if(st.sinp && st.sinp[p.id]){ rows.push({catalogo_id:st.catId, producto_id:p.id, precio:null, precio_manual:false, precio_base:base, orden:orden++}); return; }
     var ovRaw=(st.over && st.over[p.id]!=null)?String(st.over[p.id]).replace(/\D/g,''):'';
     var ovVal=ovRaw?parseInt(ovRaw):0;
     if(modo!=='manual' && ovVal>0){ precio=ovVal; manual=true; }
@@ -16023,7 +16293,7 @@ function _catCatProdPersistir(seleccionados, faltanChoice){
     } else if(modo==='sugerido'){ precio=_catCatPrecioSugerido(p.precio_min_ars,cfg); manual=false; }
     else if(modo==='sinprecio'){ precio=null; manual=false; }
     else { precio=p.precio_min_ars||0; manual=false; }
-    if(incluir){ rows.push({catalogo_id:st.catId, producto_id:p.id, precio:precio, precio_manual:manual, orden:orden++}); }
+    if(incluir){ rows.push({catalogo_id:st.catId, producto_id:p.id, precio:precio, precio_manual:manual, precio_base:base, orden:orden++}); }
   });
   var btn=document.getElementById('_catCatProdGuardarBtn'); if(btn){btn.disabled=true;btn.textContent='Guardando...';}
   apiDelete('catalogos_cliente_productos','catalogo_id=eq.'+st.catId).then(function(){
@@ -16032,6 +16302,7 @@ function _catCatProdPersistir(seleccionados, faltanChoice){
   }).then(function(){
     _catToast('Productos guardados ('+rows.length+')','tok');
     var c=_catCatList.filter(function(x){return x.id===st.catId;})[0]; if(c)c._nprod=rows.length;
+    _catCatCambios[st.catId]=0;
     _catCatProdCerrar();
     if(_catPanelTab==='catalogos'){ var b=document.getElementById('_catTabBody'); if(b)_catRenderTabCatalogos(b); }
   }).catch(function(e){ console.error('[catcat prod save]',e); _catToast('No se pudo guardar','twarn'); if(btn){btn.disabled=false;btn.textContent='Guardar productos';} });
@@ -16055,8 +16326,65 @@ function _catCatProdResolverFaltantes(n, onChoice){
   document.getElementById('_ccpFaltCan').onclick=function(){ ov.remove(); };
 }
 
+// ── Actualizar precios cuando Belle cambió los suyos ──────────────
+function _catCatActualizarPrecios(catId){
+  var cat=(_catCatList||[]).filter(function(x){return x.id===catId;})[0];
+  if(!cat){ _catToast('Catálogo no encontrado','twarn'); return; }
+  var modo=(cat.config&&cat.config.precio_modo)||'x1';
+  var ov=document.createElement('div');
+  ov.style.cssText='position:fixed;inset:0;z-index:100000;background:rgba(20,15,8,.55);display:flex;align-items:center;justify-content:center;padding:1.2rem';
+  var h="<div style='background:#fffdf9;border-radius:16px;max-width:400px;width:100%;padding:1.3rem;box-shadow:0 18px 50px rgba(0,0,0,.3)'>";
+  h+="<div style='font-family:\"Cormorant Garamond\",serif;font-size:1.35rem;font-weight:700;color:#3a2f1c;margin-bottom:.4rem'>Actualizar precios</div>";
+  h+="<div style='font-size:.83rem;color:#6a5a40;line-height:1.45;margin-bottom:1.1rem'>Elegí cómo querés poner al día <b>"+_catEsc(cat.nombre||'tu catálogo')+"</b>.</div>";
+  h+="<button id='_ccuAuto' style='width:100%;text-align:left;background:linear-gradient(135deg,#c4965a,#a9763f);color:#fff;border:none;border-radius:11px;padding:.75rem .9rem;font-size:.82rem;font-weight:700;cursor:pointer;font-family:inherit;margin-bottom:.5rem'>Recalcular los automáticos<div style='font-weight:400;font-size:.7rem;opacity:.92;margin-top:.15rem'>Los precios que pusiste vos a mano quedan intactos.</div></button>";
+  h+="<button id='_ccuProp' style='width:100%;text-align:left;background:#fff;color:#3a2f1c;border:1.5px solid #c4965a;border-radius:11px;padding:.75rem .9rem;font-size:.82rem;font-weight:700;cursor:pointer;font-family:inherit;margin-bottom:.5rem'>Actualizar todo en proporción<div style='font-weight:400;font-size:.7rem;color:#7a6a50;margin-top:.15rem'>A los precios tuyos les aplica el mismo porcentaje que cambió Belle.</div></button>";
+  h+="<button id='_ccuCan' style='width:100%;background:transparent;color:#9a8a6a;border:none;padding:.45rem;font-size:.78rem;cursor:pointer;font-family:inherit'>Cancelar</button></div>";
+  ov.innerHTML=h;
+  document.body.appendChild(ov);
+  ov.addEventListener('click',function(e){ if(e.target===ov)ov.remove(); });
+  document.getElementById('_ccuCan').onclick=function(){ ov.remove(); };
+  document.getElementById('_ccuAuto').onclick=function(){ ov.remove(); _catCatAplicarActualizacion(catId,modo,false); };
+  document.getElementById('_ccuProp').onclick=function(){ ov.remove(); _catCatAplicarActualizacion(catId,modo,true); };
+}
+function _catCatAplicarActualizacion(catId, modo, proporcional){
+  var cfg=_catCatConfig||{};
+  _catCatPdfOverlay(true,'Actualizando precios…');
+  apiGet('catalogos_cliente_productos','select=producto_id,precio,precio_manual,precio_base,orden&catalogo_id=eq.'+catId+'&order=orden.asc&limit=5000').then(function(rows){
+    rows=Array.isArray(rows)?rows:[];
+    if(!rows.length){ _catCatPdfOverlay(false); _catToast('Este catálogo no tiene productos','twarn'); return null; }
+    var byId={}; (allProds||[]).forEach(function(p){ byId[p.id]=p; });
+    var out=[], cambiados=0;
+    rows.forEach(function(r){
+      var p=byId[r.producto_id];
+      var nuevoBase=(p&&p.precio_min_ars!=null)?p.precio_min_ars:r.precio_base;
+      var precio=r.precio;
+      if(r.precio==null){ /* el cliente eligió no mostrar precio: se respeta */ }
+      else if(!r.precio_manual){
+        var np=(modo==='sugerido')?_catCatPrecioSugerido(nuevoBase,cfg):(modo==='x1'?(nuevoBase||0):r.precio);
+        if(np!==precio)cambiados++;
+        precio=np;
+      } else if(proporcional && r.precio_base && nuevoBase && r.precio_base!==nuevoBase){
+        var np2=Math.round(r.precio*(nuevoBase/r.precio_base));
+        var red=cfg.precio_redondeo?cfg.precio_redondeo:0;
+        if(red>0)np2=Math.round(np2/red)*red;
+        if(np2!==precio)cambiados++;
+        precio=np2;
+      }
+      out.push({catalogo_id:catId, producto_id:r.producto_id, precio:precio, precio_manual:r.precio_manual, precio_base:nuevoBase, orden:r.orden});
+    });
+    return apiDelete('catalogos_cliente_productos','catalogo_id=eq.'+catId).then(function(){
+      return apiPost('catalogos_cliente_productos', out);
+    }).then(function(){
+      _catCatPdfOverlay(false);
+      _catCatCambios[catId]=0;
+      _catToast(cambiados?('Listo: '+cambiados+' precio'+(cambiados===1?'':'s')+' actualizado'+(cambiados===1?'':'s')):'Tu catálogo ya estaba al día','tok');
+      if(_catPanelTab==='catalogos'){ var b=document.getElementById('_catTabBody'); if(b)_catRenderTabCatalogos(b); }
+    });
+  }).catch(function(e){ console.error('[cat actualizar precios]',e); _catCatPdfOverlay(false); _catToast('No se pudieron actualizar los precios','twarn'); });
+}
+
 // ══════════════════════════════════════════════════════════════════
-// MIS CATÁLOGOS — Fase 4: generar PDF (jsPDF + html2canvas, página por página)
+// GENERACIÓN DEL CATÁLOGO (jsPDF + html2canvas) — hoja por hoja
 // ══════════════════════════════════════════════════════════════════
 function _catCatPdfOverlay(show,msg,pct){
   var ov=document.getElementById('_catCatPdfOv');
@@ -16072,26 +16400,12 @@ function _catCatPdfOverlay(show,msg,pct){
   var wrap=document.getElementById('_catCatPdfBarWrap'), bar=document.getElementById('_catCatPdfBar');
   if(wrap&&bar){ if(pct==null){ wrap.style.display='none'; } else { wrap.style.display='block'; bar.style.width=Math.max(0,Math.min(100,Math.round(pct*100)))+'%'; } }
 }
-function _catCatPdfPreload(urls, cb){
-  var uniq=[], seen={}; (urls||[]).forEach(function(u){ if(u && !seen[u]){seen[u]=1; uniq.push(u);} });
-  var ok={};
-  if(!uniq.length){ cb&&cb(ok); return; }
-  var done=0, total=uniq.length, finished=false;
-  function tick(){ done++; if(done>=total && !finished){ finished=true; cb&&cb(ok); } }
-  uniq.forEach(function(u){
-    var im=new Image(); try{ im.crossOrigin='anonymous'; }catch(e){}
-    var t=setTimeout(tick,7000);
-    im.onload=function(){ ok[u]=true; clearTimeout(t); tick(); };
-    im.onerror=function(){ clearTimeout(t); tick(); };
-    im.src=u;
-  });
-}
-function _catCatPdfImgOk(u){ return !!(u && window._catCatPdfOk && window._catCatPdfOk[u]); }
 function _catLumText(hex){
   hex=String(hex||'').replace('#',''); if(hex.length===3)hex=hex.replace(/(.)/g,'$1$1');
   var r=parseInt(hex.substr(0,2),16)||0, g=parseInt(hex.substr(2,2),16)||0, b=parseInt(hex.substr(4,2),16)||0;
   return (0.299*r+0.587*g+0.114*b)>150?'#2a2118':'#ffffff';
 }
+function _catHexRgb(hex){ hex=String(hex||'').replace('#',''); if(hex.length===3)hex=hex.replace(/(.)/g,'$1$1'); return [parseInt(hex.substr(0,2),16)||0,parseInt(hex.substr(2,2),16)||0,parseInt(hex.substr(4,2),16)||0]; }
 function _catCatNotaFoto(nombre){
   if(!window._catNotaFotoMap){
     var m={}; (window._catNotasMaestras||[]).forEach(function(n){
@@ -16122,18 +16436,72 @@ function _catCatPdfConc(p,ficha){
   var m=String(p.nombre||'').match(/(Extrait de Parfum|Eau de Parfum|Parfum Intense|Extrait|Elixir|EDP|EDT|EDC|Parfum|Cologne)/i);
   return m?m[1]:'';
 }
-function _catCatPdfAcordesHTML(p){
+function _catCatPastels(){ return [
+ {bg:'#faf6ee',ac:'#9a7338'},{bg:'#eef6ec',ac:'#4e7d52'},{bg:'#e8f4ef',ac:'#3f8a72'},
+ {bg:'#eaf2fa',ac:'#3f6fa0'},{bg:'#eef3f8',ac:'#4a6f93'},{bg:'#f1edf8',ac:'#6b59a0'},
+ {bg:'#f9eef5',ac:'#a45285'},{bg:'#faeeee',ac:'#b05656'},{bg:'#fdf0e8',ac:'#c07a47'},
+ {bg:'#fbf6e6',ac:'#9a8330'},{bg:'#f3f1ee',ac:'#6e6258'},{bg:'#eef1f2',ac:'#566a72'},
+ {bg:'#ffffff',ac:'#1a1a1a'},{bg:'#141414',ac:'#e6c98a'},{bg:'#1d2430',ac:'#9fc2e8'}
+]; }
+
+// ── piezas reutilizables ──────────────────────────────────────────
+function _catAcordesDe(p,max){
   var ac=[]; try{ ac=Array.isArray(p.acordes)?p.acordes:(p.acordes?JSON.parse(p.acordes):[]); }catch(e){ ac=[]; }
-  if(!ac.length) return "<span style='font-size:9px;color:#c4b89c'>—</span>";
-  ac=ac.slice().sort(function(a,b){return (b.pct||0)-(a.pct||0);}).slice(0,4);
-  var h="";
-  ac.forEach(function(a){
-    var col=a.color||'#c4965a', tc=_catLumText(col);
-    h+="<div style='background:"+col+";border-radius:5px;padding:3px 8px;margin-bottom:2px;display:flex;align-items:center'><span style='font-size:8.5px;font-weight:700;color:"+tc+";white-space:nowrap;overflow:hidden;text-overflow:ellipsis;text-transform:capitalize'>"+_catEsc(a.nombre||'')+"</span></div>";
-  });
-  return h;
+  if(!Array.isArray(ac))ac=[];
+  return ac.slice().sort(function(a,b){return (b.pct||0)-(a.pct||0);}).slice(0,max||4);
 }
+function _catFotoHTML(url,w,h,fit,radius,bg){
+  var src=_catImgOk(url)?_catImgSrc(url):'';
+  var inner=src?("<img src='"+src+"' crossorigin='anonymous' style='width:100%;height:100%;object-fit:"+(fit||'cover')+";display:block'>"):"";
+  return "<div style='width:"+w+";height:"+h+";background:"+(bg||'#fff')+";border-radius:"+(radius||0)+"px;overflow:hidden;flex-shrink:0'>"+inner+"</div>";
+}
+function _catPrecioHTML(item,cfg,size,alinear){
+  if(item.precio==null) return "";
+  var ac=cfg.precio_color||'#a9763f', est=cfg.precio_estilo||'plano', F=_catTplFont(cfg);
+  var txt=fmt(item.precio);
+  var st="font-family:"+F.body+";font-size:"+size+"px;font-weight:800;white-space:nowrap;";
+  if(est==='pastilla') return "<span style='"+st+"display:inline-block;background:"+ac+";color:"+_catLumText(ac)+";padding:3px 10px;border-radius:999px'>"+txt+"</span>";
+  if(est==='borde')    return "<span style='"+st+"display:inline-block;border:1.5px solid "+ac+";color:"+ac+";padding:2px 9px;border-radius:7px'>"+txt+"</span>";
+  return "<span style='"+st+"color:"+ac+"'>"+txt+"</span>";
+}
+function _catAcordesPills(p,cfg,max,fs){
+  if(cfg.mostrar_acordes===false) return "";
+  var ac=_catAcordesDe(p,max||4); if(!ac.length)return "";
+  var F=_catTplFont(cfg), h="<div style='display:flex;flex-wrap:wrap;gap:3px'>";
+  ac.forEach(function(a){
+    var col=a.color||'#c4965a';
+    h+="<span style='background:"+col+";color:"+_catLumText(col)+";font-family:"+F.body+";font-size:"+(fs||8)+"px;font-weight:700;padding:2px 7px;border-radius:999px;text-transform:capitalize;white-space:nowrap'>"+_catEsc(a.nombre||'')+"</span>";
+  });
+  return h+"</div>";
+}
+function _catNotasTexto(item,cfg,max){
+  if(cfg.mostrar_notas===false) return "";
+  var n=_catCatPdfNotasList(item.ficha); if(!n.length)return "";
+  return _catEsc(n.slice(0,max||8).join(' · '));
+}
+function _catNotasStrip(item,cfg,n,size){
+  if(cfg.mostrar_notas===false) return "";
+  var F=_catTplFont(cfg);
+  if((cfg.notas_modo||'fotos')==='escritas'){
+    var t=_catNotasTexto(item,cfg,n);
+    return t?("<div style='font-family:"+F.body+";font-size:8.5px;color:#7a6a50;line-height:1.35'>"+t+"</div>"):"";
+  }
+  var notas=_catCatPdfNotasList(item.ficha).slice(0,n); if(!notas.length)return "";
+  var h="<div style='display:flex;gap:4px'>";
+  notas.forEach(function(nm){
+    var foto=_catCatNotaFoto(nm);
+    if(_catImgOk(foto)){
+      h+="<div style='width:"+size+"px;flex-shrink:0'><div style='width:"+size+"px;height:"+size+"px;border-radius:50%;overflow:hidden;background:#efe4cf'><img src='"+_catImgSrc(foto)+"' crossorigin='anonymous' style='width:100%;height:100%;object-fit:cover;display:block'></div><div style='font-family:"+F.body+";font-size:6px;color:#8a7a5a;text-align:center;line-height:1.05;margin-top:2px;height:12px;overflow:hidden'>"+_catEsc(nm)+"</div></div>";
+    } else {
+      h+="<div style='width:"+size+"px;flex-shrink:0'><div style='width:"+size+"px;height:"+size+"px;border-radius:50%;background:#e7d8bb;display:flex;align-items:center;justify-content:center;text-align:center;padding:2px;box-sizing:border-box'><span style='font-family:"+F.body+";font-size:6px;color:#6a5a40;line-height:1.05;font-weight:600'>"+_catEsc(nm)+"</span></div><div style='height:14px'></div></div>";
+    }
+  });
+  return h+"</div>";
+}
+// grilla de notas de la plantilla "Lista clásica"
 function _catCatPdfNotasHTML(item,cfg){
+  if(cfg.mostrar_notas===false) return "";
+  var F=_catTplFont(cfg);
   var notas=_catCatPdfNotasList(item.ficha);
   if(!notas.length) return "<span style='font-size:9px;color:#c4b89c'>—</span>";
   if((cfg.notas_modo||'fotos')==='escritas'){
@@ -16141,305 +16509,700 @@ function _catCatPdfNotasHTML(item,cfg){
     if(f.notas_salida)parts.push("<b style='color:#9a7d4e'>Salida:</b> "+_catEsc(f.notas_salida));
     if(f.notas_corazon)parts.push("<b style='color:#9a7d4e'>Corazón:</b> "+_catEsc(f.notas_corazon));
     if(f.notas_fondo)parts.push("<b style='color:#9a7d4e'>Fondo:</b> "+_catEsc(f.notas_fondo));
-    return "<div style='font-size:9px;color:#6a5a40;line-height:1.3'>"+parts.join('<br>')+"</div>";
+    return "<div style='font-family:"+F.body+";font-size:9px;color:#6a5a40;line-height:1.3'>"+parts.join('<br>')+"</div>";
   }
-  notas=notas.slice(0,12);
+  notas=notas.slice(0,8);
   var n=notas.length;
-  var cols=n<=4?2:(n<=9?3:4);
-  var fs=cols===2?'9px':(cols===3?'7.5px':'6.5px');
+  var cols=Math.min(4,Math.max(2,n));
+  var alto=(n<=cols)?46:42;   // 1 o 2 filas, nunca más: si no la fila del perfume crece y no entran 7 por hoja
+  var fs=(cols<=2)?'8px':'6.5px';
   var h="<div style='display:grid;grid-template-columns:repeat("+cols+",1fr);gap:1px;width:100%'>";
   notas.forEach(function(nm){
     var foto=_catCatNotaFoto(nm);
-    if(_catCatPdfImgOk(foto)){
-      h+="<div style='position:relative;aspect-ratio:1/1;overflow:hidden;background:#efe4cf'><img src='"+_catEsc(foto)+"' crossorigin='anonymous' style='width:100%;height:100%;object-fit:cover;display:block'><div style='position:absolute;left:0;right:0;bottom:0;background:linear-gradient(rgba(0,0,0,0),rgba(0,0,0,.72));color:#fff;font-size:"+fs+";line-height:1.02;padding:4px 2px 2px;text-align:center;font-weight:600'>"+_catEsc(nm)+"</div></div>";
+    if(_catImgOk(foto)){
+      h+="<div style='position:relative;height:"+alto+"px;overflow:hidden;background:#efe4cf'><img src='"+_catImgSrc(foto)+"' crossorigin='anonymous' style='width:100%;height:100%;object-fit:cover;display:block'><div style='position:absolute;left:0;right:0;bottom:0;background:linear-gradient(rgba(0,0,0,0),rgba(0,0,0,.72));color:#fff;font-size:"+fs+";line-height:1.02;padding:3px 1px 1px;text-align:center;font-weight:600'>"+_catEsc(nm)+"</div></div>";
     } else {
-      h+="<div style='aspect-ratio:1/1;background:#e7d8bb;display:flex;align-items:center;justify-content:center;text-align:center;padding:2px;box-sizing:border-box'><span style='font-size:"+fs+";color:#6a5a40;line-height:1.05;font-weight:600'>"+_catEsc(nm)+"</span></div>";
+      h+="<div style='height:"+alto+"px;background:#e7d8bb;display:flex;align-items:center;justify-content:center;text-align:center;padding:2px;box-sizing:border-box'><span style='font-size:"+fs+";color:#6a5a40;line-height:1.05;font-weight:600'>"+_catEsc(nm)+"</span></div>";
     }
   });
   h+="</div>";
   return h;
 }
-function _catCatPastels(){ return [
- {bg:'#faf6ee',ac:'#9a7338'},{bg:'#eef6ec',ac:'#4e7d52'},{bg:'#e8f4ef',ac:'#3f8a72'},
- {bg:'#eaf2fa',ac:'#3f6fa0'},{bg:'#eef3f8',ac:'#4a6f93'},{bg:'#f1edf8',ac:'#6b59a0'},
- {bg:'#f9eef5',ac:'#a45285'},{bg:'#faeeee',ac:'#b05656'},{bg:'#fdf0e8',ac:'#c07a47'},
- {bg:'#fbf6e6',ac:'#9a8330'},{bg:'#f3f1ee',ac:'#6e6258'},{bg:'#eef1f2',ac:'#566a72'}
-]; }
-function _catHexRgb(hex){ hex=String(hex||'').replace('#',''); if(hex.length===3)hex=hex.replace(/(.)/g,'$1$1'); return [parseInt(hex.substr(0,2),16),parseInt(hex.substr(2,2),16),parseInt(hex.substr(4,2),16)]; }
+function _catCatPdfAcordesHTML(p,cfg){
+  if(cfg && cfg.mostrar_acordes===false) return "";
+  var ac=_catAcordesDe(p,4);
+  if(!ac.length) return "<span style='font-size:9px;color:#c4b89c'>—</span>";
+  var h="";
+  ac.forEach(function(a){
+    var col=a.color||'#c4965a', tc=_catLumText(col);
+    h+="<div style='background:"+col+";border-radius:5px;padding:3px 8px;margin-bottom:2px;display:flex;align-items:center'><span style='font-size:8.5px;font-weight:700;color:"+tc+";white-space:nowrap;overflow:hidden;text-overflow:ellipsis;text-transform:capitalize'>"+_catEsc(a.nombre||'')+"</span></div>";
+  });
+  return h;
+}
+
+// ── banner / encabezado / portada ─────────────────────────────────
 function _catCatPdfBannerHTML(cat,cfg,slim){
-  var modo=cfg.banner_modo||'default';
+  var F=_catTplFont(cfg);
   var t1=_catEsc(cfg.banner_texto1||cat.nombre||'CATÁLOGO');
   var t2=_catEsc(cfg.banner_texto2||'');
-  if(modo==='imagen' && cfg.banner_imagen_url && _catCatPdfImgOk(cfg.banner_imagen_url)){
-    return "<div style='height:"+(slim?70:220)+"px;overflow:hidden'><img src='"+_catEsc(cfg.banner_imagen_url)+"' crossorigin='anonymous' style='width:100%;height:100%;object-fit:cover;display:block'></div>";
+  if(cfg.banner_modo==='imagen' && cfg.banner_imagen_url && _catImgOk(cfg.banner_imagen_url)){
+    return "<div style='height:"+(slim?70:200)+"px;overflow:hidden;flex-shrink:0'><img src='"+_catImgSrc(cfg.banner_imagen_url)+"' crossorigin='anonymous' style='width:100%;height:100%;object-fit:cover;display:block'></div>";
   }
   var bg=cfg.banner_bg||'#1a1a1a', fg=cfg.banner_fg||'#ffffff';
-  var h="<div style='height:"+(slim?60:200)+"px;background:"+bg+";color:"+fg+";display:flex;flex-direction:column;align-items:center;justify-content:center;text-align:center;padding:0 24px'>";
-  h+="<div style='font-family:Arial,\"Helvetica Neue\",Helvetica,sans-serif;font-size:"+(slim?'1.3rem':'2.1rem')+";font-weight:800;letter-spacing:.03em;line-height:1.1'>"+t1+"</div>";
-  if(t2)h+="<div style='font-family:Arial,\"Helvetica Neue\",Helvetica,sans-serif;font-size:"+(slim?'.7rem':'.9rem')+";opacity:.85;margin-top:.3rem;letter-spacing:.12em;text-transform:uppercase'>"+t2+"</div>";
+  if(cfg.banner_modo==='preset'){
+    var pr=(Array.isArray((_catCatConfig||{}).banner_presets)?_catCatConfig.banner_presets:[]).filter(function(x){return x.id===cfg.banner_preset_id;})[0];
+    if(pr){ bg=pr.bg||bg; fg=pr.fg||fg; }
+  }
+  var h="<div style='height:"+(slim?60:200)+"px;background:"+bg+";color:"+fg+";display:flex;flex-direction:column;align-items:center;justify-content:center;text-align:center;padding:0 24px;flex-shrink:0'>";
+  h+="<div style='font-family:"+F.head+";font-size:"+(slim?'26px':'44px')+";font-weight:700;letter-spacing:.02em;line-height:1.1'>"+t1+"</div>";
+  if(t2)h+="<div style='font-family:"+F.body+";font-size:"+(slim?'10px':'13px')+";opacity:.85;margin-top:6px;letter-spacing:.16em;text-transform:uppercase'>"+t2+"</div>";
   h+="</div>";
   return h;
 }
 function _catCatPdfHojaBannerHTML(cfg){
   var modo=cfg.hoja_modo||'none';
   if(modo==='none') return "";
-  if(modo==='imagen' && cfg.hoja_imagen_url && _catCatPdfImgOk(cfg.hoja_imagen_url)){
-    return "<div style='height:64px;overflow:hidden'><img src='"+_catEsc(cfg.hoja_imagen_url)+"' crossorigin='anonymous' style='width:100%;height:100%;object-fit:cover;display:block'></div>";
+  var F=_catTplFont(cfg);
+  if(modo==='imagen' && cfg.hoja_imagen_url && _catImgOk(cfg.hoja_imagen_url)){
+    return "<div style='height:64px;overflow:hidden;flex-shrink:0'><img src='"+_catImgSrc(cfg.hoja_imagen_url)+"' crossorigin='anonymous' style='width:100%;height:100%;object-fit:cover;display:block'></div>";
   }
-  if(modo==='texto' || modo==='imagen'){
-    var txt=_catEsc(cfg.hoja_texto||''); if(!txt) return "";
-    var bg=cfg.hoja_bg||'#1a1a1a', fg=cfg.hoja_fg||'#ffffff';
-    return "<div style='height:46px;background:"+bg+";color:"+fg+";display:flex;align-items:center;justify-content:center;text-align:center;padding:0 20px'><div style='font-family:Arial,\"Helvetica Neue\",Helvetica,sans-serif;font-size:1.15rem;font-weight:800;letter-spacing:.05em'>"+txt+"</div></div>";
-  }
-  return "";
+  var txt=_catEsc(cfg.hoja_texto||''); if(!txt) return "";
+  var bg=cfg.hoja_bg||'#1a1a1a', fg=cfg.hoja_fg||'#ffffff';
+  return "<div style='height:46px;background:"+bg+";color:"+fg+";display:flex;align-items:center;justify-content:center;text-align:center;padding:0 20px;flex-shrink:0'><div style='font-family:"+F.head+";font-size:22px;font-weight:700;letter-spacing:.05em'>"+txt+"</div></div>";
 }
-function _catCatPdfRowHTML(item,cfg){
-  var p=item.p, ficha=item.ficha||{};
+function _catCatPdfPortadaHTML(cat,cfg,gcfg){
+  var F=_catTplFont(cfg);
+  var bg=cfg.banner_bg||'#1a1a1a', fg=cfg.banner_fg||'#ffffff';
+  if(cfg.banner_modo==='preset'){
+    var pr=(Array.isArray((_catCatConfig||{}).banner_presets)?_catCatConfig.banner_presets:[]).filter(function(x){return x.id===cfg.banner_preset_id;})[0];
+    if(pr){ bg=pr.bg||bg; fg=pr.fg||fg; }
+  }
+  var t1=_catEsc(cfg.banner_texto1||cat.nombre||'CATÁLOGO');
+  var t2=_catEsc(cfg.banner_texto2||'');
+  var inner="";
+  if(cfg.banner_modo==='imagen' && cfg.banner_imagen_url && _catImgOk(cfg.banner_imagen_url)){
+    inner ="<img src='"+_catImgSrc(cfg.banner_imagen_url)+"' crossorigin='anonymous' style='position:absolute;inset:0;width:100%;height:100%;object-fit:cover'>";
+    inner+="<div style='position:absolute;inset:0;background:linear-gradient(rgba(0,0,0,.15),rgba(0,0,0,.62))'></div>";
+    fg='#ffffff';
+  }
+  var h="<div style='width:794px;height:1123px;position:relative;overflow:hidden;background:"+bg+";color:"+fg+";box-sizing:border-box'>";
+  h+=inner;
+  h+="<div style='position:absolute;inset:0;display:flex;flex-direction:column;align-items:center;justify-content:center;text-align:center;padding:0 70px'>";
+  h+="<div style='width:60px;height:1px;background:"+fg+";opacity:.55;margin-bottom:26px'></div>";
+  h+="<div style='font-family:"+F.head+";font-size:62px;font-weight:700;line-height:1.05;letter-spacing:.01em'>"+t1+"</div>";
+  if(t2)h+="<div style='font-family:"+F.body+";font-size:15px;letter-spacing:.28em;text-transform:uppercase;opacity:.88;margin-top:16px'>"+t2+"</div>";
+  h+="<div style='width:60px;height:1px;background:"+fg+";opacity:.55;margin-top:26px'></div>";
+  h+="</div>";
+  var pieParts=[];
+  if(cfg.incluir_contacto){
+    if(cfg.contacto_nombre)pieParts.push(_catEsc(cfg.contacto_nombre));
+    if(cfg.contacto_telefono)pieParts.push(_catEsc(cfg.contacto_telefono));
+    if(cfg.contacto_nota)pieParts.push(_catEsc(cfg.contacto_nota));
+  }
+  if(pieParts.length)h+="<div style='position:absolute;left:0;right:0;bottom:52px;text-align:center;font-family:"+F.body+";font-size:12px;letter-spacing:.06em;opacity:.9'>"+pieParts.join(' &nbsp;·&nbsp; ')+"</div>";
+  if(gcfg && gcfg.credito_belle)h+="<div style='position:absolute;left:0;right:0;bottom:26px;text-align:center;font-family:"+F.body+";font-size:9px;opacity:.6'>"+_catEsc(gcfg.credito_belle)+"</div>";
+  h+="</div>";
+  return h;
+}
+function _catCatPdfContactStrip(cfg){
+  if(!cfg.incluir_contacto)return "";
+  var F=_catTplFont(cfg);
+  var nom=_catEsc(cfg.contacto_nombre||''), tel=_catEsc(cfg.contacto_telefono||''), nota=_catEsc(cfg.contacto_nota||'');
+  var parts=[]; if(nom)parts.push("<b style='color:"+(cfg.precio_color||'#9a7d4e')+"'>"+nom+"</b>"); if(tel)parts.push(tel); if(nota)parts.push(nota);
+  if(!parts.length)return "";
+  return "<div style='border-top:1px solid rgba(0,0,0,.12);padding-top:6px;text-align:center;font-family:"+F.body+";font-size:10px;color:#7a6a4e'>"+parts.join(" &nbsp;·&nbsp; ")+"</div>";
+}
+function _catCatPdfPie(cat,cfg,gcfg,pageNum,totalPages,isLast){
+  var F=_catTplFont(cfg), h="<div style='padding:0 30px 12px;flex-shrink:0'>";
+  h+=_catCatPdfContactStrip(cfg);
+  if(isLast && gcfg && gcfg.credito_belle) h+="<div style='text-align:center;font-size:9px;color:#a89e8c;margin-top:4px;font-family:"+F.body+"'>"+_catEsc(gcfg.credito_belle)+"</div>";
+  if(cfg.mostrar_paginas!==false) h+="<div style='display:flex;justify-content:space-between;font-family:"+F.body+";font-size:9px;color:#a89e8c;margin-top:5px'><span>"+_catEsc(cat.nombre||'Catálogo')+"</span><span>"+pageNum+" / "+totalPages+"</span></div>";
+  h+="</div>";
+  return h;
+}
+
+// ── PLANTILLA: Lista clásica ──────────────────────────────────────
+function _catTplTablaHead(cfg,wPerf,wPre,wNot,wAco){
+  var ac=cfg.precio_color||'#a9763f', F=_catTplFont(cfg);
+  var c="font-family:"+F.body+";font-size:9px;font-weight:700;color:"+ac+";text-transform:uppercase;letter-spacing:.06em";
+  var h="<div style='display:flex;border-bottom:2px solid "+ac+";padding-bottom:5px;margin-bottom:2px'>";
+  h+="<div style='flex:0 0 "+wPerf+"%;"+c+"'>Perfume</div>";
+  h+="<div style='flex:0 0 "+wPre+"%;"+c+"'>Precio</div>";
+  if(wNot)h+="<div style='flex:0 0 "+wNot+"%;"+c+"'>Notas</div>";
+  if(wAco)h+="<div style='flex:0 0 "+wAco+"%;"+c+"'>Acordes</div>";
+  h+="</div>";
+  return h;
+}
+function _catTplTablaRow(item,cfg,wPerf,wPre,wNot,wAco){
+  var p=item.p, ficha=item.ficha||{}, F=_catTplFont(cfg);
   var ac=cfg.precio_color||'#a9763f';
   var nombre=_catEsc(String(p.nombre||'').replace(/\s*\|.*/,'').trim());
   var marca=_catEsc(String(p.empresa||'').trim());
   var conc=_catCatPdfConc(p,ficha), ml=p.ml?(p.ml+' ml'):'';
   var metaParts=[]; if(conc)metaParts.push(_catEsc(conc)); if(ml)metaParts.push(_catEsc(ml));
   var meta=metaParts.join(' · ');
-  var precio=item.precio!=null?fmt(item.precio):'';
-  var fotoInner=(p.imagen_url && _catCatPdfImgOk(p.imagen_url))?("<img src='"+_catEsc(p.imagen_url)+"' crossorigin='anonymous' style='width:100%;height:100%;object-fit:cover;display:block'>"):"";
-  var foto="<div style='width:84px;height:84px;align-self:center;background:#fff;border:1px solid rgba(0,0,0,.08);border-radius:6px;overflow:hidden;flex-shrink:0'>"+fotoInner+"</div>";
+  var num=(cfg.mostrar_numeracion&&item.n)?("<span style='color:#b8a888;font-weight:700'>"+item.n+". </span>"):"";
   var h="<div style='display:flex;align-items:stretch;border-bottom:1px solid rgba(0,0,0,.08);padding:13px 0'>";
-  h+="<div style='flex:0 0 40%;padding-right:8px;display:flex;gap:10px;align-items:center'>"+foto+"<div style='flex:1;min-width:0;display:flex;flex-direction:column;justify-content:center'>";
-  h+="<div style='font-family:Arial,\"Helvetica Neue\",Helvetica,sans-serif;font-size:15px;font-weight:700;color:#2e2a26;line-height:1.18'>"+nombre+"</div>";
-  if(marca)h+="<div style='font-family:Arial,sans-serif;font-size:10.5px;color:"+ac+";font-weight:600;text-transform:uppercase;letter-spacing:.04em;margin-top:2px'>"+marca+"</div>";
-  if(meta)h+="<div style='font-family:Arial,sans-serif;font-size:10.5px;color:"+ac+";margin-top:1px'>"+meta+"</div>";
+  h+="<div style='flex:0 0 "+wPerf+"%;padding-right:8px;display:flex;gap:10px;align-items:center'>";
+  h+="<div style='align-self:center;border:1px solid rgba(0,0,0,.08);border-radius:6px;overflow:hidden;flex-shrink:0'>"+_catFotoHTML(p.imagen_url,'84px','84px','cover',0,'#fff')+"</div>";
+  h+="<div style='flex:1;min-width:0;display:flex;flex-direction:column;justify-content:center'>";
+  h+="<div style='font-family:"+F.head+";font-size:"+(cfg.tipografia==='moderna'?'15px':'18px')+";font-weight:700;color:#2e2a26;line-height:1.18'>"+num+nombre+"</div>";
+  if(marca && cfg.mostrar_marca!==false)h+="<div style='font-family:"+F.body+";font-size:10.5px;color:"+ac+";font-weight:600;text-transform:uppercase;letter-spacing:.04em;margin-top:2px'>"+marca+"</div>";
+  if(meta && cfg.mostrar_meta!==false)h+="<div style='font-family:"+F.body+";font-size:10.5px;color:"+ac+";margin-top:1px'>"+meta+"</div>";
   h+="</div></div>";
-  h+="<div style='flex:0 0 15%;display:flex;align-items:center'><span style='font-family:Arial,sans-serif;font-size:16px;font-weight:800;color:"+ac+"'>"+precio+"</span></div>";
-  h+="<div style='flex:0 0 24%;padding-right:8px;display:flex;align-items:center'>"+_catCatPdfNotasHTML(item,cfg)+"</div>";
-  h+="<div style='flex:0 0 21%;display:flex;flex-direction:column;justify-content:center;gap:2px'>"+_catCatPdfAcordesHTML(p)+"</div>";
+  h+="<div style='flex:0 0 "+wPre+"%;display:flex;align-items:center'>"+_catPrecioHTML(item,cfg,16)+"</div>";
+  if(wNot)h+="<div style='flex:0 0 "+wNot+"%;padding-right:8px;display:flex;align-items:center'>"+_catCatPdfNotasHTML(item,cfg)+"</div>";
+  if(wAco)h+="<div style='flex:0 0 "+wAco+"%;display:flex;flex-direction:column;justify-content:center;gap:2px'>"+_catCatPdfAcordesHTML(p,cfg)+"</div>";
   h+="</div>";
   return h;
 }
-function _catCatPdfFooterHTML(cfg,gcfg){
-  var h="";
-  if(cfg.incluir_contacto){
-    var nom=_catEsc(cfg.contacto_nombre||''), tel=_catEsc(cfg.contacto_telefono||''), nota=_catEsc(cfg.contacto_nota||'');
-    if(nom||tel||nota){
-      h+="<div style='margin-top:18px;padding:14px 16px;background:#f6efe1;border:1px solid #e6d6b8;border-radius:10px;text-align:center'>";
-      if(nom)h+="<div style='font-family:Arial,\"Helvetica Neue\",Helvetica,sans-serif;font-size:15px;font-weight:800;color:#2e2a26'>"+nom+"</div>";
-      if(tel)h+="<div style='font-size:12px;color:#6a5a40;margin-top:2px'>"+tel+"</div>";
-      if(nota)h+="<div style='font-size:11px;color:#8a7a5a;margin-top:3px'>"+nota+"</div>";
+function _catTplTabla(cfg,items){
+  var wNot=(cfg.mostrar_notas===false)?0:24, wAco=(cfg.mostrar_acordes===false)?0:21;
+  var wPre=15, wPerf=100-wNot-wAco-wPre;
+  var h="<div style='flex:1;padding:18px 30px 8px;overflow:hidden'>";
+  h+=_catTplTablaHead(cfg,wPerf,wPre,wNot,wAco);
+  items.forEach(function(it){ h+=_catTplTablaRow(it,cfg,wPerf,wPre,wNot,wAco); });
+  h+="</div>";
+  return h;
+}
+
+// ── PLANTILLA: Editorial ──────────────────────────────────────────
+function _catTplEditorial(cfg,items){
+  var F=_catTplFont(cfg), ac=cfg.precio_color||'#a9763f';
+  var h="<div style='flex:1;padding:22px 44px 10px;display:flex;flex-direction:column;justify-content:space-around;overflow:hidden'>";
+  items.forEach(function(it,i){
+    var p=it.p, ficha=it.ficha||{};
+    var nombre=_catEsc(String(p.nombre||'').replace(/\s*\|.*/,'').trim());
+    var marca=_catEsc(String(p.empresa||'').trim());
+    var conc=_catCatPdfConc(p,ficha), ml=p.ml?(p.ml+' ml'):'';
+    var metaParts=[]; if(conc)metaParts.push(_catEsc(conc)); if(ml)metaParts.push(_catEsc(ml));
+    var rev=(i%2===1);
+    h+="<div style='display:flex;gap:24px;align-items:center;padding:12px 0;"+(rev?'flex-direction:row-reverse;':'')+"'>";
+    h+=_catFotoHTML(p.imagen_url,'168px','206px','contain',4,'#ffffff');
+    h+="<div style='flex:1;min-width:0;"+(rev?'text-align:right;':'')+"'>";
+    if(marca && cfg.mostrar_marca!==false)h+="<div style='font-family:"+F.body+";font-size:9.5px;letter-spacing:.22em;text-transform:uppercase;color:"+ac+";font-weight:700;margin-bottom:5px'>"+marca+"</div>";
+    h+="<div style='font-family:"+F.head+";font-size:30px;font-weight:700;color:#241f1a;line-height:1.08'>"+((cfg.mostrar_numeracion&&it.n)?("<span style='color:#c3b49a'>"+it.n+". </span>"):"")+nombre+"</div>";
+    if(metaParts.length && cfg.mostrar_meta!==false)h+="<div style='font-family:"+F.body+";font-size:10px;color:#8a7a5a;margin-top:4px;letter-spacing:.05em'>"+metaParts.join(' · ')+"</div>";
+    h+="<div style='width:46px;height:1px;background:"+ac+";opacity:.55;margin:10px 0;"+(rev?'margin-left:auto;':'')+"'></div>";
+    var notas=_catNotasStrip(it,cfg,6,34);
+    if(notas)h+="<div style='margin-bottom:8px;"+(rev?'display:flex;justify-content:flex-end;':'')+"'>"+notas+"</div>";
+    var pills=_catAcordesPills(p,cfg,4,8.5);
+    if(pills)h+="<div style='"+(rev?'display:flex;justify-content:flex-end;':'')+"'>"+pills+"</div>";
+    h+="</div>";
+    var pr=_catPrecioHTML(it,cfg,22);
+    if(pr)h+="<div style='flex-shrink:0;text-align:"+(rev?'left':'right')+"'>"+pr+"</div>";
+    h+="</div>";
+  });
+  h+="</div>";
+  return h;
+}
+
+// ── PLANTILLA: Revista (grilla 2) ─────────────────────────────────
+function _catTplRevista(cfg,items,capRows){
+  var F=_catTplFont(cfg), ac=cfg.precio_color||'#a9763f';
+  var h="<div style='flex:1;min-height:0;padding:18px 26px 8px;display:flex;flex-direction:column;overflow:hidden'>";
+  h+="<div style='flex:1;min-height:0;display:grid;grid-template-columns:repeat(2,1fr);grid-template-rows:repeat("+capRows+",1fr);gap:14px'>";
+  items.forEach(function(it){
+    var p=it.p, ficha=it.ficha||{};
+    var nombre=_catEsc(String(p.nombre||'').replace(/\s*\|.*/,'').trim());
+    var marca=_catEsc(String(p.empresa||'').trim());
+    var conc=_catCatPdfConc(p,ficha), ml=p.ml?(p.ml+' ml'):'';
+    var metaParts=[]; if(conc)metaParts.push(_catEsc(conc)); if(ml)metaParts.push(_catEsc(ml));
+    h+="<div style='background:#fff;border:1px solid rgba(0,0,0,.08);border-radius:12px;overflow:hidden;display:flex;flex-direction:column;min-height:0'>";
+    h+="<div style='flex:0 0 54%;overflow:hidden;background:#faf8f4'>"+_catFotoHTML(p.imagen_url,'100%','100%','contain',0,'#faf8f4')+"</div>";
+    h+="<div style='flex:1;min-height:0;padding:9px 12px 10px;display:flex;flex-direction:column'>";
+    if(marca && cfg.mostrar_marca!==false)h+="<div style='font-family:"+F.body+";font-size:8px;letter-spacing:.18em;text-transform:uppercase;color:"+ac+";font-weight:700'>"+marca+"</div>";
+    h+="<div style='font-family:"+F.head+";font-size:17px;font-weight:700;color:#2a251f;line-height:1.12;margin-top:2px'>"+nombre+"</div>";
+    if(metaParts.length && cfg.mostrar_meta!==false)h+="<div style='font-family:"+F.body+";font-size:8.5px;color:#9a8a6a;margin-top:2px'>"+metaParts.join(' · ')+"</div>";
+    var pills=_catAcordesPills(p,cfg,3,7.5);
+    if(pills)h+="<div style='margin-top:5px'>"+pills+"</div>";
+    h+="<div style='flex:1'></div>";
+    h+="<div style='display:flex;align-items:flex-end;justify-content:space-between;gap:6px;margin-top:5px'>";
+    var nt=_catNotasTexto(it,cfg,4);
+    h+="<div style='font-family:"+F.body+";font-size:7.5px;color:#a89880;line-height:1.25;flex:1;min-width:0;overflow:hidden;max-height:20px'>"+nt+"</div>";
+    h+=_catPrecioHTML(it,cfg,15);
+    h+="</div></div></div>";
+  });
+  h+="</div></div>";
+  return h;
+}
+
+// ── PLANTILLA: Galería (grilla 3) ─────────────────────────────────
+function _catTplGaleria(cfg,items,capRows){
+  var F=_catTplFont(cfg), ac=cfg.precio_color||'#a9763f';
+  var h="<div style='flex:1;min-height:0;padding:18px 26px 8px;display:flex;flex-direction:column;overflow:hidden'>";
+  h+="<div style='flex:1;min-height:0;display:grid;grid-template-columns:repeat(3,1fr);grid-template-rows:repeat("+capRows+",1fr);gap:12px'>";
+  items.forEach(function(it){
+    var p=it.p, ficha=it.ficha||{};
+    var nombre=_catEsc(String(p.nombre||'').replace(/\s*\|.*/,'').trim());
+    var marca=_catEsc(String(p.empresa||'').trim());
+    var ml=p.ml?(p.ml+' ml'):'';
+    h+="<div style='background:#fff;border:1px solid rgba(0,0,0,.07);border-radius:10px;overflow:hidden;display:flex;flex-direction:column;min-height:0'>";
+    h+="<div style='flex:1;min-height:0;background:#fbfaf7'>"+_catFotoHTML(p.imagen_url,'100%','100%','contain',0,'#fbfaf7')+"</div>";
+    h+="<div style='flex-shrink:0;padding:7px 9px 9px;text-align:center;border-top:1px solid rgba(0,0,0,.05)'>";
+    if(marca && cfg.mostrar_marca!==false)h+="<div style='font-family:"+F.body+";font-size:7px;letter-spacing:.16em;text-transform:uppercase;color:"+ac+";font-weight:700'>"+marca+"</div>";
+    h+="<div style='font-family:"+F.head+";font-size:13px;font-weight:700;color:#2a251f;line-height:1.12;margin-top:1px;max-height:30px;overflow:hidden'>"+nombre+"</div>";
+    if(ml && cfg.mostrar_meta!==false)h+="<div style='font-family:"+F.body+";font-size:7.5px;color:#a89880;margin-top:1px'>"+_catEsc(ml)+"</div>";
+    var pr=_catPrecioHTML(it,cfg,13);
+    if(pr)h+="<div style='margin-top:4px'>"+pr+"</div>";
+    h+="</div></div>";
+  });
+  h+="</div></div>";
+  return h;
+}
+
+// ── PLANTILLA: Minimalista (2 columnas de texto) ──────────────────
+function _catTplMinimal(cfg,items){
+  var F=_catTplFont(cfg), ac=cfg.precio_color||'#a9763f';
+  var mitad=Math.ceil(items.length/2);
+  var cols=[items.slice(0,mitad), items.slice(mitad)];
+  var h="<div style='flex:1;padding:22px 34px 10px;display:flex;gap:26px;overflow:hidden'>";
+  cols.forEach(function(col){
+    h+="<div style='flex:1;min-width:0'>";
+    col.forEach(function(it){
+      var p=it.p, ficha=it.ficha||{};
+      var nombre=_catEsc(String(p.nombre||'').replace(/\s*\|.*/,'').trim());
+      var marca=_catEsc(String(p.empresa||'').trim());
+      var conc=_catCatPdfConc(p,ficha), ml=p.ml?(p.ml+' ml'):'';
+      var metaParts=[]; if(marca && cfg.mostrar_marca!==false)metaParts.push(marca);
+      if(cfg.mostrar_meta!==false){ if(conc)metaParts.push(_catEsc(conc)); if(ml)metaParts.push(_catEsc(ml)); }
+      h+="<div style='display:flex;align-items:baseline;gap:8px;padding:6px 0;border-bottom:1px dotted rgba(0,0,0,.14)'>";
+      h+="<div style='flex:1;min-width:0'>";
+      h+="<div style='font-family:"+F.head+";font-size:13px;font-weight:700;color:#2a251f;line-height:1.15;white-space:nowrap;overflow:hidden;text-overflow:ellipsis'>"+((cfg.mostrar_numeracion&&it.n)?("<span style='color:#c3b49a'>"+it.n+". </span>"):"")+nombre+"</div>";
+      if(metaParts.length)h+="<div style='font-family:"+F.body+";font-size:7.5px;color:#a2926f;letter-spacing:.06em;text-transform:uppercase;white-space:nowrap;overflow:hidden;text-overflow:ellipsis'>"+metaParts.join(' · ')+"</div>";
       h+="</div>";
-    }
-  }
-  if(gcfg && gcfg.credito_belle) h+="<div style='margin-top:10px;text-align:center;font-size:9px;color:#b8a888'>"+_catEsc(gcfg.credito_belle)+"</div>";
+      h+=_catPrecioHTML(it,cfg,12);
+      h+="</div>";
+    });
+    h+="</div>";
+  });
+  h+="</div>";
   return h;
 }
-function _catCatPdfContactStrip(cfg){
-  if(!cfg.incluir_contacto)return "";
-  var nom=_catEsc(cfg.contacto_nombre||''), tel=_catEsc(cfg.contacto_telefono||''), nota=_catEsc(cfg.contacto_nota||'');
-  var parts=[]; if(nom)parts.push("<b style='color:#9a7d4e'>"+nom+"</b>"); if(tel)parts.push(tel); if(nota)parts.push(nota);
-  if(!parts.length)return "";
-  return "<div style='border-top:1px solid #e6d6b8;padding-top:6px;text-align:center;font-size:10px;color:#7a6a4e'>"+parts.join(" &nbsp;·&nbsp; ")+"</div>";
-}
-function _catCatPdfPageHTML(cat,cfg,gcfg,pageItems,isFirst,isLast,pageNum,totalPages){
-  var bg=cfg.cat_bg||'#fdfbf7', ac=cfg.precio_color||'#a9763f';
-  var h="<div style='width:794px;min-height:1123px;background:"+bg+";box-sizing:border-box;font-family:Arial,\"Helvetica Neue\",Helvetica,sans-serif;display:flex;flex-direction:column'>";
-  if(isFirst) h+=_catCatPdfBannerHTML(cat,cfg,false);
+
+// ── ARMADO DE LA HOJA ─────────────────────────────────────────────
+function _catCatPdfPageHTML(cat,cfg,gcfg,pageItems,isFirst,isLast,pageNum,totalPages,capRows){
+  var bg=cfg.cat_bg||'#fdfbf7', ac=cfg.precio_color||'#a9763f', F=_catTplFont(cfg);
+  var tplId=cfg.plantilla||'tabla';
+  // Revista y Galería son grillas: calzan exactas en la hoja.
+  // Las demás fluyen, así que van con min-height para no cortar ningún perfume.
+  var alto=(tplId==='revista'||tplId==='galeria')?"height:1123px;overflow:hidden;":"min-height:1123px;";
+  var h="<div style='width:794px;"+alto+"background:"+bg+";box-sizing:border-box;font-family:"+F.body+";display:flex;flex-direction:column;position:relative'>";
+  if(cfg.borde_hoja)h+="<div style='position:absolute;left:13px;top:13px;right:13px;bottom:13px;border:1px solid "+ac+";opacity:.28;pointer-events:none;z-index:2'></div>";
+  if(isFirst && (cfg.portada_modo||'banner')==='banner') h+=_catCatPdfBannerHTML(cat,cfg,false);
   else h+=_catCatPdfHojaBannerHTML(cfg);
-  h+="<div style='flex:1;padding:18px 30px 8px'>";
-  h+="<div style='display:flex;border-bottom:2px solid "+ac+";padding-bottom:5px;margin-bottom:2px'>";
-  h+="<div style='flex:0 0 40%;font-size:9px;font-weight:700;color:"+ac+";text-transform:uppercase;letter-spacing:.06em'>Perfume</div>";
-  h+="<div style='flex:0 0 15%;font-size:9px;font-weight:700;color:"+ac+";text-transform:uppercase;letter-spacing:.06em'>Precio</div>";
-  h+="<div style='flex:0 0 24%;font-size:9px;font-weight:700;color:"+ac+";text-transform:uppercase;letter-spacing:.06em'>Notas</div>";
-  h+="<div style='flex:0 0 21%;font-size:9px;font-weight:700;color:"+ac+";text-transform:uppercase;letter-spacing:.06em'>Acordes</div>";
-  h+="</div>";
-  pageItems.forEach(function(it){ h+=_catCatPdfRowHTML(it,cfg); });
-  h+="</div>";
-  h+="<div style='padding:0 30px 12px'>";
-  h+=_catCatPdfContactStrip(cfg);
-  if(isLast && gcfg && gcfg.credito_belle) h+="<div style='text-align:center;font-size:9px;color:#b8a888;margin-top:4px'>"+_catEsc(gcfg.credito_belle)+"</div>";
-  h+="<div style='display:flex;justify-content:space-between;font-size:9px;color:#a89e8c;margin-top:5px'><span>"+_catEsc(cat.nombre||'Catálogo')+"</span><span>"+pageNum+" / "+totalPages+"</span></div>";
-  h+="</div>";
+  if(tplId==='editorial')      h+=_catTplEditorial(cfg,pageItems);
+  else if(tplId==='revista')   h+=_catTplRevista(cfg,pageItems,capRows||3);
+  else if(tplId==='galeria')   h+=_catTplGaleria(cfg,pageItems,capRows||4);
+  else if(tplId==='minimal')   h+=_catTplMinimal(cfg,pageItems);
+  else                         h+=_catTplTabla(cfg,pageItems);
+  h+=_catCatPdfPie(cat,cfg,gcfg,pageNum,totalPages,isLast);
   h+="</div>";
   return h;
 }
+
+// Reparto PAREJO de perfumes por hoja: calcula cuántas hojas hacen falta
+// y reparte lo más parejo posible respetando el techo de cada una, para no
+// dejar la última coja (ej 7/10/4).
+function _catCatReparto(total,maxFirst,maxRest){
+  if(total<=maxFirst) return [total];
+  var n=1, cap=maxFirst;
+  while(cap<total){ n++; cap+=maxRest; }
+  var caps=[maxFirst]; for(var k=1;k<n;k++)caps.push(maxRest);
+  var cnt=[]; for(var j=0;j<n;j++)cnt.push(0);
+  var left=total, idx=0, guard=0;
+  while(left>0 && guard<100000){
+    if(cnt[idx]<caps[idx]){ cnt[idx]++; left--; }
+    idx=(idx+1)%n; guard++;
+  }
+  return cnt;
+}
+
+function _catCatItemsDe(rows){
+  var byId={}; (allProds||[]).forEach(function(p){ byId[p.id]=p; });
+  var items=[], n=0;
+  (rows||[]).forEach(function(r){
+    var p=byId[r.producto_id]; if(!p)return;
+    var ficha=null; try{ ficha=fichaMatchProd(p.nombre,(typeof FICHAS_BELLE!=='undefined'?FICHAS_BELLE:[]),p.id); }catch(e){}
+    items.push({p:p, ficha:ficha||{}, precio:r.precio, n:++n});
+  });
+  return items;
+}
+// Todas las imágenes que hace falta bajar para este catálogo (con su ancho máximo)
+function _catCatImagenes(cfg,items){
+  var out=[];
+  if(cfg.banner_modo==='imagen' && cfg.banner_imagen_url) out.push({url:cfg.banner_imagen_url,max:900});
+  if(cfg.hoja_modo==='imagen' && cfg.hoja_imagen_url) out.push({url:cfg.hoja_imagen_url,max:900});
+  var tpl=cfg.plantilla||'tabla';
+  if(tpl==='minimal') return out;                      // sin fotos: por eso vuela
+  var maxProd = (tpl==='editorial')?420:((tpl==='revista')?420:((tpl==='galeria')?320:220));
+  items.forEach(function(it){ if(it.p.imagen_url)out.push({url:it.p.imagen_url,max:maxProd}); });
+  if(cfg.mostrar_notas!==false && (cfg.notas_modo||'fotos')==='fotos' && (tpl==='tabla'||tpl==='editorial')){
+    var maxN=(tpl==='editorial')?6:12;
+    items.forEach(function(it){
+      _catCatPdfNotasList(it.ficha).slice(0,maxN).forEach(function(nm){ var u=_catCatNotaFoto(nm); if(u)out.push({url:u,max:130}); });
+    });
+  }
+  return out;
+}
+
 function _catCatPdfGenerar(catId){
   var cat=(_catCatList||[]).filter(function(x){return x.id===catId;})[0];
   if(!cat){ _catToast('Catálogo no encontrado','twarn'); return; }
   if(typeof window.jspdf==='undefined' || typeof html2canvas==='undefined'){ _catToast('Cargando librerías, reintentá en un momento…','twarn'); return; }
-  var cfg=cat.config||{}, gcfg=_catCatConfig||{};
+  var cfg=_catCatClamp(Object.assign(_catCatBase(), cat.config||{}));
+  var gcfg=_catCatConfig||{};
   _catCatPdfOverlay(true,'Preparando tu catálogo…');
   apiGet('catalogos_cliente_productos','select=producto_id,precio,precio_manual,orden&catalogo_id=eq.'+catId+'&order=orden.asc&limit=5000').then(function(rows){
     rows=Array.isArray(rows)?rows:[];
-    if(!rows.length){ _catCatPdfOverlay(false); _catToast('Este catálogo no tiene productos. Tocá "Elegir productos".','twarn'); return; }
-    var byId={}; (allProds||[]).forEach(function(p){ byId[p.id]=p; });
-    var items=[];
-    rows.forEach(function(r){
-      var p=byId[r.producto_id]; if(!p)return;
-      var ficha=null; try{ ficha=fichaMatchProd(p.nombre,(typeof FICHAS_BELLE!=='undefined'?FICHAS_BELLE:[]),p.id); }catch(e){}
-      items.push({p:p, ficha:ficha||{}, precio:r.precio});
-    });
+    if(!rows.length){ _catCatPdfOverlay(false); _catToast('Este catálogo no tiene productos. Tocá "Productos y precios".','twarn'); return; }
+    var items=_catCatItemsDe(rows);
     if(!items.length){ _catCatPdfOverlay(false); _catToast('No pude armar el catálogo','twarn'); return; }
     _catCatPdfEnsureNotas(function(){ _catCatPdfRender(cat,cfg,gcfg,items); });
   }).catch(function(e){ console.error('[catpdf load]',e); _catCatPdfOverlay(false); _catToast('No pude cargar los productos','twarn'); });
 }
+
 function _catCatPdfRender(cat,cfg,gcfg,items){
-  // Reparto PAREJO de perfumes por hoja (fix 2026-07): antes metía 7 fijos en la
-  // primera y 10 en el resto, dejando la última hoja coja (ej 7/10/4). Ahora calcula
-  // cuántas hojas hacen falta y reparte lo más parejo posible, respetando el techo
-  // (7 en la primera por el banner grande, 10 en las demás) para no cortar un perfume.
-  var MAX_FIRST=7, MAX_REST=10;
-  function _catCatPdfReparto(total){
-    if(total<=MAX_FIRST) return [total];
-    var n=1, cap=MAX_FIRST;
-    while(cap<total){ n++; cap+=MAX_REST; }               // menor nº de hojas que alcanza
-    var caps=[MAX_FIRST]; for(var k=1;k<n;k++)caps.push(MAX_REST);
-    var cnt=[]; for(var j=0;j<n;j++)cnt.push(0);
-    var left=total, idx=0, guard=0;
-    while(left>0 && guard<100000){                          // reparte de a uno, en round-robin
-      if(cnt[idx]<caps[idx]){ cnt[idx]++; left--; }
-      idx=(idx+1)%n; guard++;
-    }
-    return cnt;
-  }
+  var pp=_catTplPerPage(cfg);
+  var tpl=_catTplDef(cfg.plantilla||'tabla');
+  var conPortada=((cfg.portada_modo||'banner')==='hoja');
   var pages=[], _off=0;
-  _catCatPdfReparto(items.length).forEach(function(c){ pages.push(items.slice(_off,_off+c)); _off+=c; });
+  _catCatReparto(items.length,pp[0],pp[1]).forEach(function(c){ pages.push(items.slice(_off,_off+c)); _off+=c; });
+  var cols=tpl.cols||1;
+  var totalPages=pages.length+(conPortada?1:0);
+
   var pdf=new window.jspdf.jsPDF({orientation:'portrait',unit:'mm',format:'a4'});
   var pw=pdf.internal.pageSize.getWidth(), ph=pdf.internal.pageSize.getHeight();
   var bgHex=cfg.cat_bg||'#fdfbf7', bgRgb=_catHexRgb(bgHex);
   var host=document.createElement('div');
   host.style.cssText='position:fixed;left:-99999px;top:0;width:794px;background:'+bgHex;
   document.body.appendChild(host);
-  var idx=0;
+  var idx=0, hechas=0;
+  // Con muchas hojas bajamos un poco la escala: el PDF pesa menos y sale antes.
+  var escala = totalPages>14?1.25:1.5;
+
   function finish(ok){
     if(host.parentNode)host.parentNode.removeChild(host);
     _catCatPdfOverlay(false);
     if(ok){ pdf.save('Catalogo_'+String(cat.nombre||'Belle').replace(/[^a-zA-Z0-9]/g,'_')+'.pdf'); _catToast('¡Catálogo PDF listo!','tok'); }
   }
+  function pintar(html, cb){
+    host.innerHTML=html;
+    html2canvas(host.firstChild,{scale:escala,useCORS:true,allowTaint:false,backgroundColor:bgHex,logging:false,imageTimeout:0}).then(function(canvas){
+      var imgData=canvas.toDataURL('image/jpeg',0.9);
+      if(hechas>0)pdf.addPage();
+      pdf.setFillColor(bgRgb[0],bgRgb[1],bgRgb[2]); pdf.rect(0,0,pw,ph,'F');
+      var ratio=canvas.width/canvas.height, imgW=pw, imgH=imgW/ratio;
+      if(imgH>ph){ imgH=ph; imgW=imgH*ratio; }
+      pdf.addImage(imgData,'JPEG',(pw-imgW)/2,0,imgW,imgH);
+      hechas++;
+      _catCatPdfOverlay(true,'Armando hoja '+hechas+' de '+totalPages+'…', 0.35+0.65*(hechas/totalPages));
+      setTimeout(cb,30);
+    }).catch(function(e){ console.error('[catpdf page]',e); finish(false); _catToast('Error generando el PDF','terr'); });
+  }
   function doPage(){
     if(idx>=pages.length){ finish(true); return; }
     var pageItems=pages[idx], isFirst=idx===0, isLast=idx===pages.length-1;
-    _catCatPdfOverlay(true,'Generando página '+(idx+1)+' de '+pages.length+'…', idx/pages.length);
-    var notasFotos=(cfg.notas_modo||'fotos')==='fotos';
-    var cand=[];
-    if(isFirst){ if(cfg.banner_modo==='imagen' && cfg.banner_imagen_url) cand.push(cfg.banner_imagen_url); }
-    else { if(cfg.hoja_modo==='imagen' && cfg.hoja_imagen_url) cand.push(cfg.hoja_imagen_url); }
-    pageItems.forEach(function(it){
-      if(it.p.imagen_url) cand.push(it.p.imagen_url);
-      if(notasFotos){ _catCatPdfNotasList(it.ficha).slice(0,12).forEach(function(nm){ var u=_catCatNotaFoto(nm); if(u)cand.push(u); }); }
-    });
-    _catCatPdfPreload(cand,function(okSet){
-      window._catCatPdfOk=okSet||{};
-      host.innerHTML=_catCatPdfPageHTML(cat,cfg,gcfg,pageItems,isFirst,isLast,idx+1,pages.length);
-      html2canvas(host.firstChild,{scale:1.5,useCORS:true,allowTaint:false,backgroundColor:bgHex,logging:false}).then(function(canvas){
-        var imgData=canvas.toDataURL('image/jpeg',0.92);
-        if(idx>0)pdf.addPage();
-        pdf.setFillColor(bgRgb[0],bgRgb[1],bgRgb[2]); pdf.rect(0,0,pw,ph,'F');
-        var ratio=canvas.width/canvas.height, imgW=pw, imgH=imgW/ratio;
-        if(imgH>ph){ imgH=ph; imgW=imgH*ratio; }
-        pdf.addImage(imgData,'JPEG',(pw-imgW)/2,0,imgW,imgH);
-        idx++; setTimeout(doPage,40);
-      }).catch(function(e){ console.error('[catpdf page]',e); finish(false); _catToast('Error generando el PDF','terr'); });
-    });
+    var num=idx+1+(conPortada?1:0);
+    var capRows=Math.max(1,Math.ceil((isFirst?pp[0]:pp[1])/cols));
+    idx++;
+    pintar(_catCatPdfPageHTML(cat,cfg,gcfg,pageItems,isFirst,isLast,num,totalPages,capRows), doPage);
   }
-  doPage();
+
+  _catImgLive=false;
+  _catCatPdfOverlay(true,'Bajando las fotos…',0);
+  _catImgPreloadAll(_catCatImagenes(cfg,items), function(f){ _catCatPdfOverlay(true,'Bajando las fotos…', 0.35*f); }, function(){
+    _catCatPdfOverlay(true,'Armando las hojas…',0.35);
+    if(conPortada){ pintar(_catCatPdfPortadaHTML(cat,cfg,gcfg), doPage); }
+    else doPage();
+  });
+}
+
+// ══════════════════════════════════════════════════════════════════
+// MODAL DE DISEÑO — controles a la izquierda, vista previa real a la derecha
+// ══════════════════════════════════════════════════════════════════
+function _catCatModalCSS(){
+  if(document.getElementById('_catCatCSS'))return;
+  var st=document.createElement('style'); st.id='_catCatCSS';
+  st.textContent=[
+  '#_moCatCat{position:fixed;inset:0;z-index:9999;background:rgba(20,15,8,.62);display:flex;align-items:center;justify-content:center;padding:0}',
+  '.ccm-panel{background:#fdfbf7;width:100%;height:100%;max-width:1180px;display:flex;flex-direction:column;overflow:hidden;box-shadow:0 22px 64px rgba(0,0,0,.34)}',
+  '.ccm-head{display:flex;align-items:center;gap:.6rem;padding:.85rem 1rem;background:linear-gradient(135deg,#c4965a,#a9763f);color:#fff;flex-shrink:0}',
+  '.ccm-head h3{margin:0;font-family:"Cormorant Garamond",serif;font-size:1.25rem;font-weight:700;line-height:1.1}',
+  '.ccm-head p{margin:0;font-size:.67rem;opacity:.92}',
+  '.ccm-x{background:rgba(255,255,255,.18);border:none;color:#fff;width:34px;height:34px;border-radius:9px;font-size:1.25rem;line-height:1;cursor:pointer;flex-shrink:0}',
+  '.ccm-body{flex:1;display:flex;min-height:0}',
+  '.ccm-left{flex:1;min-width:0;overflow-y:auto;padding:.85rem .9rem 1.4rem;-webkit-overflow-scrolling:touch}',
+  '.ccm-right{display:none}',
+  '.ccm-prevMob{margin-bottom:.8rem}',
+  '@media(min-width:900px){#_moCatCat{padding:1.1rem}.ccm-panel{border-radius:18px;height:94vh}.ccm-right{display:flex;width:400px;flex-shrink:0;border-left:1px solid #eee2cd;background:#f4eee2;flex-direction:column}.ccm-prevMob{display:none}.ccm-left{padding:1rem 1.15rem 1.6rem}}',
+  '.ccm-sec{border:1px solid #ecdfc9;border-radius:14px;background:#fff;margin-bottom:.6rem;overflow:hidden}',
+  '.ccm-secH{display:flex;align-items:center;gap:.5rem;padding:.68rem .8rem;cursor:pointer;-webkit-user-select:none;user-select:none;background:#fffdf9}',
+  '.ccm-secT{font-size:.84rem;font-weight:700;color:#5a4a30;flex-shrink:0}',
+  '.ccm-secV{font-size:.66rem;color:#b09b73;flex:1;text-align:right;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}',
+  '.ccm-secA{color:#c4965a;font-size:.8rem;transition:transform .18s ease;flex-shrink:0}',
+  '.ccm-sec.open .ccm-secA{transform:rotate(90deg)}',
+  '.ccm-sec.open .ccm-secH{border-bottom:1px solid #f4ebda}',
+  '.ccm-secB{padding:.15rem .8rem .85rem;display:none}',
+  '.ccm-sec.open .ccm-secB{display:block}',
+  '.ccm-lbl{font-size:.64rem;color:#9a8870;text-transform:uppercase;font-weight:700;letter-spacing:.05em;display:block;margin:.75rem 0 .3rem}',
+  '.ccm-hint{font-size:.65rem;color:#aa9a80;line-height:1.35;margin:.25rem 0 .1rem}',
+  '.ccm-inp{width:100%;padding:.55rem .7rem;border:1px solid #e0d4bf;border-radius:9px;font-size:.85rem;font-family:inherit;color:#5a4a30;box-sizing:border-box;background:#fff}',
+  '.ccm-chips{display:flex;gap:.32rem;flex-wrap:wrap}',
+  '.ccm-chip{border:1px solid #e5d6b8;background:#fff;color:#a9763f;border-radius:999px;padding:.4rem .78rem;font-size:.71rem;font-weight:700;cursor:pointer;font-family:inherit;line-height:1.1}',
+  '.ccm-chip.on{background:linear-gradient(135deg,#c4965a,#a9763f);color:#fff;border-color:transparent}',
+  '.ccm-tplgrid{display:grid;grid-template-columns:repeat(auto-fill,minmax(150px,1fr));gap:.5rem}',
+  '.ccm-tpl{border:1.5px solid #ece0ca;border-radius:13px;padding:.55rem;cursor:pointer;background:#fff;text-align:left}',
+  '.ccm-tpl.on{border-color:#c4965a;background:#fffaf1;box-shadow:0 0 0 3px rgba(196,150,90,.15)}',
+  '.ccm-tplT{display:flex;align-items:center;gap:.35rem}',
+  '.ccm-tplN{font-size:.79rem;font-weight:700;color:#4a3c26}',
+  '.ccm-tplD{font-size:.62rem;color:#a2926f;line-height:1.32;margin-top:.2rem}',
+  '.ccm-mini{display:flex;gap:2px;margin-bottom:.35rem;height:26px}',
+  '.ccm-mini i{background:#e9dcc4;border-radius:2px;display:block}',
+  '.ccm-sw{display:flex;align-items:center;justify-content:space-between;gap:.6rem;padding:.42rem 0;font-size:.8rem;color:#5a4a30;border-bottom:1px solid #f6f0e4}',
+  '.ccm-sw:last-child{border-bottom:none}',
+  '.ccm-sw input{width:19px;height:19px;accent-color:#c4965a;flex-shrink:0}',
+  '.ccm-foot{padding:.75rem .9rem;border-top:1px solid #f0e7d6;display:flex;gap:.55rem;background:#faf6ee;flex-shrink:0}',
+  '.ccm-btn{border-radius:10px;padding:.68rem;font-size:.83rem;font-weight:700;cursor:pointer;font-family:inherit;border:none}',
+  '.ccm-prevHead{padding:.65rem .9rem;border-bottom:1px solid #e6dbc6;display:flex;align-items:center;gap:.4rem;flex-wrap:wrap;flex-shrink:0}',
+  '.ccm-prevTit{font-size:.72rem;font-weight:800;color:#7a6444;letter-spacing:.06em;text-transform:uppercase;flex:1}',
+  '.ccm-pg{border:1px solid #ddcdaa;background:#fff;color:#8a6a3a;border-radius:7px;padding:.24rem .55rem;font-size:.66rem;font-weight:700;cursor:pointer;font-family:inherit}',
+  '.ccm-pg.on{background:#c4965a;color:#fff;border-color:transparent}',
+  '.ccm-prevWrap{flex:1;overflow:auto;padding:.9rem;display:block}',
+  '.ccm-prevWrap>div{width:100%}',
+  '.ccm-stage{position:relative;box-shadow:0 10px 28px rgba(90,70,40,.22);background:#fff;overflow:hidden;flex-shrink:0}',
+  '.ccm-stage>div{transform-origin:top left}',
+  '.ccm-prevFoot{padding:.5rem .9rem .7rem;font-size:.64rem;color:#9a8768;text-align:center;flex-shrink:0;border-top:1px solid #e6dbc6}',
+  '.ccm-prevHeadM{display:flex;align-items:center;gap:.4rem;flex-wrap:wrap;margin-bottom:.4rem}',
+  '.ccm-prevMob>div{display:flex;justify-content:center}',
+  '.ccm-prevMob>.ccm-prevHeadM{justify-content:flex-start}',
+  '.ccm-prevFootM{font-size:.63rem;color:#9a8768;text-align:center;margin-top:.35rem}'
+  ].join('\n');
+  document.head.appendChild(st);
 }
 
 function _catCatModal(cat){
   var old=document.getElementById('_moCatCat'); if(old)old.remove();
+  _catCatModalCSS();
   var s;
-  if(cat){ s=Object.assign(_catCatDefaults(), cat.config||{}, {id:cat.id, nombre:cat.nombre}); s._file=null; s._imgPreview=(cat.config&&cat.config.banner_imagen_url)||''; }
+  if(cat){ s=Object.assign(_catCatBase(), cat.config||{}, {id:cat.id, nombre:cat.nombre}); s._file=null; s._imgPreview=(cat.config&&cat.config.banner_imagen_url)||''; }
   else { s=_catCatDefaults(); s.id=null; s._file=null; s._imgPreview=s.banner_imagen_url||''; }
   s=_catCatClamp(s);
+  s._sec=s._sec||0; s._prevPage=0; s._items=null;
   _catCatModalState=s;
-  var cfg=_catCatConfig||{};
-  var inp="width:100%;padding:.55rem .7rem;border:1px solid #e0d4bf;border-radius:8px;font-size:.85rem;font-family:inherit;color:#5a4a30;box-sizing:border-box;background:#fff";
-  var lbl="font-size:.68rem;color:#9a8870;text-transform:uppercase;font-weight:700;letter-spacing:.04em;display:block;margin-bottom:.3rem";
-  function gbtn(onclick,id,on,txt,extra){ return "<button type='button' onclick='"+onclick+"' id='"+id+"' style='flex:1;"+(extra||'')+"padding:.45rem;border-radius:8px;border:1px solid #d4ba8a;background:"+(on?'linear-gradient(135deg,#c4965a,#a9763f)':'#fff')+";color:"+(on?'#fff':'#a9763f')+";font-size:.7rem;font-weight:700;cursor:pointer;font-family:inherit'>"+txt+"</button>"; }
+
   var mo=document.createElement('div');
   mo.id='_moCatCat';
-  mo.style.cssText='position:fixed;inset:0;z-index:9999;background:rgba(20,15,8,.55);display:flex;align-items:flex-start;justify-content:center;padding:1rem;overflow-y:auto';
   mo.onclick=function(e){ if(e.target===mo)_catCatCerrarModal(); };
-  var h="<div style='background:#fdfbf7;border-radius:16px;max-width:440px;width:100%;margin:auto;box-shadow:0 14px 50px rgba(184,158,110,.3);overflow:hidden'>";
-  h+="<div style='padding:1rem 1.1rem;border-bottom:1px solid #f0e7d6;display:flex;justify-content:space-between;align-items:center;background:#faf6ee'>";
-  h+="<div style='font-size:1.1rem;font-weight:700;color:#5a4a30;font-family:\"Cormorant Garamond\",serif'>"+(cat?'Formato del catálogo':'Nuevo catálogo')+"</div>";
-  h+="<span onclick='_catCatCerrarModal()' style='cursor:pointer;color:#9a8870;font-size:1.4rem;line-height:1'>&times;</span>";
+  var h="<div class='ccm-panel' onclick='event.stopPropagation()'>";
+  h+="<div class='ccm-head'><div style='flex:1;min-width:0'><h3>"+(cat?'Diseño del catálogo':'Nuevo catálogo')+"</h3><p>Elegí la plantilla y mirá al costado cómo va quedando</p></div>";
+  h+="<button class='ccm-x' onclick='_catCatCerrarModal()'>&times;</button></div>";
+  h+="<div class='ccm-body'>";
+  h+="<div class='ccm-left'>";
+  h+="<label class='ccm-lbl' style='margin-top:0'>Nombre del catálogo</label>";
+  h+="<input id='_catCatNombre' class='ccm-inp' type='text' value='"+_catEsc(s.nombre||'')+"' placeholder='Ej: Catálogo Primavera' oninput='_catCatNombreLive(this.value)' style='margin-bottom:.8rem'>";
+  h+="<div class='ccm-prevMob'><div class='ccm-prevHeadM'><span class='ccm-prevTit'>Vista previa</span><span id='_ccmPgBtnsMob' style='display:flex;gap:.25rem;flex-wrap:wrap'></span><button id='_ccmZoomBtn' class='ccm-pg' onclick='_catCatPrevZoom()'>Agrandar</button></div><div id='_ccmPrevMobBox'></div><div class='ccm-prevFootM' id='_ccmPrevFootMob'></div></div>";
+  h+="<div id='_ccmSecs'></div>";
   h+="</div>";
-  h+="<div style='padding:1.1rem;max-height:calc(100vh - 150px);overflow-y:auto'>";
-  h+="<div style='margin-bottom:1rem'><label style='"+lbl+"'>Nombre del catálogo</label><input id='_catCatNombre' type='text' value='"+_catEsc(s.nombre||'')+"' placeholder='Ej: Catálogo Primavera' style='"+inp+"'></div>";
-  h+="<label style='"+lbl+"'>Vista previa</label><div id='_catCatPreview' style='margin-bottom:1rem'></div>";
-  h+="<label style='"+lbl+"'>Banner de portada (1ª hoja)</label><div style='display:flex;gap:.4rem;margin-bottom:.6rem'>";
-  h+=gbtn('_catCatBannerModo("default")','_catCatBm_default',s.banner_modo==='default','Texto');
-  h+=gbtn('_catCatBannerModo("preset")','_catCatBm_preset',s.banner_modo==='preset','Prediseñado');
-  h+=gbtn('_catCatBannerModo("imagen")','_catCatBm_imagen',s.banner_modo==='imagen','Mi imagen');
-  h+="</div><div id='_catCatBannerFields' style='margin-bottom:1rem'></div>";
-  h+="<label style='"+lbl+"'>Encabezado de cada hoja</label><div style='font-size:.64rem;color:#aa9a80;margin:-.1rem 0 .4rem'>Una franja finita arriba de la 2ª hoja en adelante.</div><div style='display:flex;gap:.4rem;margin-bottom:.6rem'>";
-  h+=gbtn('_catCatHojaModo("none")','_catCatHm_none',(s.hoja_modo||'none')==='none','Ninguno','font-size:.68rem;');
-  h+=gbtn('_catCatHojaModo("texto")','_catCatHm_texto',s.hoja_modo==='texto','Texto','font-size:.68rem;');
-  h+=gbtn('_catCatHojaModo("imagen")','_catCatHm_imagen',s.hoja_modo==='imagen','Imagen','font-size:.68rem;');
-  h+="</div><div id='_catCatHojaFields' style='margin-bottom:1rem'></div>";
-  var pModos=[]; if(cfg.modo_x1_habilitado!==false)pModos.push(['x1','Precio minorista Belle']); if(cfg.modo_sugerido_habilitado!==false)pModos.push(['sugerido','Precio sugerido']); if(cfg.modo_manual_habilitado!==false)pModos.push(['manual','Poné tus precios']); pModos.push(['sinprecio','Sin precios']);
-  h+="<label style='"+lbl+"'>Precio que mostrás</label><div style='display:flex;gap:.4rem;margin-bottom:.4rem;flex-wrap:wrap'>";
-  pModos.forEach(function(o){ h+=gbtn('_catCatStateSet("precio_modo","'+o[0]+'")','_catCatPm_'+o[0],s.precio_modo===o[0],o[1],'min-width:92px;font-size:.66rem;'); });
+  h+="<div class='ccm-right'>";
+  h+="<div class='ccm-prevHead'><span class='ccm-prevTit'>Vista previa</span><span id='_ccmPgBtns' style='display:flex;gap:.25rem;flex-wrap:wrap'></span></div>";
+  h+="<div class='ccm-prevWrap'><div id='_ccmPrevBox'></div></div>";
+  h+="<div class='ccm-prevFoot' id='_ccmPrevFoot'></div>";
   h+="</div>";
-  h+="<div id='_catCatPmDesc' style='font-size:.7rem;color:#7a6a50;background:#faf6ee;border:1px solid #f0e7d6;border-radius:7px;padding:.5rem .65rem;margin-bottom:1rem;line-height:1.4'>"+_catCatPmDescTxt(s.precio_modo)+"</div>";
-  var nModos=[]; if(cfg.notas_fotos_habilitado!==false)nModos.push(['fotos','Fotos de notas']); if(cfg.notas_escritas_habilitado!==false)nModos.push(['escritas','Notas escritas']);
-  if(nModos.length){
-    h+="<label style='"+lbl+"'>Columna de notas</label><div style='display:flex;gap:.4rem;margin-bottom:.5rem'>";
-    nModos.forEach(function(o){ h+=gbtn('_catCatStateSet("notas_modo","'+o[0]+'")','_catCatNm_'+o[0],s.notas_modo===o[0],o[1]); });
-    h+="</div>";
-    h+="<div id='_catCatNotasWarn' style='display:"+(s.notas_modo==='fotos'?'block':'none')+";font-size:.66rem;color:#9a7d4e;background:#fbf3e3;border:1px solid #ecdcc0;border-radius:7px;padding:.4rem .55rem;margin:0 0 1rem;line-height:1.35'>⏳ Con <b>fotos de notas</b>, el catálogo tarda un poco más en generarse.</div>";
-  }
-  h+="<label style='"+lbl+"'>Colores del catálogo</label><div style='font-size:.64rem;color:#aa9a80;margin:-.1rem 0 .45rem'>Elegí un fondo pastel y te sugerimos el color del precio (podés cambiarlo).</div>";
-  h+="<div id='_catCatPastelGrid' style='display:flex;flex-wrap:wrap;gap:.4rem;margin-bottom:.6rem'></div>";
-  h+="<div style='display:flex;align-items:center;gap:1.2rem;flex-wrap:wrap;margin-bottom:1rem'>";
-  h+="<label style='font-size:.72rem;color:#7a6a50'>Color del precio <input type='color' id='_catCatPrecioColor' value='"+(s.precio_color||'#a9763f')+"' oninput='_catCatStateSet(\"precio_color\",this.value)' style='width:42px;height:30px;vertical-align:middle;border:1px solid #e0d4bf;border-radius:5px;cursor:pointer'></label>";
-  h+="<label style='font-size:.72rem;color:#7a6a50'>Fondo <input type='color' id='_catCatBgColor' value='"+(s.cat_bg||'#fdfbf7')+"' oninput='_catCatStateSet(\"cat_bg\",this.value)' style='width:42px;height:30px;vertical-align:middle;border:1px solid #e0d4bf;border-radius:5px;cursor:pointer'></label>";
   h+="</div>";
-  if(cfg.permitir_contacto_pie!==false){
-    h+="<label style='display:flex;align-items:center;gap:.5rem;cursor:pointer;margin-bottom:.5rem'><input type='checkbox' id='_catCatContacto' "+(s.incluir_contacto?'checked':'')+" onchange='_catCatStateSet(\"incluir_contacto\",this.checked)' style='width:18px;height:18px;accent-color:#c4965a'><span style='font-size:.82rem;color:#5a4a30'>Incluir mi contacto en el pie</span></label>";
-    h+="<div id='_catCatContactoFields' style='display:"+(s.incluir_contacto?'block':'none')+"'>";
-    h+="<input type='text' value='"+_catEsc(s.contacto_nombre||'')+"' placeholder='Nombre o comercio (opcional)' oninput='_catCatStateSet(\"contacto_nombre\",this.value)' style='"+inp+";margin-bottom:.4rem'>";
-    h+="<input type='text' value='"+_catEsc(s.contacto_telefono||'')+"' placeholder='"+_catEsc((_catCliente&&_catCliente.telefono_principal)||'Tu teléfono / WhatsApp')+"' oninput='_catCatStateSet(\"contacto_telefono\",this.value)' style='"+inp+";margin-bottom:.4rem'>";
-    h+="<input type='text' value='"+_catEsc(s.contacto_nota||'')+"' placeholder='Nota (opcional). Ej: Envíos a todo el país' oninput='_catCatStateSet(\"contacto_nota\",this.value)' style='"+inp+";margin-bottom:.5rem'>";
-    h+="</div>";
-  }
-  h+="</div>";
-  h+="<div style='padding:.9rem 1.1rem;border-top:1px solid #f0e7d6;display:flex;gap:.6rem;background:#faf6ee'>";
-  h+="<button onclick='_catCatCerrarModal()' style='flex:1;background:#fff;border:1px solid #d4ba8a;color:#9a8870;border-radius:9px;padding:.65rem;font-size:.82rem;cursor:pointer;font-family:inherit'>Cancelar</button>";
-  h+="<button id='_catCatGuardarBtn' onclick='_catCatGuardar()' style='flex:1.4;background:linear-gradient(135deg,#c4965a,#a9763f);color:#fff;border:none;border-radius:9px;padding:.65rem;font-size:.82rem;font-weight:700;cursor:pointer;font-family:inherit'>Guardar</button>";
+  h+="<div class='ccm-foot'>";
+  h+="<button class='ccm-btn' onclick='_catCatCerrarModal()' style='flex:1;background:#fff;border:1px solid #d4ba8a;color:#9a8870;font-weight:600'>Cancelar</button>";
+  h+="<button id='_catCatGuardarBtn' class='ccm-btn' onclick='_catCatGuardar()' style='flex:1.6;background:linear-gradient(135deg,#c4965a,#a9763f);color:#fff'>Guardar diseño</button>";
   h+="</div></div>";
   mo.innerHTML=h;
   document.body.appendChild(mo);
   if(typeof _catModalBackRegistrar==='function')_catModalBackRegistrar('_moCatCat',_catCatCerrarModal);
-  _catCatRenderBannerFields();
-  _catCatRenderHojaFields();
-  _catCatRenderPastels();
-  _catCatPreviewUpdate();
+  _catCatRenderSecs();
+  _catCatPreviewCargarItems(function(){ _catCatPreviewUpdate(); });
+}
+
+function _catCatNombreLive(v){ if(_catCatModalState){ _catCatModalState.nombre=v; _catCatPreviewUpdate(); } }
+
+// ── secciones (acordeón) ──────────────────────────────────────────
+function _catCatSecs(){
+  var s=_catCatModalState||{}, cfg=_catCatConfig||{};
+  var tpl=_catTplDef(s.plantilla);
+  var dens={comoda:'Espaciado',normal:'Normal',compacta:'Compacto'}[s.densidad||'normal'];
+  var tipo={clasica:'Clásica',moderna:'Moderna',elegante:'Elegante'}[s.tipografia||'elegante'];
+  var port={ninguna:'Sin portada',banner:'Banner arriba',hoja:'Hoja de portada'}[s.portada_modo||'banner'];
+  var pm={x1:'Minorista Belle',sugerido:'Sugerido',manual:'Tus precios',sinprecio:'Sin precios'}[s.precio_modo||'x1'];
+  var muestro=[]; if(s.mostrar_notas!==false)muestro.push('notas'); if(s.mostrar_acordes!==false)muestro.push('acordes'); if(s.mostrar_marca!==false)muestro.push('marca');
+  var secs=[
+    {t:'Plantilla',  v:tpl.nombre+' · '+dens+' · '+tipo, body:_catCatSecPlantilla},
+    {t:'Portada',    v:port,  body:_catCatSecPortada},
+    {t:'Encabezado de hojas', v:{none:'Sin encabezado',texto:'Texto',imagen:'Imagen'}[s.hoja_modo||'none'], body:_catCatSecHoja},
+    {t:'Precios',    v:pm,    body:_catCatSecPrecios},
+    {t:'Qué mostrar',v:muestro.length?muestro.join(', '):'solo lo básico', body:_catCatSecMostrar},
+    {t:'Colores',    v:'',    body:_catCatSecColores},
+    {t:'Tu contacto',v:(s.incluir_contacto?'Sí, en el pie':'No'), body:_catCatSecContacto}
+  ];
+  if(cfg.permitir_contacto_pie===false)secs.pop();
+  return secs;
+}
+function _catCatRenderSecs(){
+  var box=document.getElementById('_ccmSecs'); if(!box)return;
+  var s=_catCatModalState, secs=_catCatSecs(), h="";
+  secs.forEach(function(sec,i){
+    var open=(s._sec===i);
+    h+="<div class='ccm-sec"+(open?' open':'')+"' id='_ccmSec"+i+"'>";
+    h+="<div class='ccm-secH' onclick='_catCatSecTog("+i+")'><span class='ccm-secT'>"+sec.t+"</span><span class='ccm-secV'>"+_catEsc(sec.v||'')+"</span><span class='ccm-secA'>&#9656;</span></div>";
+    h+="<div class='ccm-secB'>"+(open?sec.body():"")+"</div>";
+    h+="</div>";
+  });
+  box.innerHTML=h;
+  if(typeof _catCatRenderPastels==='function')_catCatRenderPastels();
+}
+function _catCatSecTog(i){
+  var s=_catCatModalState; if(!s)return;
+  s._sec=(s._sec===i)?-1:i;
+  _catCatRenderSecs();
+}
+
+function _catCatChips(campo, opciones, extraJS){
+  var s=_catCatModalState||{};
+  var h="<div class='ccm-chips'>";
+  opciones.forEach(function(o){
+    var on=(s[campo]===o[0]);
+    h+="<button type='button' class='ccm-chip"+(on?' on':'')+"' onclick='_catCatStateSet(\""+campo+"\",\""+o[0]+"\""+(extraJS?",true":"")+")'>"+o[1]+"</button>";
+  });
+  return h+"</div>";
+}
+function _catCatSw(campo,label,hint){
+  var s=_catCatModalState||{};
+  var on=(s[campo]!==false && s[campo]!=null)?!!s[campo]:false;
+  return "<label class='ccm-sw'><span style='flex:1'>"+label+(hint?("<span style='display:block;font-size:.64rem;color:#a89880;font-weight:400'>"+hint+"</span>"):"")+"</span><input type='checkbox' "+(on?'checked':'')+" onchange='_catCatStateSet(\""+campo+"\",this.checked,true)'></label>";
+}
+
+function _catCatMiniTpl(id){
+  // dibujito chiquito que insinúa el layout de cada plantilla
+  var b="background:#e2d2b4";
+  if(id==='tabla')     return "<div class='ccm-mini' style='flex-direction:column;gap:3px'><i style='height:5px;width:100%;"+b+"'></i><i style='height:5px;width:100%;"+b+"'></i><i style='height:5px;width:100%;"+b+"'></i><i style='height:5px;width:70%;"+b+"'></i></div>";
+  if(id==='editorial') return "<div class='ccm-mini'><i style='width:26%;height:100%;"+b+"'></i><div style='flex:1;display:flex;flex-direction:column;gap:3px;justify-content:center'><i style='height:6px;width:80%;"+b+"'></i><i style='height:4px;width:55%;"+b+"'></i></div></div>";
+  if(id==='revista')   return "<div class='ccm-mini' style='gap:3px'><i style='flex:1;height:100%;"+b+"'></i><i style='flex:1;height:100%;"+b+"'></i></div>";
+  if(id==='galeria')   return "<div class='ccm-mini' style='gap:2px'><i style='flex:1;height:100%;"+b+"'></i><i style='flex:1;height:100%;"+b+"'></i><i style='flex:1;height:100%;"+b+"'></i></div>";
+  return "<div class='ccm-mini' style='gap:6px'><div style='flex:1;display:flex;flex-direction:column;gap:3px'><i style='height:4px;"+b+"'></i><i style='height:4px;"+b+"'></i><i style='height:4px;"+b+"'></i></div><div style='flex:1;display:flex;flex-direction:column;gap:3px'><i style='height:4px;"+b+"'></i><i style='height:4px;"+b+"'></i><i style='height:4px;"+b+"'></i></div></div>";
+}
+function _catCatSecPlantilla(){
+  var s=_catCatModalState;
+  var h="<div class='ccm-hint' style='margin-bottom:.5rem'>El corazón del catálogo: cómo se acomodan los perfumes en cada hoja.</div>";
+  h+="<div class='ccm-tplgrid'>";
+  _catTplHabilitadas().forEach(function(t){
+    var on=(s.plantilla===t.id);
+    h+="<div class='ccm-tpl"+(on?' on':'')+"' onclick='_catCatStateSet(\"plantilla\",\""+t.id+"\",true)'>"+_catCatMiniTpl(t.id);
+    h+="<div class='ccm-tplT'><span style='color:#c4965a'>"+t.icon+"</span><span class='ccm-tplN'>"+t.nombre+"</span></div>";
+    h+="<div class='ccm-tplD'>"+t.desc+"</div></div>";
+  });
+  h+="</div>";
+  h+="<label class='ccm-lbl'>Cuántos entran por hoja</label>";
+  h+=_catCatChips('densidad',[['comoda','Espaciado'],['normal','Normal'],['compacta','Compacto']],true);
+  h+="<label class='ccm-lbl'>Tipografía</label>";
+  h+=_catCatChips('tipografia',[['elegante','Elegante'],['clasica','Clásica'],['moderna','Moderna']],true);
+  return h;
+}
+function _catCatSecPortada(){
+  var s=_catCatModalState;
+  var h="<div class='ccm-hint'>La primera impresión. Podés usar una hoja entera de portada o solo un banner arriba del listado.</div>";
+  h+=_catCatChips('portada_modo',[['banner','Banner arriba'],['hoja','Hoja entera'],['ninguna','Sin portada']],true);
+  if((s.portada_modo||'banner')!=='ninguna'){
+    h+="<label class='ccm-lbl'>Estilo de la portada</label>";
+    h+="<div class='ccm-chips'>";
+    [['default','Texto'],['preset','Prediseñado'],['imagen','Mi imagen']].forEach(function(o){
+      var on=(s.banner_modo===o[0]);
+      h+="<button type='button' class='ccm-chip"+(on?' on':'')+"' onclick='_catCatBannerModo(\""+o[0]+"\")'>"+o[1]+"</button>";
+    });
+    h+="</div><div id='_catCatBannerFields' style='margin-top:.55rem'></div>";
+  }
+  setTimeout(_catCatRenderBannerFields,0);
+  return h;
+}
+function _catCatSecHoja(){
+  var h="<div class='ccm-hint'>Una franja finita arriba de la 2ª hoja en adelante, para que tu marca esté siempre presente.</div>";
+  h+="<div class='ccm-chips'>";
+  var s=_catCatModalState;
+  [['none','Ninguno'],['texto','Texto'],['imagen','Imagen']].forEach(function(o){
+    var on=((s.hoja_modo||'none')===o[0]);
+    h+="<button type='button' class='ccm-chip"+(on?' on':'')+"' onclick='_catCatHojaModo(\""+o[0]+"\")'>"+o[1]+"</button>";
+  });
+  h+="</div><div id='_catCatHojaFields' style='margin-top:.55rem'></div>";
+  setTimeout(_catCatRenderHojaFields,0);
+  return h;
+}
+function _catCatSecPrecios(){
+  var s=_catCatModalState, cfg=_catCatConfig||{};
+  var pModos=[]; if(cfg.modo_x1_habilitado!==false)pModos.push(['x1','Minorista Belle']); if(cfg.modo_sugerido_habilitado!==false)pModos.push(['sugerido','Precio sugerido']); if(cfg.modo_manual_habilitado!==false)pModos.push(['manual','Tus precios']); pModos.push(['sinprecio','Sin precios']);
+  var h=_catCatChips('precio_modo',pModos,true);
+  h+="<div style='font-size:.7rem;color:#7a6a50;background:#faf6ee;border:1px solid #f0e7d6;border-radius:9px;padding:.5rem .65rem;margin-top:.5rem;line-height:1.4'>"+_catCatPmDescTxt(s.precio_modo)+"</div>";
+  h+="<label class='ccm-lbl'>Cómo se ve el precio</label>";
+  h+=_catCatChips('precio_estilo',[['plano','Simple'],['pastilla','Pastilla'],['borde','Con borde']],true);
+  h+="<div class='ccm-hint' style='margin-top:.5rem'>Los precios de cada perfume los ajustás en <b>Productos y precios</b>, donde también podés subirlos por porcentaje.</div>";
+  return h;
+}
+function _catCatSecMostrar(){
+  var s=_catCatModalState, cfg=_catCatConfig||{};
+  var h="";
+  h+=_catCatSw('mostrar_marca','Marca del perfume');
+  h+=_catCatSw('mostrar_meta','Mililitros y concentración');
+  h+=_catCatSw('mostrar_notas','Notas olfativas');
+  if(s.mostrar_notas!==false){
+    var nModos=[]; if(cfg.notas_fotos_habilitado!==false)nModos.push(['fotos','Con fotitos']); if(cfg.notas_escritas_habilitado!==false)nModos.push(['escritas','Escritas']);
+    if(nModos.length>1){
+      h+="<label class='ccm-lbl'>Cómo mostrar las notas</label>"+_catCatChips('notas_modo',nModos,true);
+      if(s.notas_modo==='fotos')h+="<div style='font-size:.65rem;color:#9a7d4e;background:#fbf3e3;border:1px solid #ecdcc0;border-radius:8px;padding:.4rem .55rem;margin-top:.4rem;line-height:1.35'>&#9203; Con fotitos el catálogo tarda un poco más en generarse.</div>";
+    }
+  }
+  h+="<div style='height:.4rem'></div>";
+  h+=_catCatSw('mostrar_acordes','Acordes de color');
+  h+=_catCatSw('mostrar_numeracion','Numerar los perfumes');
+  h+=_catCatSw('mostrar_paginas','Pie con número de hoja');
+  h+=_catCatSw('borde_hoja','Marco fino en cada hoja');
+  return h;
+}
+function _catCatSecColores(){
+  var s=_catCatModalState;
+  var h="<div class='ccm-hint'>Elegí un fondo y te sugerimos el color del precio (después lo podés cambiar).</div>";
+  h+="<div id='_catCatPastelGrid' style='display:flex;flex-wrap:wrap;gap:.4rem;margin:.5rem 0 .6rem'></div>";
+  h+="<div style='display:flex;align-items:center;gap:1.2rem;flex-wrap:wrap'>";
+  h+="<label style='font-size:.74rem;color:#7a6a50'>Color del precio <input type='color' id='_catCatPrecioColor' value='"+(s.precio_color||'#a9763f')+"' oninput='_catCatStateSet(\"precio_color\",this.value)' style='width:42px;height:30px;vertical-align:middle;border:1px solid #e0d4bf;border-radius:5px;cursor:pointer'></label>";
+  h+="<label style='font-size:.74rem;color:#7a6a50'>Fondo <input type='color' id='_catCatBgColor' value='"+(s.cat_bg||'#fdfbf7')+"' oninput='_catCatStateSet(\"cat_bg\",this.value)' style='width:42px;height:30px;vertical-align:middle;border:1px solid #e0d4bf;border-radius:5px;cursor:pointer'></label>";
+  h+="</div>";
+  setTimeout(_catCatRenderPastels,0);
+  return h;
+}
+function _catCatSecContacto(){
+  var s=_catCatModalState;
+  var h=_catCatSw('incluir_contacto','Incluir mi contacto en el pie');
+  h+="<div id='_catCatContactoFields' style='display:"+(s.incluir_contacto?'block':'none')+";margin-top:.5rem'>";
+  h+="<input type='text' class='ccm-inp' value='"+_catEsc(s.contacto_nombre||'')+"' placeholder='Nombre o comercio (opcional)' oninput='_catCatStateSet(\"contacto_nombre\",this.value)' style='margin-bottom:.4rem'>";
+  h+="<input type='text' class='ccm-inp' value='"+_catEsc(s.contacto_telefono||'')+"' placeholder='"+_catEsc((_catCliente&&_catCliente.telefono_principal)||'Tu teléfono / WhatsApp')+"' oninput='_catCatStateSet(\"contacto_telefono\",this.value)' style='margin-bottom:.4rem'>";
+  h+="<input type='text' class='ccm-inp' value='"+_catEsc(s.contacto_nota||'')+"' placeholder='Nota (opcional). Ej: Envíos a todo el país' oninput='_catCatStateSet(\"contacto_nota\",this.value)'>";
+  h+="</div>";
+  return h;
 }
 
 function _catCatPmDescTxt(m){
   if(m==='x1')return "<b>Precio minorista Belle:</b> mostrás el precio de lista minorista de Belle, tal cual.";
   if(m==='sugerido')return "<b>Precio sugerido:</b> Belle te sugiere un precio de venta con tu ganancia ya incluida y redondeado prolijo.";
-  if(m==='manual')return "<b>Poné tus precios:</b> vos ponés el precio de cada producto, a tu gusto.";
+  if(m==='manual')return "<b>Poné tus precios:</b> vos ponés el precio de cada perfume, a tu gusto.";
   if(m==='sinprecio')return "<b>Sin precios:</b> el catálogo muestra los productos sin ningún precio. Ideal para catálogos solo informativos.";
   return "";
 }
-function _catCatSyncBtns(prefix,val,vals){
-  vals.forEach(function(x){ var b=document.getElementById(prefix+x); if(!b)return; var on=(x===val); b.style.background=on?'linear-gradient(135deg,#c4965a,#a9763f)':'#fff'; b.style.color=on?'#fff':'#a9763f'; });
-}
-function _catCatStateSet(k,v){
+function _catCatStateSet(k,v,rerender){
   if(!_catCatModalState)return;
   _catCatModalState[k]=v;
-  if(k==='precio_modo'){ _catCatSyncBtns('_catCatPm_',v,['x1','sugerido','manual','sinprecio']); var dpm=document.getElementById('_catCatPmDesc'); if(dpm)dpm.innerHTML=_catCatPmDescTxt(v); }
-  else if(k==='notas_modo'){ _catCatSyncBtns('_catCatNm_',v,['fotos','escritas']); var nw=document.getElementById('_catCatNotasWarn'); if(nw)nw.style.display=(v==='fotos')?'block':'none'; }
-  else if(k==='banner_ubicacion')_catCatSyncBtns('_catCatUb_',v,['primera','todas']);
-  else if(k==='cat_bg'){ if(typeof _catCatRenderPastels==='function')_catCatRenderPastels(); }
-  else if(k==='incluir_contacto'){ var cf=document.getElementById('_catCatContactoFields'); if(cf)cf.style.display=v?'block':'none'; }
+  if(k==='incluir_contacto'){ var cf=document.getElementById('_catCatContactoFields'); if(cf)cf.style.display=v?'block':'none'; }
+  if(k==='cat_bg'||k==='precio_color'){ if(typeof _catCatRenderPastels==='function')_catCatRenderPastels(); }
+  if(rerender)_catCatRenderSecs();
   _catCatPreviewUpdate();
 }
 function _catCatBannerModo(m){
   if(!_catCatModalState)return;
   _catCatModalState.banner_modo=m;
-  _catCatSyncBtns('_catCatBm_',m,['default','preset','imagen']);
-  _catCatRenderBannerFields();
+  _catCatRenderSecs();
   _catCatPreviewUpdate();
 }
 function _catCatPickPreset(id){ if(!_catCatModalState)return; _catCatModalState.banner_preset_id=id; _catCatRenderBannerFields(); _catCatPreviewUpdate(); }
@@ -16448,7 +17211,7 @@ function _catCatRenderPastels(){
   var s=_catCatModalState, arr=_catCatPastels(), h="";
   arr.forEach(function(p,i){
     var sel=(String(s.cat_bg||'').toLowerCase()===p.bg.toLowerCase());
-    h+="<div onclick='_catCatPickPastel("+i+")' style='width:34px;height:34px;border-radius:8px;cursor:pointer;background:"+p.bg+";border:2px solid "+(sel?p.ac:'#e6ddcb')+";display:flex;align-items:center;justify-content:center'><span style='width:12px;height:12px;border-radius:50%;background:"+p.ac+"'></span></div>";
+    h+="<div onclick='_catCatPickPastel("+i+")' style='width:34px;height:34px;border-radius:9px;cursor:pointer;background:"+p.bg+";border:2px solid "+(sel?p.ac:'#e6ddcb')+";display:flex;align-items:center;justify-content:center'><span style='width:12px;height:12px;border-radius:50%;background:"+p.ac+"'></span></div>";
   });
   box.innerHTML=h;
 }
@@ -16466,48 +17229,49 @@ function _catCatBannerFile(input){
   try{ if(_catCatModalState._imgPreviewObj)URL.revokeObjectURL(_catCatModalState._imgPreviewObj); }catch(e){}
   _catCatModalState._imgPreviewObj=URL.createObjectURL(f);
   _catCatModalState._imgPreview=_catCatModalState._imgPreviewObj;
+  _catCatRenderBannerFields();
   _catCatPreviewUpdate();
 }
-
 function _catCatRenderBannerFields(){
   var box=document.getElementById('_catCatBannerFields'); if(!box)return;
   var s=_catCatModalState, cfg=_catCatConfig||{};
-  var inp="width:100%;padding:.5rem .65rem;border:1px solid #e0d4bf;border-radius:8px;font-size:.82rem;font-family:inherit;color:#5a4a30;box-sizing:border-box;background:#fff";
-  var sub="font-size:.66rem;color:#9a8870;margin-bottom:.35rem";
   var h="";
   if(s.banner_modo==='imagen'){
-    h+="<div style='"+sub+"'>Subí la imagen de tu comercio. Resolución sugerida: <b>"+_catEsc(cfg.resolucion_banner_sugerida||'1200 × 400 px')+"</b>.</div>";
+    var src=s._imgPreview||s.banner_imagen_url||'';
+    h+="<div class='ccm-hint'>Subí la imagen de tu comercio. Resolución sugerida: <b>"+_catEsc(cfg.resolucion_banner_sugerida||'1200 × 400 px')+"</b>.</div>";
+    if(src)h+="<div style='width:100%;height:70px;border-radius:9px;overflow:hidden;border:1px solid #e8d9bf;margin:.4rem 0'><img src='"+src+"' style='width:100%;height:100%;object-fit:cover;display:block'></div>";
     h+="<input type='file' accept='image/*' onchange='_catCatBannerFile(this)' style='font-size:.78rem;color:#5a4a30'>";
+    h+="<label class='ccm-lbl'>Texto (se usa si la imagen no carga)</label>";
+    h+="<input type='text' class='ccm-inp' value='"+_catEsc(s.banner_texto1||'')+"' placeholder='Tu perfumería' oninput='_catCatStateSet(\"banner_texto1\",this.value)'>";
   } else if(s.banner_modo==='preset'){
     var presets=Array.isArray(cfg.banner_presets)?cfg.banner_presets:[];
-    if(!presets.length){ h+="<div style='"+sub+"'>No hay estilos disponibles. Usá Texto o Mi imagen.</div>"; }
+    if(!presets.length){ h+="<div class='ccm-hint'>No hay estilos prediseñados disponibles. Usá Texto o Mi imagen.</div>"; }
     else {
-      h+="<div style='"+sub+"'>Elegí un estilo:</div><div style='display:flex;gap:.4rem;flex-wrap:wrap;margin-bottom:.6rem'>";
+      h+="<div class='ccm-hint'>Elegí un estilo:</div><div style='display:flex;gap:.4rem;flex-wrap:wrap;margin:.4rem 0 .55rem'>";
       presets.forEach(function(p){
         var sel=(s.banner_preset_id===p.id);
-        h+="<div onclick='_catCatPickPreset(\""+p.id+"\")' style='cursor:pointer;border:2px solid "+(sel?'#a9763f':'transparent')+";border-radius:8px;padding:1px'>";
-        h+="<div style='width:84px;height:38px;border-radius:6px;display:flex;align-items:center;justify-content:center;text-align:center;font-size:.55rem;font-weight:700;overflow:hidden;background:"+(p.bg||'#1a1a1a')+";color:"+(p.fg||'#fff')+"'>"+_catEsc(p.nombre||'')+"</div></div>";
+        h+="<div onclick='_catCatPickPreset(\""+p.id+"\")' style='cursor:pointer;border:2px solid "+(sel?'#a9763f':'transparent')+";border-radius:9px;padding:1px'>";
+        h+="<div style='width:84px;height:38px;border-radius:7px;display:flex;align-items:center;justify-content:center;text-align:center;font-size:.55rem;font-weight:700;overflow:hidden;background:"+(p.bg||'#1a1a1a')+";color:"+(p.fg||'#fff')+"'>"+_catEsc(p.nombre||'')+"</div></div>";
       });
       h+="</div>";
     }
-    h+="<input type='text' value='"+_catEsc(s.banner_texto1||'')+"' placeholder='Tu perfumería (renglón 1)' oninput='_catCatStateSet(\"banner_texto1\",this.value)' style='"+inp+";margin-bottom:.4rem'>";
-    h+="<input type='text' value='"+_catEsc(s.banner_texto2||'')+"' placeholder='Renglón 2 (opcional)' oninput='_catCatStateSet(\"banner_texto2\",this.value)' style='"+inp+"'>";
+    h+="<input type='text' class='ccm-inp' value='"+_catEsc(s.banner_texto1||'')+"' placeholder='Tu perfumería (renglón 1)' oninput='_catCatStateSet(\"banner_texto1\",this.value)' style='margin-bottom:.4rem'>";
+    h+="<input type='text' class='ccm-inp' value='"+_catEsc(s.banner_texto2||'')+"' placeholder='Renglón 2 (opcional)' oninput='_catCatStateSet(\"banner_texto2\",this.value)'>";
   } else {
-    h+="<input type='text' value='"+_catEsc(s.banner_texto1||'')+"' placeholder='Texto (renglón 1)' oninput='_catCatStateSet(\"banner_texto1\",this.value)' style='"+inp+";margin-bottom:.4rem'>";
-    h+="<input type='text' value='"+_catEsc(s.banner_texto2||'')+"' placeholder='Renglón 2 (opcional)' oninput='_catCatStateSet(\"banner_texto2\",this.value)' style='"+inp+";margin-bottom:.5rem'>";
+    h+="<input type='text' class='ccm-inp' value='"+_catEsc(s.banner_texto1||'')+"' placeholder='Texto (renglón 1)' oninput='_catCatStateSet(\"banner_texto1\",this.value)' style='margin-bottom:.4rem'>";
+    h+="<input type='text' class='ccm-inp' value='"+_catEsc(s.banner_texto2||'')+"' placeholder='Renglón 2 (opcional)' oninput='_catCatStateSet(\"banner_texto2\",this.value)' style='margin-bottom:.5rem'>";
     h+="<div style='display:flex;gap:1.2rem;align-items:center'>";
-    h+="<label style='font-size:.7rem;color:#7a6a50'>Fondo <input type='color' value='"+(s.banner_bg||'#1a1a1a')+"' oninput='_catCatStateSet(\"banner_bg\",this.value)' style='width:38px;height:30px;vertical-align:middle;border:1px solid #e0d4bf;border-radius:5px;cursor:pointer'></label>";
-    h+="<label style='font-size:.7rem;color:#7a6a50'>Letra <input type='color' value='"+(s.banner_fg||'#ffffff')+"' oninput='_catCatStateSet(\"banner_fg\",this.value)' style='width:38px;height:30px;vertical-align:middle;border:1px solid #e0d4bf;border-radius:5px;cursor:pointer'></label>";
+    h+="<label style='font-size:.72rem;color:#7a6a50'>Fondo <input type='color' value='"+(s.banner_bg||'#1a1a1a')+"' oninput='_catCatStateSet(\"banner_bg\",this.value)' style='width:38px;height:30px;vertical-align:middle;border:1px solid #e0d4bf;border-radius:5px;cursor:pointer'></label>";
+    h+="<label style='font-size:.72rem;color:#7a6a50'>Letra <input type='color' value='"+(s.banner_fg||'#ffffff')+"' oninput='_catCatStateSet(\"banner_fg\",this.value)' style='width:38px;height:30px;vertical-align:middle;border:1px solid #e0d4bf;border-radius:5px;cursor:pointer'></label>";
     h+="</div>";
   }
   box.innerHTML=h;
 }
-
 function _catCatHojaModo(m){
   if(!_catCatModalState)return;
   _catCatModalState.hoja_modo=m;
-  _catCatSyncBtns('_catCatHm_',m,['none','texto','imagen']);
-  _catCatRenderHojaFields();
+  _catCatRenderSecs();
+  _catCatPreviewUpdate();
 }
 function _catCatHojaFile(input){
   var f=input&&input.files&&input.files[0]; if(!f)return;
@@ -16517,66 +17281,141 @@ function _catCatHojaFile(input){
   _catCatModalState._hojaPreviewObj=URL.createObjectURL(f);
   _catCatModalState._hojaPreview=_catCatModalState._hojaPreviewObj;
   _catCatRenderHojaFields();
+  _catCatPreviewUpdate();
 }
 function _catCatRenderHojaFields(){
   var box=document.getElementById('_catCatHojaFields'); if(!box)return;
-  var s=_catCatModalState;
-  var inp="width:100%;padding:.5rem .65rem;border:1px solid #e0d4bf;border-radius:8px;font-size:.82rem;font-family:inherit;color:#5a4a30;box-sizing:border-box;background:#fff";
-  var sub="font-size:.66rem;color:#9a8870;margin-bottom:.35rem";
-  var modo=s.hoja_modo||'none', h="";
+  var s=_catCatModalState, modo=s.hoja_modo||'none', h="";
   if(modo==='none'){
-    h="<div style='"+sub+"'>Las hojas siguientes salen sin encabezado.</div>";
+    h="<div class='ccm-hint'>Las hojas siguientes salen sin encabezado.</div>";
   } else if(modo==='imagen'){
     var src=s._hojaPreview||s.hoja_imagen_url||'';
-    h+="<div style='"+sub+"'>Subí una imagen apaisada y finita (tipo cintillo). Sugerido: <b>1200 × 200 px</b>.</div>";
-    if(src)h+="<div style='width:100%;height:46px;border-radius:8px;overflow:hidden;border:1px solid #e8d9bf;margin-bottom:.4rem'><img src='"+src+"' style='width:100%;height:100%;object-fit:cover;display:block'></div>";
+    h+="<div class='ccm-hint'>Subí una imagen apaisada y finita (tipo cintillo). Sugerido: <b>1200 × 200 px</b>.</div>";
+    if(src)h+="<div style='width:100%;height:46px;border-radius:9px;overflow:hidden;border:1px solid #e8d9bf;margin:.4rem 0'><img src='"+src+"' style='width:100%;height:100%;object-fit:cover;display:block'></div>";
     h+="<input type='file' accept='image/*' onchange='_catCatHojaFile(this)' style='font-size:.78rem;color:#5a4a30'>";
   } else {
-    h+="<input type='text' value='"+_catEsc(s.hoja_texto||'')+"' placeholder='Texto del encabezado (ej: Tu Perfumería)' oninput='_catCatStateSet(\"hoja_texto\",this.value)' style='"+inp+";margin-bottom:.5rem'>";
+    h+="<input type='text' class='ccm-inp' value='"+_catEsc(s.hoja_texto||'')+"' placeholder='Texto del encabezado (ej: Tu Perfumería)' oninput='_catCatStateSet(\"hoja_texto\",this.value)' style='margin-bottom:.5rem'>";
     h+="<div style='display:flex;gap:1.2rem;align-items:center'>";
-    h+="<label style='font-size:.7rem;color:#7a6a50'>Fondo <input type='color' value='"+(s.hoja_bg||'#1a1a1a')+"' oninput='_catCatStateSet(\"hoja_bg\",this.value)' style='width:38px;height:30px;vertical-align:middle;border:1px solid #e0d4bf;border-radius:5px;cursor:pointer'></label>";
-    h+="<label style='font-size:.7rem;color:#7a6a50'>Letra <input type='color' value='"+(s.hoja_fg||'#ffffff')+"' oninput='_catCatStateSet(\"hoja_fg\",this.value)' style='width:38px;height:30px;vertical-align:middle;border:1px solid #e0d4bf;border-radius:5px;cursor:pointer'></label>";
+    h+="<label style='font-size:.72rem;color:#7a6a50'>Fondo <input type='color' value='"+(s.hoja_bg||'#1a1a1a')+"' oninput='_catCatStateSet(\"hoja_bg\",this.value)' style='width:38px;height:30px;vertical-align:middle;border:1px solid #e0d4bf;border-radius:5px;cursor:pointer'></label>";
+    h+="<label style='font-size:.72rem;color:#7a6a50'>Letra <input type='color' value='"+(s.hoja_fg||'#ffffff')+"' oninput='_catCatStateSet(\"hoja_fg\",this.value)' style='width:38px;height:30px;vertical-align:middle;border:1px solid #e0d4bf;border-radius:5px;cursor:pointer'></label>";
     h+="</div>";
   }
   box.innerHTML=h;
 }
 
-function _catCatPreviewUpdate(){
-  var box=document.getElementById('_catCatPreview'); if(!box)return;
-  var s=_catCatModalState, cfg=_catCatConfig||{};
-  var inner="";
-  if(s.banner_modo==='imagen'){
-    var src=s._imgPreview||s.banner_imagen_url||'';
-    inner=src?("<img src='"+src+"' style='width:100%;height:100%;object-fit:cover;display:block'>"):("<div style='display:flex;align-items:center;justify-content:center;height:100%;color:#9a8870;font-size:.75rem'>Subí tu imagen</div>");
-  } else {
-    var bg=s.banner_bg||'#1a1a1a', fg=s.banner_fg||'#ffffff';
-    if(s.banner_modo==='preset'){
-      var p=(Array.isArray(cfg.banner_presets)?cfg.banner_presets:[]).filter(function(x){return x.id===s.banner_preset_id;})[0];
-      if(p){ bg=p.bg||bg; fg=p.fg||fg; }
-    }
-    var t1=s.banner_texto1||(s.banner_modo==='default'?(cfg.texto_default||'CATÁLOGO'):'');
-    var t2=s.banner_texto2||'';
-    inner="<div style='height:100%;display:flex;flex-direction:column;align-items:center;justify-content:center;text-align:center;background:"+bg+";color:"+fg+";padding:.4rem'>"+
-      "<div style='font-family:\"Cormorant Garamond\",serif;font-size:1.5rem;font-weight:700;line-height:1.05'>"+_catEsc(t1)+"</div>"+
-      (t2?"<div style='font-family:\"Cormorant Garamond\",serif;font-size:.95rem;opacity:.92'>"+_catEsc(t2)+"</div>":"")+"</div>";
+// ── VISTA PREVIA FIEL ─────────────────────────────────────────────
+// Dibuja la MISMA hoja que sale en el PDF, escalada al ancho del panel.
+function _catCatPreviewCargarItems(cb){
+  var s=_catCatModalState; if(!s){ cb&&cb(); return; }
+  var perfumes=(allProds||[]).filter(function(p){return p.tipo==='perfume';});
+  function armarDemo(){
+    var cfg=_catCatConfig||{};
+    var rows=perfumes.slice(0,40).map(function(p){
+      var pr=null;
+      if(s.precio_modo==='sinprecio')pr=null;
+      else if(s.precio_modo==='sugerido')pr=_catCatPrecioSugerido(p.precio_min_ars,cfg);
+      else pr=p.precio_min_ars||0;
+      return {producto_id:p.id, precio:pr};
+    });
+    s._items=_catCatItemsDe(rows); s._demo=true;
   }
-  box.innerHTML="<div style='width:100%;aspect-ratio:3/1;border-radius:10px;overflow:hidden;border:1px solid #e8d9bf;background:#f1ece3'>"+inner+"</div>"+
-    "<div style='font-size:.62rem;color:#aa9a80;margin-top:.25rem;text-align:center'>Banner grande de la primera hoja</div>"+
-    "<div style='margin-top:.5rem;background:"+(s.cat_bg||'#fdfbf7')+";border:1px solid #e8d9bf;border-radius:8px;padding:.55rem .7rem;display:flex;align-items:center;justify-content:space-between'><span style='font-size:.8rem;color:#2e2a26;font-weight:700;font-family:Arial,sans-serif'>Perfume de ejemplo</span><span style='font-size:.88rem;font-weight:800;color:"+(s.precio_color||'#a9763f')+";font-family:Arial,sans-serif'>$25.000</span></div>";
+  if(!s.id){ armarDemo(); _catCatPdfEnsureNotas(function(){ cb&&cb(); }); return; }
+  apiGet('catalogos_cliente_productos','select=producto_id,precio,orden&catalogo_id=eq.'+s.id+'&order=orden.asc&limit=60').then(function(rows){
+    rows=Array.isArray(rows)?rows:[];
+    if(rows.length){ s._items=_catCatItemsDe(rows); s._demo=false; }
+    else armarDemo();
+    _catCatPdfEnsureNotas(function(){ cb&&cb(); });
+  }).catch(function(){ armarDemo(); _catCatPdfEnsureNotas(function(){ cb&&cb(); }); });
+}
+function _catCatPrevPaginas(){
+  var s=_catCatModalState; if(!s)return [];
+  var cfg=_catCatClamp(Object.assign({},s));
+  var items=s._items||[];
+  var pp=_catTplPerPage(cfg);
+  var out=[];
+  if((cfg.portada_modo||'banner')==='hoja') out.push({tipo:'portada', label:'Portada'});
+  var off=0, n=1;
+  while(off<items.length && out.length<4){
+    var cap=(n===1)?pp[0]:pp[1];
+    out.push({tipo:'hoja', items:items.slice(off,off+cap), first:(n===1), label:'Hoja '+n});
+    off+=cap; n++;
+  }
+  if(!out.length)out.push({tipo:'hoja', items:[], first:true, label:'Hoja 1'});
+  return out;
+}
+// Se llama en cada tecla: la agrupamos para que escribir siga siendo fluido.
+var _catPrevT=null;
+function _catCatPreviewUpdate(){
+  if(_catPrevT)clearTimeout(_catPrevT);
+  _catPrevT=setTimeout(function(){ _catPrevT=null; _catCatPreviewNow(); },110);
+}
+function _catCatPreviewNow(){
+  var s=_catCatModalState; if(!s)return;
+  var pags=_catCatPrevPaginas();
+  if(s._prevPage>=pags.length)s._prevPage=0;
+  // botonera de hojas
+  var bh="";
+  pags.forEach(function(p,i){ bh+="<button class='ccm-pg"+(i===s._prevPage?' on':'')+"' onclick='_catCatPrevPage("+i+")'>"+p.label+"</button>"; });
+  ['_ccmPgBtns','_ccmPgBtnsMob'].forEach(function(id){ var bb=document.getElementById(id); if(bb)bb.innerHTML=bh; });
+  var zb=document.getElementById('_ccmZoomBtn');
+  if(zb)zb.textContent=s._prevZoom?'Achicar':'Agrandar';
+  ['_ccmPrevBox','_ccmPrevMobBox'].forEach(function(id){ _catCatPrevPintar(id, pags[s._prevPage], pags.length); });
+  var cfgF=_catCatClamp(Object.assign({},s));
+  var ppF=_catTplPerPage(cfgF);
+  var nprod=(_catCatList.filter(function(x){return x.id===s.id;})[0]||{})._nprod;
+  var txt;
+  if(s._demo || nprod==null) txt="Ejemplo con perfumes reales. Entran ~"+ppF[1]+" por hoja.";
+  else txt=nprod+" perfumes · ~"+ppF[1]+" por hoja · "+Math.max(1,Math.ceil(Math.max(0,nprod-ppF[0])/ppF[1])+1)+" hojas aprox.";
+  ['_ccmPrevFoot','_ccmPrevFootMob'].forEach(function(id){ var ft=document.getElementById(id); if(ft)ft.textContent=txt; });
+}
+function _catCatPrevPage(i){ if(!_catCatModalState)return; _catCatModalState._prevPage=i; _catCatPreviewUpdate(); }
+function _catCatPrevZoom(){ if(!_catCatModalState)return; _catCatModalState._prevZoom=!_catCatModalState._prevZoom; _catCatPreviewNow(); }
+function _catCatPrevPintar(boxId, pag, totalPags){
+  var box=document.getElementById(boxId); if(!box || !pag)return;
+  var w=box.clientWidth||box.offsetWidth||0;
+  if(w<40){ box.innerHTML=""; return; }   // panel oculto (mobile/desktop según el ancho)
+  var s=_catCatModalState;
+  // En el celular la hoja va chiquita para no tapar los controles (se agranda con el botón)
+  if(boxId==='_ccmPrevMobBox' && !s._prevZoom) w=Math.min(w,236);
+  var cfg=_catCatClamp(Object.assign({},s));
+  var cat={id:s.id, nombre:s.nombre||'Mi catálogo'};
+  var gcfg=_catCatConfig||{};
+  var tpl=_catTplDef(cfg.plantilla);
+  var pp=_catTplPerPage(cfg);
+  var capRows=Math.max(1,Math.ceil((pag.first?pp[0]:pp[1])/(tpl.cols||1)));
+  // en la vista previa usamos las URLs directas (nada de dataURL): es instantáneo
+  var prevLive=_catImgLive; _catImgLive=true;
+  var cfgPrev=Object.assign({},cfg);
+  if(cfg.banner_modo==='imagen'){ cfgPrev.banner_imagen_url=s._imgPreview||cfg.banner_imagen_url||''; }
+  if(cfg.hoja_modo==='imagen'){ cfgPrev.hoja_imagen_url=s._hojaPreview||cfg.hoja_imagen_url||''; }
+  var html;
+  if(pag.tipo==='portada') html=_catCatPdfPortadaHTML(cat,cfgPrev,gcfg);
+  else html=_catCatPdfPageHTML(cat,cfgPrev,gcfg,pag.items||[],!!pag.first,false,1,Math.max(1,totalPags),capRows);
+  _catImgLive=prevLive;
+  var k=w/794, hojaH=Math.round(1123*k);
+  box.innerHTML="<div class='ccm-stage' style='width:"+w+"px;height:"+hojaH+"px'><div id='_ccmStageIn' style='width:794px;transform:scale("+k+")'>"+html+"</div></div>";
+  // Si la hoja creció (plantillas que fluyen), el PDF la achica para que entre:
+  // acá hacemos lo mismo para que la vista previa no mienta.
+  var inn=document.getElementById('_ccmStageIn');
+  if(inn){
+    var real=inn.firstChild?inn.firstChild.offsetHeight:1123;
+    if(real>1130){
+      var k2=Math.min(w/794, hojaH/real);
+      inn.style.transform="scale("+k2+")";
+      inn.style.marginLeft=Math.max(0,Math.round((w-794*k2)/2))+"px";
+    }
+  }
 }
 
+// ── guardar / duplicar / borrar ───────────────────────────────────
 function _catCatGuardar(){
   var s=_catCatModalState; if(!s)return;
   var nombre=((document.getElementById('_catCatNombre')||{value:''}).value||'').trim()||'Mi catálogo';
   s.nombre=nombre;
   var btn=document.getElementById('_catCatGuardarBtn'); if(btn){btn.disabled=true;btn.textContent='Guardando...';}
   var doSave=function(){
-    var config={ banner_modo:s.banner_modo, banner_imagen_url:s.banner_imagen_url||'', banner_preset_id:s.banner_preset_id||'',
-      banner_texto1:s.banner_texto1||'', banner_texto2:s.banner_texto2||'', banner_bg:s.banner_bg||'#1a1a1a', banner_fg:s.banner_fg||'#ffffff',
-      hoja_modo:s.hoja_modo||'none', hoja_imagen_url:s.hoja_imagen_url||'', hoja_texto:s.hoja_texto||'', hoja_bg:s.hoja_bg||'#1a1a1a', hoja_fg:s.hoja_fg||'#ffffff',
-      cat_bg:s.cat_bg||'#fdfbf7', precio_color:s.precio_color||'#a9763f',
-      precio_modo:s.precio_modo||'x1', notas_modo:s.notas_modo||'fotos',
-      incluir_contacto:!!s.incluir_contacto, contacto_texto:s.contacto_texto||'', contacto_nombre:s.contacto_nombre||'', contacto_telefono:s.contacto_telefono||'', contacto_nota:s.contacto_nota||'' };
+    var config={}, base=_catCatBase();
+    _catCatKeys().forEach(function(k){ config[k]=(s[k]!=null)?s[k]:base[k]; });
     var payload={nombre:nombre, config:config, updated_at:new Date().toISOString()};
     var p;
     if(s.id){ p=apiPatch('catalogos_cliente',payload,'id=eq.'+s.id); }
@@ -16585,7 +17424,7 @@ function _catCatGuardar(){
       _catToast('Catálogo guardado','tok');
       _catCatCerrarModal();
       _catCargarCatalogos(function(){ if(_catPanelTab==='catalogos'){ var b=document.getElementById('_catTabBody'); if(b)_catRenderTabCatalogos(b); } });
-    }).catch(function(e){ console.error('[catcat save]',e); _catToast('No se pudo guardar','twarn'); if(btn){btn.disabled=false;btn.textContent='Guardar';} });
+    }).catch(function(e){ console.error('[catcat save]',e); _catToast('No se pudo guardar','twarn'); if(btn){btn.disabled=false;btn.textContent='Guardar diseño';} });
   };
   var _uidOK=(_catSession&&_catSession.user&&_catSession.user.id)||null;
   function _upOne(file,cb){
@@ -16598,7 +17437,7 @@ function _catCatGuardar(){
       cb(null,(pub&&pub.data&&pub.data.publicUrl)||'');
     }).catch(function(e){ cb(e); });
   }
-  function _fail(){ _catToast('No se pudo subir la imagen','twarn'); if(btn){btn.disabled=false;btn.textContent='Guardar';} }
+  function _fail(){ _catToast('No se pudo subir la imagen','twarn'); if(btn){btn.disabled=false;btn.textContent='Guardar diseño';} }
   var needBanner=(s.banner_modo==='imagen' && s._file);
   var needHoja=(s.hoja_modo==='imagen' && s._hojaFile);
   function _step2(){
@@ -16606,7 +17445,7 @@ function _catCatGuardar(){
     else doSave();
   }
   if(needBanner){
-    if(!_uidOK){ _catToast('Sesión no válida','twarn'); if(btn){btn.disabled=false;btn.textContent='Guardar';} return; }
+    if(!_uidOK){ _catToast('Sesión no válida','twarn'); if(btn){btn.disabled=false;btn.textContent='Guardar diseño';} return; }
     _upOne(s._file,function(err,url){ if(err){console.error('[catcat upload]',err);_fail();return;} s.banner_imagen_url=url; s._file=null; _step2(); });
   } else { _step2(); }
 }
@@ -16619,10 +17458,10 @@ function _catCatDuplicar(id){
   apiPost('catalogos_cliente',{cliente_id:_catCliente.id, nombre:(c.nombre||'Catálogo')+' (copia)', config:c.config||{}, updated_at:new Date().toISOString()}).then(function(res){
     var nuevo=Array.isArray(res)?res[0]:res;
     if(nuevo && nuevo.id){
-      apiGet('catalogos_cliente_productos','select=producto_id,precio,precio_manual,orden&catalogo_id=eq.'+id+'&limit=5000').then(function(prods){
+      apiGet('catalogos_cliente_productos','select=producto_id,precio,precio_manual,precio_base,orden&catalogo_id=eq.'+id+'&limit=5000').then(function(prods){
         prods=Array.isArray(prods)?prods:[];
         if(prods.length){
-          var rows=prods.map(function(p){ return {catalogo_id:nuevo.id, producto_id:p.producto_id, precio:p.precio, precio_manual:p.precio_manual, orden:p.orden}; });
+          var rows=prods.map(function(p){ return {catalogo_id:nuevo.id, producto_id:p.producto_id, precio:p.precio, precio_manual:p.precio_manual, precio_base:p.precio_base, orden:p.orden}; });
           apiPost('catalogos_cliente_productos',rows).then(function(){ _catToast('Catálogo duplicado','tok'); refresh(); }).catch(function(){ _catToast('Catálogo duplicado','tok'); refresh(); });
         } else { _catToast('Catálogo duplicado','tok'); refresh(); }
       }).catch(function(){ _catToast('Catálogo duplicado','tok'); refresh(); });
@@ -16645,6 +17484,7 @@ function _catCatBorrar(id){
 function _catCatCerrarModal(){
   var m=document.getElementById('_moCatCat'); if(m)m.remove();
   try{ if(_catCatModalState&&_catCatModalState._imgPreviewObj)URL.revokeObjectURL(_catCatModalState._imgPreviewObj); }catch(e){}
+  try{ if(_catCatModalState&&_catCatModalState._hojaPreviewObj)URL.revokeObjectURL(_catCatModalState._hojaPreviewObj); }catch(e){}
 }
 
 // ══════════════ NOTIFICACIONES DEL CLIENTE (campanita + tab) ══════════════
