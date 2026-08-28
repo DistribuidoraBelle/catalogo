@@ -15959,41 +15959,99 @@ function _catTplFont(cfg){
 // ganancia de tiempo cuando el catálogo tiene muchas páginas.
 var _catImgCache = {};
 var _catImgLive = false; // true = vista previa en pantalla (usa la URL directa)
-function _catImgOk(u){ if(!u)return false; if(_catImgLive)return true; return !!_catImgCache[u]; }
-function _catImgSrc(u){ if(!u)return ''; if(_catImgLive)return u; return _catImgCache[u]||''; }
-function _catImgPrep(url, maxW, cb){
+function _catImgKey(u,fondo){ return u+'|'+(fondo||''); }
+function _catImgOk(u,fondo){ if(!u)return false; if(_catImgLive)return true; return !!_catImgCache[_catImgKey(u,fondo)]; }
+function _catImgSrc(u,fondo){
+  if(!u)return '';
+  var k=_catImgKey(u,fondo);
+  if(_catImgLive)return _catImgCache[k]||u;   // en la vista previa, si todavía no se procesó, va la foto tal cual
+  return _catImgCache[k]||'';
+}
+// Saca el FONDO BLANCO del frasco sin tocar el perfume: parte de los bordes de la
+// foto y va comiendo sólo el blanco que está pegado al borde (relleno por
+// inundación). Así el blanco de la etiqueta o del vidrio, que está "adentro" y no
+// toca el borde, queda intacto. Lo que se saca se pinta del color de la hoja.
+function _catQuitarFondoBlanco(ctx, w, h, fondoRgb){
+  var img;
+  try{ img=ctx.getImageData(0,0,w,h); }catch(e){ return false; }   // foto de otro dominio sin CORS
+  var d=img.data, n=w*h;
+  var vis=new Uint8Array(n);
+  var stack=new Int32Array(n), sp=0;
+  function esFondo(i){
+    var o=i*4, r=d[o], g=d[o+1], b=d[o+2];
+    if(r<232||g<232||b<232) return false;
+    var mx=r>g?(r>b?r:b):(g>b?g:b), mn=r<g?(r<b?r:b):(g<b?g:b);
+    return (mx-mn)<=14;                                            // blanco/gris clarito, no un color pastel
+  }
+  function meter(i){ if(i>=0 && i<n && !vis[i] && esFondo(i)){ vis[i]=1; stack[sp++]=i; } }
+  var x,y,i;
+  for(x=0;x<w;x++){ meter(x); meter((h-1)*w+x); }
+  for(y=0;y<h;y++){ meter(y*w); meter(y*w+w-1); }
+  var quitados=0;
+  while(sp>0){
+    i=stack[--sp]; quitados++;
+    x=i%w; y=(i-x)/w;
+    if(x>0)meter(i-1);
+    if(x<w-1)meter(i+1);
+    if(y>0)meter(i-w);
+    if(y<h-1)meter(i+w);
+  }
+  if(!quitados) return false;
+  var fr=fondoRgb[0], fg=fondoRgb[1], fb=fondoRgb[2], o;
+  for(i=0;i<n;i++){ if(vis[i]){ o=i*4; d[o]=fr; d[o+1]=fg; d[o+2]=fb; } }
+  // Suaviza el borde: los píxeles casi blancos pegados al fondo se mezclan un
+  // poco, para que no quede un halo blanco alrededor del frasco.
+  for(i=0;i<n;i++){
+    if(vis[i])continue;
+    x=i%w; y=(i-x)/w;
+    if(!((x>0&&vis[i-1])||(x<w-1&&vis[i+1])||(y>0&&vis[i-w])||(y<h-1&&vis[i+w])))continue;
+    o=i*4;
+    var m=d[o]<d[o+1]?(d[o]<d[o+2]?d[o]:d[o+2]):(d[o+1]<d[o+2]?d[o+1]:d[o+2]);
+    if(m<190)continue;
+    var t2=(m-190)/65; if(t2>1)t2=1;
+    d[o]=d[o]+(fr-d[o])*t2; d[o+1]=d[o+1]+(fg-d[o+1])*t2; d[o+2]=d[o+2]+(fb-d[o+2])*t2;
+  }
+  ctx.putImageData(img,0,0);
+  return true;
+}
+function _catImgPrep(url, maxW, fondo, cb){
+  if(typeof fondo==='function'){ cb=fondo; fondo=null; }
   if(!url){ cb(); return; }
-  if(_catImgCache[url]!==undefined){ cb(); return; }
+  var key=_catImgKey(url,fondo);
+  if(_catImgCache[key]!==undefined){ cb(); return; }
   var im=new Image(); try{ im.crossOrigin='anonymous'; }catch(e){}
   var done=false;
-  var t=setTimeout(function(){ if(done)return; done=true; _catImgCache[url]=''; cb(); }, 9000);
+  var t=setTimeout(function(){ if(done)return; done=true; _catImgCache[key]=''; cb(); }, 9000);
   im.onload=function(){
     if(done)return; done=true; clearTimeout(t);
     try{
       var w=im.naturalWidth||im.width, hh=im.naturalHeight||im.height;
-      if(!w||!hh){ _catImgCache[url]=''; cb(); return; }
+      if(!w||!hh){ _catImgCache[key]=''; cb(); return; }
       var sc=Math.min(1,(maxW||420)/w);
       var cw=Math.max(1,Math.round(w*sc)), ch=Math.max(1,Math.round(hh*sc));
+      var base=fondo||'#ffffff', rgb=_catHexRgb(base);
       var cv=document.createElement('canvas'); cv.width=cw; cv.height=ch;
-      var ctx=cv.getContext('2d'); ctx.fillStyle='#ffffff'; ctx.fillRect(0,0,cw,ch); ctx.drawImage(im,0,0,cw,ch);
-      _catImgCache[url]=cv.toDataURL('image/jpeg',0.82);
-    }catch(e){ _catImgCache[url]=''; }
+      var ctx=cv.getContext('2d',{willReadFrequently:true});
+      ctx.fillStyle=base; ctx.fillRect(0,0,cw,ch); ctx.drawImage(im,0,0,cw,ch);
+      if(fondo) _catQuitarFondoBlanco(ctx,cw,ch,rgb);
+      _catImgCache[key]=cv.toDataURL('image/jpeg',0.86);
+    }catch(e){ _catImgCache[key]=''; }
     cb();
   };
-  im.onerror=function(){ if(done)return; done=true; clearTimeout(t); _catImgCache[url]=''; cb(); };
+  im.onerror=function(){ if(done)return; done=true; clearTimeout(t); _catImgCache[key]=''; cb(); };
   im.src=url;
 }
 // Baja TODAS las imágenes del catálogo en paralelo (de a 6) antes de dibujar.
 function _catImgPreloadAll(list, onProg, cb){
   var uniq=[], seen={};
-  (list||[]).forEach(function(o){ if(o&&o.url&&!seen[o.url]){ seen[o.url]=1; uniq.push(o); } });
+  (list||[]).forEach(function(o){ if(!o||!o.url)return; var k=_catImgKey(o.url,o.fondo); if(!seen[k]){ seen[k]=1; uniq.push(o); } });
   var total=uniq.length; if(!total){ cb&&cb(); return; }
   var i=0, done=0, CONC=6, running=0, finished=false;
   function next(){
     if(finished)return;
     while(running<CONC && i<total){
       var it=uniq[i++]; running++;
-      _catImgPrep(it.url, it.max, function(){
+      _catImgPrep(it.url, it.max, it.fondo, function(){
         running--; done++;
         if(onProg)onProg(done/total);
         if(done>=total){ if(!finished){ finished=true; cb&&cb(); } }
@@ -16450,10 +16508,20 @@ function _catAcordesDe(p,max){
   if(!Array.isArray(ac))ac=[];
   return ac.slice().sort(function(a,b){return (b.pct||0)-(a.pct||0);}).slice(0,max||4);
 }
-function _catFotoHTML(url,w,h,fit,radius,bg){
-  var src=_catImgOk(url)?_catImgSrc(url):'';
+// sinFondo=true -> a la foto del perfume se le saca el fondo blanco y queda
+// sobre la superficie que tiene atrás (la hoja o la tarjeta), sin recuadro.
+function _catFotoHTML(url,w,h,fit,radius,bg,sinFondo){
+  var fondo=sinFondo?(bg||'#ffffff'):null;
+  var src=_catImgOk(url,fondo)?_catImgSrc(url,fondo):'';
   var inner=src?("<img src='"+src+"' crossorigin='anonymous' style='width:100%;height:100%;object-fit:"+(fit||'cover')+";display:block'>"):"";
   return "<div style='width:"+w+";height:"+h+";background:"+(bg||'#fff')+";border-radius:"+(radius||0)+"px;overflow:hidden;flex-shrink:0'>"+inner+"</div>";
+}
+// Superficie que queda DETRÁS de la foto en cada plantilla: es el color con el
+// que se rellena lo que era fondo blanco.
+function _catSuperficieFoto(cfg){
+  var tpl=cfg.plantilla||'tabla';
+  if(tpl==='revista'||tpl==='galeria') return '#ffffff';   // las tarjetas son blancas
+  return cfg.cat_bg||'#fdfbf7';                            // lista clásica y editorial: la hoja
 }
 function _catPrecioHTML(item,cfg,size,alinear){
   if(item.precio==null) return "";
@@ -16644,7 +16712,7 @@ function _catTplTablaRow(item,cfg,wPerf,wPre,wNot,wAco){
   var num=(cfg.mostrar_numeracion&&item.n)?("<span style='color:#b8a888;font-weight:700'>"+item.n+". </span>"):"";
   var h="<div style='display:flex;align-items:stretch;border-bottom:1px solid rgba(0,0,0,.08);padding:13px 0'>";
   h+="<div style='flex:0 0 "+wPerf+"%;padding-right:8px;display:flex;gap:10px;align-items:center'>";
-  h+="<div style='align-self:center;border:1px solid rgba(0,0,0,.08);border-radius:6px;overflow:hidden;flex-shrink:0'>"+_catFotoHTML(p.imagen_url,'84px','84px','cover',0,'#fff')+"</div>";
+  h+="<div style='align-self:center;flex-shrink:0'>"+_catFotoHTML(p.imagen_url,'84px','84px','contain',0,cfg.cat_bg||'#fdfbf7',true)+"</div>";
   h+="<div style='flex:1;min-width:0;display:flex;flex-direction:column;justify-content:center'>";
   h+="<div style='font-family:"+F.head+";font-size:"+(cfg.tipografia==='moderna'?'15px':'18px')+";font-weight:700;color:#2e2a26;line-height:1.18'>"+num+nombre+"</div>";
   if(marca && cfg.mostrar_marca!==false)h+="<div style='font-family:"+F.body+";font-size:10.5px;color:"+ac+";font-weight:600;text-transform:uppercase;letter-spacing:.04em;margin-top:2px'>"+marca+"</div>";
@@ -16678,7 +16746,7 @@ function _catTplEditorial(cfg,items){
     var metaParts=[]; if(conc)metaParts.push(_catEsc(conc)); if(ml)metaParts.push(_catEsc(ml));
     var rev=(i%2===1);
     h+="<div style='display:flex;gap:24px;align-items:center;padding:12px 0;"+(rev?'flex-direction:row-reverse;':'')+"'>";
-    h+=_catFotoHTML(p.imagen_url,'168px','206px','contain',4,'#ffffff');
+    h+=_catFotoHTML(p.imagen_url,'168px','206px','contain',0,cfg.cat_bg||'#fdfbf7',true);
     h+="<div style='flex:1;min-width:0;"+(rev?'text-align:right;':'')+"'>";
     if(marca && cfg.mostrar_marca!==false)h+="<div style='font-family:"+F.body+";font-size:9.5px;letter-spacing:.22em;text-transform:uppercase;color:"+ac+";font-weight:700;margin-bottom:5px'>"+marca+"</div>";
     h+="<div style='font-family:"+F.head+";font-size:30px;font-weight:700;color:#241f1a;line-height:1.08'>"+((cfg.mostrar_numeracion&&it.n)?("<span style='color:#c3b49a'>"+it.n+". </span>"):"")+nombre+"</div>";
@@ -16709,7 +16777,7 @@ function _catTplRevista(cfg,items,capRows){
     var conc=_catCatPdfConc(p,ficha), ml=p.ml?(p.ml+' ml'):'';
     var metaParts=[]; if(conc)metaParts.push(_catEsc(conc)); if(ml)metaParts.push(_catEsc(ml));
     h+="<div style='background:#fff;border:1px solid rgba(0,0,0,.08);border-radius:12px;overflow:hidden;display:flex;flex-direction:column;min-height:0'>";
-    h+="<div style='flex:0 0 54%;overflow:hidden;background:#faf8f4'>"+_catFotoHTML(p.imagen_url,'100%','100%','contain',0,'#faf8f4')+"</div>";
+    h+="<div style='flex:0 0 54%;overflow:hidden;background:#ffffff'>"+_catFotoHTML(p.imagen_url,'100%','100%','contain',0,'#ffffff',true)+"</div>";
     h+="<div style='flex:1;min-height:0;padding:9px 12px 10px;display:flex;flex-direction:column'>";
     if(marca && cfg.mostrar_marca!==false)h+="<div style='font-family:"+F.body+";font-size:8px;letter-spacing:.18em;text-transform:uppercase;color:"+ac+";font-weight:700'>"+marca+"</div>";
     h+="<div style='font-family:"+F.head+";font-size:17px;font-weight:700;color:#2a251f;line-height:1.12;margin-top:2px'>"+nombre+"</div>";
@@ -16738,7 +16806,7 @@ function _catTplGaleria(cfg,items,capRows){
     var marca=_catEsc(String(p.empresa||'').trim());
     var ml=p.ml?(p.ml+' ml'):'';
     h+="<div style='background:#fff;border:1px solid rgba(0,0,0,.07);border-radius:10px;overflow:hidden;display:flex;flex-direction:column;min-height:0'>";
-    h+="<div style='flex:1;min-height:0;background:#fbfaf7'>"+_catFotoHTML(p.imagen_url,'100%','100%','contain',0,'#fbfaf7')+"</div>";
+    h+="<div style='flex:1;min-height:0;background:#ffffff'>"+_catFotoHTML(p.imagen_url,'100%','100%','contain',0,'#ffffff',true)+"</div>";
     h+="<div style='flex-shrink:0;padding:7px 9px 9px;text-align:center;border-top:1px solid rgba(0,0,0,.05)'>";
     if(marca && cfg.mostrar_marca!==false)h+="<div style='font-family:"+F.body+";font-size:7px;letter-spacing:.16em;text-transform:uppercase;color:"+ac+";font-weight:700'>"+marca+"</div>";
     h+="<div style='font-family:"+F.head+";font-size:13px;font-weight:700;color:#2a251f;line-height:1.12;margin-top:1px;max-height:30px;overflow:hidden'>"+nombre+"</div>";
@@ -16835,8 +16903,9 @@ function _catCatImagenes(cfg,items){
   if(cfg.hoja_modo==='imagen' && cfg.hoja_imagen_url) out.push({url:cfg.hoja_imagen_url,max:900});
   var tpl=cfg.plantilla||'tabla';
   if(tpl==='minimal') return out;                      // sin fotos: por eso vuela
-  var maxProd = (tpl==='editorial')?420:((tpl==='revista')?420:((tpl==='galeria')?320:220));
-  items.forEach(function(it){ if(it.p.imagen_url)out.push({url:it.p.imagen_url,max:maxProd}); });
+  var maxProd = (tpl==='editorial')?380:((tpl==='revista')?360:((tpl==='galeria')?300:220));
+  var sup=_catSuperficieFoto(cfg);
+  items.forEach(function(it){ if(it.p.imagen_url)out.push({url:it.p.imagen_url,max:maxProd,fondo:sup}); });
   if(cfg.mostrar_notas!==false && (cfg.notas_modo||'fotos')==='fotos' && (tpl==='tabla'||tpl==='editorial')){
     var maxN=(tpl==='editorial')?6:12;
     items.forEach(function(it){
@@ -17403,6 +17472,18 @@ function _catCatPrevPintar(boxId, pag, totalPags){
       var k2=Math.min(w/794, hojaH/real);
       inn.style.transform="scale("+k2+")";
       inn.style.marginLeft=Math.max(0,Math.round((w-794*k2)/2))+"px";
+    }
+  }
+  // La vista previa arranca con las fotos tal cual y, apenas se procesan (fondo
+  // blanco recortado), se vuelve a dibujar una sola vez: así muestra lo mismo
+  // que va a salir en el PDF.
+  if(pag.tipo!=='portada' && !s._prevCargando){
+    var faltan=_catCatImagenes(cfgPrev,(pag.items||[])).filter(function(o){
+      return o.fondo && _catImgCache[_catImgKey(o.url,o.fondo)]===undefined;
+    });
+    if(faltan.length){
+      s._prevCargando=true;
+      _catImgPreloadAll(faltan,null,function(){ s._prevCargando=false; _catCatPreviewNow(); });
     }
   }
 }
