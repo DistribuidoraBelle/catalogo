@@ -1707,6 +1707,7 @@ body{
         <button class="btn btn-g _repTab" data-tab="panorama" onclick="_repCambiarTab('panorama')">📈 Panorama</button>
         <button class="btn btn-a _repTab" data-tab="financiero" onclick="_repCambiarTab('financiero')">💰 Financiero</button>
         <button class="btn btn-g _repTab" data-tab="rentabilidad" onclick="_repCambiarTab('rentabilidad')">💎 Rentabilidad</button>
+        <button class="btn btn-g _repTab" data-tab="compra" onclick="_repCambiarTab('compra')">🛒 Sugerido de compra</button>
         <button class="btn btn-g _repTab" data-tab="bajorend" onclick="_repCambiarTab('bajorend')">🐌 Bajo rendimiento</button>
         <button class="btn btn-g _repTab" data-tab="proyeccion" onclick="_repCambiarTab('proyeccion')">🔮 Proyección</button>
         <button class="btn btn-g _repTab" data-tab="vendedores" onclick="_repCambiarTab('vendedores')">👥 Por Vendedor</button>
@@ -36115,6 +36116,7 @@ function _repRenderTab(){
   if(tab === "panorama") _repCargarPanorama();
   else if(tab === "financiero") _repCargarFinanciero();
   else if(tab === "rentabilidad") _repCargarRentabilidad();
+  else if(tab === "compra") _repCargarCompra();
   else if(tab === "bajorend") _repCargarBajoRend();
   else if(tab === "proyeccion") _repCargarProyeccion();
   else if(tab === "vendedores") _repCargarVendedores();
@@ -36995,6 +36997,310 @@ function _repCritBadge(dias, nunca){
   else b="<span style='color:var(--green);font-size:.62rem'>reciente</span>";
   if(nunca) b+=" <span style='background:var(--sur2);color:var(--tx3);padding:.1rem .4rem;border-radius:5px;font-size:.6rem'>nunca vendió</span>";
   return b;
+}
+
+// ══════════════════════════════════════════════════════════════════════
+// REPORTES ▸ SUGERIDO DE COMPRA
+// "¿Cuántos días de stock me quedan de cada perfume y cuánto pido?"
+// No usa el período de arriba: la velocidad de venta se mide siempre sobre
+// los últimos 30/60/90 días, que es lo que sirve para decidir una compra.
+// ══════════════════════════════════════════════════════════════════════
+window._repCompra = null;
+
+function _repCompraCfg(){
+  var c={objetivo:45, lead:30, incluirDecan:true};
+  try{
+    var g=JSON.parse(localStorage.getItem('_repCompraCfg')||'{}');
+    if(g.objetivo>0)c.objetivo=parseInt(g.objetivo);
+    if(g.lead>=0)c.lead=parseInt(g.lead);
+    if(g.incluirDecan===false)c.incluirDecan=false;
+  }catch(e){}
+  return c;
+}
+function _repCompraGuardarCfg(c){ try{ localStorage.setItem('_repCompraCfg',JSON.stringify(c)); }catch(e){} }
+
+function _repCargarCompra(){
+  var cfg=_repCompraCfg();
+  var hoy=Date.now();
+  var desde90=new Date(hoy-90*864e5).toISOString();
+  Promise.all([
+    apiGet("productos","select=id,nombre,empresa,tipo,ml,activo,oculto,stock_actual,reserva,en_viaje,deposito_m,compra_minima,min_cantidad,costo_ind,costo_log,ultimo_ingreso_at,reingreso_at,created_at&limit=8000").catch(function(){return [];}),
+    apiGetAll("ventas","select=producto_id,cantidad,segmento,created_at&estado=in.(confirmada,archivada_periodo)&created_at=gte."+desde90+"&limit=40000").catch(function(){return [];})
+  ]).then(function(data){
+    var productos=data[0]||[], ventas=data[1]||[];
+    var cotiz=(typeof cotizActual!=="undefined" && cotizActual)?cotizActual:1550;
+    var DEC_ML=5;
+    var byId={}; productos.forEach(function(p){ byId[p.id]=p; });
+
+    // ── unidades de FRASCO consumidas en cada ventana ──
+    var u={};   // {pid:{d30,d60,d90}}
+    var t30=hoy-30*864e5, t60=hoy-60*864e5;
+    ventas.forEach(function(v){
+      var pid=v.producto_id; if(!pid)return;
+      var p=byId[pid]; if(!p)return;
+      var q=parseFloat(v.cantidad)||0; if(q<=0)return;
+      var seg=String(v.segmento||'').toLowerCase();
+      if(seg==='decan'){
+        if(!cfg.incluirDecan)return;
+        q=q*(DEC_ML/((parseFloat(p.ml)||100)));   // un decant consume 5 ml del frasco
+      }
+      var t=new Date(v.created_at).getTime();
+      if(!u[pid])u[pid]={d30:0,d60:0,d90:0};
+      u[pid].d90+=q;
+      if(t>=t60)u[pid].d60+=q;
+      if(t>=t30)u[pid].d30+=q;
+    });
+
+    var rows=[], marcas={};
+    productos.forEach(function(p){
+      if(!p.activo || p.oculto)return;
+      if(p.tipo==='combo')return;
+      var a=u[p.id]||{d30:0,d60:0,d90:0};
+      // Velocidad diaria: pesa más lo reciente, pero mira 90 días para no
+      // reaccionar de más a una semana floja.
+      var vel = a.d90>0 ? (0.5*(a.d30/30) + 0.3*(a.d60/60) + 0.2*(a.d90/90)) : 0;
+      var disp=parseFloat(p.stock_actual)||0;
+      var res=parseFloat(p.reserva)||0;
+      var viaje=parseFloat(p.en_viaje)||0;
+      var cubre=disp+viaje;
+      var dias = vel>0 ? (cubre/vel) : (cubre>0?99999:0);
+      var necesita = vel>0 ? Math.ceil(vel*(cfg.objetivo+cfg.lead) - cubre) : 0;
+      if(necesita<0)necesita=0;
+      // Respeta el mínimo de compra y el múltiplo del proveedor
+      var minC=parseInt(p.compra_minima)||0, mult=parseInt(p.min_cantidad)||0;
+      var pedir=necesita;
+      if(pedir>0){
+        if(minC>0 && pedir<minC)pedir=minC;
+        if(mult>1)pedir=Math.ceil(pedir/mult)*mult;
+      }
+      var costoU=(parseFloat(p.costo_ind)||0)+(parseFloat(p.costo_log)||0);
+      var estado;
+      if(vel<=0) estado = cubre>0 ? 'sinventas' : 'nada';
+      else if(disp<=0) estado='quiebre';
+      else if(dias<cfg.lead) estado='critico';
+      else if(dias<cfg.objetivo) estado='bajo';
+      else if(dias>180) estado='sobre';
+      else estado='ok';
+      if(estado==='nada')return;
+      rows.push({
+        id:p.id, nombre:p.nombre||'', marca:p.empresa||'Sin marca', ml:p.ml||null,
+        disp:disp, res:res, viaje:viaje, vel:vel, mes:vel*30,
+        d30:a.d30, d60:a.d60, d90:a.d90,
+        dias:dias, pedir:pedir, estado:estado,
+        costoU:costoU, costoTot:costoU*pedir, costoArs:costoU*pedir*cotiz,
+        dormido:(estado==='sobre'||estado==='sinventas')?costoU*disp:0,
+        minC:minC, mult:mult,
+        ultIng:p.ultimo_ingreso_at||p.reingreso_at||p.created_at||null
+      });
+      marcas[p.empresa||'Sin marca']=1;
+    });
+
+    window._repCompra={ rows:rows, marcas:Object.keys(marcas).sort(), cfg:cfg, cotiz:cotiz,
+                        q:'', marca:'', estado:'', orden:'urgencia', dir:1 };
+    _repCompraRender();
+  }).catch(function(e){
+    console.error("[belle] _repCargarCompra error:", e);
+    var el=document.getElementById("_repContenido");
+    if(el)el.innerHTML="<div style='color:var(--red);padding:2rem;text-align:center'>Error al calcular el sugerido de compra</div>";
+  });
+}
+
+var _REP_COMPRA_EST={
+  quiebre:  {n:'Sin stock',   ico:'🔴', col:'#d94848', desc:'Se vende y no queda nada'},
+  critico:  {n:'Crítico',     ico:'🟠', col:'#e08a3c', desc:'No llega hasta la próxima compra'},
+  bajo:     {n:'Bajo',        ico:'🟡', col:'#d4b13c', desc:'Por debajo de la cobertura objetivo'},
+  ok:       {n:'OK',          ico:'🟢', col:'#3fae74', desc:'Cobertura sana'},
+  sobre:    {n:'Sobrestock',  ico:'🔵', col:'#5a9fd4', desc:'Más de 180 días de stock'},
+  sinventas:{n:'Sin ventas',  ico:'⚫', col:'#8a8a8a', desc:'Con stock y sin ventas en 90 días'}
+};
+
+function _repCompraFiltradas(){
+  var st=window._repCompra; if(!st)return [];
+  var q=(st.q||'').trim().toLowerCase();
+  var out=st.rows.filter(function(r){
+    if(st.marca && r.marca!==st.marca)return false;
+    if(st.estado && r.estado!==st.estado)return false;
+    if(q && (r.nombre+' '+r.marca).toLowerCase().indexOf(q)<0)return false;
+    return true;
+  });
+  var ord=st.orden, dir=st.dir;
+  var peso={quiebre:0,critico:1,bajo:2,ok:3,sobre:4,sinventas:5};
+  out.sort(function(a,b){
+    var va,vb;
+    if(ord==='urgencia'){ va=peso[a.estado]*1e6+a.dias; vb=peso[b.estado]*1e6+b.dias; }
+    else if(ord==='nombre'){ return dir*a.nombre.localeCompare(b.nombre); }
+    else if(ord==='marca'){ var c=a.marca.localeCompare(b.marca); return c!==0?dir*c:a.nombre.localeCompare(b.nombre); }
+    else { va=a[ord]||0; vb=b[ord]||0; }
+    return dir*(va-vb);
+  });
+  return out;
+}
+function _repCompraSet(k,v){ var st=window._repCompra; if(!st)return; st[k]=v; _repCompraRender(); }
+function _repCompraOrden(o){
+  var st=window._repCompra; if(!st)return;
+  if(st.orden===o)st.dir=-st.dir; else { st.orden=o; st.dir=(o==='nombre'||o==='marca'||o==='urgencia'||o==='dias')?1:-1; }
+  _repCompraRender();
+}
+function _repCompraCfgSet(k,v){
+  var st=window._repCompra; if(!st)return;
+  var n=parseInt(v); if(isNaN(n)||n<0)return;
+  st.cfg[k]=n; _repCompraGuardarCfg(st.cfg);
+  _repCargarCompra();
+}
+function _repCompraDecan(on){
+  var st=window._repCompra; if(!st)return;
+  st.cfg.incluirDecan=!!on; _repCompraGuardarCfg(st.cfg); _repCargarCompra();
+}
+
+function _repCompraRender(){
+  var st=window._repCompra; if(!st)return;
+  var el=document.getElementById("_repContenido"); if(!el)return;
+  var cfg=st.cfg;
+  var todas=st.rows, lista=_repCompraFiltradas();
+
+  // ── totales sobre TODO (no sobre el filtro) ──
+  var cnt={quiebre:0,critico:0,bajo:0,ok:0,sobre:0,sinventas:0};
+  var unidPedir=0, usdPedir=0, usdDormido=0, unidDormidas=0;
+  todas.forEach(function(r){
+    cnt[r.estado]=(cnt[r.estado]||0)+1;
+    unidPedir+=r.pedir; usdPedir+=r.costoTot;
+    usdDormido+=r.dormido; if(r.dormido>0)unidDormidas+=r.disp;
+  });
+  var urgentes=cnt.quiebre+cnt.critico;
+
+  var h="";
+  h+="<div style='display:flex;justify-content:space-between;align-items:flex-start;gap:.8rem;flex-wrap:wrap;margin-bottom:1rem'>";
+  h+="<div><div style='font-size:1.1rem;font-weight:700;color:var(--tx)'>🛒 Sugerido de compra</div>";
+  h+="<div style='font-size:.7rem;color:var(--tx3);margin-top:.15rem'>Velocidad de venta de los últimos 30/60/90 días · no depende del período de arriba</div></div>";
+  h+="<button class='btn btn-a' onclick='_repCompraExport()' style='font-size:.75rem'>⬇ Exportar Excel</button>";
+  h+="</div>";
+
+  // ── parámetros ──
+  h+="<div style='background:var(--sur);border:1px solid var(--bd);border-radius:10px;padding:.85rem 1rem;margin-bottom:1rem'>";
+  h+="<div style='font-size:.78rem;font-weight:700;margin-bottom:.5rem'>⚙️ Con qué criterio calculamos</div>";
+  h+="<div style='display:flex;gap:1.2rem;flex-wrap:wrap;align-items:flex-end'>";
+  h+="<div><label style='font-size:.66rem;color:var(--tx3);display:block;margin-bottom:.2rem'>Cobertura que querés tener</label>";
+  h+="<div style='display:flex;align-items:center;gap:.4rem'><input type='number' min='7' max='365' value='"+cfg.objetivo+"' onchange='_repCompraCfgSet(\"objetivo\",this.value)' style='width:80px;padding:.4rem .55rem;background:var(--sur2);border:1px solid var(--bd);border-radius:7px;color:var(--tx);font-family:inherit;font-size:.82rem'><span style='font-size:.72rem;color:var(--tx3)'>días</span></div></div>";
+  h+="<div><label style='font-size:.66rem;color:var(--tx3);display:block;margin-bottom:.2rem'>Lo que tarda en llegar el pedido</label>";
+  h+="<div style='display:flex;align-items:center;gap:.4rem'><input type='number' min='0' max='365' value='"+cfg.lead+"' onchange='_repCompraCfgSet(\"lead\",this.value)' style='width:80px;padding:.4rem .55rem;background:var(--sur2);border:1px solid var(--bd);border-radius:7px;color:var(--tx);font-family:inherit;font-size:.82rem'><span style='font-size:.72rem;color:var(--tx3)'>días</span></div></div>";
+  h+="<label style='display:flex;align-items:center;gap:.45rem;cursor:pointer;font-size:.76rem;color:var(--tx2)'><input type='checkbox' "+(cfg.incluirDecan?'checked':'')+" onchange='_repCompraDecan(this.checked)' style='width:17px;height:17px;accent-color:var(--acc)'>Contar los decants (5 ml del frasco)</label>";
+  h+="</div>";
+  h+="<div style='font-size:.68rem;color:var(--tx3);margin-top:.6rem;line-height:1.45'>Pedimos lo necesario para cubrir <b>"+(cfg.objetivo+cfg.lead)+" días</b> de venta (los "+cfg.lead+" que tarda en llegar más los "+cfg.objetivo+" que querés tener en góndola), descontando lo que ya tenés y lo que viene en viaje. Después se redondea al mínimo de compra y al múltiplo de cada producto.</div>";
+  h+="</div>";
+
+  // ── KPIs ──
+  h+="<div style='display:grid;grid-template-columns:repeat(auto-fit,minmax(190px,1fr));gap:.7rem;margin-bottom:1rem'>";
+  h+=_repKPI("🚨 Para comprar ya", String(urgentes), {color:urgentes?"var(--red)":"var(--green)", sub:cnt.quiebre+" sin stock · "+cnt.critico+" no llegan"});
+  h+=_repKPI("📦 Unidades sugeridas", _repMiles(unidPedir), {sub:todas.filter(function(r){return r.pedir>0;}).length+" productos a pedir"});
+  h+=_repKPI("💵 Inversión estimada", "u$d "+_repMiles(usdPedir), {color:"var(--acc)", sub:fmt(usdPedir*st.cotiz)+" al cambio de hoy"});
+  h+=_repKPI("🧊 Plata dormida", "u$d "+_repMiles(usdDormido), {color:usdDormido>0?"var(--yel)":"var(--tx)", sub:_repMiles(unidDormidas)+" u. en sobrestock o sin ventas"});
+  h+="</div>";
+
+  // ── barra de distribución ──
+  var totalEst=0; Object.keys(cnt).forEach(function(k){ totalEst+=cnt[k]; });
+  if(totalEst>0){
+    h+="<div style='background:var(--sur);border:1px solid var(--bd);border-radius:10px;padding:1rem;margin-bottom:1rem'>";
+    h+="<div style='font-size:.85rem;font-weight:700;margin-bottom:.7rem'>📊 Cómo está parado tu catálogo</div>";
+    h+="<div style='display:flex;height:26px;border-radius:7px;overflow:hidden;margin-bottom:.7rem'>";
+    ['quiebre','critico','bajo','ok','sobre','sinventas'].forEach(function(k){
+      if(!cnt[k])return;
+      var pct=cnt[k]/totalEst*100;
+      h+="<div title='"+_REP_COMPRA_EST[k].n+": "+cnt[k]+"' style='width:"+pct.toFixed(2)+"%;background:"+_REP_COMPRA_EST[k].col+"'></div>";
+    });
+    h+="</div>";
+    h+="<div style='display:flex;gap:.4rem;flex-wrap:wrap'>";
+    ['quiebre','critico','bajo','ok','sobre','sinventas'].forEach(function(k){
+      var e=_REP_COMPRA_EST[k], act=(st.estado===k);
+      h+="<button onclick='_repCompraSet(\"estado\",\""+(act?'':k)+"\")' title='"+e.desc+"' style='display:flex;align-items:center;gap:.35rem;border:1px solid "+(act?e.col:'var(--bd)')+";background:"+(act?e.col+'22':'var(--sur2)')+";color:var(--tx);border-radius:999px;padding:.3rem .7rem;font-size:.7rem;cursor:pointer;font-family:inherit'>";
+      h+="<span style='width:9px;height:9px;border-radius:50%;background:"+e.col+";display:inline-block'></span>"+e.n+" <b>"+(cnt[k]||0)+"</b></button>";
+    });
+    h+="</div></div>";
+  }
+
+  // ── filtros ──
+  h+="<div style='display:flex;gap:.5rem;flex-wrap:wrap;align-items:center;margin-bottom:.7rem'>";
+  h+="<input type='text' id='_repCompraQ' value='"+_admEsc(st.q||'')+"' placeholder='Buscar perfume o marca…' oninput='_repCompraSet(\"q\",this.value)' style='flex:1;min-width:200px;padding:.45rem .7rem;border:1px solid var(--bd);border-radius:7px;font-size:.82rem;background:var(--sur2);color:var(--tx)'>";
+  h+="<select onchange='_repCompraSet(\"marca\",this.value)' style='padding:.45rem .65rem;border:1px solid var(--bd);border-radius:7px;font-size:.78rem;background:var(--sur2);color:var(--tx)'><option value=''>Todas las marcas</option>";
+  st.marcas.forEach(function(m){ h+="<option value='"+_admEsc(m)+"'"+(st.marca===m?' selected':'')+">"+_admEsc(m)+"</option>"; });
+  h+="</select>";
+  h+="<div style='font-size:.72rem;color:var(--tx3)'>"+lista.length+" de "+todas.length+"</div>";
+  h+="</div>";
+
+  // ── tabla ──
+  function th(txt,k,ancho){
+    var act=(st.orden===k);
+    return "<th onclick='_repCompraOrden(\""+k+"\")' style='padding:.5rem .45rem;text-align:"+(k==='nombre'||k==='marca'?'left':'right')+";font-size:.64rem;text-transform:uppercase;letter-spacing:.04em;color:"+(act?'var(--acc)':'var(--tx3)')+";cursor:pointer;white-space:nowrap;"+(ancho?('width:'+ancho+';'):'')+"'>"+txt+(act?(st.dir>0?' ▲':' ▼'):'')+"</th>";
+  }
+  h+="<div style='background:var(--sur);border:1px solid var(--bd);border-radius:10px;overflow:hidden'>";
+  h+="<div style='overflow-x:auto'><table style='width:100%;border-collapse:collapse;min-width:900px'>";
+  h+="<thead><tr style='background:var(--sur2);border-bottom:1px solid var(--bd)'>";
+  h+=th('Estado','urgencia','90px')+th('Perfume','nombre')+th('Marca','marca','130px');
+  h+=th('Disp.','disp','60px')+th('Reserv.','res','60px')+th('En viaje','viaje','70px');
+  h+=th('Venta/mes','mes','80px')+th('Días','dias','70px')+th('Pedir','pedir','70px')+th('u$d','costoTot','80px');
+  h+="</tr></thead><tbody>";
+  if(!lista.length){
+    h+="<tr><td colspan='10' style='padding:2rem;text-align:center;color:var(--tx3);font-style:italic;font-size:.8rem'>No hay productos con ese filtro</td></tr>";
+  }
+  lista.slice(0,400).forEach(function(r){
+    var e=_REP_COMPRA_EST[r.estado]||_REP_COMPRA_EST.ok;
+    var diasTxt = r.dias>=99999?'—':(r.dias>999?'+999':Math.round(r.dias));
+    h+="<tr style='border-bottom:1px solid var(--bd);font-size:.76rem'>";
+    h+="<td style='padding:.45rem;white-space:nowrap'><span style='display:inline-flex;align-items:center;gap:.3rem;background:"+e.col+"1f;color:"+e.col+";border-radius:999px;padding:.15rem .5rem;font-size:.64rem;font-weight:700'>"+e.ico+" "+e.n+"</span></td>";
+    h+="<td style='padding:.45rem;max-width:280px'><div style='overflow:hidden;text-overflow:ellipsis;white-space:nowrap'>"+_admEsc(r.nombre)+"</div>"+
+       (r.minC||r.mult>1?("<div style='font-size:.6rem;color:var(--tx3)'>"+(r.minC?('mín '+r.minC):'')+(r.minC&&r.mult>1?' · ':'')+(r.mult>1?('de a '+r.mult):'')+"</div>"):"")+"</td>";
+    h+="<td style='padding:.45rem;color:var(--tx3);font-size:.7rem'>"+_admEsc(r.marca)+"</td>";
+    h+="<td style='padding:.45rem;text-align:right;font-weight:700;color:"+(r.disp<=0?'var(--red)':'var(--tx)')+"'>"+Math.round(r.disp)+"</td>";
+    h+="<td style='padding:.45rem;text-align:right;color:var(--tx3)'>"+(r.res>0?Math.round(r.res):'—')+"</td>";
+    h+="<td style='padding:.45rem;text-align:right;color:"+(r.viaje>0?'var(--acc)':'var(--tx3)')+"'>"+(r.viaje>0?Math.round(r.viaje):'—')+"</td>";
+    h+="<td style='padding:.45rem;text-align:right'>"+(r.mes>0?r.mes.toFixed(r.mes<10?1:0):'—')+"</td>";
+    h+="<td style='padding:.45rem;text-align:right;color:"+e.col+";font-weight:700'>"+diasTxt+"</td>";
+    h+="<td style='padding:.45rem;text-align:right;font-weight:800;color:"+(r.pedir>0?'var(--acc)':'var(--tx3)')+"'>"+(r.pedir>0?r.pedir:'—')+"</td>";
+    h+="<td style='padding:.45rem;text-align:right;color:var(--tx3)'>"+(r.costoTot>0?_repMiles(r.costoTot):'—')+"</td>";
+    h+="</tr>";
+  });
+  h+="</tbody></table></div>";
+  if(lista.length>400) h+="<div style='padding:.6rem;text-align:center;color:var(--tx3);font-size:.72rem'>Mostrando los primeros 400. Filtrá o exportá a Excel para verlos todos.</div>";
+  h+="</div>";
+
+  h+="<div style='font-size:.68rem;color:var(--tx3);margin-top:.7rem;line-height:1.5'>";
+  h+="<b>Disp.</b> es lo que podés vender hoy (ya sin lo reservado). <b>Días</b> es cuánto te dura ese stock más lo que viene en viaje, al ritmo actual de venta. ";
+  h+="Los combos no se cuentan acá porque descuentan de sus componentes.";
+  h+="</div>";
+
+  el.innerHTML=h;
+  var inp=document.getElementById('_repCompraQ');
+  if(inp && st.q){ try{ inp.focus(); inp.setSelectionRange(inp.value.length,inp.value.length); }catch(e){} }
+}
+
+function _repCompraExport(){
+  var st=window._repCompra; if(!st){ toast('Todavía no se calculó','twarn'); return; }
+  var lista=_repCompraFiltradas();
+  if(!lista.length){ toast('No hay nada para exportar','twarn'); return; }
+  var doExport=function(){
+    var headers=['Estado','Perfume','Marca','ML','Disponible','Reservado','En viaje','Vendidos 30d','Vendidos 60d','Vendidos 90d','Venta por mes','Días de stock','Sugerido a pedir','Mínimo de compra','Múltiplo','Costo u. (u$d)','Total (u$d)','Total (ARS)'];
+    var rows=[headers];
+    var n=function(v){ var x=parseFloat(v); return isNaN(x)?'':Math.round(x*100)/100; };
+    lista.forEach(function(r){
+      var e=_REP_COMPRA_EST[r.estado]||{n:''};
+      rows.push([e.n, r.nombre, r.marca, n(r.ml), n(r.disp), n(r.res), n(r.viaje),
+                 n(r.d30), n(r.d60), n(r.d90), n(r.mes),
+                 (r.dias>=99999?'':Math.round(r.dias)), (r.pedir||''), (r.minC||''), (r.mult>1?r.mult:''),
+                 n(r.costoU), n(r.costoTot), n(r.costoArs)]);
+    });
+    var ws=XLSX.utils.aoa_to_sheet(rows);
+    ws['!cols']=[{wch:12},{wch:42},{wch:18},{wch:6},{wch:10},{wch:10},{wch:9},{wch:12},{wch:12},{wch:12},{wch:13},{wch:13},{wch:16},{wch:16},{wch:9},{wch:14},{wch:13},{wch:14}];
+    var wb=XLSX.utils.book_new();
+    XLSX.utils.book_append_sheet(wb,ws,'Sugerido de compra');
+    XLSX.writeFile(wb,'sugerido_compra_'+new Date().toISOString().slice(0,10)+'.xlsx');
+    toast('Excel descargado: '+lista.length+' productos 🛒','tok');
+  };
+  if(typeof XLSX==='undefined'){
+    toast('Cargando librería de Excel...','tok');
+    var sc=document.createElement('script');
+    sc.src='https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js';
+    sc.onload=doExport; sc.onerror=function(){toast('No se pudo cargar la librería Excel','terr');};
+    document.head.appendChild(sc);
+  } else doExport();
 }
 
 function _repCargarBajoRend(){
