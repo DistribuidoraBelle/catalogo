@@ -3871,6 +3871,9 @@ function vcCargarPedido(clienteId, clienteNombre, listaPre){
     if(ccCheck) ccCheck.checked = false;
     // Toast informativo y volver al catálogo
     toast((c.nombre||"")+" asignado — agregá productos al carrito","tok");
+    // ⚠️ Si el cliente ya debe plata o tiene cuotas vencidas, avisarle al
+    // vendedor antes de que arranque a cargar. No bloquea: él decide.
+    try{ _rgoAvisar(c.id, null); }catch(_er){ console.warn('[riesgo]',_er); }
     // Si la pestaña actual no es la de catálogo, ir ahí (con el elemento del tab)
     if(typeof navTo === "function"){
       try {
@@ -5907,6 +5910,8 @@ function _seleccionarClienteDrawer(id){
     // Cerrar modal buscador
     var mo=document.getElementById("_moBuscarCliente");if(mo)mo.remove();
     toast((c.nombre||"")+" asignado al pedido","tok");
+    // ⚠️ Aviso de riesgo (deuda vieja / cuotas vencidas). Solo avisa.
+    try{ _rgoAvisar(c.id, null); }catch(_er){ console.warn('[riesgo]',_er); }
     // Re-render del catálogo: si el cliente tiene CC habilitada, las tarjetas mostrarán precio x10 forzado
     if(typeof renderCat==="function") renderCat();
   });
@@ -5914,6 +5919,7 @@ function _seleccionarClienteDrawer(id){
 
 function _desasignarCliente(){
   _carritoCliente=null;
+  try{ _rgoLimpiarChip(); }catch(e){}
   var info=document.getElementById("drawerClienteInfo");
   if(info)info.innerHTML="Sin cliente asignado";
   var ccToggle=document.getElementById("drawerCCToggle");
@@ -5938,6 +5944,7 @@ function toggleCCDrawer(checked){
 // ── Limpiar cliente al vaciar carrito ─────────────────────────
 function _limpiarCarritoCliente(){
   _carritoCliente=null;
+  try{ _rgoLimpiarChip(); }catch(e){}
   var info=document.getElementById("drawerClienteInfo");
   if(info)info.innerHTML="Sin cliente asignado";
   var ccToggle=document.getElementById("drawerCCToggle");
@@ -13451,6 +13458,277 @@ function _vcbzBadgeHome(){
   }).catch(function(){});
 }
 
+
+
+// ══════════════════════════════════════════════════════════════════════
+// ⚠️ AVISO DE RIESGO AL CARGARLE UN PEDIDO A UN CLIENTE
+// No bloquea nada: le muestra al vendedor lo que el cliente ya debe y
+// hace cuánto está vencido, y él decide. La cuenta es la misma que usa
+// Cobranzas: pedidos sin cobrar + cuotas de cuenta corriente + cuotas de
+// financiación, sin contar dos veces el pedido que ya tiene cuotas.
+// ══════════════════════════════════════════════════════════════════════
+window._rgoCache = {};
+
+function _rgoEsc(s){ return String(s==null?'':s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;'); }
+function _rgoHoy(){ return new Date().toLocaleDateString('en-CA',{timeZone:'America/Argentina/Buenos_Aires'}); }
+function _rgoDias(fechaISO){
+  if(!fechaISO)return null;
+  var a=new Date(String(fechaISO).slice(0,10)+'T12:00:00'), b=new Date(_rgoHoy()+'T12:00:00');
+  return Math.round((b-a)/86400000);
+}
+
+function _rgoCliente(clienteId, cb){
+  if(!clienteId){ cb(null); return; }
+  var cacheado=window._rgoCache[clienteId];
+  if(cacheado && (Date.now()-cacheado.t)<120000){ cb(cacheado.r); return; }
+  apiGet("pedidos_catalogo","select=id,nro_orden,total,total_con_envio,cobrado_total,estado,created_at,cc_fecha_vencimiento"+
+         "&cliente_id=eq."+clienteId+"&order=created_at.desc&limit=300")
+  .then(function(peds){
+    peds=Array.isArray(peds)?peds:[];
+    var ids=peds.map(function(p){return p.id;});
+    if(!ids.length) return {peds:peds, ccq:[], fins:[], finq:[]};
+    var enIds='('+ids.join(',')+')';
+    return Promise.all([
+      apiGet("cc_cuotas","select=id,pedido_id,nro_cuota,total_cuotas,monto,monto_pagado,recargo_mora,fecha_vencimiento,estado"+
+             "&pedido_id=in."+enIds+"&estado=in.(pendiente,parcial,vencida)&limit=300").catch(function(){return [];}),
+      apiGet("financiaciones","select=id,pedido_id,nro_orden,estado&pedido_id=in."+enIds+"&estado=eq.activa&limit=100").catch(function(){return [];})
+    ]).then(function(r){
+      var fins=r[1]||[];
+      if(!fins.length) return {peds:peds, ccq:r[0]||[], fins:[], finq:[]};
+      return apiGet("financiacion_cuotas","select=id,financiacion_id,nro,monto,pagada_monto,vencimiento,pagada"+
+             "&financiacion_id=in.("+fins.map(function(f){return f.id;}).join(',')+")&pagada=is.false&limit=300")
+        .catch(function(){return [];})
+        .then(function(fq){ return {peds:peds, ccq:r[0]||[], fins:fins, finq:fq||[]}; });
+    });
+  })
+  .then(function(d){
+    return apiGet("clientes","select=id,nombre,apellido,bloqueado,bloqueado_motivo,limite_credito,saldo_cc,cuenta_corriente_habilitada,cc_plazo_dias&id=eq."+clienteId+"&limit=1")
+      .catch(function(){return [];})
+      .then(function(cs){ d.cli=(Array.isArray(cs)&&cs[0])||{}; return d; });
+  })
+  .then(function(d){
+    var r=_rgoArmar(d, clienteId);
+    window._rgoCache[clienteId]={t:Date.now(), r:r};
+    cb(r);
+  })
+  .catch(function(e){ console.warn('[riesgo]',e); cb(null); });
+}
+
+function _rgoArmar(d, clienteId){
+  var peds=d.peds||[], ccq=d.ccq||[], fins=d.fins||[], finq=d.finq||[], cli=d.cli||{};
+  var pedById={}; peds.forEach(function(p){ pedById[p.id]=p; });
+  var finById={}; fins.forEach(function(f){ finById[f.id]=f; });
+  var conCC={}, conFin={};
+  ccq.forEach(function(c){ if(c.pedido_id)conCC[c.pedido_id]=1; });
+  fins.forEach(function(f){ if(f.pedido_id)conFin[f.pedido_id]=1; });
+
+  var plazo=parseInt(cli.cc_plazo_dias); if(isNaN(plazo)||plazo<0)plazo=15;
+  // cuántos días puede estar un pedido sin cobrar antes de que llame la atención
+  var tolerancia=cli.cuenta_corriente_habilitada?plazo:10;
+  // "vencido" = tenía fecha de vencimiento y ya pasó (compromiso incumplido)
+  // "abierto" = pedido sin cobrar que todavía no tiene fecha, pero lleva días
+  var deuda=0, vencido=0, vencidas=0, diasMax=0, abierto=0, abiertos=0, diasAbierto=0, items=[];
+
+  // pedidos sin cobrar que no tienen cuotas armadas
+  peds.forEach(function(p){
+    if(['pendiente','reservado','cobrado_parcial'].indexOf(p.estado)<0)return;
+    if(conCC[p.id]||conFin[p.id])return;   // ese pedido ya se cuenta por sus cuotas
+    var tot=parseFloat(p.total_con_envio)||parseFloat(p.total)||0;
+    var saldo=tot-(parseFloat(p.cobrado_total)||0);
+    if(saldo<=1)return;
+    deuda+=saldo;
+    var que=(p.estado==='cobrado_parcial'?'Pedido a medio cobrar':'Pedido sin cobrar');
+    if(p.cc_fecha_vencimiento){
+      var dv=_rgoDias(p.cc_fecha_vencimiento);
+      if(dv!=null && dv>0){ vencido+=saldo; vencidas++; if(dv>diasMax)diasMax=dv;
+        items.push({ref:p.nro_orden||('Pedido #'+p.id), monto:saldo, dias:dv, vencida:true, que:que}); return; }
+      items.push({ref:p.nro_orden||('Pedido #'+p.id), monto:saldo, dias:null, que:que}); return;
+    }
+    var edad=p.created_at?_rgoDias(String(p.created_at).slice(0,10)):null;
+    var viejo=(edad!=null && edad>tolerancia);
+    if(viejo){ abierto+=saldo; abiertos++; if(edad>diasAbierto)diasAbierto=edad; }
+    items.push({ref:p.nro_orden||('Pedido #'+p.id), monto:saldo, dias:null,
+                edad:edad, viejo:viejo, que:que});
+  });
+  // cuotas de cuenta corriente
+  ccq.forEach(function(c){
+    var saldo=(parseFloat(c.monto)||0)+(parseFloat(c.recargo_mora)||0)-(parseFloat(c.monto_pagado)||0);
+    if(saldo<=1)return;
+    deuda+=saldo;
+    var dv=c.fecha_vencimiento?_rgoDias(c.fecha_vencimiento):null;
+    var p=pedById[c.pedido_id];
+    if(dv!=null && dv>0){ vencido+=saldo; vencidas++; if(dv>diasMax)diasMax=dv; }
+    items.push({ref:((p&&p.nro_orden)||('Pedido #'+c.pedido_id))+' · cuota '+(c.nro_cuota||'?')+'/'+(c.total_cuotas||'?'),
+                monto:saldo, dias:(dv!=null&&dv>0)?dv:null, vencida:(dv!=null&&dv>0),
+                que:'Cuenta corriente'+((dv!=null&&dv<=0)?(' · vence en '+Math.abs(dv)+' días'):'')});
+  });
+  // cuotas de financiación
+  finq.forEach(function(cu){
+    var f=finById[cu.financiacion_id]; if(!f)return;
+    var saldo=(parseFloat(cu.monto)||0)-(parseFloat(cu.pagada_monto)||0);
+    if(saldo<=1)return;
+    deuda+=saldo;
+    var dv=cu.vencimiento?_rgoDias(cu.vencimiento):null;
+    if(dv!=null && dv>0){ vencido+=saldo; vencidas++; if(dv>diasMax)diasMax=dv; }
+    items.push({ref:(f.nro_orden||('Financiación #'+f.id))+' · cuota '+(cu.nro||'?'),
+                monto:saldo, dias:(dv!=null&&dv>0)?dv:null, vencida:(dv!=null&&dv>0),
+                que:'Financiación'+((dv!=null&&dv<=0)?(' · vence en '+Math.abs(dv)+' días'):'')});
+  });
+
+  items.sort(function(a,b){ return (b.dias||0)-(a.dias||0) || (b.edad||0)-(a.edad||0) || b.monto-a.monto; });
+  var limite=parseFloat(cli.limite_credito)||0;
+  var pasaLimite=(limite>0 && deuda>limite);
+
+  var nivel='ok';
+  if(cli.bloqueado) nivel='alto';
+  else if(vencidas>0) nivel=(diasMax>=10 || vencido>=50000)?'alto':'ojo';
+  else if(abiertos>0) nivel=(diasAbierto>=(tolerancia*2))?'alto':'ojo';
+  else if(pasaLimite) nivel='ojo';
+  else if(deuda>1) nivel='info';
+
+  return {
+    clienteId:clienteId,
+    nombre:((cli.nombre||'')+' '+(cli.apellido||'')).trim(),
+    nivel:nivel, deuda:Math.round(deuda),
+    vencido:Math.round(vencido), vencidas:vencidas, diasMax:diasMax,
+    abierto:Math.round(abierto), abiertos:abiertos, diasAbierto:diasAbierto,
+    items:items.slice(0,8),
+    limite:limite, pasaLimite:pasaLimite, tolerancia:tolerancia,
+    bloqueado:!!cli.bloqueado, bloqueadoMotivo:cli.bloqueado_motivo||'',
+    plazo:plazo
+  };
+}
+function _rgoSumar(fechaISO, dias){
+  var d=new Date(String(fechaISO)+'T12:00:00'); d.setDate(d.getDate()+dias);
+  return d.toISOString().slice(0,10);
+}
+
+// ── el cartelito de aviso (no bloquea: decide el vendedor) ────────────
+var _RGO_ESTILO={
+  alto:{col:'#e05c6e', bg:'rgba(224,92,110,.12)', ico:'🚨', tt:'Ojo con este cliente'},
+  ojo: {col:'#f0b429', bg:'rgba(240,180,41,.12)', ico:'⚠️', tt:'Tiene cuentas abiertas'},
+  // (el nivel se calcula en _rgoArmar; acá sólo el color y el título)
+  info:{col:'#5b8dee', bg:'rgba(91,141,238,.10)', ico:'ℹ️', tt:'Tiene saldo pendiente'}
+};
+function _rgoAvisar(clienteId, alSeguir){
+  _rgoCliente(clienteId, function(r){
+    _rgoPintarChip(r);
+    if(!r || r.nivel==='ok' || r.nivel==='info'){ if(alSeguir)alSeguir(); return; }
+    _rgoModal(r, alSeguir);
+  });
+}
+function _rgoModal(r, alSeguir){
+  var st=_RGO_ESTILO[r.nivel]||_RGO_ESTILO.ojo;
+  var ex=document.getElementById('_moRiesgo'); if(ex)ex.remove();
+  window._rgoSeguir=alSeguir||null;
+  var mo=document.createElement('div'); mo.id='_moRiesgo'; mo.className='mo open'; mo.style.zIndex='10070';
+  var h="<div class='md' style='max-width:460px'>";
+  h+="<div class='mh' style='border-bottom-color:"+st.col+"'><div class='mtt' style='color:"+st.col+"'>"+st.ico+" "+st.tt+"</div>"+
+     "<button class='btn btn-g' onclick='_rgoCerrar()' style='padding:.2rem .5rem'>X</button></div>";
+  h+="<div class='mb'>";
+  h+="<div style='font-size:.9rem;font-weight:700;color:var(--tx);margin-bottom:.6rem'>"+_rgoEsc(r.nombre||('Cliente #'+r.clienteId))+"</div>";
+
+  if(r.bloqueado){
+    h+="<div style='background:rgba(224,92,110,.15);border:1px solid #e05c6e;border-radius:9px;padding:.6rem .75rem;margin-bottom:.7rem'>"+
+       "<div style='font-size:.82rem;font-weight:800;color:#e05c6e'>🔒 Está bloqueado</div>"+
+       (r.bloqueadoMotivo?("<div style='font-size:.74rem;color:var(--tx2);margin-top:.15rem'>"+_rgoEsc(r.bloqueadoMotivo)+"</div>"):"")+"</div>";
+  }
+
+  h+="<div style='display:grid;grid-template-columns:1fr 1fr;gap:.5rem;margin-bottom:.7rem'>";
+  h+="<div style='background:var(--sur2);border:1px solid var(--bd);border-radius:9px;padding:.55rem .7rem'>"+
+     "<div style='font-size:.6rem;color:var(--tx3);text-transform:uppercase;letter-spacing:.05em'>Ya debe</div>"+
+     "<div style='font-size:1.15rem;font-weight:900;color:var(--tx)'>"+fmt(r.deuda)+"</div></div>";
+  if(r.vencido>0){
+    h+="<div style='background:"+st.bg+";border:1px solid "+st.col+";border-radius:9px;padding:.55rem .7rem'>"+
+       "<div style='font-size:.6rem;color:var(--tx3);text-transform:uppercase;letter-spacing:.05em'>Vencido</div>"+
+       "<div style='font-size:1.15rem;font-weight:900;color:"+st.col+"'>"+fmt(r.vencido)+"</div>"+
+       "<div style='font-size:.62rem;color:"+st.col+"'>"+r.vencidas+" cuota"+(r.vencidas>1?'s':'')+" · hasta "+r.diasMax+" días</div></div>";
+  }else if(r.abiertos>0){
+    h+="<div style='background:"+st.bg+";border:1px solid "+st.col+";border-radius:9px;padding:.55rem .7rem'>"+
+       "<div style='font-size:.6rem;color:var(--tx3);text-transform:uppercase;letter-spacing:.05em'>Sin cobrar hace rato</div>"+
+       "<div style='font-size:1.15rem;font-weight:900;color:"+st.col+"'>"+fmt(r.abierto)+"</div>"+
+       "<div style='font-size:.62rem;color:"+st.col+"'>"+r.abiertos+" pedido"+(r.abiertos>1?'s':'')+" · el más viejo de hace "+r.diasAbierto+" días</div></div>";
+  }else if(r.pasaLimite){
+    h+="<div style='background:"+st.bg+";border:1px solid "+st.col+";border-radius:9px;padding:.55rem .7rem'>"+
+       "<div style='font-size:.6rem;color:var(--tx3);text-transform:uppercase;letter-spacing:.05em'>Su límite</div>"+
+       "<div style='font-size:1.15rem;font-weight:900;color:"+st.col+"'>"+fmt(r.limite)+"</div>"+
+       "<div style='font-size:.62rem;color:"+st.col+"'>lo pasó por "+fmt(r.deuda-r.limite)+"</div></div>";
+  }
+  h+="</div>";
+  // si además de lo vencido hay pedidos viejos, se dice aparte
+  if(r.vencido>0 && r.abiertos>0){
+    h+="<div style='font-size:.72rem;color:var(--tx2);margin-bottom:.6rem'>Aparte tiene "+fmt(r.abierto)+" en "+r.abiertos+" pedido"+(r.abiertos>1?'s':'')+" sin cobrar (el más viejo de hace "+r.diasAbierto+" días).</div>";
+  }
+
+  if(r.items.length){
+    h+="<div style='font-size:.62rem;color:var(--tx3);text-transform:uppercase;letter-spacing:.05em;font-weight:700;margin-bottom:.3rem'>Lo que tiene abierto</div>";
+    h+="<div style='max-height:34vh;overflow:auto'>";
+    r.items.forEach(function(it){
+      var rojo=(it.vencida||it.viejo);
+      var sub=it.que;
+      if(it.vencida)sub+=' · vencida hace '+it.dias+' días';
+      else if(it.edad!=null)sub+=' · hace '+it.edad+' día'+(it.edad===1?'':'s');
+      h+="<div style='display:flex;justify-content:space-between;align-items:center;gap:.5rem;padding:.35rem 0;border-bottom:1px solid rgba(42,48,69,.5)'>"+
+         "<div style='min-width:0'><div style='font-size:.76rem;color:var(--tx);font-weight:600'>"+_rgoEsc(it.ref)+"</div>"+
+         "<div style='font-size:.64rem;color:"+(rojo?st.col:'var(--tx3)')+"'>"+_rgoEsc(sub)+"</div></div>"+
+         "<div style='font-size:.82rem;font-weight:800;color:"+(rojo?st.col:'var(--tx2)')+";white-space:nowrap'>"+fmt(it.monto)+"</div></div>";
+    });
+    h+="</div>";
+  }
+  h+="<div style='font-size:.72rem;color:var(--tx3);margin-top:.7rem;line-height:1.45'>Esto es solo un aviso: si querés cargarle el pedido igual, dale para adelante. Vos conocés al cliente.</div>";
+  h+="</div>";
+  h+="<div class='mf'>";
+  h+="<button class='btn btn-g' onclick='_rgoCancelar()'>Mejor no</button>";
+  h+="<button class='btn btn-g' onclick='_rgoVerCobranzas("+r.clienteId+")' style='border-color:var(--acc);color:var(--acc)'>Ver cobranzas</button>";
+  h+="<button class='btn btn-a' onclick='_rgoSeguirIgual()'>Cargar igual</button>";
+  h+="</div></div>";
+  mo.innerHTML=h;
+  document.body.appendChild(mo);
+}
+function _rgoCerrar(){ var m=document.getElementById('_moRiesgo'); if(m)m.remove(); }
+function _rgoSeguirIgual(){
+  _rgoCerrar();
+  var f=window._rgoSeguir; window._rgoSeguir=null;
+  if(f)f();
+}
+function _rgoCancelar(){
+  _rgoCerrar(); window._rgoSeguir=null;
+  // el cliente ya quedó asignado: lo sacamos del carrito
+  try{ if(typeof _desasignarCliente==='function' && _carritoCliente) _desasignarCliente(); }catch(e){}
+}
+function _rgoVerCobranzas(clienteId){
+  _rgoCerrar(); window._rgoSeguir=null;
+  try{
+    if(typeof _appEsStandalone==='function' && document.getElementById('appMobile') && document.getElementById('appMobile').style.display==='flex'){
+      if(typeof _appVerCobranzas==='function'){ _appVerCobranzas(); return; }
+    }
+    var tab=document.querySelector('.tab[onclick*="cobranzas"]');
+    if(typeof navTo==='function'){ navTo('cobranzas', tab); return; }
+  }catch(e){}
+  toast('Mirá la pestaña Cobranzas','twarn');
+}
+
+// ── la chapita que queda a la vista en el carrito ─────────────────────
+function _rgoPintarChip(r){
+  var box=document.getElementById('drawerRiesgo'); if(!box)return;
+  if(!r || r.nivel==='ok' || r.deuda<=1){ box.style.display='none'; box.innerHTML=''; return; }
+  var st=_RGO_ESTILO[r.nivel]||_RGO_ESTILO.info;
+  var txt;
+  if(r.bloqueado)txt='Cliente bloqueado';
+  else if(r.vencido>0)txt='Debe '+fmt(r.deuda)+' · '+fmt(r.vencido)+' vencido hace '+r.diasMax+' días';
+  else if(r.abiertos>0)txt='Debe '+fmt(r.deuda)+' · '+r.abiertos+' pedido'+(r.abiertos>1?'s':'')+' sin cobrar de hace '+r.diasAbierto+' días';
+  else if(r.pasaLimite)txt='Debe '+fmt(r.deuda)+' · pasó su límite de '+fmt(r.limite);
+  else txt='Tiene '+fmt(r.deuda)+' sin cobrar';
+  box.style.display='';
+  box.innerHTML="<div onclick='_rgoAbrirDeChip("+r.clienteId+")' style='margin-top:.4rem;background:"+st.bg+";border:1px solid "+st.col+";border-radius:7px;padding:.35rem .5rem;font-size:.68rem;color:"+st.col+";font-weight:700;cursor:pointer;line-height:1.35'>"+st.ico+" "+_rgoEsc(txt)+" <span style='opacity:.7;font-weight:500'>· ver</span></div>";
+}
+function _rgoAbrirDeChip(clienteId){
+  _rgoCliente(clienteId, function(r){ if(r)_rgoModal(r, null); });
+}
+function _rgoLimpiarChip(){
+  var box=document.getElementById('drawerRiesgo');
+  if(box){ box.style.display='none'; box.innerHTML=''; }
+}
 
 
 // ══════════════════════════════════════════════════════════════════════
@@ -22509,6 +22787,7 @@ function _rtBorrarDir(id){
         <button onclick="abrirBuscadorCliente()" style="background:none;border:none;color:var(--acc);font-size:.72rem;cursor:pointer;padding:0">🔍 Buscar</button>
       </div>
       <div id="drawerClienteInfo" style="font-size:.78rem;color:var(--tx2)">Sin cliente asignado</div>
+      <div id="drawerRiesgo" style="display:none"></div>
       <!-- Toggle CC — solo visible si el cliente tiene CC habilitada -->
       <div id="drawerCCToggle" style="display:none;margin-top:.4rem;padding-top:.4rem;border-top:1px solid var(--bd)">
         <label style="display:flex;align-items:center;gap:.4rem;cursor:pointer;font-size:.75rem;color:var(--tx)">
