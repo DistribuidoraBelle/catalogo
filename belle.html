@@ -15491,14 +15491,20 @@ function _cbzCargar(){
     apiGet("financiaciones","select=*&estado=eq.activa&limit=3000").catch(function(){return [];}),
     apiGet("financiacion_cuotas","select=*&pagada=is.false&limit=8000").catch(function(){return [];}),
     apiGet("clientes","select=id,nombre,apellido,telefono_principal,vendedor_asignado_id,estado,bloqueado&limit=8000").catch(function(){return [];}),
-    apiGet("cobranza_comunicaciones","select=cliente_id,created_at,canal&order=created_at.desc&limit=3000").catch(function(){return [];})
+    apiGet("cobranza_comunicaciones","select=cliente_id,created_at,canal,tipo,mensaje,promesa_fecha&order=created_at.desc&limit=4000").catch(function(){return [];})
   ]).then(function(d){
     var peds=d[0]||[], ccq=d[1]||[], fins=d[2]||[], finq=d[3]||[], clis=d[4]||[], coms=d[5]||[];
 
     var pedById={}; peds.forEach(function(p){ pedById[p.id]=p; });
     var cliById={}; clis.forEach(function(c){ cliById[c.id]=c; });
     var finById={}; fins.forEach(function(f){ finById[f.id]=f; });
-    var ultCom={}; coms.forEach(function(c){ if(c.cliente_id && !ultCom[c.cliente_id]) ultCom[c.cliente_id]=c.created_at; });
+    var ultCom={}, promesa={}, ultNota={};
+    coms.forEach(function(c){
+      if(!c.cliente_id)return;
+      if(!ultCom[c.cliente_id]) ultCom[c.cliente_id]=c.created_at;
+      if(!ultNota[c.cliente_id] && c.mensaje) ultNota[c.cliente_id]=c;
+      if(c.promesa_fecha && !promesa[c.cliente_id]) promesa[c.cliente_id]=c.promesa_fecha;
+    });
 
     var tieneCC={}, tieneFin={};
     ccq.forEach(function(c){ if(c.pedido_id)tieneCC[c.pedido_id]=1; });
@@ -15542,7 +15548,7 @@ function _cbzCargar(){
         tipo:'cc', cid:cid, cliente:nombreDe(cid,p), tel:telDe(cid,p),
         vend:(p&&p.vendedor_id)||(cid&&cliById[cid]?cliById[cid].vendedor_asignado_id:null),
         ref:((p&&p.nro_orden)||('Pedido #'+c.pedido_id))+' · cuota '+(c.nro_cuota||'?')+'/'+(c.total_cuotas||'?'),
-        pedidoId:c.pedido_id, monto:saldo, mora:parseFloat(c.recargo_mora)||0,
+        pedidoId:c.pedido_id, cuotaId:c.id, monto:saldo, mora:parseFloat(c.recargo_mora)||0,
         vence:c.fecha_vencimiento||null, desde:(p&&p.created_at)||c.created_at||null,
         detalle:'Cuenta corriente'+(c.estado==='parcial'?(' · pagó '+fmt(c.monto_pagado)):'')
       });
@@ -15560,7 +15566,7 @@ function _cbzCargar(){
         tipo:'fin', cid:cid, cliente:(cid?nombreDe(cid,p):((f.cliente_nombre||'').trim()||'Sin cliente')), tel:telDe(cid,p),
         vend:f.vendedor_id||(p&&p.vendedor_id)||null,
         ref:(f.nro_orden||('Financiación #'+f.id))+' · cuota '+(cu.nro||'?'),
-        pedidoId:f.pedido_id||null, finId:f.id, monto:saldo, mora:mora,
+        pedidoId:f.pedido_id||null, finId:f.id, cuotaId:cu.id, monto:saldo, mora:mora,
         vence:cu.vencimiento||null, desde:f.created_at||null,
         detalle:'Financiación en cuotas'+(mora>0?(' · mora '+fmt(mora)):'')
       });
@@ -15583,6 +15589,8 @@ function _cbzCargar(){
       if(!porCli[k]) porCli[k]={key:k, cid:it.cid, cliente:it.cliente, tel:it.tel, vend:it.vend,
                                 total:0, vencido:0, items:[], maxAtraso:0, prox:null,
                                 ultCom:(it.cid?ultCom[it.cid]:null)||null,
+                                promesa:(it.cid?promesa[it.cid]:null)||null,
+                                nota:(it.cid?ultNota[it.cid]:null)||null,
                                 bloq:(it.cid&&cliById[it.cid])?!!cliById[it.cid].bloqueado:false};
       var g=porCli[k];
       g.items.push(it);
@@ -15594,9 +15602,9 @@ function _cbzCargar(){
       if(!g.vend && it.vend)g.vend=it.vend;
     });
     var grupos=Object.keys(porCli).map(function(k){ return porCli[k]; });
-    grupos.forEach(function(g){ g.items.sort(function(a,b){ return (b.atraso-a.atraso)||(b.total-a.total); }); });
-
-    window._cbz={ items:items, grupos:grupos, q:'', vend:'', tipo:'', tramo:'', orden:'total', dir:-1, cliById:cliById };
+    window._cbz={ items:items, grupos:grupos, q:'', vend:'', tipo:'', tramo:'', promesa:'', orden:'total', dir:-1, cliById:cliById };
+    _cbzRecalcAtrasos();
+    _cbzReagrupar();
     _cbzRender();
   }).catch(function(e){
     console.error("[belle] _cbzCargar error:", e);
@@ -15634,6 +15642,9 @@ function _cbzFiltrados(){
     if(st.vend && String(g.vend||'')!==String(st.vend))return false;
     if(st.tipo && !g.items.some(function(i){return i.tipo===st.tipo;}))return false;
     if(st.tramo && !g.items.some(function(i){return _cbzTramo(i.atraso)===st.tramo;}))return false;
+    if(st.promesa==='vencida' && !(g.promesa && g.promesa < new Date().toISOString().slice(0,10)))return false;
+    if(st.promesa==='activa' && !(g.promesa && g.promesa >= new Date().toISOString().slice(0,10)))return false;
+    if(st.promesa==='sin' && g.promesa)return false;
     if(q && (g.cliente+' '+(g.tel||'')+' '+g.items.map(function(i){return i.ref;}).join(' ')).toLowerCase().indexOf(q)<0)return false;
     return true;
   });
@@ -15660,7 +15671,7 @@ function _cbzRender(){
     if(it.vencido)totVenc+=it.total;
     porTramo[_cbzTramo(it.atraso)]+=it.total;
     porTipo[it.tipo]=(porTipo[it.tipo]||0)+it.total;
-    if(it.vence && !it.vencido){ var f=new Date(String(it.vence).slice(0,10)+"T00:00:00"); if(f<=en7)tot7+=it.total; }
+    if(it.venceEfec && !it.vencido){ var f=new Date(String(it.venceEfec).slice(0,10)+"T00:00:00"); if(f<=en7)tot7+=it.total; }
     if(it.atraso>masVieja)masVieja=it.atraso;
   });
   var nClientes=st.grupos.length;
@@ -15671,6 +15682,17 @@ function _cbzRender(){
   h+="<div style='font-size:.78rem;color:var(--tx2);max-width:640px;line-height:1.5'>Toda la plata que nos deben, junta: pedidos sin cobrar, cuotas de cuenta corriente y cuotas de financiación con su mora. Un pedido que ya tiene cuotas no se cuenta dos veces.</div>";
   h+="<div style='display:flex;gap:.4rem'><button class='btn btn-g' onclick='_cbzCargar()' style='font-size:.74rem'>↻ Actualizar</button><button class='btn btn-a' onclick='_cbzExport()' style='font-size:.74rem'>⬇ Exportar Excel</button></div>";
   h+="</div>";
+  h+="<div style='background:var(--sur);border:1px solid var(--bd);border-radius:10px;padding:.7rem 1rem;margin-bottom:1rem;display:flex;gap:1.2rem;flex-wrap:wrap;align-items:center'>";
+  h+="<div style='display:flex;align-items:center;gap:.45rem'><span style='font-size:.72rem;color:var(--tx3)'>Un pedido sin fecha de pago vence a los</span>";
+  h+="<input type='number' min='0' max='180' value='"+_cbzPlazoDef()+"' onchange='_cbzSetPlazoDef(this.value)' style='width:64px;padding:.35rem .5rem;background:var(--sur2);border:1px solid var(--bd);border-radius:7px;color:var(--tx);font-size:.8rem'>";
+  h+="<span style='font-size:.72rem;color:var(--tx3)'>días de cargado</span></div>";
+  h+="<div style='flex:1'></div>";
+  h+="<div style='display:flex;gap:.3rem;flex-wrap:wrap'>";
+  [['','Todos'],['activa','🤝 Con promesa'],['vencida','💔 Promesa vencida'],['sin','Sin promesa']].forEach(function(o){
+    var act=(st.promesa===o[0]);
+    h+="<button onclick='_cbzSet(\"promesa\",\""+o[0]+"\")' style='border:1px solid "+(act?'var(--acc)':'var(--bd)')+";background:"+(act?'rgba(196,150,90,.15)':'var(--sur2)')+";color:var(--tx);border-radius:999px;padding:.28rem .65rem;font-size:.68rem;cursor:pointer;font-family:inherit'>"+o[1]+"</button>";
+  });
+  h+="</div></div>";
 
   h+="<div style='display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:.7rem;margin-bottom:1rem'>";
   h+=_repKPI("💰 Total a cobrar", fmt(totGral), {color:"var(--acc)", sub:nClientes+" clientes · "+st.items.length+" comprobantes"});
@@ -15731,7 +15753,7 @@ function _cbzRender(){
   h+="<div style='background:var(--sur);border:1px solid var(--bd);border-radius:10px;overflow:hidden'>";
   h+="<div style='overflow-x:auto'><table style='width:100%;border-collapse:collapse;min-width:820px'>";
   h+="<thead><tr style='background:var(--sur2);border-bottom:1px solid var(--bd)'>";
-  h+=th('Cliente','cliente','left')+th('Vendedor','vend','left')+th('Comprobantes','','right')+th('Vencido','vencido')+th('Total','total')+th('Atraso','maxAtraso')+"<th style='width:150px'></th>";
+  h+=th('Cliente','cliente','left')+th('Vendedor','vend','left')+th('Promesa','','left')+th('Vencido','vencido')+th('Total','total')+th('Atraso','maxAtraso')+"<th style='width:200px'></th>";
   h+="</tr></thead><tbody>";
   if(!lista.length) h+="<tr><td colspan='7' style='padding:2rem;text-align:center;color:var(--tx3);font-style:italic;font-size:.82rem'>No hay deuda con ese filtro 🎉</td></tr>";
   lista.forEach(function(g){
@@ -15740,12 +15762,13 @@ function _cbzRender(){
     h+="<td style='padding:.5rem'><div style='font-weight:700;display:flex;align-items:center;gap:.35rem'>"+(g.bloq?"<span title='Cliente bloqueado'>🚫</span>":"")+_admEsc(g.cliente)+"</div>";
     h+="<div style='font-size:.66rem;color:var(--tx3)'>"+_admEsc(g.tel||'sin teléfono')+(g.ultCom?(" · último contacto "+new Date(g.ultCom).toLocaleDateString('es-AR')):"")+"</div></td>";
     h+="<td style='padding:.5rem;color:var(--tx3);font-size:.72rem'>"+_admEsc(_cbzVendNombre(g.vend))+"</td>";
-    h+="<td style='padding:.5rem;text-align:right;color:var(--tx3)'>"+g.items.length+"</td>";
+    h+="<td style='padding:.5rem;font-size:.7rem'>"+_cbzPromesaChip(g)+"</td>";
     h+="<td style='padding:.5rem;text-align:right;color:"+(g.vencido>0?'var(--red)':'var(--tx3)')+";font-weight:"+(g.vencido>0?'700':'400')+"'>"+(g.vencido>0?fmt(g.vencido):'—')+"</td>";
     h+="<td style='padding:.5rem;text-align:right;font-weight:800;color:var(--acc)'>"+fmt(g.total)+"</td>";
     h+="<td style='padding:.5rem;text-align:right'><span style='background:"+tr.col+"1f;color:"+tr.col+";border-radius:999px;padding:.15rem .5rem;font-size:.66rem;font-weight:700'>"+(g.maxAtraso>0?(g.maxAtraso+"d"):"al día")+"</span></td>";
     h+="<td style='padding:.5rem;text-align:right;white-space:nowrap'>";
-    h+="<button class='btn btn-g' onclick='_cbzFicha(\""+g.key+"\")' style='font-size:.68rem;padding:.28rem .55rem'>Ver detalle</button>";
+    h+="<button class='btn btn-g' onclick='_cbzFicha(\""+g.key+"\")' style='font-size:.68rem;padding:.28rem .55rem'>"+g.items.length+" · Ver detalle</button>";
+    h+=" <button class='btn btn-g' onclick='_cbzGestion(\""+g.key+"\")' title='Anotar gestión o promesa de pago' style='font-size:.68rem;padding:.28rem .5rem'>📝</button>";
     if(g.tel)h+=" <button class='btn btn-g' onclick='_cbzWhats(\""+g.key+"\")' style='font-size:.68rem;padding:.28rem .55rem;color:#25d366;border-color:#25d366'>WhatsApp</button>";
     h+="</td></tr>";
   });
@@ -15756,7 +15779,7 @@ function _cbzRender(){
   var inp=document.getElementById('_cbzQ');
   if(inp && st.q){ try{ inp.focus(); inp.setSelectionRange(inp.value.length,inp.value.length); }catch(e){} }
 }
-function _cbzLimpiar(){ var st=window._cbz; if(!st)return; st.q='';st.vend='';st.tipo='';st.tramo=''; _cbzRender(); }
+function _cbzLimpiar(){ var st=window._cbz; if(!st)return; st.q='';st.vend='';st.tipo='';st.tramo='';st.promesa=''; _cbzRender(); }
 
 // Chapita roja en el menú con la cantidad de clientes con deuda vencida.
 function _cbzSetBadge(n){
@@ -15781,6 +15804,13 @@ try{ setTimeout(function(){
   if(typeof _cbzChequeoRapido==='function')_cbzChequeoRapido();
 },2200); }catch(e){}
 
+function _cbzPromesaChip(g){
+  if(!g.promesa) return "<span style='color:var(--tx3)'>—</span>";
+  var hoy=new Date().toISOString().slice(0,10);
+  var f=new Date(String(g.promesa)+"T00:00:00").toLocaleDateString('es-AR');
+  if(g.promesa<hoy) return "<span title='Prometió pagar y no lo hizo' style='background:rgba(217,72,72,.15);color:#d94848;border-radius:999px;padding:.12rem .5rem;font-weight:700'>💔 "+f+"</span>";
+  return "<span title='Quedó en pagar' style='background:rgba(63,174,116,.15);color:#3fae74;border-radius:999px;padding:.12rem .5rem;font-weight:700'>🤝 "+f+"</span>";
+}
 function _cbzGrupo(key){ var st=window._cbz; if(!st)return null; return st.grupos.filter(function(g){return g.key===key;})[0]||null; }
 
 function _cbzFicha(key){
@@ -15801,8 +15831,14 @@ function _cbzFicha(key){
   h+="<div><div style='font-size:.62rem;color:var(--tx3);text-transform:uppercase'>Atraso mayor</div><div style='font-size:1.15rem;font-weight:800'>"+(g.maxAtraso>0?(g.maxAtraso+" días"):"—")+"</div></div>";
   h+="<div><div style='font-size:.62rem;color:var(--tx3);text-transform:uppercase'>Comprobantes</div><div style='font-size:1.15rem;font-weight:800'>"+g.items.length+"</div></div>";
   h+="</div>";
+  if(g.promesa || g.nota){
+    h+="<div style='padding:.7rem 1.1rem;border-bottom:1px solid var(--bd);font-size:.75rem;color:var(--tx2);line-height:1.5'>";
+    if(g.promesa)h+=_cbzPromesaChip(g)+" ";
+    if(g.nota)h+="<span style='color:var(--tx3)'>“"+_admEsc(String(g.nota.mensaje||'').slice(0,160))+"” · "+new Date(g.nota.created_at).toLocaleDateString('es-AR')+"</span>";
+    h+="</div>";
+  }
   h+="<div style='flex:1;overflow-y:auto;padding:.8rem 1.1rem'>";
-  g.items.forEach(function(it){
+  g.items.forEach(function(it, _idx){
     var t=_CBZ_TIPOS[it.tipo], tr=_CBZ_TRAMOS[_cbzTramo(it.atraso)];
     h+="<div style='border:1px solid var(--bd);border-left:3px solid "+t.col+";border-radius:9px;padding:.6rem .75rem;margin-bottom:.5rem;background:var(--sur2)'>";
     h+="<div style='display:flex;justify-content:space-between;gap:.6rem;flex-wrap:wrap'>";
@@ -15810,19 +15846,27 @@ function _cbzFicha(key){
     h+="<div style='font-size:.68rem;color:var(--tx3);margin-top:.1rem'>"+_admEsc(it.detalle)+"</div>";
     h+="<div style='font-size:.66rem;color:var(--tx3);margin-top:.15rem'>";
     if(it.vence) h+="Vence "+new Date(String(it.vence).slice(0,10)+"T00:00:00").toLocaleDateString('es-AR');
+    else if(it.venceEfec) h+="Sin fecha propia · se cuenta vencida el "+new Date(String(it.venceEfec).slice(0,10)+"T00:00:00").toLocaleDateString('es-AR');
     else h+="Sin fecha de vencimiento";
     if(it.desde) h+=" · del "+new Date(it.desde).toLocaleDateString('es-AR');
     h+="</div></div>";
     h+="<div style='text-align:right;flex-shrink:0'><div style='font-size:1rem;font-weight:800;color:var(--acc)'>"+fmt(it.total)+"</div>";
-    h+="<div style='margin-top:.2rem'><span style='background:"+tr.col+"1f;color:"+tr.col+";border-radius:999px;padding:.12rem .5rem;font-size:.64rem;font-weight:700'>"+(it.atraso>0?("vencida hace "+it.atraso+"d"):(it.vence?"al día":"sin plazo"))+"</span></div></div>";
+    h+="<div style='margin-top:.2rem'><span style='background:"+tr.col+"1f;color:"+tr.col+";border-radius:999px;padding:.12rem .5rem;font-size:.64rem;font-weight:700'>"+(it.atraso>0?("vencida hace "+it.atraso+"d"):(it.venceEfec?(it.estimado?"al día (plazo estimado)":"al día"):"sin plazo"))+"</span></div></div>";
     h+="</div>";
-    if(it.pedidoId) h+="<div style='margin-top:.45rem'><button class='btn btn-g' onclick='_cbzVerPedido("+it.pedidoId+")' style='font-size:.65rem;padding:.22rem .5rem'>Ver el pedido</button></div>";
+    h+="<div style='margin-top:.5rem;display:flex;gap:.35rem;flex-wrap:wrap'>";
+    if(it.pedidoId) h+="<button class='btn btn-g' onclick='_cbzVerPedido("+it.pedidoId+")' style='font-size:.65rem;padding:.22rem .5rem'>Ver el pedido</button>";
+    h+="<button class='btn btn-g' onclick='_cbzPlazo(\""+g.key+"\","+_idx+")' style='font-size:.65rem;padding:.22rem .5rem'>📅 "+(it.vence?'Correr fecha':'Poner fecha de pago')+"</button>";
+    if(it.mora>0) h+="<button class='btn btn-g' onclick='_cbzSacarMora(\""+g.key+"\","+_idx+")' style='font-size:.65rem;padding:.22rem .5rem'>🕊 Sacar mora</button>";
+    h+="<button class='btn btn-g' onclick='_cbzGestion(\""+g.key+"\","+_idx+")' style='font-size:.65rem;padding:.22rem .5rem'>📝 Anotar</button>";
+    h+="</div>";
     h+="</div>";
   });
   h+="</div>";
   h+="<div style='padding:.8rem 1.1rem;border-top:1px solid var(--bd);display:flex;gap:.5rem;flex-wrap:wrap'>";
-  if(g.tel)h+="<button class='btn btn-a' onclick='_cbzWhats(\""+g.key+"\")' style='flex:1;min-width:160px;font-size:.8rem'>Mandar WhatsApp de cobro</button>";
-  h+="<button class='btn btn-g' onclick='_cbzCopiar(\""+g.key+"\")' style='font-size:.8rem'>Copiar resumen</button>";
+  if(g.tel)h+="<button class='btn btn-a' onclick='_cbzWhats(\""+g.key+"\")' style='flex:1;min-width:150px;font-size:.8rem'>Mandar WhatsApp</button>";
+  h+="<button class='btn btn-g' onclick='_cbzGestion(\""+g.key+"\")' style='font-size:.8rem'>📝 Anotar gestión</button>";
+  h+="<button class='btn btn-g' onclick='_cbzCopiar(\""+g.key+"\")' style='font-size:.8rem'>Copiar</button>";
+  if(g.cid)h+="<button class='btn btn-g' onclick='_cbzBloquear(\""+g.key+"\")' style='font-size:.8rem;color:"+(g.bloq?'var(--green)':'var(--red)')+";border-color:"+(g.bloq?'var(--green)':'var(--red)')+"'>"+(g.bloq?'🔓 Desbloquear':'🔒 Bloquear')+"</button>";
   h+="</div></div>";
   mo.innerHTML=h;
   document.body.appendChild(mo);
@@ -15883,27 +15927,218 @@ function _cbzCopiar(key){
   }catch(e){ toast('No se pudo copiar','twarn'); }
 }
 
+
+// ══════════════════════════════════════════════════════════════════════
+// COBRANZAS ▸ SUPERPODERES DEL ADMIN
+// Poner plazos, correr vencimientos, sacar la mora, anotar la gestión con
+// promesa de pago y bloquear al cliente. Todo lo que NO toca la caja: los
+// cobros se siguen registrando donde siempre, con su lógica de rendición.
+// ══════════════════════════════════════════════════════════════════════
+function _cbzPlazoDef(){
+  var n=15;
+  try{ var v=parseInt(localStorage.getItem('_cbzPlazoDef')); if(!isNaN(v)&&v>=0)n=v; }catch(e){}
+  return n;
+}
+function _cbzSetPlazoDef(v){
+  var n=parseInt(v); if(isNaN(n)||n<0)return;
+  try{ localStorage.setItem('_cbzPlazoDef', String(n)); }catch(e){}
+  var st=window._cbz; if(!st)return;
+  _cbzRecalcAtrasos(); _cbzReagrupar(); _cbzRender();
+}
+// Un pedido sin fecha de pago no puede quedar afuera del atraso para siempre:
+// le damos el plazo por defecto contado desde la fecha del pedido.
+function _cbzRecalcAtrasos(){
+  var st=window._cbz; if(!st)return;
+  var plazo=_cbzPlazoDef();
+  st.items.forEach(function(it){
+    it.venceEfec=it.vence; it.estimado=false;
+    if(!it.vence && it.tipo==='pedido' && plazo>0 && it.desde){
+      var d=new Date(String(it.desde).slice(0,10)+"T00:00:00");
+      d.setDate(d.getDate()+plazo);
+      it.venceEfec=d.toISOString().slice(0,10);
+      it.estimado=true;
+    }
+    var dv=_cbzDias(it.venceEfec);
+    it.atraso=(dv!=null && dv>0)?dv:0;
+    it.vencido=it.atraso>0;
+  });
+}
+function _cbzReagrupar(){
+  var st=window._cbz; if(!st)return;
+  st.grupos.forEach(function(g){
+    g.total=0; g.vencido=0; g.maxAtraso=0; g.prox=null;
+    g.items.forEach(function(it){
+      g.total+=it.total;
+      if(it.vencido)g.vencido+=it.total;
+      if(it.atraso>g.maxAtraso)g.maxAtraso=it.atraso;
+      if(it.venceEfec && (!g.prox || it.venceEfec<g.prox))g.prox=it.venceEfec;
+    });
+    g.items.sort(function(a,b){ return (b.atraso-a.atraso)||(b.total-a.total); });
+  });
+}
+
+// ── overlay chico y reutilizable para las acciones ──
+function _cbzAccModal(titulo, cuerpoHTML, onOK, okTxt){
+  var old=document.getElementById('_cbzAcc'); if(old)old.remove();
+  var mo=document.createElement('div'); mo.id='_cbzAcc';
+  mo.style.cssText='position:fixed;inset:0;z-index:99999;background:rgba(0,0,0,.66);display:flex;align-items:center;justify-content:center;padding:1rem';
+  mo.onclick=function(e){ if(e.target===mo)mo.remove(); };
+  var h="<div style='background:var(--sur);border:1px solid var(--bd);border-radius:14px;max-width:460px;width:100%;overflow:hidden' onclick='event.stopPropagation()'>";
+  h+="<div style='padding:.9rem 1.1rem;border-bottom:1px solid var(--bd);font-size:.95rem;font-weight:700'>"+titulo+"</div>";
+  h+="<div style='padding:1rem 1.1rem'>"+cuerpoHTML+"</div>";
+  h+="<div style='padding:.8rem 1.1rem;border-top:1px solid var(--bd);display:flex;gap:.5rem'>";
+  h+="<button class='btn btn-g' onclick=\"document.getElementById('_cbzAcc').remove()\" style='font-size:.82rem'>Cancelar</button>";
+  h+="<button id='_cbzAccOK' class='btn btn-a' style='flex:1;font-size:.82rem'>"+(okTxt||'Guardar')+"</button>";
+  h+="</div></div>";
+  mo.innerHTML=h;
+  document.body.appendChild(mo);
+  document.getElementById('_cbzAccOK').onclick=function(){ onOK(function(){ mo.remove(); }); };
+}
+function _cbzItemPorRef(key, idx){
+  var g=_cbzGrupo(key); if(!g)return null;
+  return g.items[idx]||null;
+}
+
+// ── 1) poner o correr el vencimiento ──
+function _cbzPlazo(key, idx){
+  var g=_cbzGrupo(key), it=_cbzItemPorRef(key,idx); if(!g||!it)return;
+  var hoy=new Date().toISOString().slice(0,10);
+  var actual=it.vence?String(it.vence).slice(0,10):'';
+  var c="<div style='font-size:.8rem;color:var(--tx2);margin-bottom:.7rem;line-height:1.5'><b>"+_admEsc(it.ref)+"</b><br>"+fmt(it.total)+" · "+_admEsc(g.cliente)+"</div>";
+  c+="<label style='font-size:.66rem;color:var(--tx3);display:block;margin-bottom:.25rem;text-transform:uppercase'>Fecha de vencimiento</label>";
+  c+="<input type='date' id='_cbzPlazoF' value='"+(actual||hoy)+"' style='width:100%;padding:.5rem .6rem;background:var(--sur2);border:1px solid var(--bd);border-radius:8px;color:var(--tx);font-size:.85rem;box-sizing:border-box'>";
+  c+="<div style='display:flex;gap:.35rem;flex-wrap:wrap;margin-top:.6rem'>";
+  [[7,'+7 días'],[15,'+15 días'],[30,'+30 días'],[60,'+60 días']].forEach(function(o){
+    c+="<button class='btn btn-g' onclick='_cbzPlazoMas("+o[0]+")' style='font-size:.7rem;padding:.25rem .55rem'>"+o[1]+"</button>";
+  });
+  c+="</div>";
+  if(it.estimado)c+="<div style='font-size:.68rem;color:var(--tx3);margin-top:.7rem;line-height:1.45'>Hoy este pedido no tiene fecha propia: el sistema le está contando "+_cbzPlazoDef()+" días desde que se cargó. Si le ponés una fecha, pasa a ser la real.</div>";
+  _cbzAccModal('📅 Fecha de pago', c, function(cerrar){
+    var f=(document.getElementById('_cbzPlazoF')||{}).value;
+    if(!f){ toast('Elegí una fecha','twarn'); return; }
+    var p;
+    if(it.tipo==='pedido') p=apiPatch('pedidos_catalogo',{cc_fecha_vencimiento:f},'id=eq.'+it.pedidoId);
+    else if(it.tipo==='cc') p=apiPatch('cc_cuotas',{fecha_vencimiento:f, updated_at:new Date().toISOString()},'id=eq.'+it.cuotaId);
+    else p=apiPatch('financiacion_cuotas',{vencimiento:f},'id=eq.'+it.cuotaId);
+    p.then(function(){
+      it.vence=f;
+      _cbzRegistrar(g, it, 'plazo', 'Vencimiento puesto para el '+new Date(f+"T00:00:00").toLocaleDateString('es-AR'), null);
+      _cbzRecalcAtrasos(); _cbzReagrupar(); _cbzRender();
+      toast('Vencimiento actualizado','tok'); cerrar();
+      var m=document.getElementById('_cbzModal'); if(m){ m.remove(); _cbzFicha(key); }
+    }).catch(function(e){ console.error('[cbz plazo]',e); toast('No se pudo guardar la fecha','terr'); });
+  }, 'Guardar fecha');
+}
+function _cbzPlazoMas(d){
+  var i=document.getElementById('_cbzPlazoF'); if(!i)return;
+  var base=new Date(); base.setDate(base.getDate()+d);
+  i.value=base.toISOString().slice(0,10);
+}
+
+// ── 2) sacar la mora ──
+function _cbzSacarMora(key, idx){
+  var g=_cbzGrupo(key), it=_cbzItemPorRef(key,idx); if(!g||!it)return;
+  var esFin=(it.tipo==='fin');
+  var c="<div style='font-size:.8rem;color:var(--tx2);line-height:1.55'><b>"+_admEsc(it.ref)+"</b><br>";
+  c+="Mora acumulada: <b style='color:var(--red)'>"+fmt(it.mora)+"</b></div>";
+  c+="<div style='font-size:.74rem;color:var(--tx3);margin-top:.7rem;line-height:1.5'>";
+  c+=esFin
+    ? "En las financiaciones la mora se calcula sola sobre el plan, así que sacarla apaga la mora de <b>todo el plan</b>, no solo de esta cuota."
+    : "Se pone en cero el recargo por mora de esta cuota de cuenta corriente.";
+  c+="</div>";
+  _cbzAccModal('🕊 Sacar la mora', c, function(cerrar){
+    var p = esFin
+      ? apiPatch('financiaciones',{mora_tipo:'ninguna'},'id=eq.'+it.finId)
+      : apiPatch('cc_cuotas',{recargo_mora:0, updated_at:new Date().toISOString()},'id=eq.'+it.cuotaId);
+    p.then(function(){
+      _cbzRegistrar(g, it, 'mora', 'Mora condonada por '+fmt(it.mora), null);
+      toast('Mora sacada','tok'); cerrar(); _cbzCargar();
+      var m=document.getElementById('_cbzModal'); if(m)m.remove();
+    }).catch(function(e){ console.error('[cbz mora]',e); toast('No se pudo sacar la mora','terr'); });
+  }, 'Sí, sacarla');
+}
+
+// ── 3) anotar la gestión + promesa de pago ──
+function _cbzGestion(key, idx){
+  var g=_cbzGrupo(key); if(!g)return;
+  var it=(idx!=null)?_cbzItemPorRef(key,idx):null;
+  var hoy=new Date(); var manana=new Date(hoy.getTime()+864e5);
+  var c="<div style='font-size:.8rem;color:var(--tx2);margin-bottom:.7rem'><b>"+_admEsc(g.cliente)+"</b>"+(it?("<br><span style='color:var(--tx3);font-size:.74rem'>"+_admEsc(it.ref)+" · "+fmt(it.total)+"</span>"):"")+"</div>";
+  c+="<label style='font-size:.66rem;color:var(--tx3);display:block;margin-bottom:.25rem;text-transform:uppercase'>Qué pasó</label>";
+  c+="<textarea id='_cbzGestNota' rows='3' placeholder='Ej: Hablé con él, paga el viernes cuando cobre' style='width:100%;padding:.5rem .6rem;background:var(--sur2);border:1px solid var(--bd);border-radius:8px;color:var(--tx);font-size:.84rem;font-family:inherit;resize:vertical;box-sizing:border-box'></textarea>";
+  c+="<label style='display:flex;align-items:center;gap:.45rem;cursor:pointer;font-size:.78rem;color:var(--tx2);margin-top:.7rem'><input type='checkbox' id='_cbzGestProm' checked onchange=\"document.getElementById('_cbzGestFecha').style.display=this.checked?'block':'none'\" style='width:17px;height:17px;accent-color:var(--acc)'>Quedó en pagar el…</label>";
+  c+="<input type='date' id='_cbzGestFecha' value='"+manana.toISOString().slice(0,10)+"' style='width:100%;padding:.5rem .6rem;background:var(--sur2);border:1px solid var(--bd);border-radius:8px;color:var(--tx);font-size:.85rem;margin-top:.4rem;box-sizing:border-box'>";
+  c+="<div style='font-size:.68rem;color:var(--tx3);margin-top:.7rem;line-height:1.45'>La promesa queda anotada y, si la fecha pasa sin que pague, el cliente aparece marcado como <b>promesa vencida</b>.</div>";
+  _cbzAccModal('📝 Anotar gestión', c, function(cerrar){
+    var nota=((document.getElementById('_cbzGestNota')||{}).value||'').trim();
+    var conProm=(document.getElementById('_cbzGestProm')||{}).checked;
+    var fecha=conProm?((document.getElementById('_cbzGestFecha')||{}).value||null):null;
+    if(!nota && !fecha){ toast('Escribí algo o poné una fecha','twarn'); return; }
+    _cbzRegistrar(g, it, conProm?'promesa':'nota', nota||'Gestión de cobranza', fecha, function(){
+      toast(conProm?'Promesa anotada':'Gestión anotada','tok'); cerrar();
+      _cbzCargar();
+      var m=document.getElementById('_cbzModal'); if(m)m.remove();
+    });
+  }, 'Anotar');
+}
+function _cbzRegistrar(g, it, tipo, mensaje, promesaFecha, cb){
+  if(!g || !g.cid){ if(cb)cb(); return; }
+  var row={ cliente_id:g.cid, canal:'sistema', tipo:tipo, mensaje:mensaje, estado:'registrado', usuario:'admin',
+            promesa_fecha:promesaFecha||null };
+  if(it){ row.origen_tipo=it.tipo; row.origen_ref=it.ref; row.monto=Math.round(it.total); if(it.pedidoId)row.pedido_id=it.pedidoId; }
+  apiPost('cobranza_comunicaciones', row).then(function(){ if(cb)cb(); })
+    .catch(function(e){ console.error('[cbz registrar]',e); if(cb)cb(); });
+}
+
+// ── 4) bloquear / desbloquear al cliente ──
+function _cbzBloquear(key){
+  var g=_cbzGrupo(key); if(!g||!g.cid){ toast('Ese cliente no está en la base','twarn'); return; }
+  if(g.bloq){
+    var c1="<div style='font-size:.82rem;color:var(--tx2);line-height:1.55'><b>"+_admEsc(g.cliente)+"</b> está bloqueado. Al desbloquearlo vuelve a poder comprar.</div>";
+    _cbzAccModal('🔓 Desbloquear cliente', c1, function(cerrar){
+      apiPatch('clientes',{bloqueado:false, bloqueado_motivo:null, bloqueado_at:null},'id=eq.'+g.cid).then(function(){
+        g.bloq=false; _cbzRegistrar(g,null,'desbloqueo','Cliente desbloqueado',null);
+        toast('Cliente desbloqueado','tok'); cerrar(); _cbzRender();
+        var m=document.getElementById('_cbzModal'); if(m){ m.remove(); _cbzFicha(key); }
+      }).catch(function(e){ console.error('[cbz desbloq]',e); toast('No se pudo desbloquear','terr'); });
+    }, 'Desbloquear');
+    return;
+  }
+  var c="<div style='font-size:.82rem;color:var(--tx2);line-height:1.55;margin-bottom:.7rem'>Mientras esté bloqueado, <b>"+_admEsc(g.cliente)+"</b> no va a poder hacer pedidos nuevos.</div>";
+  c+="<label style='font-size:.66rem;color:var(--tx3);display:block;margin-bottom:.25rem;text-transform:uppercase'>Motivo</label>";
+  c+="<input type='text' id='_cbzBloqMot' value='Deuda vencida de "+fmt(g.vencido||g.total)+"' style='width:100%;padding:.5rem .6rem;background:var(--sur2);border:1px solid var(--bd);border-radius:8px;color:var(--tx);font-size:.84rem;box-sizing:border-box'>";
+  _cbzAccModal('🔒 Bloquear cliente', c, function(cerrar){
+    var mot=((document.getElementById('_cbzBloqMot')||{}).value||'').trim()||'Deuda vencida';
+    apiPatch('clientes',{bloqueado:true, bloqueado_motivo:mot, bloqueado_at:new Date().toISOString()},'id=eq.'+g.cid).then(function(){
+      g.bloq=true; _cbzRegistrar(g,null,'bloqueo',mot,null);
+      toast('Cliente bloqueado','tok'); cerrar(); _cbzRender();
+      var m=document.getElementById('_cbzModal'); if(m){ m.remove(); _cbzFicha(key); }
+    }).catch(function(e){ console.error('[cbz bloq]',e); toast('No se pudo bloquear','terr'); });
+  }, 'Bloquear');
+}
+
 function _cbzExport(){
   var st=window._cbz; if(!st){ toast('Todavía no cargó','twarn'); return; }
   var lista=_cbzFiltrados();
   if(!lista.length){ toast('No hay nada para exportar','twarn'); return; }
   var doExport=function(){
     var wb=XLSX.utils.book_new();
-    var r1=[['Cliente','Teléfono','Vendedor','Comprobantes','Vencido','Total','Atraso mayor (días)','Último contacto']];
+    var r1=[['Cliente','Teléfono','Vendedor','Comprobantes','Vencido','Total','Atraso mayor (días)','Promesa de pago','Último contacto']];
     lista.forEach(function(g){
       r1.push([g.cliente, g.tel||'', _cbzVendNombre(g.vend), g.items.length,
                Math.round(g.vencido), Math.round(g.total), g.maxAtraso,
+               g.promesa||'',
                g.ultCom?new Date(g.ultCom).toLocaleDateString('es-AR'):'']);
     });
     var ws1=XLSX.utils.aoa_to_sheet(r1);
-    ws1['!cols']=[{wch:30},{wch:16},{wch:14},{wch:13},{wch:14},{wch:14},{wch:18},{wch:16}];
+    ws1['!cols']=[{wch:30},{wch:16},{wch:14},{wch:13},{wch:14},{wch:14},{wch:18},{wch:15},{wch:16}];
     XLSX.utils.book_append_sheet(wb,ws1,'Por cliente');
 
     var r2=[['Cliente','Origen','Comprobante','Detalle','Vence','Atraso (días)','Mora','Importe']];
     lista.forEach(function(g){
       g.items.forEach(function(it){
         r2.push([g.cliente, (_CBZ_TIPOS[it.tipo]||{}).n||it.tipo, it.ref, it.detalle,
-                 it.vence?String(it.vence).slice(0,10):'', it.atraso, Math.round(it.mora||0), Math.round(it.total)]);
+                 it.venceEfec?String(it.venceEfec).slice(0,10):'', it.atraso, Math.round(it.mora||0), Math.round(it.total)]);
       });
     });
     var ws2=XLSX.utils.aoa_to_sheet(r2);
@@ -37805,9 +38040,10 @@ function _repCargarMargenes(){
   Promise.all([
     apiGetAll("ventas","select=producto_id,producto_nombre,cantidad,total,segmento,vendedor_id,created_at&estado=in.(confirmada,archivada_periodo)&limit=60000").catch(function(){return [];}),
     apiGet("productos","select=id,nombre,empresa,ml,costo_ind,costo_log&limit=8000").catch(function(){return [];}),
-    apiGet("combos","select=id,nombre,combo_items(producto_id,cantidad,es_decan)&limit=2000").catch(function(){return [];})
+    apiGet("combos","select=id,nombre,combo_items(producto_id,cantidad,es_decan)&limit=2000").catch(function(){return [];}),
+    apiGet("gastos_vendedor","select=monto,categoria,concepto,vendedor_id,created_at&aprobado=is.true&limit=20000").catch(function(){return [];})
   ]).then(function(d){
-    var ventas=d[0]||[], productos=d[1]||[], combos=d[2]||[];
+    var ventas=d[0]||[], productos=d[1]||[], combos=d[2]||[], gastos=d[3]||[];
     var cotiz=(typeof cotizActual!=="undefined" && cotizActual)?cotizActual:1550;
     var DECAN_ML=5, PERFUME_ML=100, cpv=0.94*cotiz;
 
@@ -37860,7 +38096,15 @@ function _repCargarMargenes(){
       var t=new Date(f.fecha).getTime();
       return t>=r.desde.getTime() && t<r.hasta.getTime();
     });
-    window._repMg={ filas:filas, enRango:enRango, cotiz:cotiz, orden:'gan', dir:-1, dim:'marca' };
+    var gs=gastos.map(function(g){
+      return {monto:parseFloat(g.monto)||0, cat:(g.categoria||'Sin categoría'), concepto:g.concepto||'',
+              vend:g.vendedor_id||null, fecha:g.created_at, mes:String(g.created_at||'').slice(0,7)};
+    }).filter(function(g){ return g.monto>0; });
+    var gsRango=gs.filter(function(g){
+      var t=new Date(g.fecha).getTime();
+      return t>=r.desde.getTime() && t<r.hasta.getTime();
+    });
+    window._repMg={ filas:filas, enRango:enRango, gastos:gs, gastosRango:gsRango, cotiz:cotiz, orden:'gan', dir:-1, dim:'marca' };
     _repMgRender();
   }).catch(function(e){
     console.error("[belle] _repCargarMargenes error:", e);
@@ -37922,6 +38166,40 @@ function _repMgTabla(titulo, sub, grupos, labelFn){
   return h;
 }
 
+// Como el vendedor sí tiene gastos propios, su tabla lleva columna de gastos y neta.
+function _repMgTablaVend(grupos, gVend){
+  var st=window._repMg;
+  grupos.forEach(function(g){ g.gastos=gVend[String(g.k)]||0; g.neta=g.gan-g.gastos; });
+  grupos=grupos.slice().sort(function(a,b){ return b.neta-a.neta; });
+  var maxN=0; grupos.forEach(function(g){ if(Math.abs(g.neta)>maxN)maxN=Math.abs(g.neta); });
+  var h="<div style='background:var(--sur);border:1px solid var(--bd);border-radius:10px;padding:1rem;margin-bottom:1rem'>";
+  h+="<div style='font-size:.85rem;font-weight:700'>👥 Por vendedor</div>";
+  h+="<div style='font-size:.68rem;color:var(--tx3);margin:.1rem 0 .7rem'>Lo que generó cada uno, menos sus propios gastos aprobados del período.</div>";
+  h+="<div style='overflow-x:auto'><table style='width:100%;border-collapse:collapse;min-width:700px'>";
+  h+="<thead><tr style='border-bottom:1px solid var(--bd)'>";
+  ['Vendedor','Unid.','Facturado','Costo','Bruta','Gastos','NETA','Margen neto',''].forEach(function(t,i){
+    h+="<th style='padding:.42rem .4rem;text-align:"+(i===0?'left':'right')+";font-size:.62rem;text-transform:uppercase;color:"+(t==='NETA'?'var(--acc)':'var(--tx3)')+";white-space:nowrap'>"+t+"</th>";
+  });
+  h+="</tr></thead><tbody>";
+  grupos.forEach(function(g){
+    var mn = g.fact>0 ? (g.neta/g.fact*100) : 0;
+    var col = mn<0?'var(--red)':(mn<10?'var(--yel)':'var(--green)');
+    var w = maxN>0 ? Math.abs(g.neta)/maxN*100 : 0;
+    h+="<tr style='border-bottom:1px solid var(--bd);font-size:.77rem'>";
+    h+="<td style='padding:.42rem .4rem'>"+_admEsc(_cbzVendNombre(String(g.k)==='null'?null:g.k))+"<div style='font-size:.62rem;color:var(--tx3)'>"+g.n+" ventas</div></td>";
+    h+="<td style='padding:.42rem .4rem;text-align:right;color:var(--tx3)'>"+_repMiles(g.q)+"</td>";
+    h+="<td style='padding:.42rem .4rem;text-align:right'>"+fmt(g.fact)+"</td>";
+    h+="<td style='padding:.42rem .4rem;text-align:right;color:var(--tx3)'>"+fmt(g.costo)+"</td>";
+    h+="<td style='padding:.42rem .4rem;text-align:right;color:var(--tx2)'>"+fmt(g.gan)+"</td>";
+    h+="<td style='padding:.42rem .4rem;text-align:right;color:"+(g.gastos>0?'var(--yel)':'var(--tx3)')+"'>"+(g.gastos>0?('-'+fmt(g.gastos)):'—')+"</td>";
+    h+="<td style='padding:.42rem .4rem;text-align:right;font-weight:800;color:"+col+"'>"+fmt(g.neta)+"</td>";
+    h+="<td style='padding:.42rem .4rem;text-align:right;font-weight:700;color:"+col+"'>"+mn.toFixed(1)+"%</td>";
+    h+="<td style='padding:.42rem .4rem;width:100px'><div style='height:7px;background:var(--sur2);border-radius:4px;overflow:hidden'><div style='height:100%;width:"+w.toFixed(1)+"%;background:"+col+"'></div></div></td>";
+    h+="</tr>";
+  });
+  h+="</tbody></table></div></div>";
+  return h;
+}
 function _repMgRender(){
   var st=window._repMg; if(!st)return;
   var el=document.getElementById("_repContenido"); if(!el)return;
@@ -37930,6 +38208,9 @@ function _repMgRender(){
   var fact=0, costo=0, gan=0, unid=0;
   f.forEach(function(x){ fact+=x.fact; costo+=x.costo; gan+=x.gan; unid+=x.q; });
   var margen = fact>0 ? gan/fact*100 : 0;
+  var gastos = (st.gastosRango||[]).reduce(function(a,g){return a+g.monto;},0);
+  var neta = gan-gastos;
+  var margenNeto = fact>0 ? neta/fact*100 : 0;
 
   // ── lo que se vendió por debajo del costo ──
   var bajoCosto={};
@@ -37952,9 +38233,11 @@ function _repMgRender(){
   h+="<div style='display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:.7rem;margin-bottom:1rem'>";
   h+=_repKPI("💵 Facturado", fmt(fact), {sub:_repMiles(unid)+" unidades · "+f.length+" ventas"});
   h+=_repKPI("📦 Costo de la mercadería", fmt(costo), {color:"var(--tx3)"});
-  h+=_repKPI("💎 Ganancia bruta", fmt(gan), {color:gan>=0?"var(--green)":"var(--red)"});
-  h+=_repKPI("📊 Margen", margen.toFixed(1)+"%", {color:margen<15?"var(--yel)":"var(--green)", sub:"sobre lo facturado"});
+  h+=_repKPI("💎 Ganancia bruta", fmt(gan), {color:gan>=0?"var(--green)":"var(--red)", sub:"margen "+margen.toFixed(1)+"%"});
+  h+=_repKPI("🧾 Gastos aprobados", fmt(gastos), {color:gastos>0?"var(--yel)":"var(--tx3)", sub:(st.gastosRango||[]).length+" gastos en el período"});
+  h+=_repKPI("🏆 GANANCIA NETA", fmt(neta), {color:neta>=0?"var(--green)":"var(--red)", sub:"margen neto "+margenNeto.toFixed(1)+"%"});
   h+="</div>";
+  h+="<div style='font-size:.68rem;color:var(--tx3);margin:-.5rem 0 1rem;line-height:1.5'>La <b>neta</b> es la bruta menos los gastos de vendedores aprobados del período. No descuenta sueldos, alquiler ni impuestos: eso no está cargado en el sistema, así que sería inventarlo.</div>";
 
   if(factSinCosto>0){
     h+=_repAlerta("yel","📋","Hay "+fmt(factSinCosto)+" facturados sin costo cargado",
@@ -37992,6 +38275,8 @@ function _repMgRender(){
 
   // ── evolución mensual del margen (todo el historial) ──
   var meses=_repMgAgrupar(st.filas, function(x){ return x.mes; }).sort(function(a,b){ return a.k<b.k?-1:1; }).slice(-12);
+  var gastoMes={}; (st.gastos||[]).forEach(function(g){ gastoMes[g.mes]=(gastoMes[g.mes]||0)+g.monto; });
+  meses.forEach(function(m){ m.gastos=gastoMes[m.k]||0; m.neta=m.gan-m.gastos; m.margenNeto = m.fact>0?(m.neta/m.fact*100):0; });
   if(meses.length>1){
     var labels=meses.map(function(m){ var p=m.k.split('-'); return new Date(p[0],parseInt(p[1])-1,1).toLocaleDateString('es-AR',{month:'short',year:'2-digit'}); });
     h+="<div style='background:var(--sur);border:1px solid var(--bd);border-radius:10px;padding:1rem;margin-bottom:1rem'>";
@@ -37999,23 +38284,26 @@ function _repMgRender(){
     h+="<div style='font-size:.68rem;color:var(--tx3);margin-bottom:.7rem'>Facturación y ganancia de cada mes, con el margen resultante.</div>";
     h+=_repChartMulti(labels,
       [{nombre:"Facturado",color:"#c9963a",datos:meses.map(function(m){return m.fact;})},
-       {nombre:"Ganancia",color:"#4caf82",datos:meses.map(function(m){return m.gan;})}],
-      [{nombre:"Margen %",color:"#5a9fd4",fmt:"pct",datos:meses.map(function(m){return m.margen;})}]);
+       {nombre:"Ganancia bruta",color:"#4caf82",datos:meses.map(function(m){return m.gan;})},
+       {nombre:"Ganancia neta",color:"#7fd4a8",datos:meses.map(function(m){return m.neta;})}],
+      [{nombre:"Margen neto %",color:"#5a9fd4",fmt:"pct",datos:meses.map(function(m){return m.margenNeto;})}]);
     h+="<div style='overflow-x:auto;margin-top:.8rem'><table style='width:100%;border-collapse:collapse;min-width:520px'>";
     h+="<thead><tr style='border-bottom:1px solid var(--bd)'>";
-    ['Mes','Unid.','Facturado','Costo','Ganancia','Margen'].forEach(function(t,i){
-      h+="<th style='padding:.4rem;text-align:"+(i===0?'left':'right')+";font-size:.62rem;text-transform:uppercase;color:var(--tx3)'>"+t+"</th>";
+    ['Mes','Unid.','Facturado','Costo','Bruta','Gastos','NETA','Margen neto'].forEach(function(t,i){
+      h+="<th style='padding:.4rem;text-align:"+(i===0?'left':'right')+";font-size:.62rem;text-transform:uppercase;color:"+(t==='NETA'?'var(--acc)':'var(--tx3)')+"'>"+t+"</th>";
     });
     h+="</tr></thead><tbody>";
     meses.slice().reverse().forEach(function(m,i){
-      var col=m.margen<0?'var(--red)':(m.margen<15?'var(--yel)':'var(--green)');
+      var col=m.margenNeto<0?'var(--red)':(m.margenNeto<10?'var(--yel)':'var(--green)');
       h+="<tr style='border-bottom:1px solid var(--bd);font-size:.77rem'>";
       h+="<td style='padding:.4rem'>"+labels[meses.length-1-i]+"</td>";
       h+="<td style='padding:.4rem;text-align:right;color:var(--tx3)'>"+_repMiles(m.q)+"</td>";
       h+="<td style='padding:.4rem;text-align:right'>"+fmt(m.fact)+"</td>";
       h+="<td style='padding:.4rem;text-align:right;color:var(--tx3)'>"+fmt(m.costo)+"</td>";
-      h+="<td style='padding:.4rem;text-align:right;font-weight:700;color:"+col+"'>"+fmt(m.gan)+"</td>";
-      h+="<td style='padding:.4rem;text-align:right;font-weight:700;color:"+col+"'>"+m.margen.toFixed(1)+"%</td>";
+      h+="<td style='padding:.4rem;text-align:right;color:var(--tx2)'>"+fmt(m.gan)+"</td>";
+      h+="<td style='padding:.4rem;text-align:right;color:"+(m.gastos>0?'var(--yel)':'var(--tx3)')+"'>"+(m.gastos>0?('-'+fmt(m.gastos)):'—')+"</td>";
+      h+="<td style='padding:.4rem;text-align:right;font-weight:800;color:"+col+"'>"+fmt(m.neta)+"</td>";
+      h+="<td style='padding:.4rem;text-align:right;font-weight:700;color:"+col+"'>"+m.margenNeto.toFixed(1)+"%</td>";
       h+="</tr>";
     });
     h+="</tbody></table></div></div>";
@@ -38023,9 +38311,28 @@ function _repMgRender(){
 
   // ── cruces ──
   h+=_repMgTabla("🏷 Por marca","Qué marcas dejan plata de verdad, no solo las que más facturan.", _repMgAgrupar(f,function(x){return x.marca;}));
-  h+=_repMgTabla("👥 Por vendedor","Ganancia que generó cada uno con lo que vendió en el período.", _repMgAgrupar(f,function(x){return x.vend;}), function(k){ return _cbzVendNombre(k==='null'?null:k); });
+  var gVend={}; (st.gastosRango||[]).forEach(function(g){ var k=String(g.vend); gVend[k]=(gVend[k]||0)+g.monto; });
+  h+=_repMgTablaVend(_repMgAgrupar(f,function(x){return x.vend;}), gVend);
   h+=_repMgTabla("🧾 Por tipo de venta","Dónde está el margen: mayorista, mediano, minorista, decan o combo.", _repMgAgrupar(f,function(x){return x.seg;}), function(k){ return _labelSegmento(k); });
   h+=_repMgTabla("💎 Por producto (top 30)","Los 30 que más ganancia dejaron.", _repMgAgrupar(f,function(x){return x.nombre;}).sort(function(a,b){return b.gan-a.gan;}).slice(0,30));
+
+  // ── en qué se fue la plata ──
+  if((st.gastosRango||[]).length){
+    var porCat={};
+    st.gastosRango.forEach(function(g){ porCat[g.cat]=(porCat[g.cat]||0)+g.monto; });
+    var cats=Object.keys(porCat).map(function(k){return {k:k,v:porCat[k]};}).sort(function(a,b){return b.v-a.v;});
+    var maxCat=cats.length?cats[0].v:1;
+    h+="<div style='background:var(--sur);border:1px solid var(--bd);border-radius:10px;padding:1rem;margin-bottom:1rem'>";
+    h+="<div style='font-size:.85rem;font-weight:700;margin-bottom:.2rem'>🧾 En qué se fueron los gastos</div>";
+    h+="<div style='font-size:.68rem;color:var(--tx3);margin-bottom:.7rem'>Gastos de vendedores aprobados en el período — lo que separa la ganancia bruta de la neta.</div>";
+    cats.forEach(function(c){
+      h+="<div style='margin-bottom:.45rem'>";
+      h+="<div style='display:flex;justify-content:space-between;font-size:.74rem;margin-bottom:.15rem'><span>"+_admEsc(c.k)+"</span><b>"+fmt(c.v)+"</b></div>";
+      h+="<div style='height:8px;background:var(--sur2);border-radius:4px;overflow:hidden'><div style='height:100%;width:"+(c.v/maxCat*100).toFixed(1)+"%;background:linear-gradient(90deg,#d4b13c,#e08a3c)'></div></div>";
+      h+="</div>";
+    });
+    h+="</div>";
+  }
 
   // ── matriz marca × vendedor ──
   var vends={}, marcasTop={};
@@ -38078,7 +38385,25 @@ function _repMgExport(){
     hoja('Por vendedor', _repMgAgrupar(f,function(x){return x.vend;}), 'Vendedor', function(k){return _cbzVendNombre(k==='null'?null:k);});
     hoja('Por tipo de venta', _repMgAgrupar(f,function(x){return x.seg;}), 'Tipo', function(k){return _labelSegmento(k);});
     hoja('Por producto', _repMgAgrupar(f,function(x){return x.nombre;}), 'Perfume');
-    hoja('Mes a mes', _repMgAgrupar(st.filas,function(x){return x.mes;}), 'Mes');
+    // Mes a mes con gastos y neta
+    var gm={}; (st.gastos||[]).forEach(function(g){ gm[g.mes]=(gm[g.mes]||0)+g.monto; });
+    var rowsM=[['Mes','Ventas','Unidades','Facturado','Costo','Ganancia bruta','Gastos','Ganancia neta','Margen neto %']];
+    _repMgAgrupar(st.filas,function(x){return x.mes;}).sort(function(a,b){return a.k<b.k?-1:1;}).forEach(function(g){
+      var ga=gm[g.k]||0, ne=g.gan-ga;
+      rowsM.push([g.k, g.n, g.q, Math.round(g.fact), Math.round(g.costo), Math.round(g.gan), Math.round(ga), Math.round(ne),
+                  g.fact>0?Math.round(ne/g.fact*1000)/10:0]);
+    });
+    var wsM=XLSX.utils.aoa_to_sheet(rowsM);
+    wsM['!cols']=[{wch:10},{wch:9},{wch:11},{wch:14},{wch:14},{wch:16},{wch:13},{wch:15},{wch:14}];
+    XLSX.utils.book_append_sheet(wb,wsM,'Mes a mes');
+    // Gastos del período
+    var rowsG=[['Fecha','Vendedor','Categoría','Concepto','Monto']];
+    (st.gastosRango||[]).forEach(function(g){
+      rowsG.push([String(g.fecha||'').slice(0,10), _cbzVendNombre(g.vend), g.cat, g.concepto, Math.round(g.monto)]);
+    });
+    var wsG=XLSX.utils.aoa_to_sheet(rowsG);
+    wsG['!cols']=[{wch:12},{wch:14},{wch:20},{wch:38},{wch:13}];
+    XLSX.utils.book_append_sheet(wb,wsG,'Gastos');
     XLSX.writeFile(wb,'margenes_'+new Date().toISOString().slice(0,10)+'.xlsx');
     toast('Excel descargado 📐','tok');
   };
@@ -38097,9 +38422,24 @@ function _repMgExport(){
 // ══════════════════════════════════════════════════════════════════════
 window._repMuertos = null;
 
+// Clasifica cada producto parado. La diferencia clave es cuánto hace que está en
+// depósito: uno que llegó hace tres semanas todavía no tuvo su chance, y meterlo
+// en la misma bolsa que uno de 8 meses te hace liquidar mercadería nueva.
+var _REP_MU_CLASES={
+  muerto: {n:'Muerto',      ico:'🪦', col:'#d94848', desc:'Mucho tiempo en depósito y sin vender (o nunca vendió)'},
+  dormido:{n:'Dormido',     ico:'😴', col:'#e08a3c', desc:'Hace rato que no sale, pero no es de los más viejos'},
+  lento:  {n:'Lento',       ico:'🐌', col:'#d4b13c', desc:'Vende, pero muy de a poco'},
+  nuevo:  {n:'Recién llegado', ico:'🌱', col:'#5a9fd4', desc:'Entró hace poco: todavía no tuvo tiempo de venderse'}
+};
 function _repCargarMuertos(){
-  var cfg={dias:90, minStock:1};
-  try{ var g=JSON.parse(localStorage.getItem('_repMuertosCfg')||'{}'); if(g.dias)cfg.dias=parseInt(g.dias); if(g.minStock!=null)cfg.minStock=parseInt(g.minStock); }catch(e){}
+  var cfg={dias:90, minStock:1, minDeposito:0, minPlata:0, gracia:45};
+  try{ var g=JSON.parse(localStorage.getItem('_repMuertosCfg')||'{}');
+    if(g.dias)cfg.dias=parseInt(g.dias);
+    if(g.minStock!=null)cfg.minStock=parseInt(g.minStock);
+    if(g.minDeposito!=null)cfg.minDeposito=parseInt(g.minDeposito);
+    if(g.minPlata!=null)cfg.minPlata=parseInt(g.minPlata);
+    if(g.gracia!=null)cfg.gracia=parseInt(g.gracia);
+  }catch(e){}
   Promise.all([
     apiGet("productos","select=id,nombre,empresa,tipo,ml,activo,oculto,stock_actual,reserva,costo_ind,costo_log,precio_min_ars,precio_may_ars,ultimo_ingreso_at,reingreso_at,created_at&limit=8000").catch(function(){return [];}),
     apiGetAll("ventas","select=producto_id,cantidad,created_at&estado=in.(confirmada,archivada_periodo)&limit=60000").catch(function(){return [];})
@@ -38127,19 +38467,30 @@ function _repCargarMuertos(){
         p.ultimo_ingreso_at?new Date(p.ultimo_ingreso_at).getTime():0,
         p.reingreso_at?new Date(p.reingreso_at).getTime():0,
         p.created_at?new Date(p.created_at).getTime():0);
+      var antig = ingreso? Math.floor((hoy-ingreso)/864e5) : null;
+      var inmov = costoU*stock;
+      if(cfg.minDeposito>0 && (antig==null || antig<cfg.minDeposito))return;
+      if(cfg.minPlata>0 && inmov<cfg.minPlata)return;
+      // clasificación
+      var clase;
+      if(antig!=null && antig<cfg.gracia) clase='nuevo';
+      else if(dias==null) clase='muerto';                       // nunca vendió y ya pasó la gracia
+      else if(dias>=cfg.dias*2) clase='muerto';
+      else if(dias>=cfg.dias) clase='dormido';
+      else clase='lento';
       rows.push({
         id:p.id, nombre:p.nombre||'', marca:p.empresa||'Sin marca', ml:p.ml||null,
         stock:stock, res:parseFloat(p.reserva)||0,
-        dias:dias, nunca:(dias==null),
-        antig: ingreso? Math.floor((hoy-ingreso)/864e5) : null,
-        costoU:costoU, inmov:costoU*stock, inmovArs:costoU*stock*cotiz,
+        dias:dias, nunca:(dias==null), clase:clase,
+        antig: antig,
+        costoU:costoU, inmov:inmov, inmovArs:inmov*cotiz,
         precio:parseFloat(p.precio_min_ars)||0,
-        sel:true
+        sel:(clase==='muerto'||clase==='dormido')
       });
       marcas[p.empresa||'Sin marca']=1;
     });
     rows.sort(function(a,b){ return b.inmov-a.inmov; });
-    window._repMuertos={ rows:rows, marcas:Object.keys(marcas).sort(), cfg:cfg, cotiz:cotiz, q:'', marca:'', soloNunca:false };
+    window._repMuertos={ rows:rows, marcas:Object.keys(marcas).sort(), cfg:cfg, cotiz:cotiz, q:'', marca:'', soloNunca:false, clase:'' };
     _repMuertosRender();
   }).catch(function(e){
     console.error("[belle] _repCargarMuertos error:", e);
@@ -38161,6 +38512,7 @@ function _repMuertosFiltrados(){
   return st.rows.filter(function(r){
     if(st.marca && r.marca!==st.marca)return false;
     if(st.soloNunca && !r.nunca)return false;
+    if(st.clase && r.clase!==st.clase)return false;
     if(q && (r.nombre+' '+r.marca).toLowerCase().indexOf(q)<0)return false;
     return true;
   });
@@ -38202,18 +38554,46 @@ function _repMuertosRender(){
   h+="<button id='_repMuertosBtnCamp' class='btn btn-a' onclick='_liqAbrir(\"reporte\")' style='font-size:.74rem'>⚡ Crear campaña de liquidación</button></div>";
   h+="</div>";
 
-  h+="<div style='background:var(--sur);border:1px solid var(--bd);border-radius:10px;padding:.85rem 1rem;margin-bottom:1rem;display:flex;gap:1.2rem;flex-wrap:wrap;align-items:flex-end'>";
+  h+="<div style='background:var(--sur);border:1px solid var(--bd);border-radius:10px;padding:.85rem 1rem;margin-bottom:1rem'>";
+  h+="<div style='font-size:.78rem;font-weight:700;margin-bottom:.6rem'>🔎 Qué contamos como parado</div>";
+  h+="<div style='display:flex;gap:1.2rem;flex-wrap:wrap;align-items:flex-end'>";
   h+="<div><label style='font-size:.66rem;color:var(--tx3);display:block;margin-bottom:.2rem'>Sin vender hace más de</label>";
   h+="<select onchange='_repMuertosCfg(\"dias\",this.value)' style='padding:.4rem .6rem;background:var(--sur2);border:1px solid var(--bd);border-radius:7px;color:var(--tx);font-size:.8rem'>";
   [30,60,90,120,180,365].forEach(function(d){ h+="<option value='"+d+"'"+(st.cfg.dias===d?' selected':'')+">"+d+" días</option>"; });
   h+="</select></div>";
+  h+="<div><label style='font-size:.66rem;color:var(--tx3);display:block;margin-bottom:.2rem'>En depósito hace más de</label>";
+  h+="<select onchange='_repMuertosCfg(\"minDeposito\",this.value)' style='padding:.4rem .6rem;background:var(--sur2);border:1px solid var(--bd);border-radius:7px;color:var(--tx);font-size:.8rem'>";
+  [[0,'no importa'],[30,'30 días'],[60,'60 días'],[90,'90 días'],[120,'120 días'],[180,'180 días'],[365,'un año']].forEach(function(o){ h+="<option value='"+o[0]+"'"+(st.cfg.minDeposito===o[0]?' selected':'')+">"+o[1]+"</option>"; });
+  h+="</select></div>";
   h+="<div><label style='font-size:.66rem;color:var(--tx3);display:block;margin-bottom:.2rem'>Con al menos</label>";
-  h+="<div style='display:flex;align-items:center;gap:.4rem'><input type='number' min='1' value='"+st.cfg.minStock+"' onchange='_repMuertosCfg(\"minStock\",this.value)' style='width:70px;padding:.4rem .55rem;background:var(--sur2);border:1px solid var(--bd);border-radius:7px;color:var(--tx);font-size:.82rem'><span style='font-size:.72rem;color:var(--tx3)'>de stock</span></div></div>";
+  h+="<div style='display:flex;align-items:center;gap:.4rem'><input type='number' min='1' value='"+st.cfg.minStock+"' onchange='_repMuertosCfg(\"minStock\",this.value)' style='width:66px;padding:.4rem .55rem;background:var(--sur2);border:1px solid var(--bd);border-radius:7px;color:var(--tx);font-size:.82rem'><span style='font-size:.72rem;color:var(--tx3)'>de stock</span></div></div>";
+  h+="<div><label style='font-size:.66rem;color:var(--tx3);display:block;margin-bottom:.2rem'>Y al menos</label>";
+  h+="<div style='display:flex;align-items:center;gap:.4rem'><span style='font-size:.72rem;color:var(--tx3)'>u$d</span><input type='number' min='0' step='50' value='"+st.cfg.minPlata+"' onchange='_repMuertosCfg(\"minPlata\",this.value)' style='width:76px;padding:.4rem .55rem;background:var(--sur2);border:1px solid var(--bd);border-radius:7px;color:var(--tx);font-size:.82rem'><span style='font-size:.72rem;color:var(--tx3)'>parados</span></div></div>";
+  h+="<div><label style='font-size:.66rem;color:var(--tx3);display:block;margin-bottom:.2rem'>Perdonar los que entraron hace</label>";
+  h+="<select onchange='_repMuertosCfg(\"gracia\",this.value)' style='padding:.4rem .6rem;background:var(--sur2);border:1px solid var(--bd);border-radius:7px;color:var(--tx);font-size:.8rem'>";
+  [[0,'no perdonar'],[30,'menos de 30 días'],[45,'menos de 45 días'],[60,'menos de 60 días'],[90,'menos de 90 días']].forEach(function(o){ h+="<option value='"+o[0]+"'"+(st.cfg.gracia===o[0]?' selected':'')+">"+o[1]+"</option>"; });
+  h+="</select></div>";
   h+="<label style='display:flex;align-items:center;gap:.45rem;cursor:pointer;font-size:.76rem;color:var(--tx2)'><input type='checkbox' "+(st.soloNunca?'checked':'')+" onchange='_repMuertosSet(\"soloNunca\",this.checked)' style='width:17px;height:17px;accent-color:var(--acc)'>Solo los que nunca se vendieron</label>";
+  h+="</div>";
+  h+="<div style='font-size:.68rem;color:var(--tx3);margin-top:.6rem;line-height:1.45'>Los <b>recién llegados</b> entraron hace poco y todavía no tuvieron su chance: aparecen aparte y no vienen marcados para liquidar. Un <b>muerto</b> es el que ya pasó la gracia y nunca vendió, o hace más del doble de la ventana que no sale.</div>";
+  h+="</div>";
+
+  // chips de clasificación
+  var porClase={muerto:0,dormido:0,lento:0,nuevo:0}, plataClase={muerto:0,dormido:0,lento:0,nuevo:0};
+  st.rows.forEach(function(r){ porClase[r.clase]=(porClase[r.clase]||0)+1; plataClase[r.clase]=(plataClase[r.clase]||0)+r.inmov; });
+  h+="<div style='display:flex;gap:.4rem;flex-wrap:wrap;margin-bottom:1rem'>";
+  ['muerto','dormido','lento','nuevo'].forEach(function(k){
+    var c=_REP_MU_CLASES[k], act=(st.clase===k);
+    if(!porClase[k])return;
+    h+="<button onclick='_repMuertosSet(\"clase\",\""+(act?'':k)+"\")' title='"+c.desc+"' style='display:flex;align-items:center;gap:.4rem;border:1px solid "+(act?c.col:'var(--bd)')+";background:"+(act?c.col+'22':'var(--sur2)')+";color:var(--tx);border-radius:999px;padding:.35rem .75rem;font-size:.72rem;cursor:pointer;font-family:inherit'>";
+    h+=c.ico+" "+c.n+" <b>"+porClase[k]+"</b> <span style='color:var(--tx3);font-size:.66rem'>u$d "+_repMiles(plataClase[k])+"</span></button>";
+  });
   h+="</div>";
 
   h+="<div style='display:grid;grid-template-columns:repeat(auto-fit,minmax(190px,1fr));gap:.7rem;margin-bottom:1rem'>";
-  h+=_repKPI("💀 Productos parados", String(st.rows.length), {color:st.rows.length?"var(--yel)":"var(--green)", sub:nunca+" nunca se vendieron"});
+  var nMuertos=st.rows.filter(function(r){return r.clase==='muerto';}).length;
+  var plataMuertos=st.rows.filter(function(r){return r.clase==='muerto';}).reduce(function(a,r){return a+r.inmov;},0);
+  h+=_repKPI("🪦 Muertos de verdad", String(nMuertos), {color:nMuertos?"var(--red)":"var(--green)", sub:"u$d "+_repMiles(plataMuertos)+" · de "+st.rows.length+" parados"});
   h+=_repKPI("📦 Unidades quietas", _repMiles(totU));
   h+=_repKPI("🧊 Plata dormida", "u$d "+_repMiles(totInmov), {color:"var(--red)", sub:fmt(totInmov*st.cotiz)+" al cambio de hoy"});
   h+=_repKPI("🏷 Marcas afectadas", String(st.marcas.length));
@@ -38245,16 +38625,18 @@ function _repMuertosRender(){
   h+="<div style='background:var(--sur);border:1px solid var(--bd);border-radius:10px;overflow:hidden'>";
   h+="<div style='overflow-x:auto'><table style='width:100%;border-collapse:collapse;min-width:820px'>";
   h+="<thead><tr style='background:var(--sur2);border-bottom:1px solid var(--bd)'>";
-  ['','Perfume','Marca','Stock','Sin vender','En depósito','Costo u.','Inmovilizado'].forEach(function(t,i){
-    h+="<th style='padding:.5rem .45rem;text-align:"+(i<3?'left':'right')+";font-size:.64rem;text-transform:uppercase;letter-spacing:.04em;color:var(--tx3);white-space:nowrap'>"+t+"</th>";
+  ['','Perfume','Marca','Estado','Stock','Sin vender','En depósito','Costo u.','Inmovilizado'].forEach(function(t,i){
+    h+="<th style='padding:.5rem .45rem;text-align:"+(i<4?'left':'right')+";font-size:.64rem;text-transform:uppercase;letter-spacing:.04em;color:var(--tx3);white-space:nowrap'>"+t+"</th>";
   });
   h+="</tr></thead><tbody>";
-  if(!lista.length) h+="<tr><td colspan='8' style='padding:2rem;text-align:center;color:var(--tx3);font-style:italic;font-size:.82rem'>Nada parado con ese filtro 🎉</td></tr>";
+  if(!lista.length) h+="<tr><td colspan='9' style='padding:2rem;text-align:center;color:var(--tx3);font-style:italic;font-size:.82rem'>Nada parado con ese filtro 🎉</td></tr>";
   lista.slice(0,400).forEach(function(r){
     h+="<tr style='border-bottom:1px solid var(--bd);font-size:.77rem'>";
     h+="<td style='padding:.4rem .45rem'><input type='checkbox' "+(r.sel?'checked':'')+" onchange='_repMuertosTog("+r.id+",this.checked)' style='width:17px;height:17px;accent-color:var(--acc)'></td>";
     h+="<td style='padding:.45rem;max-width:300px'><div style='overflow:hidden;text-overflow:ellipsis;white-space:nowrap'>"+_admEsc(r.nombre)+"</div></td>";
     h+="<td style='padding:.45rem;color:var(--tx3);font-size:.72rem'>"+_admEsc(r.marca)+"</td>";
+    var cl=_REP_MU_CLASES[r.clase]||_REP_MU_CLASES.dormido;
+    h+="<td style='padding:.45rem;white-space:nowrap'><span title='"+cl.desc+"' style='background:"+cl.col+"1f;color:"+cl.col+";border-radius:999px;padding:.12rem .5rem;font-size:.64rem;font-weight:700'>"+cl.ico+" "+cl.n+"</span></td>";
     h+="<td style='padding:.45rem;text-align:right;font-weight:700'>"+Math.round(r.stock)+"</td>";
     h+="<td style='padding:.45rem;text-align:right;color:"+(r.nunca?'var(--red)':'var(--yel)')+";font-weight:700'>"+(r.nunca?'nunca':(r.dias+'d'))+"</td>";
     h+="<td style='padding:.45rem;text-align:right;color:var(--tx3)'>"+(r.antig!=null?(r.antig+'d'):'—')+"</td>";
@@ -38277,13 +38659,13 @@ function _repMuertosExport(){
   var lista=_repMuertosFiltrados();
   if(!lista.length){ toast('No hay nada para exportar','twarn'); return; }
   var doExport=function(){
-    var rows=[['Perfume','Marca','ML','Stock','Reservado','Días sin vender','Días en depósito','Costo u. (u$d)','Inmovilizado (u$d)','Inmovilizado (ARS)','Precio minorista']];
+    var rows=[['Perfume','Marca','Estado','ML','Stock','Reservado','Días sin vender','Días en depósito','Costo u. (u$d)','Inmovilizado (u$d)','Inmovilizado (ARS)','Precio minorista']];
     lista.forEach(function(r){
-      rows.push([r.nombre, r.marca, r.ml||'', r.stock, r.res, (r.nunca?'nunca vendido':r.dias), (r.antig!=null?r.antig:''),
+      rows.push([r.nombre, r.marca, (_REP_MU_CLASES[r.clase]||{}).n||'', r.ml||'', r.stock, r.res, (r.nunca?'nunca vendido':r.dias), (r.antig!=null?r.antig:''),
                  Math.round(r.costoU*100)/100, Math.round(r.inmov), Math.round(r.inmovArs), Math.round(r.precio)]);
     });
     var ws=XLSX.utils.aoa_to_sheet(rows);
-    ws['!cols']=[{wch:42},{wch:18},{wch:6},{wch:8},{wch:10},{wch:16},{wch:16},{wch:14},{wch:18},{wch:18},{wch:15}];
+    ws['!cols']=[{wch:42},{wch:18},{wch:15},{wch:6},{wch:8},{wch:10},{wch:16},{wch:16},{wch:14},{wch:18},{wch:18},{wch:15}];
     var wb=XLSX.utils.book_new();
     XLSX.utils.book_append_sheet(wb,ws,'Productos muertos');
     XLSX.writeFile(wb,'productos_muertos_'+new Date().toISOString().slice(0,10)+'.xlsx');
@@ -38341,7 +38723,7 @@ function _liqModal(prods){
   var hoy=new Date();
   var nombreDef='Liquidación '+hoy.toLocaleDateString('es-AR',{month:'long'})+' '+hoy.getFullYear();
   window._liq={ prods:prods.map(function(p){ return Object.assign({sel:true},p); }), desc:30, dias:15,
-                nombre:nombreDef, etiqueta:'LIQUIDACIÓN', crearPestana:true };
+                nombre:nombreDef, etiqueta:'LIQUIDACIÓN', crearPestana:true, pausada:true };
   var mo=document.createElement('div'); mo.id='_liqModal';
   mo.style.cssText='position:fixed;inset:0;z-index:99998;background:rgba(0,0,0,.65);display:flex;align-items:center;justify-content:center;padding:1rem';
   mo.onclick=function(e){ if(e.target===mo)mo.remove(); };
@@ -38352,12 +38734,18 @@ function _liqModal(prods){
 function _liqSet(k,v){
   var st=window._liq; if(!st)return;
   if(k==='desc'||k==='dias'){ var n=parseInt(v); if(isNaN(n))return; st[k]=n; }
-  else if(k==='crearPestana') st[k]=!!v;
+  else if(k==='crearPestana'||k==='pausada') st[k]=!!v;
   else st[k]=v;
   _liqRender(k!=='nombre' && k!=='etiqueta');
 }
 function _liqTog(id,on){ var st=window._liq; if(!st)return; var p=st.prods.filter(function(x){return x.id===id;})[0]; if(p)p.sel=!!on; _liqRender(true); }
 function _liqTodos(on){ var st=window._liq; if(!st)return; st.prods.forEach(function(p){p.sel=!!on;}); _liqRender(true); }
+function _liqQuitar(id){
+  var st=window._liq; if(!st)return;
+  st.prods=st.prods.filter(function(p){return p.id!==id;});
+  if(!st.prods.length){ var m=document.getElementById('_liqModal'); if(m)m.remove(); toast('Sacaste todos los productos','twarn'); return; }
+  _liqRender(true);
+}
 
 function _liqRender(soloDatos){
   var st=window._liq; if(!st)return;
@@ -38385,6 +38773,10 @@ function _liqRender(soloDatos){
   h+="<div style='display:flex;align-items:center;gap:.4rem'><input type='number' min='1' max='120' value='"+st.dias+"' onchange='_liqSet(\"dias\",this.value)' style='width:70px;padding:.42rem .55rem;background:var(--sur);border:1px solid var(--bd);border-radius:7px;color:var(--tx);font-size:.82rem'><span style='font-size:.78rem;color:var(--tx3)'>días</span></div></div>";
   h+="</div>";
   h+="<label style='display:flex;align-items:center;gap:.45rem;cursor:pointer;font-size:.76rem;color:var(--tx2);margin-top:.7rem'><input type='checkbox' "+(st.crearPestana?'checked':'')+" onchange='_liqSet(\"crearPestana\",this.checked)' style='width:17px;height:17px;accent-color:var(--acc)'>Crear una pestaña propia en el catálogo para esta liquidación</label>";
+  h+="<label style='display:flex;align-items:center;gap:.45rem;cursor:pointer;font-size:.76rem;color:var(--tx2);margin-top:.35rem'><input type='checkbox' "+(st.pausada?'checked':'')+" onchange='_liqSet(\"pausada\",this.checked)' style='width:17px;height:17px;accent-color:var(--acc)'>Dejarla <b style='margin:0 .2rem'>en borrador</b> para revisarla antes de publicarla</label>";
+  h+="<div style='font-size:.66rem;color:"+(st.pausada?'var(--tx3)':'var(--yel)')+";margin-top:.35rem;line-height:1.45'>"+(st.pausada
+      ? "Se crea pausada: no se ve en el catálogo hasta que la actives. Podés sacarle productos y cambiarle el descuento desde Ofertas y Campañas."
+      : "⚠️ Va a salir <b>publicada al toque</b> en el catálogo. Si querés revisarla antes, dejá tildado el borrador.")+"</div>";
   h+="</div>";
 
   h+="<div style='padding:.7rem 1.1rem;background:var(--sur);border-bottom:1px solid var(--bd);display:flex;gap:1.2rem;flex-wrap:wrap;font-size:.76rem'>";
@@ -38409,17 +38801,45 @@ function _liqRender(soloDatos){
       h+="<span style='color:var(--tx3);text-decoration:line-through;font-size:.7rem'>"+fmt(p.precio)+"</span> ";
       h+="<b style='color:var(--green)'>"+fmt(nuevo)+"</b>";
     } else h+="<span style='color:var(--tx3);font-size:.7rem'>sin precio</span>";
-    h+="</td></tr>";
+    h+="</td>";
+    h+="<td style='padding:.4rem .2rem;width:30px;text-align:right'><button title='Sacar de la liquidación' onclick='_liqQuitar("+p.id+")' style='background:none;border:none;color:var(--tx3);cursor:pointer;font-size:.95rem;line-height:1;padding:.1rem .25rem'>&times;</button></td>";
+    h+="</tr>";
   });
   h+="</tbody></table></div>";
 
   h+="<div style='padding:.85rem 1.1rem;border-top:1px solid var(--bd);display:flex;gap:.5rem'>";
   h+="<button class='btn btn-g' onclick=\"document.getElementById('_liqModal').remove()\" style='font-size:.82rem'>Cancelar</button>";
-  h+="<button id='_liqCrear' class='btn btn-a' onclick='_liqCrear()' style='flex:1;font-size:.85rem'"+(sel.length?'':' disabled')+">Crear la campaña con "+sel.length+" producto"+(sel.length===1?'':'s')+"</button>";
+  h+="<button id='_liqCrear' class='btn btn-a' onclick='_liqCrear()' style='flex:1;font-size:.85rem'"+(sel.length?'':' disabled')+">"+(st.pausada?'Crear en borrador con ':'Publicar con ')+sel.length+" producto"+(sel.length===1?'':'s')+"</button>";
   h+="</div>";
   box.innerHTML=h;
 }
 
+// Pantalla final: la campaña quedó creada, acá se decide qué hacer con ella.
+function _liqListo(nombre, n, desc, pausada){
+  var box=document.getElementById('_liqBox');
+  if(!box){ toast('Campaña creada','tok'); return; }
+  var h="<div style='padding:2rem 1.6rem;text-align:center'>";
+  h+="<div style='font-size:2.4rem;line-height:1'>"+(pausada?'📝':'🔥')+"</div>";
+  h+="<div style='font-size:1.15rem;font-weight:800;margin-top:.5rem'>"+(pausada?'Campaña creada en borrador':'Campaña publicada')+"</div>";
+  h+="<div style='font-size:.85rem;color:var(--tx2);margin-top:.4rem;line-height:1.6;max-width:460px;margin-left:auto;margin-right:auto'>";
+  h+="<b>"+_admEsc(nombre)+"</b> quedó armada con <b>"+n+"</b> producto"+(n===1?'':'s')+" al <b>"+desc+"% off</b>.<br>";
+  h+=pausada
+    ? "Todavía <b>no se ve en el catálogo</b>. Revisala, sacá o agregá productos, y cuando estés listo activala."
+    : "Ya está saliendo en el catálogo.";
+  h+="</div>";
+  h+="<div style='display:flex;gap:.5rem;justify-content:center;margin-top:1.3rem;flex-wrap:wrap'>";
+  h+="<button class='btn btn-a' onclick='_liqIrAOfertas()' style='font-size:.85rem;padding:.6rem 1.2rem'>"+(pausada?'Revisarla en Ofertas':'Ver la campaña')+"</button>";
+  h+="<button class='btn btn-g' onclick=\"document.getElementById('_liqModal').remove()\" style='font-size:.85rem;padding:.6rem 1.2rem'>Seguir acá</button>";
+  h+="</div></div>";
+  box.innerHTML=h;
+}
+function _liqIrAOfertas(){
+  var m=document.getElementById('_liqModal'); if(m)m.remove();
+  try{
+    var sb=document.querySelector(".sb-item[onclick*=\"navTo('ofertas'\"]");
+    navTo('ofertas', sb);
+  }catch(e){ if(typeof loadOfertasAdmin==='function')loadOfertasAdmin(); }
+}
 function _liqCrear(){
   var st=window._liq; if(!st)return;
   var sel=st.prods.filter(function(p){return p.sel;});
@@ -38433,13 +38853,13 @@ function _liqCrear(){
   function crearCampania(pestanaId){
     return apiPost('ofertas_campanias',{
       nombre:nombre, descripcion:'Liquidación automática de productos sin movimiento',
-      pestana_id:pestanaId||null, abrir_pestana_al_entrar:false, activa:true,
+      pestana_id:pestanaId||null, abrir_pestana_al_entrar:false, activa:!st.pausada,
       tab_destacada:!!pestanaId
     }).then(function(res){
       var camp=Array.isArray(res)?res[0]:res;
       if(!camp||!camp.id) throw new Error('no se pudo crear la campaña');
       return apiPost('ofertas',{
-        campania_id:camp.id, producto_id:null, activa:true, tipo:'descuento_pct',
+        campania_id:camp.id, producto_id:null, activa:!st.pausada, tipo:'descuento_pct',
         descuento_pct:st.desc, etiqueta:(st.etiqueta||'').trim()||null,
         fecha_desde:desde.toISOString(), fecha_hasta:hasta.toISOString()
       }).then(function(){
@@ -38467,12 +38887,7 @@ function _liqCrear(){
   }
 
   prom.then(function(camp){
-    var m=document.getElementById('_liqModal'); if(m)m.remove();
-    toast('🔥 Campaña "'+nombre+'" creada con '+sel.length+' productos al '+st.desc+'% off','tok');
-    try{
-      var sb=document.querySelector(".sb-item[onclick*=\"navTo('ofertas'\"]");
-      navTo('ofertas', sb);
-    }catch(e){ if(typeof loadOfertasAdmin==='function')loadOfertasAdmin(); }
+    _liqListo(nombre, sel.length, st.desc, st.pausada);
   }).catch(function(e){
     console.error('[liq crear]',e);
     toast('No se pudo crear la campaña: '+(e.message||''),'terr');
