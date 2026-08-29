@@ -4406,6 +4406,61 @@ function _lockClick(btn, fn, opts){
 window._gsResults = { pedidos:[], clientes:[], productos:[] };
 window._gsTimer = null;
 
+
+// ── Buscar sin pelearse con las tildes ────────────────────────────────
+// `ilike` distingue tildes: buscar "jose" NO encuentra "José". Se arma un
+// patrón donde cada vocal acepta su versión con tilde y se usa con imatch
+// (el ~* de Postgres), que no necesita ninguna extensión instalada.
+// "juan perez" también encuentra "Juan Carlos Pérez" (las palabras se unen
+// con .*), y de paso se sacan los caracteres raros para no romper la URL.
+var _GS_CLASES={a:'[aáàäâ]',e:'[eéèëê]',i:'[iíìïî]',o:'[oóòöô]',u:'[uúùüû]',n:'[nñ]',c:'[cç]'};
+function _gsRx(q){
+  var limpio=String(q||'').toLowerCase().replace(/[^0-9a-zà-ÿ\s]/g,' ').trim();
+  if(!limpio)return '';
+  var partes=limpio.split(/\s+/).filter(Boolean).map(function(p){
+    return p.split('').map(function(ch){
+      var base=ch;
+      try{ base=ch.normalize('NFD').replace(/[̀-ͯ]/g,''); }catch(e){}
+      return _GS_CLASES[base]||base;
+    }).join('');
+  });
+  return partes.join('.*');
+}
+function _gsSoloNumeros(q){ return String(q||'').replace(/\D/g,''); }
+
+// Pide con imatch (ignora tildes) y, si el servidor no lo aceptara, vuelve
+// solo a la búsqueda de siempre en vez de mostrar "sin resultados".
+function _gsPedir(tabla, sel, conImatch, conIlike){
+  return apiGet(tabla, sel+"&"+conImatch).then(function(r){
+    if(Array.isArray(r)) return r;
+    return apiGet(tabla, sel+"&"+conIlike).then(function(r2){ return Array.isArray(r2)?r2:[]; });
+  }).catch(function(){ return []; });
+}
+
+
+
+// ── Moverse con el teclado: ↑ ↓ para elegir, Enter para abrir ─────────
+function _gsFilas(){ var r=document.getElementById('_gsResults'); return r?r.querySelectorAll('[data-gs]'):[]; }
+function _gsMarcar(i){
+  var f=_gsFilas(); if(!f.length)return;
+  if(i<0)i=f.length-1; if(i>=f.length)i=0;
+  window._gsSel=i;
+  Array.prototype.forEach.call(f,function(el,k){
+    el.style.background = (k===i)?'var(--sur2)':'';
+    if(k===i && el.scrollIntoView) el.scrollIntoView({block:'nearest'});
+  });
+}
+function _gsMover(d){
+  var f=_gsFilas(); if(!f.length)return;
+  var i=(typeof window._gsSel==='number')?window._gsSel+d:(d>0?0:f.length-1);
+  _gsMarcar(i);
+}
+function _gsAbrirSel(){
+  var f=_gsFilas();
+  var i=(typeof window._gsSel==='number')?window._gsSel:0;
+  if(f[i])f[i].click();
+}
+
 function _gsAbrir(){
   // Crear modal si no existe
   var mo = document.getElementById('_gsModal');
@@ -4432,7 +4487,10 @@ function _gsAbrir(){
       window._gsTimer = setTimeout(_gsBuscar, 250);
     });
     inp.addEventListener('keydown', function(e){
-      if(e.key === 'Escape') _gsCerrar();
+      if(e.key === 'Escape'){ _gsCerrar(); return; }
+      if(e.key === 'ArrowDown'){ e.preventDefault(); _gsMover(1); return; }
+      if(e.key === 'ArrowUp'){ e.preventDefault(); _gsMover(-1); return; }
+      if(e.key === 'Enter'){ e.preventDefault(); _gsAbrirSel(); return; }
     });
   }
   setTimeout(function(){
@@ -4456,18 +4514,34 @@ function _gsBuscar(){
     res.innerHTML = "<div style='padding:1.5rem;text-align:center;color:var(--tx3);font-size:.8rem'>Escribí al menos 2 caracteres</div>";
     return;
   }
+  var rx=_gsRx(q);
+  if(!rx){
+    res.innerHTML = "<div style='padding:1.5rem;text-align:center;color:var(--tx3);font-size:.8rem'>Probá con letras o números</div>";
+    return;
+  }
   res.innerHTML = "<div style='padding:1rem;text-align:center;color:var(--tx3);font-size:.8rem'><div class='spin' style='display:inline-block'></div> Buscando...</div>";
 
-  var qEsc = encodeURIComponent(q);
-  var qLikeOR = "or=(nombre.ilike.*"+qEsc+"*,apellido.ilike.*"+qEsc+"*,email.ilike.*"+qEsc+"*,telefono_principal.ilike.*"+qEsc+"*)";
+  var P = encodeURIComponent(rx);
+  var num = _gsSoloNumeros(q);
+  var esId = /^\d{1,7}$/.test(q);
+  var porTel = (num.length>=4) ? (",telefono_principal.imatch."+encodeURIComponent(num)) : "";
+
+  var I = encodeURIComponent(q);   // para la búsqueda vieja, por las dudas
 
   Promise.all([
-    // Pedidos: por nro_orden o id
-    apiGet('pedidos_catalogo', "select=id,nro_orden,total,estado,cliente_id,created_at&or=(nro_orden.ilike.*"+qEsc+"*)&order=created_at.desc&limit=20").catch(function(){return [];}),
-    // Clientes: nombre, apellido, email, telefono
-    apiGet('clientes', "select=id,nombre,apellido,email,telefono_principal,bloqueado&"+qLikeOR+"&limit=20").catch(function(){return [];}),
-    // Productos: nombre, empresa
-    apiGet('productos', "select=id,nombre,empresa,stock_actual,activo&or=(nombre.ilike.*"+qEsc+"*,empresa.ilike.*"+qEsc+"*)&limit=20").catch(function(){return [];})
+    // Pedidos: por número de orden, por el nombre del cliente que quedó en el
+    // pedido, y por id si escribiste solo un número
+    _gsPedir('pedidos_catalogo', "select=id,nro_orden,total,estado,cliente_id,cliente_nombre,created_at&order=created_at.desc&limit=20",
+      "or=(nro_orden.imatch."+P+",cliente_nombre.imatch."+P+(esId?(",id.eq."+num):"")+")",
+      "or=(nro_orden.ilike.*"+I+"*,cliente_nombre.ilike.*"+I+"*"+(esId?(",id.eq."+num):"")+")"),
+    // Clientes: nombre, apellido, email, teléfono y número de ficha
+    _gsPedir('clientes', "select=id,nombre,apellido,email,telefono_principal,bloqueado&limit=20",
+      "or=(nombre.imatch."+P+",apellido.imatch."+P+",email.imatch."+P+porTel+(esId?(",id.eq."+num):"")+")",
+      "or=(nombre.ilike.*"+I+"*,apellido.ilike.*"+I+"*,email.ilike.*"+I+"*)"),
+    // Productos: nombre y marca
+    _gsPedir('productos', "select=id,nombre,empresa,stock_actual,activo&limit=20",
+      "or=(nombre.imatch."+P+",empresa.imatch."+P+(esId?(",id.eq."+num):"")+")",
+      "or=(nombre.ilike.*"+I+"*,empresa.ilike.*"+I+"*)")
   ]).then(function(data){
     var pedidos = Array.isArray(data[0]) ? data[0] : [];
     var clientes = Array.isArray(data[1]) ? data[1] : [];
@@ -4491,7 +4565,7 @@ function _gsRender(){
     r.pedidos.forEach(function(p){
       var fecha = p.created_at ? new Date(p.created_at).toLocaleDateString("es-AR",{day:"2-digit",month:"2-digit",year:"2-digit"}) : '';
       var estC = p.estado==='cobrado'?'var(--green)':p.estado==='cancelado'?'var(--red)':'var(--yel)';
-      html += "<div onclick='_gsIrA(\"pedido\","+p.id+")' style='padding:.55rem 1rem;cursor:pointer;border-bottom:1px solid var(--bd);display:flex;justify-content:space-between;align-items:center;gap:.5rem' onmouseover='this.style.background=\"var(--sur2)\"' onmouseout='this.style.background=\"\"'>"+
+      html += "<div data-gs='1' onclick='_gsIrA(\"pedido\","+p.id+")' style='padding:.55rem 1rem;cursor:pointer;border-bottom:1px solid var(--bd);display:flex;justify-content:space-between;align-items:center;gap:.5rem' onmouseover='this.style.background=\"var(--sur2)\"' onmouseout='this.style.background=\"\"'>"+
         "<div style='flex:1;min-width:0'>"+
           "<div style='font-size:.78rem;color:var(--acc);font-weight:600'>"+(p.nro_orden||'#'+p.id)+"</div>"+
           "<div style='font-size:.65rem;color:var(--tx3)'>"+fecha+" · "+(p.estado||'')+"</div>"+
@@ -4506,7 +4580,7 @@ function _gsRender(){
     html += "<div style='padding:.4rem 1rem;font-size:.65rem;font-weight:700;color:var(--tx3);background:var(--sur2);text-transform:uppercase;letter-spacing:.05em'>👤 Clientes ("+r.clientes.length+")</div>";
     r.clientes.forEach(function(c){
       var blocked = c.bloqueado ? " <span style='color:var(--red);font-size:.6rem'>BLOQUEADO</span>" : "";
-      html += "<div onclick='_gsIrA(\"cliente\","+c.id+")' style='padding:.55rem 1rem;cursor:pointer;border-bottom:1px solid var(--bd)' onmouseover='this.style.background=\"var(--sur2)\"' onmouseout='this.style.background=\"\"'>"+
+      html += "<div data-gs='1' onclick='_gsIrA(\"cliente\","+c.id+")' style='padding:.55rem 1rem;cursor:pointer;border-bottom:1px solid var(--bd)' onmouseover='this.style.background=\"var(--sur2)\"' onmouseout='this.style.background=\"\"'>"+
         "<div style='font-size:.8rem;font-weight:500'>"+(c.nombre||'')+(c.apellido?' '+c.apellido:'')+blocked+"</div>"+
         "<div style='font-size:.65rem;color:var(--tx3)'>"+(c.email||'')+(c.telefono_principal?' · '+c.telefono_principal:'')+"</div>"+
       "</div>";
@@ -4520,7 +4594,7 @@ function _gsRender(){
       var stockTxt = p.stock_actual!=null ? p.stock_actual+'u' : '?';
       var stockC = (p.stock_actual||0)>0 ? 'var(--green)' : 'var(--red)';
       var inactivo = !p.activo ? " <span style='color:var(--tx3);font-size:.6rem'>(inactivo)</span>" : "";
-      html += "<div onclick='_gsIrA(\"producto\","+p.id+")' style='padding:.55rem 1rem;cursor:pointer;border-bottom:1px solid var(--bd);display:flex;justify-content:space-between;align-items:center;gap:.5rem' onmouseover='this.style.background=\"var(--sur2)\"' onmouseout='this.style.background=\"\"'>"+
+      html += "<div data-gs='1' onclick='_gsIrA(\"producto\","+p.id+")' style='padding:.55rem 1rem;cursor:pointer;border-bottom:1px solid var(--bd);display:flex;justify-content:space-between;align-items:center;gap:.5rem' onmouseover='this.style.background=\"var(--sur2)\"' onmouseout='this.style.background=\"\"'>"+
         "<div style='flex:1;min-width:0'>"+
           "<div style='font-size:.78rem;font-weight:500'>"+(p.nombre||'')+inactivo+"</div>"+
           "<div style='font-size:.65rem;color:var(--tx3)'>"+(p.empresa||'')+"</div>"+
@@ -4534,6 +4608,8 @@ function _gsRender(){
     html = "<div style='padding:1.5rem;text-align:center;color:var(--tx3);font-size:.8rem'>Sin resultados</div>";
   }
   res.innerHTML = html;
+  window._gsSel = null;
+  _gsMarcar(0);   // el primero queda elegido: con Enter se abre directo
 }
 
 function _gsIrA(tipo, id){
