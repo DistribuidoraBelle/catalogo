@@ -77,6 +77,11 @@ header{background:var(--sur);border-bottom:1px solid var(--bd);padding:.7rem 1.2
 .content{padding:.9rem 1rem;max-width:960px;margin:0 auto;padding-bottom:5.5rem}
 .page{display:none}.page.act{display:block}
 .money-grid{display:grid;grid-template-columns:repeat(2,1fr);gap:.65rem;margin-bottom:.9rem}
+/* Mi dinero: el resumen a la izquierda y el cierre de caja al costado */
+.dinero-wrap{display:grid;grid-template-columns:minmax(0,1fr) 340px;gap:1rem;align-items:start}
+.dinero-main{min-width:0}
+.dinero-lado{position:sticky;top:.8rem}
+@media(max-width:900px){.dinero-wrap{grid-template-columns:1fr}.dinero-lado{position:static}}
 .mcard{background:var(--sur);border:1px solid var(--bd);border-radius:var(--r);padding:.85rem 1rem}
 .mcard-lbl{font-size:.6rem;color:var(--tx3);text-transform:uppercase;letter-spacing:.06em;margin-bottom:.28rem}
 .mcard-val{font-size:1.3rem;font-weight:600}
@@ -9668,6 +9673,8 @@ function renderDinero(){
     ?"<div class='mcard' style='border-top:2px solid #34b3a0'><div class='mcard-lbl'>Cobros cta. corriente</div><div class='mcard-val' style='color:#34b3a0'>"+fmt(cobrosCC)+"</div><div class='mcard-sub'>Cobrado, no vendido</div></div>"
     :"";
   pg.innerHTML=
+    "<div class='dinero-wrap'>"+
+    "<div class='dinero-main'>"+
     "<div class='money-grid'>"+
     "<div class='mcard'><div class='mcard-lbl'>Total vendido</div><div class='mcard-val mv-green'>"+fmt(dineroData.vendido)+"</div><div class='mcard-sub'>Periodo actual</div></div>"+
     cardCobrosCC+
@@ -9687,9 +9694,14 @@ function renderDinero(){
     "</div></div>"+
     "<div class='form-card'><div class='form-title'>Formas de cobro</div>"+
     "<div id='_pieDavid'><div class='loading'><div class='spin'></div></div></div>"+
+    "</div>"+
+    "</div>"+
+    "<div class='dinero-lado'><div id='_ccjPanel'></div></div>"+
     "</div>";
   // Render pie chart
   if(dineroData.formas) _renderPieChart(dineroData.formas,'_pieDavid');
+  // 🧾 Cierre de caja del día, al costado
+  try{ _ccjMontar('_ccjPanel'); }catch(e){ console.error('[cierre caja]',e); }
 }
 
 // DEPOSITO MARCELA
@@ -13442,6 +13454,303 @@ function _vcbzBadgeHome(){
 
 
 // ══════════════════════════════════════════════════════════════════════
+// 🧾 CIERRE DE CAJA DIARIO
+// Al final del día: cuánto entró, cuánto salió y cuánto efectivo tendría
+// que tener en el bolsillo. Se cuenta la plata, se anota lo contado y el
+// sistema dice si sobra o falta. Queda guardado como foto del día.
+// ══════════════════════════════════════════════════════════════════════
+window._ccj = null;
+
+function _ccjEsc(s){ return String(s==null?'':s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;'); }
+function _ccjHoy(){ return new Date().toLocaleDateString('en-CA',{timeZone:'America/Argentina/Buenos_Aires'}); }
+function _ccjMas(f,d){ var x=new Date(String(f)+'T12:00:00'); x.setDate(x.getDate()+d); return x.toISOString().slice(0,10); }
+function _ccjLabel(f){
+  var hoy=_ccjHoy();
+  if(f===hoy)return 'Hoy';
+  if(f===_ccjMas(hoy,-1))return 'Ayer';
+  return new Date(String(f)+'T12:00:00').toLocaleDateString('es-AR',{weekday:'long',day:'numeric',month:'short'});
+}
+// Qué entra como plata en mano. "Mixto" no se puede partir (no sabemos
+// cuánto fue en efectivo y cuánto no), así que NO se cuenta como efectivo
+// y se avisa aparte para que el vendedor lo sume a mano.
+function _ccjEsEfectivo(forma){
+  var f=String(forma||'efectivo').toLowerCase();
+  return f==='efectivo' || f==='' || f==='cash';
+}
+
+function _ccjCargar(fecha, cb){
+  var f=fecha||_ccjHoy();
+  var d0=f+'T00:00:00-03:00', d1=_ccjMas(f,1)+'T00:00:00-03:00';
+  Promise.all([
+    apiGetAll("ventas","select=id,total,forma_cobro,created_at,producto_nombre,cantidad,nro_orden&vendedor_id=eq."+VENDEDOR_ID+
+      "&estado=eq.confirmada&created_at=gte."+encodeURIComponent(d0)+"&created_at=lt."+encodeURIComponent(d1)+"&limit=3000").catch(function(){return [];}),
+    apiGet("cc_pagos","select=id,monto,forma_pago,fecha,created_at,cliente_id,nota&vendedor_id=eq."+VENDEDOR_ID+
+      "&created_at=gte."+encodeURIComponent(d0)+"&created_at=lt."+encodeURIComponent(d1)+"&limit=500").catch(function(){return [];}),
+    apiGet("gastos_vendedor","select=id,monto,concepto,categoria,aprobado,created_at&vendedor_id=eq."+VENDEDOR_ID+
+      "&created_at=gte."+encodeURIComponent(d0)+"&created_at=lt."+encodeURIComponent(d1)+"&limit=300").catch(function(){return [];}),
+    apiGet("rendiciones","select=id,monto,concepto,tipo,estado,created_at&vendedor_id=eq."+VENDEDOR_ID+"&tipo=neq.reclamo"+
+      "&created_at=gte."+encodeURIComponent(d0)+"&created_at=lt."+encodeURIComponent(d1)+"&limit=200").catch(function(){return [];}),
+    apiGet("cierres_caja","select=*&vendedor_id=eq."+VENDEDOR_ID+"&order=fecha.desc&limit=14").catch(function(){return [];})
+  ]).then(function(d){
+    var ventas=d[0]||[], pagos=d[1]||[], gastos=d[2]||[], rends=d[3]||[], cierres=d[4]||[];
+
+    // ── ventas del día, separadas por cómo cobró ──
+    var formas={}; var ventasTotal=0, ventasEfec=0;
+    // una venta por producto: se agrupan por orden para no contar dos veces la forma de cobro
+    ventas.forEach(function(v){
+      var t=parseFloat(v.total)||0; ventasTotal+=t;
+      var fc=String(v.forma_cobro||'efectivo').toLowerCase();
+      formas[fc]=(formas[fc]||0)+t;
+      if(_ccjEsEfectivo(fc))ventasEfec+=t;
+    });
+
+    // ── cobros de cuenta corriente ──
+    var ccTotal=0, ccEfec=0, ccFormas={};
+    pagos.forEach(function(p){
+      var m=parseFloat(p.monto)||0; ccTotal+=m;
+      var fp=String(p.forma_pago||'efectivo').toLowerCase();
+      ccFormas[fp]=(ccFormas[fp]||0)+m;
+      if(_ccjEsEfectivo(fp))ccEfec+=m;
+    });
+
+    // ── gastos y rendiciones ──
+    var gastosTotal=gastos.reduce(function(a,g){return a+(parseFloat(g.monto)||0);},0);
+    var rendTotal=rends.filter(function(r){return r.estado!=='rechazada'&&r.estado!=='archivada'&&r.tipo!=='saldo_arrastrado';})
+                       .reduce(function(a,r){return a+(parseFloat(r.monto)||0);},0);
+    var rendPend=rends.filter(function(r){return r.estado==='pendiente';})
+                      .reduce(function(a,r){return a+(parseFloat(r.monto)||0);},0);
+
+    // lo que tendría que tener en la mano al terminar el día
+    var esperado=ventasEfec+ccEfec-gastosTotal-rendTotal;
+
+    var cierre=cierres.filter(function(c){ return String(c.fecha).slice(0,10)===f; })[0]||null;
+
+    window._ccj={
+      fecha:f, ventas:ventas, pagos:pagos, gastos:gastos, rends:rends,
+      formas:formas, ccFormas:ccFormas,
+      ventasTotal:Math.round(ventasTotal), ventasEfec:Math.round(ventasEfec),
+      ventasOtras:Math.round(ventasTotal-ventasEfec),
+      ccTotal:Math.round(ccTotal), ccEfec:Math.round(ccEfec),
+      gastos_m:Math.round(gastosTotal), rendido:Math.round(rendTotal), rendPend:Math.round(rendPend),
+      esperado:Math.round(esperado),
+      cierre:cierre, historial:cierres, _dest:(window._ccj&&window._ccj._dest)||'_ccjPanel'
+    };
+    if(cb)cb();
+  }).catch(function(e){ console.error('[cierre caja]',e); if(cb)cb(e); });
+}
+
+// ── RENDER DEL PANEL ──────────────────────────────────────────────────
+function _ccjRender(destino){
+  var st=window._ccj;
+  var el=document.getElementById(destino||(st&&st._dest)||'_ccjPanel');
+  if(!el)return;
+  if(!st){ el.innerHTML="<div style='padding:1.2rem;text-align:center;color:var(--tx3);font-size:.8rem'>Cargando el cierre...</div>"; return; }
+  st._dest=el.id;
+  var f=st.fecha, hoy=_ccjHoy(), cerrado=(st.cierre&&st.cierre.estado==='cerrado');
+
+  var h="";
+  h+="<div class='form-card' style='margin-bottom:.7rem'>";
+
+  // cabecera con navegación de días
+  h+="<div style='display:flex;align-items:center;gap:.4rem;margin-bottom:.7rem'>";
+  h+="<button onclick='_ccjIr(-1)' style='background:var(--sur);border:1px solid var(--bd);border-radius:8px;width:30px;height:30px;color:var(--tx);cursor:pointer;font-size:.95rem;flex-shrink:0'>‹</button>";
+  h+="<div style='flex:1;text-align:center;min-width:0'>";
+  h+="<div style='font-size:.62rem;color:var(--tx3);text-transform:uppercase;letter-spacing:.06em'>Cierre de caja</div>";
+  h+="<div style='font-size:.95rem;font-weight:800;color:var(--tx);text-transform:capitalize'>"+_ccjLabel(f)+"</div>";
+  h+="<div style='font-size:.62rem;color:var(--tx3)'>"+f.split('-').reverse().join('/')+"</div>";
+  h+="</div>";
+  h+="<button onclick='_ccjIr(1)' "+(f>=hoy?"disabled style='opacity:.3;":"style='")+"background:var(--sur);border:1px solid var(--bd);border-radius:8px;width:30px;height:30px;color:var(--tx);cursor:pointer;font-size:.95rem;flex-shrink:0'>›</button>";
+  h+="</div>";
+
+  if(cerrado){
+    var dif=parseFloat(st.cierre.diferencia)||0;
+    var difCol=Math.abs(dif)<1?'var(--green)':(dif>0?'var(--yel)':'var(--red)');
+    h+="<div style='background:"+(Math.abs(dif)<1?'rgba(76,175,130,.12)':'rgba(224,92,110,.1)')+";border:1px solid "+difCol+";border-radius:9px;padding:.6rem .7rem;margin-bottom:.7rem'>";
+    h+="<div style='font-size:.75rem;font-weight:800;color:"+difCol+"'>"+(Math.abs(dif)<1?'✓ Caja cerrada y cuadrada':(dif>0?'✓ Caja cerrada · sobró '+fmt(dif):'✓ Caja cerrada · faltó '+fmt(Math.abs(dif))))+"</div>";
+    h+="<div style='font-size:.66rem;color:var(--tx3);margin-top:.15rem'>Contaste "+fmt(st.cierre.contado_efectivo)+" · el sistema decía "+fmt(st.cierre.esperado_efectivo)+"</div>";
+    if(st.cierre.nota)h+="<div style='font-size:.7rem;color:var(--tx2);margin-top:.3rem;font-style:italic'>“"+_ccjEsc(st.cierre.nota)+"”</div>";
+    h+="</div>";
+  }
+
+  // ── el movimiento del día ──
+  h+="<div class='tot-box' style='margin-bottom:.7rem'>";
+  h+=_ccjFila('Ventas del día', st.ventasTotal, 'var(--green)', st.ventas.length+(st.ventas.length===1?' línea':' líneas'));
+  if(st.ventasOtras>0){
+    h+=_ccjSub('en efectivo', st.ventasEfec);
+    h+=_ccjSub('por transferencia / tarjeta', st.ventasOtras);
+  }
+  if(st.ccTotal>0){
+    h+=_ccjFila('Cobros de cuenta corriente', st.ccTotal, '#34b3a0', st.pagos.length+' cobro'+(st.pagos.length===1?'':'s'));
+    if(st.ccEfec!==st.ccTotal)h+=_ccjSub('de eso, en efectivo', st.ccEfec);
+  }
+  var mixto=(st.formas['mixto']||0)+(st.ccFormas['mixto']||0);
+  if(mixto>0){
+    h+="<div class='tot-row' style='border-bottom:none;padding:.05rem 0 .05rem .7rem'>"+
+       "<span style='font-size:.66rem;color:var(--yel)'>⚠ "+fmt(mixto)+" cobrado mixto: sumale a mano lo que fue en efectivo</span></div>";
+  }
+  if(st.gastos_m>0)h+=_ccjFila('Gastos', -st.gastos_m, 'var(--red)', st.gastos.length+' gasto'+(st.gastos.length===1?'':'s'));
+  if(st.rendido>0)h+=_ccjFila('Rendiste', -st.rendido, 'var(--acc)', st.rendPend>0?(fmt(st.rendPend)+' sin aceptar'):'aceptado');
+  h+="<div class='tot-row' style='border-bottom:none;padding-top:.4rem;margin-top:.25rem;border-top:1px solid var(--bd)'>"+
+     "<span class='tot-lbl' style='font-weight:800;color:var(--tx)'>EFECTIVO QUE TENDRÍAS</span>"+
+     "<span style='color:var(--blue);font-size:1.05rem;font-weight:800'>"+fmt(st.esperado)+"</span></div>";
+  h+="</div>";
+
+  if(st.ventasTotal===0 && st.ccTotal===0 && st.gastos_m===0 && st.rendido===0){
+    h+="<div style='text-align:center;padding:1rem;color:var(--tx3);font-size:.78rem'>No se movió nada este día.</div>";
+  }
+
+  // ── contar la plata ──
+  if(!cerrado){
+    h+="<div style='background:var(--sur);border:1px solid var(--bd);border-radius:9px;padding:.7rem'>";
+    h+="<div style='font-size:.68rem;color:var(--tx3);text-transform:uppercase;letter-spacing:.05em;font-weight:700;margin-bottom:.4rem'>Contá la plata que tenés</div>";
+    h+="<input class='fi' id='_ccjContado' type='number' inputmode='numeric' placeholder='"+st.esperado+"' oninput='_ccjDif()' style='font-size:1.05rem;font-weight:800;text-align:center'>";
+    h+="<div id='_ccjDifBox' style='margin-top:.45rem;text-align:center;font-size:.78rem;color:var(--tx3);min-height:1.1rem'>Escribí cuánto contaste y te digo si cuadra</div>";
+    h+="<input class='fi' id='_ccjNota' type='text' maxlength='160' placeholder='Nota (opcional): a qué se debe la diferencia' style='margin-top:.45rem;font-size:.76rem'>";
+    h+="<button id='_ccjBtn' onclick='_ccjCerrar()' style='width:100%;margin-top:.5rem;background:linear-gradient(135deg,var(--acc),#a9793f);color:#1a1200;border:none;border-radius:10px;padding:.6rem;font-size:.85rem;font-weight:800;cursor:pointer;font-family:inherit'>🔒 Cerrar la caja de "+(f===hoy?'hoy':'este día')+"</button>";
+    h+="<button onclick='_ccjUsarEsperado()' style='width:100%;margin-top:.35rem;background:none;border:none;color:var(--tx3);font-size:.68rem;cursor:pointer;font-family:inherit;text-decoration:underline'>Cuadra justo, poner "+fmt(st.esperado)+"</button>";
+    h+="</div>";
+  }else{
+    h+="<button onclick='_ccjReabrir()' style='width:100%;background:var(--sur);border:1px solid var(--bd);color:var(--tx2);border-radius:9px;padding:.5rem;font-size:.76rem;font-weight:700;cursor:pointer;font-family:inherit'>✏️ Corregir este cierre</button>";
+  }
+  h+="</div>";
+
+  // ── historial ──
+  var hist=(st.historial||[]).filter(function(c){ return String(c.fecha).slice(0,10)!==f; }).slice(0,7);
+  if(hist.length){
+    h+="<div class='form-card'>";
+    h+="<div class='form-title'>Últimos cierres</div>";
+    var acum=0;
+    hist.forEach(function(c){
+      var dif=parseFloat(c.diferencia)||0; acum+=dif;
+      var col=Math.abs(dif)<1?'var(--tx3)':(dif>0?'var(--yel)':'var(--red)');
+      h+="<div onclick='_ccjIrA(\""+String(c.fecha).slice(0,10)+"\")' style='display:flex;justify-content:space-between;align-items:center;padding:.32rem 0;border-bottom:1px solid rgba(42,48,69,.5);cursor:pointer;font-size:.74rem'>"+
+         "<span style='color:var(--tx2);text-transform:capitalize'>"+_ccjLabel(String(c.fecha).slice(0,10))+"</span>"+
+         "<span style='color:"+col+";font-weight:700'>"+(Math.abs(dif)<1?'cuadró':((dif>0?'sobró ':'faltó ')+fmt(Math.abs(dif))))+"</span></div>";
+    });
+    if(Math.abs(acum)>=1){
+      h+="<div style='display:flex;justify-content:space-between;padding-top:.4rem;font-size:.74rem'>"+
+         "<span style='color:var(--tx3)'>Arrastre de los últimos "+hist.length+"</span>"+
+         "<span style='color:"+(acum>0?'var(--yel)':'var(--red)')+";font-weight:800'>"+(acum>0?'sobró ':'faltó ')+fmt(Math.abs(acum))+"</span></div>";
+    }
+    h+="</div>";
+  }
+
+  el.innerHTML=h;
+  if(!cerrado){ var i=document.getElementById('_ccjContado'); if(i && el.id!=='_ccjPanel')setTimeout(function(){},0); }
+}
+function _ccjFila(lbl, monto, color, sub){
+  return "<div class='tot-row'><span class='tot-lbl'>"+lbl+(sub?(" <span style='font-size:.64rem;color:var(--tx3)'>· "+sub+"</span>"):"")+"</span>"+
+         "<span style='color:"+color+";font-weight:700'>"+(monto<0?'-':'')+fmt(Math.abs(monto))+"</span></div>";
+}
+function _ccjSub(lbl, monto){
+  return "<div class='tot-row' style='border-bottom:none;padding:.05rem 0 .05rem .7rem'>"+
+         "<span style='font-size:.68rem;color:var(--tx3)'>↳ "+lbl+"</span>"+
+         "<span style='font-size:.68rem;color:var(--tx3)'>"+fmt(monto)+"</span></div>";
+}
+function _ccjDif(){
+  var st=window._ccj; if(!st)return;
+  var v=(document.getElementById('_ccjContado')||{value:''}).value;
+  var box=document.getElementById('_ccjDifBox'); if(!box)return;
+  if(v===''){ box.innerHTML="Escribí cuánto contaste y te digo si cuadra"; box.style.color='var(--tx3)'; return; }
+  var dif=(parseFloat(v)||0)-st.esperado;
+  if(Math.abs(dif)<1){ box.innerHTML="✓ Cuadra justo"; box.style.color='var(--green)'; }
+  else if(dif>0){ box.innerHTML="Te sobran <b>"+fmt(dif)+"</b>"; box.style.color='var(--yel)'; }
+  else { box.innerHTML="Te faltan <b>"+fmt(Math.abs(dif))+"</b>"; box.style.color='var(--red)'; }
+}
+function _ccjUsarEsperado(){
+  var st=window._ccj; if(!st)return;
+  var i=document.getElementById('_ccjContado'); if(i){ i.value=st.esperado; _ccjDif(); }
+}
+function _ccjIr(d){ var st=window._ccj; if(!st)return; _ccjIrA(_ccjMas(st.fecha,d)); }
+function _ccjIrA(f){
+  var st=window._ccj; if(!st)return;
+  if(f>_ccjHoy())return;
+  var el=document.getElementById(st._dest);
+  if(el)el.innerHTML="<div style='padding:1.2rem;text-align:center;color:var(--tx3);font-size:.8rem'>Cargando...</div>";
+  _ccjCargar(f, function(){ _ccjRender(); });
+}
+
+// ── guardar el cierre ─────────────────────────────────────────────────
+function _ccjCerrar(){
+  var st=window._ccj; if(!st)return;
+  var raw=(document.getElementById('_ccjContado')||{value:''}).value;
+  if(raw===''){ toast('Contá la plata y escribí cuánto tenés','twarn'); var i=document.getElementById('_ccjContado'); if(i)i.focus(); return; }
+  var contado=Math.round(parseFloat(raw)||0);
+  var nota=((document.getElementById('_ccjNota')||{value:''}).value||'').trim()||null;
+  var dif=contado-st.esperado;
+  if(Math.abs(dif)>=1){
+    var q=(dif>0?('Te sobran '+fmt(dif)):('Te faltan '+fmt(Math.abs(dif))))+'.\n\n¿Cerrás igual la caja de '+_ccjLabel(st.fecha).toLowerCase()+'?';
+    if(!confirm(q))return;
+  }
+  var btn=document.getElementById('_ccjBtn'); if(btn){ btn.disabled=true; btn.textContent='Cerrando...'; }
+  var body={
+    vendedor_id:VENDEDOR_ID, fecha:st.fecha,
+    esperado_efectivo:st.esperado, contado_efectivo:contado, diferencia:dif,
+    ventas_total:st.ventasTotal, ventas_efectivo:st.ventasEfec, ventas_otras:st.ventasOtras,
+    cobros_cc:st.ccTotal, gastos:st.gastos_m, rendido:st.rendido,
+    detalle:{ formas:st.formas, cc_formas:st.ccFormas, cc_efectivo:st.ccEfec,
+              lineas_venta:st.ventas.length, gastos_n:st.gastos.length, rend_pendiente:st.rendPend },
+    nota:nota, estado:'cerrado', cerrado_at:new Date().toISOString(),
+    cerrado_por:VENDEDOR_ID, cerrado_por_nombre:VENDEDOR_NOMBRE||'',
+    updated_at:new Date().toISOString()
+  };
+  var yaEstaba=st.cierre&&st.cierre.id;
+  var p=yaEstaba
+    ? apiPatch('cierres_caja', body, 'id=eq.'+st.cierre.id)
+    : apiPost('cierres_caja', body);
+  p.then(function(){
+    toast(Math.abs(dif)<1?'Caja cerrada y cuadrada ✓':'Caja cerrada ✓','tok');
+    // si faltó o sobró plata, queda el aviso para el admin y en mi campanita
+    if(Math.abs(dif)>=1){
+      try{
+        _avisoPropio('caja', (dif>0?'🧾 Cierre con sobrante':'🧾 Cierre con faltante'),
+          _ccjLabel(st.fecha)+': contaste '+fmt(contado)+' y el sistema decía '+fmt(st.esperado)+
+          ' — '+(dif>0?'sobran ':'faltan ')+fmt(Math.abs(dif))+(nota?(' · '+nota):''), null);
+      }catch(e){}
+    }
+    _ccjIrA(st.fecha);
+  }).catch(function(e){
+    console.error('[cerrar caja]',e);
+    if(btn){ btn.disabled=false; btn.textContent='🔒 Cerrar la caja'; }
+    // si ya existía el cierre (choque con el índice único) lo actualizamos
+    if(e&&e.status===409){
+      apiPatch('cierres_caja', body, 'vendedor_id=eq.'+VENDEDOR_ID+'&fecha=eq.'+st.fecha)
+        .then(function(){ toast('Caja cerrada ✓','tok'); _ccjIrA(st.fecha); })
+        .catch(function(){ toast('No se pudo cerrar la caja','terr'); });
+      return;
+    }
+    toast('No se pudo cerrar la caja','terr');
+  });
+}
+function _ccjReabrir(){
+  var st=window._ccj; if(!st||!st.cierre)return;
+  if(!confirm('¿Corregir el cierre de '+_ccjLabel(st.fecha).toLowerCase()+'? Vas a poder contar la plata de nuevo.'))return;
+  apiPatch('cierres_caja',{estado:'abierto',updated_at:new Date().toISOString()},'id=eq.'+st.cierre.id)
+    .then(function(){ _ccjIrA(st.fecha); })
+    .catch(function(e){ console.error('[reabrir caja]',e); toast('No se pudo abrir','terr'); });
+}
+
+// ── entradas ──────────────────────────────────────────────────────────
+function _ccjMontar(destino){
+  var el=document.getElementById(destino); if(!el)return;
+  el.innerHTML="<div style='padding:1.2rem;text-align:center;color:var(--tx3);font-size:.8rem'>Armando el cierre del día...</div>";
+  var f=(window._ccj&&window._ccj.fecha)||_ccjHoy();
+  window._ccj=null;
+  _ccjCargar(f, function(err){
+    if(err){ el.innerHTML="<div style='padding:1.2rem;text-align:center;color:var(--red);font-size:.8rem'>No se pudo armar el cierre</div>"; return; }
+    window._ccj._dest=destino;
+    _ccjRender(destino);
+  });
+}
+// aviso en el botón de Mi dinero de la app: si el día de ayer quedó sin cerrar
+function _ccjPendiente(cb){
+  apiGet('cierres_caja','select=fecha&vendedor_id=eq.'+VENDEDOR_ID+'&fecha=eq.'+_ccjMas(_ccjHoy(),-1)+'&limit=1')
+    .then(function(r){ if(cb)cb(!(Array.isArray(r)&&r.length)); })
+    .catch(function(){ if(cb)cb(false); });
+}
+
+
+// ══════════════════════════════════════════════════════════════════════
 // 😴 CLIENTES DORMIDOS — los que compraban y dejaron de comprar
 // No alcanza con "hace 60 días que no compra": cada cliente tiene su
 // ritmo. El que compraba cada 15 días y hace 70 que no aparece está
@@ -14815,8 +15124,11 @@ function _appVerDinero(){
       (arrastrado>0?fila("+ Saldo anterior",arrastrado,"#d4b24a","+"):"")+
       "<div style='display:flex;justify-content:space-between;padding:.7rem 0 .1rem;font-size:1rem;font-weight:800'><span style='color:var(--tx)'>Saldo encima</span><span style='color:#5b9fe0'>"+fmt(saldo)+"</span></div>"+
     "</div>";
-    h+="<button onclick='_appRendir()' style='width:100%;background:linear-gradient(135deg,var(--acc),#a9793f);color:#1a1200;border:none;border-radius:14px;padding:1rem;font-size:1.05rem;font-weight:800;cursor:pointer'>💵 Rendir dinero</button>";
+    h+="<button onclick='_appRendir()' style='width:100%;background:linear-gradient(135deg,var(--acc),#a9793f);color:#1a1200;border:none;border-radius:14px;padding:1rem;font-size:1.05rem;font-weight:800;cursor:pointer;margin-bottom:1rem'>💵 Rendir dinero</button>";
+    // 🧾 Cierre de caja del día (en el cel va abajo del todo, no al costado)
+    h+="<div id='_ccjPanel'></div>";
     b.innerHTML=h;
+    try{ _ccjMontar('_ccjPanel'); }catch(e){ console.error('[cierre caja app]',e); }
   }).catch(function(e){var b=document.getElementById('_appDinBody');if(b)b.innerHTML="<div style='color:var(--red);text-align:center;padding:1.5rem'>Error: "+(e&&e.message||'')+"</div>";});
 }
 
