@@ -719,6 +719,7 @@ body{
     <div class="sb-item admin-only" onclick="navTo('reportes',this)"><span>&#128202;</span><span>Reportes</span></div>
     <div class="sb-item admin-only" onclick="navTo('periodos',this)"><span>&#128197;</span><span>Periodos</span></div>
     <div class="sb-item admin-only" onclick="navTo('pedidos',this)"><span>&#128203;</span><span>Pedidos</span></div>
+    <div class="sb-item admin-only" onclick="navTo('cobranzas',this)"><span>&#128176;</span><span>Cobranzas</span><span id="cbzMenuBadge" title="Deuda vencida" style="display:none;margin-left:auto;background:#e5484d;color:#fff;border-radius:999px;min-width:18px;height:18px;font-size:.6rem;font-weight:800;align-items:center;justify-content:center;padding:0 5px">0</span></div>
     <div class="sb-sec admin-only">Registro</div>
     <div class="sb-item admin-only" onclick="navTo('auditoria-stock',this)"><span>🔍</span><span>Auditoría Stock</span></div>
     <div class="sb-item admin-only" onclick="navTo('movimientos',this)"><span>&#128196;</span><span>Movimientos Stock</span></div>
@@ -1762,6 +1763,10 @@ body{
         <div class="loading"><div class="spin"></div>Cargando pedidos...</div>
       </div>
     </div>
+    <div class="page" id="page-cobranzas" style="display:none;padding:1rem">
+      <div id="cbzBody"><div class="loading"><div class="spin"></div>Cargando cobranzas...</div></div>
+    </div>
+
     <div class="page" id="page-auditoria-stock" style="display:none">
       <div id="auditoriaContainer">
         <div class="loading"><div class="spin"></div>Cargando auditoría...</div>
@@ -15434,7 +15439,484 @@ function guardarNuevoProdFromModal(){
   });
 }
 
-var PAGE_TITLES={chatbot:"Chats de Belle",estadisticas:"Estadisticas",cobros:"Cobros y Envios",cotizaciones:"Cotizaciones",actividad:"Logs de Actividad",deposito:"Deposito Marcela","deposito-marcela":"Mi Deposito",reservas:"Reservas","inicio-config":"Pagina de Inicio","pendientes-catalogo":"Pendientes del Catalogo",incidencias:"Incidencias",diagnostico:"Diagn\u00f3stico del Sistema",dashboard:"Dashboard",stock:"Stock y Precios","catalogo-edit":"Editar Catalogo",rendicion:"Rendicion David","historial-ventas":"Historial Ventas",pedidos:"Pedidos",movimientos:"Movimientos Stock","avisos-stock":"Avisos y Notificaciones","auditoria-stock":"Auditoría de Stock",reclamos:"Reclamos",registros:"Registros Historicos",combos:"Combos y Ofertas",ofertas:"Ofertas y Campañas",decans:"Decans",pestanas:"Pestanas del Catalogo","contacto-admin":"Pagina de Contacto",carrusel:"Carrusel",cierre:"Cierre de Periodo",clientes:"Clientes",cotizHistorial:"Estadísticas Mensuales","cotiz-historial":"Estadísticas Mensuales","compras-ia":"Ayudante de Compras","blessing":"Ayudante Cosméticos","pedidos-proveedor":"Pedidos al Proveedor",cuentas:"Gestion de Cuentas",periodos:"Periodos",reportes:"Reportes","catalogos-pdf":"Cat\u00e1logos PDF (clientes)"};
+var PAGE_TITLES={chatbot:"Chats de Belle",estadisticas:"Estadisticas",cobros:"Cobros y Envios",cotizaciones:"Cotizaciones",actividad:"Logs de Actividad",deposito:"Deposito Marcela","deposito-marcela":"Mi Deposito",reservas:"Reservas","inicio-config":"Pagina de Inicio","pendientes-catalogo":"Pendientes del Catalogo",incidencias:"Incidencias",diagnostico:"Diagn\u00f3stico del Sistema",dashboard:"Dashboard",stock:"Stock y Precios","catalogo-edit":"Editar Catalogo",rendicion:"Rendicion David","historial-ventas":"Historial Ventas",pedidos:"Pedidos",movimientos:"Movimientos Stock","avisos-stock":"Avisos y Notificaciones","auditoria-stock":"Auditoría de Stock",reclamos:"Reclamos",registros:"Registros Historicos",combos:"Combos y Ofertas",ofertas:"Ofertas y Campañas",decans:"Decans",pestanas:"Pestanas del Catalogo","contacto-admin":"Pagina de Contacto",carrusel:"Carrusel",cierre:"Cierre de Periodo",clientes:"Clientes",cotizHistorial:"Estadísticas Mensuales","cotiz-historial":"Estadísticas Mensuales","compras-ia":"Ayudante de Compras","blessing":"Ayudante Cosméticos","pedidos-proveedor":"Pedidos al Proveedor",cobranzas:"Cobranzas",cuentas:"Gestion de Cuentas",periodos:"Periodos",reportes:"Reportes","catalogos-pdf":"Cat\u00e1logos PDF (clientes)"};
+
+
+// ══════════════════════════════════════════════════════════════════════
+// COBRANZAS — un solo número por cliente
+// Junta las tres cajas donde vive la plata que nos deben:
+//   1) pedidos abiertos (pendiente / P. pendiente / cobro parcial)
+//   2) cuotas de cuenta corriente (cc_cuotas)
+//   3) cuotas de financiación (financiacion_cuotas) con su mora
+// Un pedido que ya tiene cuotas de CC o una financiación NO se cuenta por su
+// cuenta: su deuda vive en las cuotas, si no la contaríamos dos veces.
+// ══════════════════════════════════════════════════════════════════════
+window._cbz = null;
+var _CBZ_ESTADOS_ABIERTOS = ['pendiente','reservado','cobrado_parcial'];
+
+function _cbzDias(fechaISO){
+  if(!fechaISO) return null;
+  var f=new Date(String(fechaISO).slice(0,10)+"T00:00:00");
+  var hoy=new Date(); hoy.setHours(0,0,0,0);
+  return Math.round((hoy-f)/864e5);          // >0 = vencida hace tantos días
+}
+// Misma cuenta de mora que usa la app del vendedor
+function _cbzMoraFin(cuota, f){
+  if(!cuota || cuota.pagada || !f) return 0;
+  var tipo=f.mora_tipo||'ninguna', val=parseFloat(f.mora_valor)||0;
+  if(tipo==='ninguna' || val<=0) return 0;
+  var dias=_cbzDias(cuota.vencimiento); if(dias==null || dias<=0) return 0;
+  var efectivos=dias-(parseInt(f.mora_gracia_dias)||0);
+  if(efectivos<=0) return 0;
+  var base=parseFloat(cuota.monto)||0;
+  var unidad=(f.mora_modo==='monto')?val:base*(val/100);
+  var mora=0;
+  if(tipo==='fija') mora=unidad;
+  else if(tipo==='diaria') mora=unidad*efectivos;
+  else if(tipo==='mensual') mora=unidad*Math.ceil(efectivos/30);
+  var tope=parseFloat(f.mora_tope_pct)||0;
+  if(tope>0) mora=Math.min(mora, base*(tope/100));
+  return Math.round(mora);
+}
+
+function _cbzCargar(){
+  var cont=document.getElementById("cbzBody"); if(!cont)return;
+  cont.innerHTML="<div class='loading'><div class='spin'></div>Juntando toda la plata a cobrar...</div>";
+  Promise.all([
+    apiGetAll("pedidos_catalogo","select=id,nro_orden,cliente_id,cliente_nombre,cliente_tel,telefono,total,total_con_envio,cobrado_total,estado,es_cc,vendedor_id,created_at,cc_fecha_vencimiento&limit=8000").catch(function(){return [];}),
+    apiGet("cc_cuotas","select=*&estado=in.(pendiente,parcial,vencida)&limit=5000").catch(function(){return [];}),
+    apiGet("financiaciones","select=*&estado=eq.activa&limit=3000").catch(function(){return [];}),
+    apiGet("financiacion_cuotas","select=*&pagada=is.false&limit=8000").catch(function(){return [];}),
+    apiGet("clientes","select=id,nombre,apellido,telefono_principal,vendedor_asignado_id,estado,bloqueado&limit=8000").catch(function(){return [];}),
+    apiGet("cobranza_comunicaciones","select=cliente_id,created_at,canal&order=created_at.desc&limit=3000").catch(function(){return [];})
+  ]).then(function(d){
+    var peds=d[0]||[], ccq=d[1]||[], fins=d[2]||[], finq=d[3]||[], clis=d[4]||[], coms=d[5]||[];
+
+    var pedById={}; peds.forEach(function(p){ pedById[p.id]=p; });
+    var cliById={}; clis.forEach(function(c){ cliById[c.id]=c; });
+    var finById={}; fins.forEach(function(f){ finById[f.id]=f; });
+    var ultCom={}; coms.forEach(function(c){ if(c.cliente_id && !ultCom[c.cliente_id]) ultCom[c.cliente_id]=c.created_at; });
+
+    var tieneCC={}, tieneFin={};
+    ccq.forEach(function(c){ if(c.pedido_id)tieneCC[c.pedido_id]=1; });
+    fins.forEach(function(f){ if(f.pedido_id)tieneFin[f.pedido_id]=1; });
+
+    var items=[];
+    function nombreDe(cid, ped){
+      var c=cid?cliById[cid]:null;
+      if(c) return ((c.nombre||'')+' '+(c.apellido||'')).trim() || ('Cliente #'+cid);
+      var n=(ped&&(ped.cliente_nombre||'')).trim();
+      return n || 'Sin cliente';
+    }
+    function telDe(cid, ped){
+      var c=cid?cliById[cid]:null;
+      return (c&&c.telefono_principal)||(ped&&(ped.cliente_tel||ped.telefono))||'';
+    }
+
+    // 1) Pedidos abiertos que no están cubiertos por cuotas
+    peds.forEach(function(p){
+      if(_CBZ_ESTADOS_ABIERTOS.indexOf(p.estado)<0) return;
+      if(tieneCC[p.id] || tieneFin[p.id]) return;
+      var tot=parseFloat(p.total_con_envio)||parseFloat(p.total)||0;
+      var saldo=tot-(parseFloat(p.cobrado_total)||0);
+      if(saldo<=1) return;
+      items.push({
+        tipo:'pedido', cid:p.cliente_id||null, cliente:nombreDe(p.cliente_id,p), tel:telDe(p.cliente_id,p),
+        vend:p.vendedor_id||(p.cliente_id&&cliById[p.cliente_id]?cliById[p.cliente_id].vendedor_asignado_id:null),
+        ref:p.nro_orden||('Pedido #'+p.id), pedidoId:p.id, monto:saldo, mora:0,
+        vence:p.cc_fecha_vencimiento||null, desde:p.created_at||null,
+        detalle:(p.estado==='cobrado_parcial'?('Cobro parcial · faltan '+fmt(saldo)+' de '+fmt(tot)):'Pedido sin cobrar')
+      });
+    });
+
+    // 2) Cuotas de cuenta corriente
+    ccq.forEach(function(c){
+      var saldo=(parseFloat(c.monto)||0)+(parseFloat(c.recargo_mora)||0)-(parseFloat(c.monto_pagado)||0);
+      if(saldo<=1) return;
+      var p=pedById[c.pedido_id]||null;
+      var cid=p?p.cliente_id:null;
+      items.push({
+        tipo:'cc', cid:cid, cliente:nombreDe(cid,p), tel:telDe(cid,p),
+        vend:(p&&p.vendedor_id)||(cid&&cliById[cid]?cliById[cid].vendedor_asignado_id:null),
+        ref:((p&&p.nro_orden)||('Pedido #'+c.pedido_id))+' · cuota '+(c.nro_cuota||'?')+'/'+(c.total_cuotas||'?'),
+        pedidoId:c.pedido_id, monto:saldo, mora:parseFloat(c.recargo_mora)||0,
+        vence:c.fecha_vencimiento||null, desde:(p&&p.created_at)||c.created_at||null,
+        detalle:'Cuenta corriente'+(c.estado==='parcial'?(' · pagó '+fmt(c.monto_pagado)):'')
+      });
+    });
+
+    // 3) Cuotas de financiación
+    finq.forEach(function(cu){
+      var f=finById[cu.financiacion_id]; if(!f) return;
+      var saldo=(parseFloat(cu.monto)||0)-(parseFloat(cu.pagada_monto)||0);
+      if(saldo<=1) return;
+      var p=f.pedido_id?pedById[f.pedido_id]:null;
+      var cid=p?p.cliente_id:null;
+      var mora=_cbzMoraFin(cu,f);
+      items.push({
+        tipo:'fin', cid:cid, cliente:(cid?nombreDe(cid,p):((f.cliente_nombre||'').trim()||'Sin cliente')), tel:telDe(cid,p),
+        vend:f.vendedor_id||(p&&p.vendedor_id)||null,
+        ref:(f.nro_orden||('Financiación #'+f.id))+' · cuota '+(cu.nro||'?'),
+        pedidoId:f.pedido_id||null, finId:f.id, monto:saldo, mora:mora,
+        vence:cu.vencimiento||null, desde:f.created_at||null,
+        detalle:'Financiación en cuotas'+(mora>0?(' · mora '+fmt(mora)):'')
+      });
+    });
+
+    // ── días de atraso / antigüedad ──
+    items.forEach(function(it){
+      it.total=it.monto+(it.tipo==='fin'?it.mora:0);
+      var dv=_cbzDias(it.vence);
+      it.atraso = (dv!=null && dv>0) ? dv : 0;
+      it.vencido = it.atraso>0;
+      it.antig = _cbzDias(it.desde)||0;
+      it.sinPlazo = (it.vence==null);
+    });
+
+    // ── agrupar por cliente ──
+    var porCli={};
+    items.forEach(function(it){
+      var k = it.cid ? ('c'+it.cid) : ('n:'+it.cliente);
+      if(!porCli[k]) porCli[k]={key:k, cid:it.cid, cliente:it.cliente, tel:it.tel, vend:it.vend,
+                                total:0, vencido:0, items:[], maxAtraso:0, prox:null,
+                                ultCom:(it.cid?ultCom[it.cid]:null)||null,
+                                bloq:(it.cid&&cliById[it.cid])?!!cliById[it.cid].bloqueado:false};
+      var g=porCli[k];
+      g.items.push(it);
+      g.total+=it.total;
+      if(it.vencido)g.vencido+=it.total;
+      if(it.atraso>g.maxAtraso)g.maxAtraso=it.atraso;
+      if(it.vence && (!g.prox || it.vence<g.prox))g.prox=it.vence;
+      if(!g.tel && it.tel)g.tel=it.tel;
+      if(!g.vend && it.vend)g.vend=it.vend;
+    });
+    var grupos=Object.keys(porCli).map(function(k){ return porCli[k]; });
+    grupos.forEach(function(g){ g.items.sort(function(a,b){ return (b.atraso-a.atraso)||(b.total-a.total); }); });
+
+    window._cbz={ items:items, grupos:grupos, q:'', vend:'', tipo:'', tramo:'', orden:'total', dir:-1, cliById:cliById };
+    _cbzRender();
+  }).catch(function(e){
+    console.error("[belle] _cbzCargar error:", e);
+    cont.innerHTML="<div style='color:var(--red);padding:2rem;text-align:center'>Error al cargar cobranzas</div>";
+  });
+}
+
+var _CBZ_TIPOS={ pedido:{n:'Pedido',ico:'📦',col:'#5a9fd4'}, cc:{n:'Cuenta corriente',ico:'📒',col:'#c4965a'}, fin:{n:'Financiación',ico:'💳',col:'#a45285'} };
+function _cbzTramo(dias){
+  if(dias<=0) return 'aldia';
+  if(dias<=30) return 'd30';
+  if(dias<=60) return 'd60';
+  return 'd60mas';
+}
+var _CBZ_TRAMOS={ aldia:{n:'Sin vencer',col:'#3fae74'}, d30:{n:'1 a 30 días',col:'#d4b13c'}, d60:{n:'31 a 60 días',col:'#e08a3c'}, d60mas:{n:'Más de 60 días',col:'#d94848'} };
+
+function _cbzVendNombre(id){
+  if(!id) return 'Sin vendedor';
+  if(typeof VENDEDORES_CFG!=='undefined' && Array.isArray(VENDEDORES_CFG)){
+    var v=VENDEDORES_CFG.filter(function(x){return String(x.id)===String(id);})[0];
+    if(v) return v.nombre||('Vendedor '+id);
+  }
+  return 'Vendedor '+id;
+}
+function _cbzSet(k,v){ var st=window._cbz; if(!st)return; st[k]=v; _cbzRender(); }
+function _cbzOrden(o){
+  var st=window._cbz; if(!st)return;
+  if(st.orden===o)st.dir=-st.dir; else { st.orden=o; st.dir=(o==='cliente')?1:-1; }
+  _cbzRender();
+}
+function _cbzFiltrados(){
+  var st=window._cbz; if(!st)return [];
+  var q=(st.q||'').trim().toLowerCase();
+  var out=st.grupos.filter(function(g){
+    if(st.vend && String(g.vend||'')!==String(st.vend))return false;
+    if(st.tipo && !g.items.some(function(i){return i.tipo===st.tipo;}))return false;
+    if(st.tramo && !g.items.some(function(i){return _cbzTramo(i.atraso)===st.tramo;}))return false;
+    if(q && (g.cliente+' '+(g.tel||'')+' '+g.items.map(function(i){return i.ref;}).join(' ')).toLowerCase().indexOf(q)<0)return false;
+    return true;
+  });
+  var o=st.orden, dir=st.dir;
+  out.sort(function(a,b){
+    if(o==='cliente') return dir*a.cliente.localeCompare(b.cliente);
+    return dir*((a[o]||0)-(b[o]||0));
+  });
+  return out;
+}
+
+function _cbzRender(){
+  var st=window._cbz; if(!st)return;
+  var cont=document.getElementById("cbzBody"); if(!cont)return;
+  var lista=_cbzFiltrados();
+
+  // Totales sobre TODO
+  var totGral=0, totVenc=0, tot7=0, porTramo={aldia:0,d30:0,d60:0,d60mas:0}, porTipo={pedido:0,cc:0,fin:0};
+  var hoy=new Date(); hoy.setHours(0,0,0,0);
+  var en7=new Date(hoy.getTime()+7*864e5);
+  var masVieja=0;
+  st.items.forEach(function(it){
+    totGral+=it.total;
+    if(it.vencido)totVenc+=it.total;
+    porTramo[_cbzTramo(it.atraso)]+=it.total;
+    porTipo[it.tipo]=(porTipo[it.tipo]||0)+it.total;
+    if(it.vence && !it.vencido){ var f=new Date(String(it.vence).slice(0,10)+"T00:00:00"); if(f<=en7)tot7+=it.total; }
+    if(it.atraso>masVieja)masVieja=it.atraso;
+  });
+  var nClientes=st.grupos.length;
+  var nVencidos=st.grupos.filter(function(g){return g.vencido>0;}).length;
+
+  var h="";
+  h+="<div style='display:flex;justify-content:space-between;align-items:flex-start;gap:.8rem;flex-wrap:wrap;margin-bottom:1rem'>";
+  h+="<div style='font-size:.78rem;color:var(--tx2);max-width:640px;line-height:1.5'>Toda la plata que nos deben, junta: pedidos sin cobrar, cuotas de cuenta corriente y cuotas de financiación con su mora. Un pedido que ya tiene cuotas no se cuenta dos veces.</div>";
+  h+="<div style='display:flex;gap:.4rem'><button class='btn btn-g' onclick='_cbzCargar()' style='font-size:.74rem'>↻ Actualizar</button><button class='btn btn-a' onclick='_cbzExport()' style='font-size:.74rem'>⬇ Exportar Excel</button></div>";
+  h+="</div>";
+
+  h+="<div style='display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:.7rem;margin-bottom:1rem'>";
+  h+=_repKPI("💰 Total a cobrar", fmt(totGral), {color:"var(--acc)", sub:nClientes+" clientes · "+st.items.length+" comprobantes"});
+  h+=_repKPI("🔴 Vencido", fmt(totVenc), {color:totVenc>0?"var(--red)":"var(--green)", sub:nVencidos+" clientes con atraso"});
+  h+=_repKPI("📅 Vence en 7 días", fmt(tot7), {color:"var(--yel)"});
+  h+=_repKPI("⏳ Atraso más viejo", masVieja>0?(masVieja+" días"):"—", {color:masVieja>60?"var(--red)":"var(--tx)"});
+  h+="</div>";
+
+  // Aging + tipos
+  h+="<div style='display:grid;grid-template-columns:repeat(auto-fit,minmax(280px,1fr));gap:.7rem;margin-bottom:1rem'>";
+  h+="<div style='background:var(--sur);border:1px solid var(--bd);border-radius:10px;padding:1rem'>";
+  h+="<div style='font-size:.85rem;font-weight:700;margin-bottom:.7rem'>⏱ Antigüedad de la deuda</div>";
+  if(totGral>0){
+    h+="<div style='display:flex;height:24px;border-radius:7px;overflow:hidden;margin-bottom:.6rem'>";
+    ['aldia','d30','d60','d60mas'].forEach(function(k){
+      if(!porTramo[k])return;
+      h+="<div title='"+_CBZ_TRAMOS[k].n+": "+fmt(porTramo[k])+"' style='width:"+(porTramo[k]/totGral*100).toFixed(2)+"%;background:"+_CBZ_TRAMOS[k].col+"'></div>";
+    });
+    h+="</div>";
+  }
+  h+="<div style='display:flex;gap:.35rem;flex-wrap:wrap'>";
+  ['aldia','d30','d60','d60mas'].forEach(function(k){
+    var t=_CBZ_TRAMOS[k], act=(st.tramo===k);
+    h+="<button onclick='_cbzSet(\"tramo\",\""+(act?'':k)+"\")' style='display:flex;align-items:center;gap:.35rem;border:1px solid "+(act?t.col:'var(--bd)')+";background:"+(act?t.col+'22':'var(--sur2)')+";color:var(--tx);border-radius:999px;padding:.28rem .65rem;font-size:.68rem;cursor:pointer;font-family:inherit'>";
+    h+="<span style='width:8px;height:8px;border-radius:50%;background:"+t.col+";display:inline-block'></span>"+t.n+" <b>"+fmt(porTramo[k])+"</b></button>";
+  });
+  h+="</div></div>";
+  h+="<div style='background:var(--sur);border:1px solid var(--bd);border-radius:10px;padding:1rem'>";
+  h+="<div style='font-size:.85rem;font-weight:700;margin-bottom:.7rem'>🗂 De dónde viene</div>";
+  h+="<div style='display:flex;flex-direction:column;gap:.4rem'>";
+  ['pedido','cc','fin'].forEach(function(k){
+    var t=_CBZ_TIPOS[k], act=(st.tipo===k), val=porTipo[k]||0;
+    var pct=totGral>0?(val/totGral*100):0;
+    h+="<div onclick='_cbzSet(\"tipo\",\""+(act?'':k)+"\")' style='cursor:pointer;padding:.4rem .55rem;border-radius:8px;border:1px solid "+(act?t.col:'transparent')+";background:"+(act?t.col+'18':'var(--sur2)')+"'>";
+    h+="<div style='display:flex;justify-content:space-between;font-size:.74rem'><span>"+t.ico+" "+t.n+"</span><b>"+fmt(val)+"</b></div>";
+    h+="<div style='height:5px;background:var(--bd);border-radius:3px;margin-top:.3rem;overflow:hidden'><div style='height:100%;width:"+pct.toFixed(1)+"%;background:"+t.col+"'></div></div>";
+    h+="</div>";
+  });
+  h+="</div></div>";
+  h+="</div>";
+
+  // Filtros
+  h+="<div style='display:flex;gap:.5rem;flex-wrap:wrap;align-items:center;margin-bottom:.7rem'>";
+  h+="<input type='text' id='_cbzQ' value='"+_admEsc(st.q||'')+"' placeholder='Buscar cliente, teléfono u orden…' oninput='_cbzSet(\"q\",this.value)' style='flex:1;min-width:220px;padding:.45rem .7rem;border:1px solid var(--bd);border-radius:7px;font-size:.82rem;background:var(--sur2);color:var(--tx)'>";
+  h+="<select onchange='_cbzSet(\"vend\",this.value)' style='padding:.45rem .65rem;border:1px solid var(--bd);border-radius:7px;font-size:.78rem;background:var(--sur2);color:var(--tx)'><option value=''>Todos los vendedores</option>";
+  var vends={}; st.items.forEach(function(i){ if(i.vend)vends[i.vend]=1; });
+  Object.keys(vends).forEach(function(v){ h+="<option value='"+v+"'"+(String(st.vend)===String(v)?' selected':'')+">"+_admEsc(_cbzVendNombre(v))+"</option>"; });
+  h+="</select>";
+  if(st.tramo||st.tipo||st.vend||st.q) h+="<button class='btn btn-g' onclick='_cbzLimpiar()' style='font-size:.72rem'>✕ Limpiar filtros</button>";
+  h+="<div style='font-size:.72rem;color:var(--tx3)'>"+lista.length+" de "+st.grupos.length+" clientes</div>";
+  h+="</div>";
+
+  // Tabla
+  function th(txt,k,al){
+    var act=(st.orden===k);
+    return "<th onclick='_cbzOrden(\""+k+"\")' style='padding:.5rem .5rem;text-align:"+(al||'right')+";font-size:.64rem;text-transform:uppercase;letter-spacing:.04em;color:"+(act?'var(--acc)':'var(--tx3)')+";cursor:pointer;white-space:nowrap'>"+txt+(act?(st.dir>0?' ▲':' ▼'):'')+"</th>";
+  }
+  h+="<div style='background:var(--sur);border:1px solid var(--bd);border-radius:10px;overflow:hidden'>";
+  h+="<div style='overflow-x:auto'><table style='width:100%;border-collapse:collapse;min-width:820px'>";
+  h+="<thead><tr style='background:var(--sur2);border-bottom:1px solid var(--bd)'>";
+  h+=th('Cliente','cliente','left')+th('Vendedor','vend','left')+th('Comprobantes','','right')+th('Vencido','vencido')+th('Total','total')+th('Atraso','maxAtraso')+"<th style='width:150px'></th>";
+  h+="</tr></thead><tbody>";
+  if(!lista.length) h+="<tr><td colspan='7' style='padding:2rem;text-align:center;color:var(--tx3);font-style:italic;font-size:.82rem'>No hay deuda con ese filtro 🎉</td></tr>";
+  lista.forEach(function(g){
+    var tr=_CBZ_TRAMOS[_cbzTramo(g.maxAtraso)];
+    h+="<tr style='border-bottom:1px solid var(--bd);font-size:.78rem'>";
+    h+="<td style='padding:.5rem'><div style='font-weight:700;display:flex;align-items:center;gap:.35rem'>"+(g.bloq?"<span title='Cliente bloqueado'>🚫</span>":"")+_admEsc(g.cliente)+"</div>";
+    h+="<div style='font-size:.66rem;color:var(--tx3)'>"+_admEsc(g.tel||'sin teléfono')+(g.ultCom?(" · último contacto "+new Date(g.ultCom).toLocaleDateString('es-AR')):"")+"</div></td>";
+    h+="<td style='padding:.5rem;color:var(--tx3);font-size:.72rem'>"+_admEsc(_cbzVendNombre(g.vend))+"</td>";
+    h+="<td style='padding:.5rem;text-align:right;color:var(--tx3)'>"+g.items.length+"</td>";
+    h+="<td style='padding:.5rem;text-align:right;color:"+(g.vencido>0?'var(--red)':'var(--tx3)')+";font-weight:"+(g.vencido>0?'700':'400')+"'>"+(g.vencido>0?fmt(g.vencido):'—')+"</td>";
+    h+="<td style='padding:.5rem;text-align:right;font-weight:800;color:var(--acc)'>"+fmt(g.total)+"</td>";
+    h+="<td style='padding:.5rem;text-align:right'><span style='background:"+tr.col+"1f;color:"+tr.col+";border-radius:999px;padding:.15rem .5rem;font-size:.66rem;font-weight:700'>"+(g.maxAtraso>0?(g.maxAtraso+"d"):"al día")+"</span></td>";
+    h+="<td style='padding:.5rem;text-align:right;white-space:nowrap'>";
+    h+="<button class='btn btn-g' onclick='_cbzFicha(\""+g.key+"\")' style='font-size:.68rem;padding:.28rem .55rem'>Ver detalle</button>";
+    if(g.tel)h+=" <button class='btn btn-g' onclick='_cbzWhats(\""+g.key+"\")' style='font-size:.68rem;padding:.28rem .55rem;color:#25d366;border-color:#25d366'>WhatsApp</button>";
+    h+="</td></tr>";
+  });
+  h+="</tbody></table></div></div>";
+
+  cont.innerHTML=h;
+  if(typeof _cbzSetBadge==='function')_cbzSetBadge(st.items.filter(function(i){return i.vencido;}).length);
+  var inp=document.getElementById('_cbzQ');
+  if(inp && st.q){ try{ inp.focus(); inp.setSelectionRange(inp.value.length,inp.value.length); }catch(e){} }
+}
+function _cbzLimpiar(){ var st=window._cbz; if(!st)return; st.q='';st.vend='';st.tipo='';st.tramo=''; _cbzRender(); }
+
+// Chapita roja en el menú con la cantidad de clientes con deuda vencida.
+function _cbzSetBadge(n){
+  var b=document.getElementById('cbzMenuBadge'); if(!b)return;
+  if(n>0){ b.textContent=n>99?'99+':String(n); b.style.display='inline-flex'; }
+  else { b.style.display='none'; }
+  try{ localStorage.setItem('cbzVencidosCount', String(n)); }catch(e){}
+}
+// Consulta liviana al arrancar: sólo lo vencido, sin traer todo el detalle.
+function _cbzChequeoRapido(){
+  var hoy=new Date().toISOString().slice(0,10);
+  Promise.all([
+    apiGet("cc_cuotas","select=pedido_id,monto,monto_pagado,recargo_mora,fecha_vencimiento&estado=in.(pendiente,parcial,vencida)&fecha_vencimiento=lt."+hoy+"&limit=3000").catch(function(){return [];}),
+    apiGet("financiacion_cuotas","select=financiacion_id,monto,pagada_monto,vencimiento&pagada=is.false&vencimiento=lt."+hoy+"&limit=3000").catch(function(){return [];})
+  ]).then(function(d){
+    var n=(d[0]||[]).length+(d[1]||[]).length;
+    _cbzSetBadge(n);
+  }).catch(function(){});
+}
+try{ setTimeout(function(){
+  try{ var n=parseInt(localStorage.getItem('cbzVencidosCount')||'0')||0; _cbzSetBadge(n); }catch(e){}
+  if(typeof _cbzChequeoRapido==='function')_cbzChequeoRapido();
+},2200); }catch(e){}
+
+function _cbzGrupo(key){ var st=window._cbz; if(!st)return null; return st.grupos.filter(function(g){return g.key===key;})[0]||null; }
+
+function _cbzFicha(key){
+  var g=_cbzGrupo(key); if(!g)return;
+  var old=document.getElementById('_cbzModal'); if(old)old.remove();
+  var mo=document.createElement('div'); mo.id='_cbzModal';
+  mo.style.cssText='position:fixed;inset:0;z-index:99998;background:rgba(0,0,0,.62);display:flex;align-items:center;justify-content:center;padding:1rem';
+  mo.onclick=function(e){ if(e.target===mo)mo.remove(); };
+  var h="<div style='background:var(--sur);border:1px solid var(--bd);border-radius:14px;max-width:820px;width:100%;max-height:90vh;display:flex;flex-direction:column;overflow:hidden' onclick='event.stopPropagation()'>";
+  h+="<div style='padding:1rem 1.1rem;border-bottom:1px solid var(--bd);display:flex;justify-content:space-between;align-items:flex-start;gap:.6rem'>";
+  h+="<div><div style='font-size:1.05rem;font-weight:700'>"+_admEsc(g.cliente)+"</div>";
+  h+="<div style='font-size:.72rem;color:var(--tx3);margin-top:.15rem'>"+_admEsc(g.tel||'sin teléfono')+" · "+_admEsc(_cbzVendNombre(g.vend))+"</div></div>";
+  h+="<button class='btn btn-g' onclick=\"document.getElementById('_cbzModal').remove()\" style='font-size:1rem;padding:.2rem .6rem'>&times;</button>";
+  h+="</div>";
+  h+="<div style='padding:.8rem 1.1rem;background:var(--sur2);display:grid;grid-template-columns:repeat(auto-fit,minmax(130px,1fr));gap:.6rem'>";
+  h+="<div><div style='font-size:.62rem;color:var(--tx3);text-transform:uppercase'>Debe en total</div><div style='font-size:1.15rem;font-weight:800;color:var(--acc)'>"+fmt(g.total)+"</div></div>";
+  h+="<div><div style='font-size:.62rem;color:var(--tx3);text-transform:uppercase'>Vencido</div><div style='font-size:1.15rem;font-weight:800;color:"+(g.vencido>0?'var(--red)':'var(--tx3)')+"'>"+fmt(g.vencido)+"</div></div>";
+  h+="<div><div style='font-size:.62rem;color:var(--tx3);text-transform:uppercase'>Atraso mayor</div><div style='font-size:1.15rem;font-weight:800'>"+(g.maxAtraso>0?(g.maxAtraso+" días"):"—")+"</div></div>";
+  h+="<div><div style='font-size:.62rem;color:var(--tx3);text-transform:uppercase'>Comprobantes</div><div style='font-size:1.15rem;font-weight:800'>"+g.items.length+"</div></div>";
+  h+="</div>";
+  h+="<div style='flex:1;overflow-y:auto;padding:.8rem 1.1rem'>";
+  g.items.forEach(function(it){
+    var t=_CBZ_TIPOS[it.tipo], tr=_CBZ_TRAMOS[_cbzTramo(it.atraso)];
+    h+="<div style='border:1px solid var(--bd);border-left:3px solid "+t.col+";border-radius:9px;padding:.6rem .75rem;margin-bottom:.5rem;background:var(--sur2)'>";
+    h+="<div style='display:flex;justify-content:space-between;gap:.6rem;flex-wrap:wrap'>";
+    h+="<div style='min-width:0'><div style='font-size:.8rem;font-weight:700'>"+t.ico+" "+_admEsc(it.ref)+"</div>";
+    h+="<div style='font-size:.68rem;color:var(--tx3);margin-top:.1rem'>"+_admEsc(it.detalle)+"</div>";
+    h+="<div style='font-size:.66rem;color:var(--tx3);margin-top:.15rem'>";
+    if(it.vence) h+="Vence "+new Date(String(it.vence).slice(0,10)+"T00:00:00").toLocaleDateString('es-AR');
+    else h+="Sin fecha de vencimiento";
+    if(it.desde) h+=" · del "+new Date(it.desde).toLocaleDateString('es-AR');
+    h+="</div></div>";
+    h+="<div style='text-align:right;flex-shrink:0'><div style='font-size:1rem;font-weight:800;color:var(--acc)'>"+fmt(it.total)+"</div>";
+    h+="<div style='margin-top:.2rem'><span style='background:"+tr.col+"1f;color:"+tr.col+";border-radius:999px;padding:.12rem .5rem;font-size:.64rem;font-weight:700'>"+(it.atraso>0?("vencida hace "+it.atraso+"d"):(it.vence?"al día":"sin plazo"))+"</span></div></div>";
+    h+="</div>";
+    if(it.pedidoId) h+="<div style='margin-top:.45rem'><button class='btn btn-g' onclick='_cbzVerPedido("+it.pedidoId+")' style='font-size:.65rem;padding:.22rem .5rem'>Ver el pedido</button></div>";
+    h+="</div>";
+  });
+  h+="</div>";
+  h+="<div style='padding:.8rem 1.1rem;border-top:1px solid var(--bd);display:flex;gap:.5rem;flex-wrap:wrap'>";
+  if(g.tel)h+="<button class='btn btn-a' onclick='_cbzWhats(\""+g.key+"\")' style='flex:1;min-width:160px;font-size:.8rem'>Mandar WhatsApp de cobro</button>";
+  h+="<button class='btn btn-g' onclick='_cbzCopiar(\""+g.key+"\")' style='font-size:.8rem'>Copiar resumen</button>";
+  h+="</div></div>";
+  mo.innerHTML=h;
+  document.body.appendChild(mo);
+}
+function _cbzVerPedido(id){
+  var m=document.getElementById('_cbzModal'); if(m)m.remove();
+  try{
+    var sb=document.querySelector(".sb-item[onclick*=\"navTo('pedidos'\"]");
+    navTo('pedidos', sb);
+    setTimeout(function(){
+      var inp=document.getElementById('pedSrch');
+      var st=window._cbz;
+      var ref=null;
+      if(st){ var it=st.items.filter(function(x){return x.pedidoId===id;})[0]; if(it)ref=String(it.ref).split(' · ')[0]; }
+      if(inp && ref){ inp.value=ref; if(typeof renderPedidos==='function')renderPedidos(); }
+    },300);
+  }catch(e){ console.error('[cbz verPedido]',e); }
+}
+function _cbzMensaje(g){
+  var l=[];
+  l.push("Hola "+(g.cliente||'')+"! Te paso el resumen de tu cuenta con Distribuidora Belle:");
+  l.push("");
+  g.items.forEach(function(it){
+    var t=_CBZ_TIPOS[it.tipo];
+    var linea="• "+it.ref+": "+fmt(it.total);
+    if(it.vence) linea+=" (vence "+new Date(String(it.vence).slice(0,10)+"T00:00:00").toLocaleDateString('es-AR')+(it.atraso>0?", vencida hace "+it.atraso+" días":"")+")";
+    l.push(linea);
+  });
+  l.push("");
+  l.push("Total: "+fmt(g.total));
+  if(g.vencido>0) l.push("Vencido: "+fmt(g.vencido));
+  l.push("");
+  l.push("Cualquier cosa me avisás. Gracias!");
+  return l.join("\n");
+}
+function _cbzWhats(key){
+  var g=_cbzGrupo(key); if(!g)return;
+  if(!g.tel){ toast('Ese cliente no tiene teléfono cargado','twarn'); return; }
+  var tel=String(g.tel).replace(/\D/g,'');
+  if(tel.length===10)tel='549'+tel;
+  else if(tel.length===11 && tel.charAt(0)==='0')tel='549'+tel.slice(1);
+  else if(tel.indexOf('54')!==0)tel='549'+tel;
+  var url="https://wa.me/"+tel+"?text="+encodeURIComponent(_cbzMensaje(g));
+  try{ window.open(url,'_blank','noopener'); }catch(e){}
+  if(g.cid){
+    apiPost('cobranza_comunicaciones',{cliente_id:g.cid, canal:'whatsapp', tipo:'recordatorio',
+      mensaje:'Resumen de cuenta por '+fmt(g.total), estado:'enviado', usuario:'admin'}).catch(function(){});
+    g.ultCom=new Date().toISOString();
+  }
+  toast('WhatsApp abierto y contacto registrado','tok');
+}
+function _cbzCopiar(key){
+  var g=_cbzGrupo(key); if(!g)return;
+  var txt=_cbzMensaje(g);
+  try{
+    navigator.clipboard.writeText(txt).then(function(){ toast('Resumen copiado','tok'); },
+                                            function(){ toast('No se pudo copiar','twarn'); });
+  }catch(e){ toast('No se pudo copiar','twarn'); }
+}
+
+function _cbzExport(){
+  var st=window._cbz; if(!st){ toast('Todavía no cargó','twarn'); return; }
+  var lista=_cbzFiltrados();
+  if(!lista.length){ toast('No hay nada para exportar','twarn'); return; }
+  var doExport=function(){
+    var wb=XLSX.utils.book_new();
+    var r1=[['Cliente','Teléfono','Vendedor','Comprobantes','Vencido','Total','Atraso mayor (días)','Último contacto']];
+    lista.forEach(function(g){
+      r1.push([g.cliente, g.tel||'', _cbzVendNombre(g.vend), g.items.length,
+               Math.round(g.vencido), Math.round(g.total), g.maxAtraso,
+               g.ultCom?new Date(g.ultCom).toLocaleDateString('es-AR'):'']);
+    });
+    var ws1=XLSX.utils.aoa_to_sheet(r1);
+    ws1['!cols']=[{wch:30},{wch:16},{wch:14},{wch:13},{wch:14},{wch:14},{wch:18},{wch:16}];
+    XLSX.utils.book_append_sheet(wb,ws1,'Por cliente');
+
+    var r2=[['Cliente','Origen','Comprobante','Detalle','Vence','Atraso (días)','Mora','Importe']];
+    lista.forEach(function(g){
+      g.items.forEach(function(it){
+        r2.push([g.cliente, (_CBZ_TIPOS[it.tipo]||{}).n||it.tipo, it.ref, it.detalle,
+                 it.vence?String(it.vence).slice(0,10):'', it.atraso, Math.round(it.mora||0), Math.round(it.total)]);
+      });
+    });
+    var ws2=XLSX.utils.aoa_to_sheet(r2);
+    ws2['!cols']=[{wch:30},{wch:18},{wch:32},{wch:34},{wch:12},{wch:13},{wch:12},{wch:14}];
+    XLSX.utils.book_append_sheet(wb,ws2,'Detalle');
+    XLSX.writeFile(wb,'cobranzas_'+new Date().toISOString().slice(0,10)+'.xlsx');
+    toast('Excel descargado 💰','tok');
+  };
+  if(typeof XLSX==='undefined'){
+    toast('Cargando librería de Excel...','tok');
+    var sc=document.createElement('script');
+    sc.src='https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js';
+    sc.onload=doExport; sc.onerror=function(){toast('No se pudo cargar la librería Excel','terr');};
+    document.head.appendChild(sc);
+  } else doExport();
+}
 
 // -- COMBOS -----------------------------------------------------------
 var combosData=[];
@@ -38973,6 +39455,7 @@ function navTo(pg,el){
   if(pg==="historial-ventas")loadHistorialVentas();
   if(pg==="reportes"){_repInit();}
   if(pg==="pedidos")loadPedidos();
+  if(pg==="cobranzas")_cbzCargar();
   if(pg==="movimientos")loadMovimientos();
   if(pg==="avisos-stock")loadAvisosStock();
   if(pg==="auditoria-stock")loadAuditoriaStock();
