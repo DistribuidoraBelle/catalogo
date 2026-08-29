@@ -1708,6 +1708,7 @@ body{
         <button class="btn btn-g _repTab" data-tab="panorama" onclick="_repCambiarTab('panorama')">📈 Panorama</button>
         <button class="btn btn-a _repTab" data-tab="financiero" onclick="_repCambiarTab('financiero')">💰 Financiero</button>
         <button class="btn btn-g _repTab" data-tab="rentabilidad" onclick="_repCambiarTab('rentabilidad')">💎 Rentabilidad</button>
+        <button class="btn btn-g _repTab" data-tab="margenes" onclick="_repCambiarTab('margenes')">📐 Márgenes</button>
         <button class="btn btn-g _repTab" data-tab="compra" onclick="_repCambiarTab('compra')">🛒 Sugerido de compra</button>
         <button class="btn btn-g _repTab" data-tab="bajorend" onclick="_repCambiarTab('bajorend')">🐌 Bajo rendimiento</button>
         <button class="btn btn-g _repTab" data-tab="muertos" onclick="_repCambiarTab('muertos')">💀 Productos muertos</button>
@@ -36600,6 +36601,7 @@ function _repRenderTab(){
   if(tab === "panorama") _repCargarPanorama();
   else if(tab === "financiero") _repCargarFinanciero();
   else if(tab === "rentabilidad") _repCargarRentabilidad();
+  else if(tab === "margenes") _repCargarMargenes();
   else if(tab === "compra") _repCargarCompra();
   else if(tab === "bajorend") _repCargarBajoRend();
   else if(tab === "muertos") _repCargarMuertos();
@@ -37781,6 +37783,306 @@ function _repCompraExport(){
   };
   if(typeof XLSX==='undefined'){
     toast('Cargando librería de Excel...','tok');
+    var sc=document.createElement('script');
+    sc.src='https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js';
+    sc.onload=doExport; sc.onerror=function(){toast('No se pudo cargar la librería Excel','terr');};
+    document.head.appendChild(sc);
+  } else doExport();
+}
+
+// ══════════════════════════════════════════════════════════════════════
+// ══════════════════════════════════════════════════════════════════════
+// REPORTES ▸ MÁRGENES
+// El margen real cruzado por marca, vendedor, segmento y mes, con el costo
+// que corresponde a cada venta (el decan paga su frasquito, el combo suma
+// sus componentes). Y lo más importante: qué se está vendiendo por debajo
+// del costo, que es plata que se pierde sin que nadie la vea.
+// ══════════════════════════════════════════════════════════════════════
+window._repMg = null;
+
+function _repCargarMargenes(){
+  var r=_repCalcRango(window._repPeriodo);
+  Promise.all([
+    apiGetAll("ventas","select=producto_id,producto_nombre,cantidad,total,segmento,vendedor_id,created_at&estado=in.(confirmada,archivada_periodo)&limit=60000").catch(function(){return [];}),
+    apiGet("productos","select=id,nombre,empresa,ml,costo_ind,costo_log&limit=8000").catch(function(){return [];}),
+    apiGet("combos","select=id,nombre,combo_items(producto_id,cantidad,es_decan)&limit=2000").catch(function(){return [];})
+  ]).then(function(d){
+    var ventas=d[0]||[], productos=d[1]||[], combos=d[2]||[];
+    var cotiz=(typeof cotizActual!=="undefined" && cotizActual)?cotizActual:1550;
+    var DECAN_ML=5, PERFUME_ML=100, cpv=0.94*cotiz;
+
+    var pById={}, mapCP={};
+    productos.forEach(function(p){
+      pById[p.id]=p;
+      mapCP[p.id]=((parseFloat(p.costo_ind)||0)+(parseFloat(p.costo_log)||0))*cotiz;
+    });
+    var mapCC={};
+    combos.forEach(function(c){
+      var t=0;
+      (c.combo_items||[]).forEach(function(ci){
+        var cb=mapCP[ci.producto_id]||0, q=parseInt(ci.cantidad)||1;
+        t+= ci.es_decan ? ((cb*DECAN_ML/PERFUME_ML)+cpv)*q : cb*q;
+      });
+      if(c.nombre)mapCC[c.nombre]=t;
+    });
+    function costoUnit(v){
+      var s=String(v.segmento||'').toLowerCase();
+      if(s==='combo'){
+        var nl=String(v.producto_nombre||'').replace(/^Combo:\s*/i,'').trim();
+        return mapCC[nl]||mapCC[v.producto_nombre]||0;
+      }
+      var cb=mapCP[v.producto_id]||0;
+      if(s==='decan'){
+        var p=pById[v.producto_id];
+        var ml=(p&&parseFloat(p.ml))||PERFUME_ML;
+        return (cb*DECAN_ML/(ml||PERFUME_ML))+cpv;
+      }
+      return cb;
+    }
+
+    // filas normalizadas (solo ventas con plata real)
+    var filas=[];
+    ventas.forEach(function(v){
+      var tot=parseFloat(v.total)||0;
+      if(tot<=0)return;
+      var q=parseInt(v.cantidad)||0; if(q<=0)return;
+      var cu=costoUnit(v), costo=cu*q;
+      var p=pById[v.producto_id];
+      filas.push({
+        pid:v.producto_id||null, nombre:v.producto_nombre||(p?p.nombre:'')||'—',
+        marca:(p&&p.empresa)||'Sin marca',
+        seg:_normalizarSegmento(v.segmento), vend:v.vendedor_id||null,
+        fecha:v.created_at, mes:String(v.created_at||'').slice(0,7),
+        q:q, fact:tot, costo:costo, gan:tot-costo, cu:cu, pu:tot/q
+      });
+    });
+    var enRango=filas.filter(function(f){
+      var t=new Date(f.fecha).getTime();
+      return t>=r.desde.getTime() && t<r.hasta.getTime();
+    });
+    window._repMg={ filas:filas, enRango:enRango, cotiz:cotiz, orden:'gan', dir:-1, dim:'marca' };
+    _repMgRender();
+  }).catch(function(e){
+    console.error("[belle] _repCargarMargenes error:", e);
+    var el=document.getElementById("_repContenido");
+    if(el)el.innerHTML="<div style='color:var(--red);padding:2rem;text-align:center'>Error al calcular márgenes</div>";
+  });
+}
+function _repMgSet(k,v){ var st=window._repMg; if(!st)return; st[k]=v; _repMgRender(); }
+function _repMgOrden(o){ var st=window._repMg; if(!st)return; if(st.orden===o)st.dir=-st.dir; else {st.orden=o;st.dir=-1;} _repMgRender(); }
+
+function _repMgAgrupar(filas, keyFn){
+  var m={};
+  filas.forEach(function(f){
+    var k=keyFn(f)||'—';
+    if(!m[k])m[k]={k:k,q:0,fact:0,costo:0,gan:0,n:0};
+    var g=m[k]; g.q+=f.q; g.fact+=f.fact; g.costo+=f.costo; g.gan+=f.gan; g.n++;
+  });
+  return Object.keys(m).map(function(k){
+    var g=m[k]; g.margen = g.fact>0 ? (g.gan/g.fact*100) : 0; return g;
+  });
+}
+function _repMgTabla(titulo, sub, grupos, labelFn){
+  var st=window._repMg;
+  var tot=grupos.reduce(function(a,g){return a+g.fact;},0);
+  grupos=grupos.slice().sort(function(a,b){
+    var o=st.orden;
+    if(o==='k') return st.dir*String(a.k).localeCompare(String(b.k));
+    return st.dir*((a[o]||0)-(b[o]||0));
+  });
+  var maxGan=0; grupos.forEach(function(g){ if(Math.abs(g.gan)>maxGan)maxGan=Math.abs(g.gan); });
+  var h="<div style='background:var(--sur);border:1px solid var(--bd);border-radius:10px;padding:1rem;margin-bottom:1rem'>";
+  h+="<div style='font-size:.85rem;font-weight:700'>"+titulo+"</div>";
+  if(sub)h+="<div style='font-size:.68rem;color:var(--tx3);margin:.1rem 0 .7rem'>"+sub+"</div>";
+  h+="<div style='overflow-x:auto'><table style='width:100%;border-collapse:collapse;min-width:640px'>";
+  h+="<thead><tr style='border-bottom:1px solid var(--bd)'>";
+  [['','k','left'],['Unid.','q'],['Facturado','fact'],['Costo','costo'],['Ganancia','gan'],['Margen','margen'],['',null]].forEach(function(c){
+    if(!c[1] && c[1]!==null){ }
+    var act=(st.orden===c[1]);
+    var clic=c[1]?(" onclick='_repMgOrden(\""+c[1]+"\")' style='cursor:pointer;"):" style='";
+    h+="<th"+clic+"padding:.42rem .4rem;text-align:"+(c[2]||'right')+";font-size:.62rem;text-transform:uppercase;letter-spacing:.04em;color:"+(act?'var(--acc)':'var(--tx3)')+";white-space:nowrap'>"+c[0]+(act?(st.dir>0?' ▲':' ▼'):'')+"</th>";
+  });
+  h+="</tr></thead><tbody>";
+  grupos.forEach(function(g){
+    // Sin costo cargado el margen da 100% y engaña: lo marcamos en vez de festejarlo.
+    var sinCosto = (g.costo<=0 && g.fact>0);
+    var col = sinCosto?'var(--tx3)':(g.margen<0?'var(--red)':(g.margen<15?'var(--yel)':'var(--green)'));
+    var w = maxGan>0 ? Math.abs(g.gan)/maxGan*100 : 0;
+    h+="<tr style='border-bottom:1px solid var(--bd);font-size:.77rem'>";
+    h+="<td style='padding:.42rem .4rem'>"+_admEsc(labelFn?labelFn(g.k):g.k)+"<div style='font-size:.62rem;color:var(--tx3)'>"+g.n+" ventas</div></td>";
+    h+="<td style='padding:.42rem .4rem;text-align:right;color:var(--tx3)'>"+_repMiles(g.q)+"</td>";
+    h+="<td style='padding:.42rem .4rem;text-align:right'>"+fmt(g.fact)+"</td>";
+    h+="<td style='padding:.42rem .4rem;text-align:right;color:var(--tx3)'>"+(sinCosto?"<span title='No tiene costo cargado, así que el margen no es real'>sin costo ⚠</span>":fmt(g.costo))+"</td>";
+    h+="<td style='padding:.42rem .4rem;text-align:right;font-weight:700;color:"+col+"'>"+fmt(g.gan)+"</td>";
+    h+="<td style='padding:.42rem .4rem;text-align:right;font-weight:700;color:"+col+"'>"+(sinCosto?"—":(g.margen.toFixed(1)+"%"))+"</td>";
+    h+="<td style='padding:.42rem .4rem;width:110px'><div style='height:7px;background:var(--sur2);border-radius:4px;overflow:hidden'><div style='height:100%;width:"+w.toFixed(1)+"%;background:"+col+"'></div></div></td>";
+    h+="</tr>";
+  });
+  h+="</tbody></table></div></div>";
+  return h;
+}
+
+function _repMgRender(){
+  var st=window._repMg; if(!st)return;
+  var el=document.getElementById("_repContenido"); if(!el)return;
+  var f=st.enRango;
+
+  var fact=0, costo=0, gan=0, unid=0;
+  f.forEach(function(x){ fact+=x.fact; costo+=x.costo; gan+=x.gan; unid+=x.q; });
+  var margen = fact>0 ? gan/fact*100 : 0;
+
+  // ── lo que se vendió por debajo del costo ──
+  var bajoCosto={};
+  f.forEach(function(x){
+    if(x.gan>=0 || x.cu<=0)return;
+    var k=x.pid||x.nombre;
+    if(!bajoCosto[k])bajoCosto[k]={nombre:x.nombre, marca:x.marca, q:0, perdida:0, seg:{}, pu:x.pu, cu:x.cu};
+    var b=bajoCosto[k];
+    b.q+=x.q; b.perdida+=Math.abs(x.gan); b.seg[x.seg]=1;
+    if(x.pu<b.pu)b.pu=x.pu;
+  });
+  var bcList=Object.keys(bajoCosto).map(function(k){return bajoCosto[k];}).sort(function(a,b){return b.perdida-a.perdida;});
+  var perdidaTot=bcList.reduce(function(a,b){return a+b.perdida;},0);
+
+  var h="";
+  h+=_repHeaderSeccion("📐 Márgenes", "margenes");
+  h+="<div style='font-size:.72rem;color:var(--tx3);margin:-.6rem 0 1rem;line-height:1.5'>Cada venta con el costo que le corresponde: el decan paga su frasquito y el prorrateo de mililitros, el combo suma sus componentes. Las cruces de abajo usan el período elegido arriba; la evolución mensual va siempre sobre todo el historial.</div>";
+
+  var factSinCosto=0; f.forEach(function(x){ if(x.cu<=0)factSinCosto+=x.fact; });
+  h+="<div style='display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:.7rem;margin-bottom:1rem'>";
+  h+=_repKPI("💵 Facturado", fmt(fact), {sub:_repMiles(unid)+" unidades · "+f.length+" ventas"});
+  h+=_repKPI("📦 Costo de la mercadería", fmt(costo), {color:"var(--tx3)"});
+  h+=_repKPI("💎 Ganancia bruta", fmt(gan), {color:gan>=0?"var(--green)":"var(--red)"});
+  h+=_repKPI("📊 Margen", margen.toFixed(1)+"%", {color:margen<15?"var(--yel)":"var(--green)", sub:"sobre lo facturado"});
+  h+="</div>";
+
+  if(factSinCosto>0){
+    h+=_repAlerta("yel","📋","Hay "+fmt(factSinCosto)+" facturados sin costo cargado",
+      "Esos productos no tienen costo en la ficha, así que su margen aparece como 100% y no es real. Cargales el costo en Stock y Precios para que este informe cierre.");
+    h+="<div style='height:.7rem'></div>";
+  }
+  if(bcList.length){
+    h+=_repAlerta("red","⚠️","Hay "+bcList.length+" producto"+(bcList.length===1?'':'s')+" que se vendió por debajo del costo",
+      "En este período se perdieron <b>"+fmt(perdidaTot)+"</b> vendiendo abajo del costo. Suele pasar cuando sube el costo del proveedor o la cotización y el precio de venta queda viejo.");
+    h+="<div style='background:var(--sur);border:1px solid var(--bd);border-radius:10px;padding:1rem;margin:.7rem 0 1rem'>";
+    h+="<div style='font-size:.85rem;font-weight:700;margin-bottom:.7rem'>🩸 Vendido por debajo del costo</div>";
+    h+="<div style='overflow-x:auto'><table style='width:100%;border-collapse:collapse;min-width:620px'>";
+    h+="<thead><tr style='border-bottom:1px solid var(--bd)'>";
+    ['Perfume','Marca','Unid.','Precio más bajo','Costo','Pérdida'].forEach(function(t,i){
+      h+="<th style='padding:.42rem .4rem;text-align:"+(i<2?'left':'right')+";font-size:.62rem;text-transform:uppercase;color:var(--tx3)'>"+t+"</th>";
+    });
+    h+="</tr></thead><tbody>";
+    bcList.slice(0,25).forEach(function(b){
+      h+="<tr style='border-bottom:1px solid var(--bd);font-size:.77rem'>";
+      h+="<td style='padding:.42rem .4rem;max-width:260px'><div style='overflow:hidden;text-overflow:ellipsis;white-space:nowrap'>"+_admEsc(b.nombre)+"</div><div style='font-size:.62rem;color:var(--tx3)'>"+Object.keys(b.seg).map(function(s){return _labelSegmento(s);}).join(', ')+"</div></td>";
+      h+="<td style='padding:.42rem .4rem;color:var(--tx3);font-size:.72rem'>"+_admEsc(b.marca)+"</td>";
+      h+="<td style='padding:.42rem .4rem;text-align:right'>"+b.q+"</td>";
+      h+="<td style='padding:.42rem .4rem;text-align:right'>"+fmt(b.pu)+"</td>";
+      h+="<td style='padding:.42rem .4rem;text-align:right;color:var(--tx3)'>"+fmt(b.cu)+"</td>";
+      h+="<td style='padding:.42rem .4rem;text-align:right;font-weight:800;color:var(--red)'>-"+fmt(b.perdida)+"</td>";
+      h+="</tr>";
+    });
+    h+="</tbody></table></div>";
+    if(bcList.length>25)h+="<div style='text-align:center;color:var(--tx3);font-size:.7rem;margin-top:.4rem'>Y "+(bcList.length-25)+" más</div>";
+    h+="</div>";
+  } else {
+    h+=_repAlerta("green","✅","Ningún producto se vendió por debajo del costo","En este período todo se vendió por arriba de lo que costó. Bien ahí.");
+    h+="<div style='height:1rem'></div>";
+  }
+
+  // ── evolución mensual del margen (todo el historial) ──
+  var meses=_repMgAgrupar(st.filas, function(x){ return x.mes; }).sort(function(a,b){ return a.k<b.k?-1:1; }).slice(-12);
+  if(meses.length>1){
+    var labels=meses.map(function(m){ var p=m.k.split('-'); return new Date(p[0],parseInt(p[1])-1,1).toLocaleDateString('es-AR',{month:'short',year:'2-digit'}); });
+    h+="<div style='background:var(--sur);border:1px solid var(--bd);border-radius:10px;padding:1rem;margin-bottom:1rem'>";
+    h+="<div style='font-size:.85rem;font-weight:700;margin-bottom:.2rem'>📅 Mes a mes</div>";
+    h+="<div style='font-size:.68rem;color:var(--tx3);margin-bottom:.7rem'>Facturación y ganancia de cada mes, con el margen resultante.</div>";
+    h+=_repChartMulti(labels,
+      [{nombre:"Facturado",color:"#c9963a",datos:meses.map(function(m){return m.fact;})},
+       {nombre:"Ganancia",color:"#4caf82",datos:meses.map(function(m){return m.gan;})}],
+      [{nombre:"Margen %",color:"#5a9fd4",fmt:"pct",datos:meses.map(function(m){return m.margen;})}]);
+    h+="<div style='overflow-x:auto;margin-top:.8rem'><table style='width:100%;border-collapse:collapse;min-width:520px'>";
+    h+="<thead><tr style='border-bottom:1px solid var(--bd)'>";
+    ['Mes','Unid.','Facturado','Costo','Ganancia','Margen'].forEach(function(t,i){
+      h+="<th style='padding:.4rem;text-align:"+(i===0?'left':'right')+";font-size:.62rem;text-transform:uppercase;color:var(--tx3)'>"+t+"</th>";
+    });
+    h+="</tr></thead><tbody>";
+    meses.slice().reverse().forEach(function(m,i){
+      var col=m.margen<0?'var(--red)':(m.margen<15?'var(--yel)':'var(--green)');
+      h+="<tr style='border-bottom:1px solid var(--bd);font-size:.77rem'>";
+      h+="<td style='padding:.4rem'>"+labels[meses.length-1-i]+"</td>";
+      h+="<td style='padding:.4rem;text-align:right;color:var(--tx3)'>"+_repMiles(m.q)+"</td>";
+      h+="<td style='padding:.4rem;text-align:right'>"+fmt(m.fact)+"</td>";
+      h+="<td style='padding:.4rem;text-align:right;color:var(--tx3)'>"+fmt(m.costo)+"</td>";
+      h+="<td style='padding:.4rem;text-align:right;font-weight:700;color:"+col+"'>"+fmt(m.gan)+"</td>";
+      h+="<td style='padding:.4rem;text-align:right;font-weight:700;color:"+col+"'>"+m.margen.toFixed(1)+"%</td>";
+      h+="</tr>";
+    });
+    h+="</tbody></table></div></div>";
+  }
+
+  // ── cruces ──
+  h+=_repMgTabla("🏷 Por marca","Qué marcas dejan plata de verdad, no solo las que más facturan.", _repMgAgrupar(f,function(x){return x.marca;}));
+  h+=_repMgTabla("👥 Por vendedor","Ganancia que generó cada uno con lo que vendió en el período.", _repMgAgrupar(f,function(x){return x.vend;}), function(k){ return _cbzVendNombre(k==='null'?null:k); });
+  h+=_repMgTabla("🧾 Por tipo de venta","Dónde está el margen: mayorista, mediano, minorista, decan o combo.", _repMgAgrupar(f,function(x){return x.seg;}), function(k){ return _labelSegmento(k); });
+  h+=_repMgTabla("💎 Por producto (top 30)","Los 30 que más ganancia dejaron.", _repMgAgrupar(f,function(x){return x.nombre;}).sort(function(a,b){return b.gan-a.gan;}).slice(0,30));
+
+  // ── matriz marca × vendedor ──
+  var vends={}, marcasTop={};
+  f.forEach(function(x){ vends[x.vend]=1; });
+  _repMgAgrupar(f,function(x){return x.marca;}).sort(function(a,b){return b.gan-a.gan;}).slice(0,12).forEach(function(g){ marcasTop[g.k]=1; });
+  var listaV=Object.keys(vends), listaM=Object.keys(marcasTop);
+  if(listaV.length>1 && listaM.length){
+    var cel={};
+    f.forEach(function(x){ if(!marcasTop[x.marca])return; var k=x.marca+'|'+x.vend; cel[k]=(cel[k]||0)+x.gan; });
+    var maxC=0; Object.keys(cel).forEach(function(k){ if(cel[k]>maxC)maxC=cel[k]; });
+    h+="<div style='background:var(--sur);border:1px solid var(--bd);border-radius:10px;padding:1rem;margin-bottom:1rem'>";
+    h+="<div style='font-size:.85rem;font-weight:700;margin-bottom:.2rem'>🔀 Marca × vendedor</div>";
+    h+="<div style='font-size:.68rem;color:var(--tx3);margin-bottom:.7rem'>Ganancia por cruce. Sirve para ver quién le pega mejor a cada marca.</div>";
+    h+="<div style='overflow-x:auto'><table style='width:100%;border-collapse:collapse;min-width:520px'>";
+    h+="<thead><tr style='border-bottom:1px solid var(--bd)'><th style='padding:.4rem;text-align:left;font-size:.62rem;text-transform:uppercase;color:var(--tx3)'>Marca</th>";
+    listaV.forEach(function(v){ h+="<th style='padding:.4rem;text-align:right;font-size:.62rem;text-transform:uppercase;color:var(--tx3)'>"+_admEsc(_cbzVendNombre(v==='null'?null:v))+"</th>"; });
+    h+="</tr></thead><tbody>";
+    listaM.forEach(function(m){
+      h+="<tr style='border-bottom:1px solid var(--bd);font-size:.76rem'><td style='padding:.4rem'>"+_admEsc(m)+"</td>";
+      listaV.forEach(function(v){
+        var val=cel[m+'|'+v]||0;
+        var inten=maxC>0?Math.max(0,Math.min(1,val/maxC)):0;
+        h+="<td style='padding:.4rem;text-align:right;background:rgba(76,175,130,"+(inten*0.35).toFixed(2)+")'>"+(val?fmt(val):'—')+"</td>";
+      });
+      h+="</tr>";
+    });
+    h+="</tbody></table></div></div>";
+  }
+
+  h+="<div style='display:flex;justify-content:flex-end;margin-bottom:1.5rem'><button class='btn btn-a' onclick='_repMgExport()' style='font-size:.78rem'>⬇ Exportar todo a Excel</button></div>";
+
+  el.innerHTML=h;
+}
+
+function _repMgExport(){
+  var st=window._repMg; if(!st){ toast('Todavía no cargó','twarn'); return; }
+  var f=st.enRango;
+  var doExport=function(){
+    var wb=XLSX.utils.book_new();
+    function hoja(nombre, grupos, etiqueta, labelFn){
+      var rows=[[etiqueta,'Ventas','Unidades','Facturado','Costo','Ganancia','Margen %']];
+      grupos.sort(function(a,b){return b.gan-a.gan;}).forEach(function(g){
+        rows.push([labelFn?labelFn(g.k):g.k, g.n, g.q, Math.round(g.fact), Math.round(g.costo), Math.round(g.gan), Math.round(g.margen*10)/10]);
+      });
+      var ws=XLSX.utils.aoa_to_sheet(rows);
+      ws['!cols']=[{wch:34},{wch:9},{wch:11},{wch:14},{wch:14},{wch:14},{wch:11}];
+      XLSX.utils.book_append_sheet(wb,ws,nombre);
+    }
+    hoja('Por marca', _repMgAgrupar(f,function(x){return x.marca;}), 'Marca');
+    hoja('Por vendedor', _repMgAgrupar(f,function(x){return x.vend;}), 'Vendedor', function(k){return _cbzVendNombre(k==='null'?null:k);});
+    hoja('Por tipo de venta', _repMgAgrupar(f,function(x){return x.seg;}), 'Tipo', function(k){return _labelSegmento(k);});
+    hoja('Por producto', _repMgAgrupar(f,function(x){return x.nombre;}), 'Perfume');
+    hoja('Mes a mes', _repMgAgrupar(st.filas,function(x){return x.mes;}), 'Mes');
+    XLSX.writeFile(wb,'margenes_'+new Date().toISOString().slice(0,10)+'.xlsx');
+    toast('Excel descargado 📐','tok');
+  };
+  if(typeof XLSX==='undefined'){
     var sc=document.createElement('script');
     sc.src='https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js';
     sc.onload=doExport; sc.onerror=function(){toast('No se pudo cargar la librería Excel','terr');};
