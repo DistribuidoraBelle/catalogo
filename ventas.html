@@ -3348,6 +3348,7 @@ function _renderClientesVend(pg){
       {key:"mios",label:"Mis clientes",count:cMios},
       {key:"sinasignar",label:"Sin asignar",count:cSin},
       {key:"favoritos",label:"❤️ Favoritos",count:cFavs},
+      {key:"dormidos",label:"😴 Dormidos",count:0},
       {key:"todos",label:"Todos",count:cTodos}
     ];
     chips.forEach(function(ch){
@@ -3355,6 +3356,16 @@ function _renderClientesVend(pg){
       html+="<button onclick='_vcCambiarVista(\""+ch.key+"\")' style='font-size:.72rem;padding:.3rem .7rem;border-radius:18px;cursor:pointer;border:1px solid "+(act?"var(--acc)":"var(--bd)")+";background:"+(act?"var(--acc)":"var(--sur2)")+";color:"+(act?"#fff":"var(--tx2)")+";font-weight:"+(act?"600":"400")+"'>"+ch.label+(ch.count?" <span style=\"margin-left:.2rem;font-size:.62rem;background:rgba(255,255,255,.25);border-radius:8px;padding:0 .3rem\">"+ch.count+"</span>":"")+"</button>";
     });
     html+="</div>";
+
+    // 😴 Vista "Dormidos": tiene su propio tablero
+    if(vista==="dormidos"){
+      html+="<div id='_cdBody'><div style='text-align:center;padding:2rem;color:var(--tx3)'>Mirando quién dejó de comprar...</div></div>";
+      html+="</div>";
+      pg.innerHTML=html;
+      pg._busq=q;
+      _cdVistaPC();
+      return;
+    }
 
     // Buscador + botón crear cliente
     var qEsc=String(q||"").replace(/'/g,"&#39;").replace(/"/g,"&quot;");
@@ -13422,6 +13433,456 @@ function _vcbzBadgeHome(){
 
 
 // ══════════════════════════════════════════════════════════════════════
+// 😴 CLIENTES DORMIDOS — los que compraban y dejaron de comprar
+// No alcanza con "hace 60 días que no compra": cada cliente tiene su
+// ritmo. El que compraba cada 15 días y hace 70 que no aparece está
+// mucho peor que el que compra cada 90. Acá se ve las dos cosas.
+// ══════════════════════════════════════════════════════════════════════
+window._cd = null;
+
+function _cdEsc(s){ return String(s==null?'':s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;'); }
+function _cdHoy(){ return new Date().toLocaleDateString('en-CA',{timeZone:'America/Argentina/Buenos_Aires'}); }
+function _cdDias(fechaISO){
+  if(!fechaISO)return null;
+  var a=new Date(String(fechaISO).slice(0,10)+'T12:00:00'), b=new Date(_cdHoy()+'T12:00:00');
+  return Math.round((b-a)/86400000);
+}
+function _cdCfg(){
+  if(!window._cdCfgV)window._cdCfgV={umbral:60, soloMios:true, incNunca:false, orden:'plata', ocultarContactados:true};
+  return window._cdCfgV;
+}
+// Marcados como "ya lo contacté" — por vendedor, en el navegador
+function _cdContKey(){ return '_belle_dormi_cont_'+(typeof VENDEDOR_ID!=='undefined'?VENDEDOR_ID:'0'); }
+function _cdContGet(){ try{ return JSON.parse(localStorage.getItem(_cdContKey())||'{}'); }catch(e){ return {}; } }
+function _cdContSet(m){ try{ localStorage.setItem(_cdContKey(),JSON.stringify(m||{})); }catch(e){} }
+function _cdContDias(id){ var m=_cdContGet(); return m[id]?_cdDias(m[id]):null; }
+
+// ── carga y armado de la foto de cada cliente ──
+function _cdCargar(cb){
+  var cfg=_cdCfg();
+  var clis=Array.isArray(window._vcData)&&window._vcData.length?Promise.resolve(window._vcData)
+           :apiGet("clientes","select=*&limit=8000").catch(function(){return [];});
+  Promise.all([
+    clis,
+    apiGetAll("pedidos_catalogo","select=id,cliente_id,cliente_nombre,cliente_tel,telefono,total,estado,created_at,vendedor_id&order=created_at.desc&limit=8000").catch(function(){return [];})
+  ]).then(function(d){
+    var clientes=Array.isArray(d[0])?d[0]:[], peds=Array.isArray(d[1])?d[1]:[];
+    window._vcData=clientes;
+    var MALOS={cancelado:1, anulado:1, rechazado:1};
+    var porCli={};
+    peds.forEach(function(p){
+      if(!p.cliente_id)return;
+      if(MALOS[String(p.estado||'').toLowerCase()])return;
+      var k=p.cliente_id;
+      var g=porCli[k]||(porCli[k]={n:0, plata:0, fechas:[], tel:'', vend:null, ids:[]});
+      g.n++; g.plata+=(parseFloat(p.total)||0);
+      g.fechas.push(String(p.created_at).slice(0,10));
+      g.ids.push(p.id);
+      if(!g.tel)g.tel=p.cliente_tel||p.telefono||'';
+      if(g.vend==null && p.vendedor_id)g.vend=p.vendedor_id;
+    });
+
+    var filas=[];
+    clientes.forEach(function(c){
+      var g=porCli[c.id];
+      var nombre=((c.nombre||'')+' '+(c.apellido||'')).trim()||('Cliente #'+c.id);
+      var tel=c.telefono_principal||(g&&g.tel)||'';
+      var vend=c.vendedor_asignado_id||(g&&g.vend)||null;
+      if(!g){
+        // nunca compró — sólo cuenta si ya lleva un tiempo cargado
+        var alta=_cdDias(c.created_at);
+        filas.push({id:c.id, nombre:nombre, tel:tel, vend:vend, clase:'nunca',
+          n:0, plata:0, ticket:0, dias:alta, ritmo:null, atraso:0, ult:null, alta:alta,
+          cc:!!c.cuenta_corriente_habilitada, saldo:parseFloat(c.saldo_cc)||0, top:''});
+        return;
+      }
+      g.fechas.sort();
+      var prim=g.fechas[0], ult=g.fechas[g.fechas.length-1];
+      var dias=_cdDias(ult);
+      // ritmo: promedio de días entre compras (mínimo 7 para que no explote)
+      var ritmo=null;
+      if(g.n>=3){
+        var span=_cdDias(prim)-_cdDias(ult);
+        ritmo=Math.max(7, Math.round(span/(g.n-1)));
+      }
+      var atraso=(ritmo&&ritmo>0)?(dias/ritmo):0;
+      filas.push({id:c.id, nombre:nombre, tel:tel, vend:vend,
+        n:g.n, plata:Math.round(g.plata), ticket:Math.round(g.plata/g.n),
+        dias:dias, ritmo:ritmo, atraso:atraso, ult:ult, prim:prim, pedIds:g.ids,
+        cc:!!c.cuenta_corriente_habilitada, saldo:parseFloat(c.saldo_cc)||0, top:'', clase:''});
+    });
+
+    // clasificar
+    filas.forEach(function(f){
+      if(f.clase==='nunca')return;
+      if(f.dias>=cfg.umbral) f.clase='dormido';
+      else if(f.ritmo && f.atraso>=1.8) f.clase='riesgo';   // se está por dormir según SU ritmo
+      else f.clase='activo';
+    });
+
+    window._cd={filas:filas, cargado:Date.now(), items:{}};
+    if(cb)cb();
+  }).catch(function(e){ console.error('[dormidos]',e); if(cb)cb(e); });
+}
+
+// ── lo que más compraba: se busca sólo para los que se muestran ──
+function _cdCargarTop(ids, cb){
+  var st=window._cd; if(!st||!ids.length){ if(cb)cb(); return; }
+  var faltan=ids.filter(function(i){ return st.items[i]===undefined; });
+  if(!faltan.length){ if(cb)cb(); return; }
+  faltan.forEach(function(i){ st.items[i]=null; }); // marcar pedido en curso
+  apiGet("pedidos_catalogo","select=cliente_id,items&cliente_id=in.("+faltan.slice(0,120).join(',')+")&order=created_at.desc&limit=900")
+  .then(function(rows){
+    rows=Array.isArray(rows)?rows:[];
+    var acum={};
+    rows.forEach(function(p){
+      if(!p.cliente_id||!Array.isArray(p.items))return;
+      var a=acum[p.cliente_id]||(acum[p.cliente_id]={});
+      p.items.forEach(function(it){
+        var nom=String(it&&it.nombre||'').trim(); if(!nom)return;
+        a[nom]=(a[nom]||0)+(parseInt(it.qty)||1);
+      });
+    });
+    Object.keys(acum).forEach(function(cid){
+      var a=acum[cid];
+      var mejor=Object.keys(a).sort(function(x,y){ return a[y]-a[x]; }).slice(0,2);
+      st.items[cid]=mejor.join(' · ');
+    });
+    faltan.forEach(function(i){ if(!st.items[i])st.items[i]=''; });
+    if(cb)cb();
+  }).catch(function(){ faltan.forEach(function(i){ st.items[i]=''; }); if(cb)cb(); });
+}
+
+// ── filtrado y orden ──
+function _cdFiltradas(){
+  var st=window._cd; if(!st)return [];
+  var cfg=_cdCfg();
+  var out=st.filas.filter(function(f){
+    if(cfg.soloMios && String(f.vend||'')!==String(VENDEDOR_ID))return false;
+    if(f.clase==='activo')return false;
+    if(f.clase==='nunca' && !cfg.incNunca)return false;
+    if(f.clase==='nunca' && (f.alta==null || f.alta<30))return false;
+    if(cfg.ocultarContactados){
+      var dc=_cdContDias(f.id);
+      if(dc!=null && dc<14)return false;   // lo contacté hace poco, no lo repito
+    }
+    return true;
+  });
+  var o=cfg.orden;
+  out.sort(function(a,b){
+    if(o==='dias')  return (b.dias||0)-(a.dias||0);
+    if(o==='atraso')return (b.atraso||0)-(a.atraso||0);
+    if(o==='ticket')return (b.ticket||0)-(a.ticket||0);
+    return (b.plata||0)-(a.plata||0);
+  });
+  return out;
+}
+
+// ── RENDER ────────────────────────────────────────────────────────────
+function _cdRender(pg, esApp){
+  var st=window._cd, cfg=_cdCfg();
+  var el=(typeof pg==='string')?document.getElementById(pg):pg;
+  if(!el)return;
+  if(!st){ el.innerHTML="<div style='padding:2rem;text-align:center;color:var(--tx3)'>Cargando clientes dormidos...</div>"; _cdCargar(function(){ _cdRender(pg,esApp); }); return; }
+  window._cdDest=pg; window._cdApp=!!esApp;
+
+  var lista=_cdFiltradas();
+  // buscar lo que más compraban (sólo los primeros que se ven)
+  _cdCargarTop(lista.filter(function(f){return f.n>0;}).slice(0,60).map(function(f){return f.id;}), function(){
+    var e2=(typeof window._cdDest==='string')?document.getElementById(window._cdDest):window._cdDest;
+    if(e2 && e2._cdPintado) _cdPintar(e2, esApp);
+  });
+
+  _cdPintar(el, esApp);
+}
+
+function _cdPintar(el, esApp){
+  var st=window._cd, cfg=_cdCfg();
+  var lista=_cdFiltradas();
+  var dormidos=lista.filter(function(f){return f.clase==='dormido';});
+  var riesgo=lista.filter(function(f){return f.clase==='riesgo';});
+  // los que nunca compraron se cuentan aparte: si no están tildados, no vienen en "lista"
+  var nunca=(st?st.filas:[]).filter(function(f){
+    if(f.clase!=='nunca')return false;
+    if(f.alta==null || f.alta<30)return false;
+    if(cfg.soloMios && String(f.vend||'')!==String(VENDEDOR_ID))return false;
+    return true;
+  });
+  var plataDormida=dormidos.reduce(function(a,f){return a+f.plata;},0);
+  var ticketProm=dormidos.length?Math.round(dormidos.reduce(function(a,f){return a+f.ticket;},0)/dormidos.length):0;
+
+  var h="";
+  h+="<div style='font-size:.78rem;color:var(--tx3);margin-bottom:.8rem;line-height:1.5'>Clientes que compraban y se apagaron. El <b style='color:var(--tx2)'>ritmo</b> es cada cuánto compraba cada uno: si compraba cada 15 días y hace 70 que no aparece, está 4 veces atrasado — ese es el que hay que llamar primero.</div>";
+
+  // KPIs
+  var cards=[
+    {n:dormidos.length, l:'dormidos', c:'#e0a458', s:'+'+cfg.umbral+' días sin comprar'},
+    {n:fmt(plataDormida), l:'dejaron de facturar', c:'#e06464', s:'lo que compraron en total'},
+    {n:riesgo.length, l:'se están durmiendo', c:'#c4965a', s:'atrasados según su ritmo'},
+    {n:fmt(ticketProm), l:'ticket promedio', c:'#4caf80', s:'de los dormidos'}
+  ];
+  h+="<div style='display:grid;grid-template-columns:repeat("+(esApp?'2':'auto-fit,minmax(150px,1fr)')+");gap:.5rem;margin-bottom:.9rem'>";
+  cards.forEach(function(c){
+    h+="<div style='background:var(--sur2,#26221e);border:1px solid var(--bd);border-radius:12px;padding:.65rem .75rem'>"+
+       "<div style='font-size:"+(String(c.n).length>7?'1rem':'1.35rem')+";font-weight:900;color:"+c.c+";line-height:1.1'>"+c.n+"</div>"+
+       "<div style='font-size:.66rem;color:var(--tx2);text-transform:uppercase;letter-spacing:.04em;font-weight:700;margin-top:.1rem'>"+c.l+"</div>"+
+       "<div style='font-size:.62rem;color:var(--tx3);margin-top:.1rem'>"+c.s+"</div></div>";
+  });
+  h+="</div>";
+
+  // controles
+  h+="<div style='background:var(--sur2,#26221e);border:1px solid var(--bd);border-radius:12px;padding:.7rem .8rem;margin-bottom:.9rem'>";
+  h+="<div style='font-size:.66rem;color:var(--tx3);text-transform:uppercase;font-weight:700;margin-bottom:.35rem'>Sin comprar hace más de</div>";
+  h+="<div style='display:flex;gap:.3rem;flex-wrap:wrap;margin-bottom:.6rem'>";
+  [30,45,60,90,120].forEach(function(u){
+    var on=(cfg.umbral===u);
+    h+="<button onclick='_cdSet(\"umbral\","+u+")' style='border:1px solid "+(on?'var(--acc)':'var(--bd)')+";background:"+(on?'var(--acc)':'var(--sur,#1a1714)')+";color:"+(on?'#1a1200':'var(--tx)')+";border-radius:999px;padding:.28rem .7rem;font-size:.74rem;font-weight:700;cursor:pointer;font-family:inherit'>"+u+" días</button>";
+  });
+  h+="</div>";
+  h+="<div style='font-size:.66rem;color:var(--tx3);text-transform:uppercase;font-weight:700;margin-bottom:.35rem'>Ordenar por</div>";
+  h+="<div style='display:flex;gap:.3rem;flex-wrap:wrap;margin-bottom:.6rem'>";
+  [['plata','💰 Lo que compraba'],['atraso','⏱ Más atrasado a su ritmo'],['dias','📅 Días sin comprar'],['ticket','🎟 Ticket promedio']].forEach(function(o){
+    var on=(cfg.orden===o[0]);
+    h+="<button onclick='_cdSet(\"orden\",\""+o[0]+"\")' style='border:1px solid "+(on?'var(--acc)':'var(--bd)')+";background:"+(on?'var(--acc)':'var(--sur,#1a1714)')+";color:"+(on?'#1a1200':'var(--tx)')+";border-radius:999px;padding:.28rem .7rem;font-size:.74rem;font-weight:700;cursor:pointer;font-family:inherit'>"+o[1]+"</button>";
+  });
+  h+="</div>";
+  h+="<div style='display:flex;gap:.9rem;flex-wrap:wrap;font-size:.75rem;color:var(--tx2)'>";
+  h+="<label style='display:flex;align-items:center;gap:.3rem;cursor:pointer'><input type='checkbox' "+(cfg.soloMios?'checked':'')+" onchange='_cdSet(\"soloMios\",this.checked)'> Solo mis clientes</label>";
+  h+="<label style='display:flex;align-items:center;gap:.3rem;cursor:pointer'><input type='checkbox' "+(cfg.incNunca?'checked':'')+" onchange='_cdSet(\"incNunca\",this.checked)'> Sumar los que nunca compraron ("+nunca.length+")</label>";
+  h+="<label style='display:flex;align-items:center;gap:.3rem;cursor:pointer'><input type='checkbox' "+(cfg.ocultarContactados?'checked':'')+" onchange='_cdSet(\"ocultarContactados\",this.checked)'> Esconder los que ya contacté</label>";
+  h+="</div></div>";
+
+  if(!lista.length){
+    h+="<div style='text-align:center;padding:2.5rem 1rem;color:var(--tx3)'><div style='font-size:2.2rem'>🎉</div><div style='font-size:.95rem;font-weight:700;color:var(--tx2);margin-top:.4rem'>Ningún cliente dormido</div><div style='font-size:.78rem;margin-top:.2rem'>Con este filtro te están comprando todos.</div></div>";
+    el.innerHTML=h; el._cdPintado=1; return;
+  }
+
+  // campaña de recuperación
+  var recup=lista.filter(function(f){return f.clase!=='nunca';}).slice(0,20);
+  if(recup.length>=3){
+    h+="<button onclick='_cdCampania()' style='width:100%;background:linear-gradient(135deg,#4a3a6b,#6b5498);color:#fff;border:none;border-radius:14px;padding:.8rem;font-size:.9rem;font-weight:800;cursor:pointer;margin-bottom:.9rem;font-family:inherit'>🗓 Armar campaña de recuperación con los "+recup.length+" primeros</button>";
+  }
+
+  h+="<div style='font-size:.72rem;color:var(--tx3);margin-bottom:.5rem'>"+lista.length+" cliente"+(lista.length>1?'s':'')+" para recuperar</div>";
+
+  lista.slice(0, esApp?60:200).forEach(function(f){ h+=_cdFila(f, esApp); });
+  h+="<div style='height:1.5rem'></div>";
+  el.innerHTML=h; el._cdPintado=1;
+}
+
+function _cdFila(f, esApp){
+  var st=window._cd;
+  var esNunca=(f.clase==='nunca'), esRiesgo=(f.clase==='riesgo');
+  var col=esNunca?'#7a7a8c':(esRiesgo?'#c4965a':(f.atraso>=3?'#e06464':'#e0a458'));
+  var top=(st&&st.items[f.id])||'';
+  var cont=_cdContDias(f.id);
+  var nomJS=String(f.nombre).replace(/'/g,'&#39;').replace(/"/g,'&quot;');
+
+  var h="<div style='background:var(--sur,#1a1714);border:1px solid var(--bd);border-left:4px solid "+col+";border-radius:11px;padding:.75rem .85rem;margin-bottom:.55rem'>";
+  // encabezado
+  h+="<div style='display:flex;justify-content:space-between;align-items:flex-start;gap:.5rem;margin-bottom:.5rem'>";
+  h+="<div style='flex:1;min-width:0'>";
+  h+="<div style='font-size:.92rem;font-weight:800;color:var(--tx)'>"+_cdEsc(f.nombre)+" <span style='font-size:.62rem;color:var(--tx3);font-weight:500'>#"+f.id+"</span>"+
+     (f.cc?" <span style='font-size:.58rem;color:var(--acc);border:1px solid rgba(196,150,90,.4);border-radius:4px;padding:0 .25rem'>💳 CC</span>":"")+"</div>";
+  if(f.tel)h+="<div style='font-size:.7rem;color:var(--tx3);margin-top:.1rem'>📞 "+_cdEsc(f.tel)+"</div>";
+  h+="</div>";
+  if(esNunca)h+="<span style='font-size:.62rem;font-weight:800;color:#9aa;border:1px solid #55555f;border-radius:9px;padding:.15rem .45rem;flex-shrink:0'>NUNCA COMPRÓ</span>";
+  else h+="<span style='font-size:.62rem;font-weight:800;color:"+col+";border:1px solid "+col+";border-radius:9px;padding:.15rem .45rem;flex-shrink:0;white-space:nowrap'>"+f.dias+" días</span>";
+  h+="</div>";
+
+  if(esNunca){
+    h+="<div style='font-size:.74rem;color:var(--tx3);margin-bottom:.55rem'>Está cargado hace "+f.alta+" días y todavía no hizo ningún pedido.</div>";
+  }else{
+    // números
+    h+="<div style='display:grid;grid-template-columns:repeat("+(esApp?'2':'4')+",1fr);gap:.35rem;margin-bottom:.55rem'>";
+    [[fmt(f.plata),'compró en total'],[f.n+(f.n>1?' pedidos':' pedido'),'hizo'],
+     [fmt(f.ticket),'por pedido'],[f.ritmo?('cada '+f.ritmo+'d'):'—','su ritmo']].forEach(function(x){
+      h+="<div style='background:var(--sur2,#26221e);border-radius:7px;padding:.3rem .45rem'>"+
+         "<div style='font-size:.78rem;font-weight:800;color:var(--tx)'>"+x[0]+"</div>"+
+         "<div style='font-size:.58rem;color:var(--tx3);text-transform:uppercase'>"+x[1]+"</div></div>";
+    });
+    h+="</div>";
+    // el dato que manda
+    if(f.ritmo && f.atraso>=1.5){
+      var veces=(Math.round(f.atraso*10)/10);
+      h+="<div style='background:rgba(224,100,100,.1);border:1px solid rgba(224,100,100,.35);border-radius:8px;padding:.4rem .55rem;margin-bottom:.5rem;font-size:.74rem;color:#ffb3b3;font-weight:700'>"+
+         "⏱ Va "+veces+"× atrasado: compraba cada "+f.ritmo+" días y ya lleva "+f.dias+"</div>";
+    }
+    if(top)h+="<div style='font-size:.72rem;color:var(--tx2);margin-bottom:.5rem'>🧴 Lo que más llevaba: <b>"+_cdEsc(top)+"</b></div>";
+    if(f.cc && f.saldo<0)h+="<div style='font-size:.72rem;color:#e06464;margin-bottom:.5rem;font-weight:700'>⚠ Debe "+fmt(Math.abs(f.saldo))+" de cuenta corriente</div>";
+  }
+  if(cont!=null)h+="<div style='font-size:.68rem;color:#4caf80;margin-bottom:.45rem;font-weight:700'>✓ Lo contactaste hace "+(cont===0?'hoy':(cont+' día'+(cont>1?'s':'')))+"</div>";
+
+  // acciones
+  h+="<div style='display:flex;gap:.35rem;flex-wrap:wrap'>";
+  if(f.tel)h+="<button onclick=\"_cdWhats("+f.id+")\" style='background:#25693f;border:none;color:#fff;border-radius:8px;padding:.35rem .7rem;font-size:.74rem;font-weight:700;cursor:pointer;font-family:inherit'>💬 Escribirle</button>";
+  h+="<button onclick=\"_cdAgendar("+f.id+")\" style='background:var(--sur2,#26221e);border:1px solid var(--acc);color:var(--acc);border-radius:8px;padding:.35rem .7rem;font-size:.74rem;font-weight:700;cursor:pointer;font-family:inherit'>🗓 Agendar</button>";
+  h+="<button onclick=\"_cdContactado("+f.id+")\" style='background:var(--sur2,#26221e);border:1px solid var(--bd);color:var(--tx2);border-radius:8px;padding:.35rem .7rem;font-size:.74rem;font-weight:700;cursor:pointer;font-family:inherit'>✓ Ya lo contacté</button>";
+  if(typeof abrirFichaCliente==='function' && !window._cdApp)
+    h+="<button onclick=\"abrirFichaCliente("+f.id+")\" style='background:var(--sur2,#26221e);border:1px solid var(--bd);color:var(--tx2);border-radius:8px;padding:.35rem .7rem;font-size:.74rem;font-weight:700;cursor:pointer;font-family:inherit'>👤 Ficha</button>";
+  if(typeof vcCargarPedido==='function' && !window._cdApp)
+    h+="<button onclick=\"vcCargarPedido("+f.id+",'"+nomJS+"','minorista')\" style='background:var(--sur2,#26221e);border:1px solid var(--bd);color:var(--tx2);border-radius:8px;padding:.35rem .7rem;font-size:.74rem;font-weight:700;cursor:pointer;font-family:inherit'>📦 Cargar pedido</button>";
+  h+="</div></div>";
+  return h;
+}
+
+function _cdSet(k,v){
+  var cfg=_cdCfg();
+  cfg[k]=v;
+  if(k==='umbral'){
+    // reclasificar sin volver a pedir nada al servidor
+    var st=window._cd;
+    if(st)st.filas.forEach(function(f){
+      if(f.clase==='nunca')return;
+      if(f.dias>=v)f.clase='dormido';
+      else if(f.ritmo && f.atraso>=1.8)f.clase='riesgo';
+      else f.clase='activo';
+    });
+  }
+  _cdRefrescar();
+}
+function _cdRefrescar(){
+  var el=(typeof window._cdDest==='string')?document.getElementById(window._cdDest):window._cdDest;
+  if(el)_cdPintar(el, window._cdApp);
+}
+function _cdFila1(id){ var st=window._cd; if(!st)return null; return st.filas.filter(function(f){return f.id===id;})[0]||null; }
+
+function _cdMensaje(f){
+  var st=window._cd, top=(st&&st.items[f.id])||'';
+  var nom=String(f.nombre||'').split(' ')[0];
+  if(f.clase==='nunca')
+    return "¡Hola "+nom+"! 👋 Soy "+(VENDEDOR_NOMBRE||'de Belle')+", de Distribuidora Belle. Te paso el catálogo con lo que tenemos ahora por si querés arrancar con algo. Cualquier cosa que busques, decime y te lo consigo 🌸";
+  var m="¡Hola "+nom+"! 👋 ¿Cómo andás? Soy "+(VENDEDOR_NOMBRE||'de Belle')+", de Distribuidora Belle. Hace un tiempo que no hacés pedido y me acordé de vos.";
+  if(top)m+=" Te llegó a llevar "+top+" — ¿querés que te reponga?";
+  m+=" Tengo novedades y precios nuevos, te paso el catálogo si querés 🌸";
+  return m;
+}
+function _cdWhats(id){
+  var f=_cdFila1(id); if(!f)return;
+  var tel=_vcbzTelNorm(f.tel);
+  if(!tel){ toast('Este cliente no tiene teléfono cargado','twarn'); return; }
+  try{ window.open('https://wa.me/'+tel+'?text='+encodeURIComponent(_cdMensaje(f)),'_blank','noopener'); }catch(e){}
+  _cdContactado(id, true);
+}
+function _cdContactado(id, silencioso){
+  var m=_cdContGet(); m[id]=_cdHoy(); _cdContSet(m);
+  if(!silencioso)toast('Anotado: ya lo contactaste ✓','tok');
+  _cdRefrescar();
+}
+
+// ── agendar el seguimiento (usa la Agenda) ────────────────────────────
+function _cdAgendar(id){
+  var f=_cdFila1(id); if(!f)return;
+  var st=window._cd, top=(st&&st.items[f.id])||'';
+  var manana=_agFechaMas(_cdHoy(),1);
+  var nota=(f.clase==='nunca')
+    ? ('Está cargado hace '+f.alta+' días y nunca compró.')
+    : ('Hace '+f.dias+' días que no compra. Compró '+fmt(f.plata)+' en '+f.n+' pedido'+(f.n>1?'s':'')+
+       (f.ritmo?(' · su ritmo era cada '+f.ritmo+' días'):'')+(top?(' · llevaba '+top):''));
+  apiPost('agenda_eventos',{
+    vendedor_id:VENDEDOR_ID, creado_por:VENDEDOR_ID, creado_por_nombre:VENDEDOR_NOMBRE||'',
+    titulo:'Recuperar a '+f.nombre, nota:nota, tipo:'llamar', color:_agTipo('llamar').col,
+    fecha:manana, hora:'10:00', estado:'pendiente', recordar_min:30, repetir:'no',
+    cliente_id:f.id, cliente_nombre:f.nombre, avisar_a:[]
+  }).then(function(){
+    toast('Lo agendé para mañana a las 10 🗓','tok');
+    _cdContactado(id, true);
+  }).catch(function(e){ console.error('[dormidos agendar]',e); toast('No se pudo agendar','terr'); });
+}
+
+// ── campaña de recuperación: reparte los llamados en los próximos días ──
+function _cdCampania(){
+  var lista=_cdFiltradas().filter(function(f){return f.clase!=='nunca';}).slice(0,20);
+  if(!lista.length){ toast('No hay clientes para la campaña','twarn'); return; }
+  var ex=document.getElementById('_moCdCamp'); if(ex)ex.remove();
+  window._cdCampSel={}; lista.forEach(function(f){ window._cdCampSel[f.id]=true; });
+  var mo=document.createElement('div'); mo.id='_moCdCamp'; mo.className='mo open'; mo.style.zIndex='10050';
+  var h="<div class='md' style='max-width:560px'>";
+  h+="<div class='mh'><div class='mtt'>🗓 Campaña de recuperación</div><button class='btn btn-g' onclick=\"var _m=document.getElementById('_moCdCamp');if(_m)_m.remove()\" style='padding:.2rem .5rem'>X</button></div>";
+  h+="<div class='mb'>";
+  h+="<div style='font-size:.78rem;color:var(--tx3);margin-bottom:.8rem;line-height:1.5'>Te dejo un llamado por cliente en la agenda, repartidos de a poco para que no se te junten todos el mismo día. Sacá de la lista al que no quieras.</div>";
+  h+="<div style='display:flex;gap:.5rem;margin-bottom:.8rem'>"+
+     "<div class='fg' style='flex:1;margin:0'><label>Arrancar</label><input class='fi' id='_cdCampF' type='date' value='"+_agFechaMas(_cdHoy(),1)+"'></div>"+
+     "<div class='fg' style='flex:1;margin:0'><label>Por día</label><select class='fi' id='_cdCampN'><option>3</option><option selected>5</option><option>8</option><option>10</option></select></div>"+
+     "<div class='fg' style='flex:1;margin:0'><label>Desde las</label><input class='fi' id='_cdCampH' type='time' value='10:00'></div></div>";
+  h+="<div id='_cdCampLista' style='max-height:44vh;overflow:auto'>"+_cdCampListaHTML(lista)+"</div>";
+  h+="</div>";
+  h+="<div class='mf'><button class='btn btn-g' onclick=\"var _m=document.getElementById('_moCdCamp');if(_m)_m.remove()\">Cancelar</button>"+
+     "<button class='btn btn-a' id='_cdCampBtn' onclick='_cdCampCrear()'>Poner en la agenda</button></div>";
+  h+="</div>";
+  mo.innerHTML=h;
+  document.body.appendChild(mo);
+}
+function _cdCampListaHTML(lista){
+  return lista.map(function(f){
+    var on=window._cdCampSel[f.id];
+    return "<div id='_cdC"+f.id+"' style='display:flex;align-items:center;gap:.5rem;background:var(--sur2,#26221e);border:1px solid var(--bd);border-radius:9px;padding:.45rem .6rem;margin-bottom:.35rem;opacity:"+(on?'1':'.4')+"'>"+
+      "<div style='flex:1;min-width:0'><div style='font-size:.82rem;font-weight:700;color:var(--tx)'>"+_cdEsc(f.nombre)+"</div>"+
+      "<div style='font-size:.66rem;color:var(--tx3)'>"+f.dias+" días · compró "+fmt(f.plata)+(f.ritmo?(' · ritmo cada '+f.ritmo+'d'):'')+"</div></div>"+
+      "<button onclick='_cdCampTog("+f.id+")' style='background:none;border:1px solid var(--bd);border-radius:7px;width:28px;height:28px;color:"+(on?'#e06464':'var(--tx3)')+";cursor:pointer;font-size:.85rem;flex-shrink:0'>"+(on?'✕':'+')+"</button></div>";
+  }).join('');
+}
+function _cdCampTog(id){
+  window._cdCampSel[id]=!window._cdCampSel[id];
+  var lista=_cdFiltradas().filter(function(f){return f.clase!=='nunca';}).slice(0,20);
+  var c=document.getElementById('_cdCampLista'); if(c)c.innerHTML=_cdCampListaHTML(lista);
+}
+function _cdCampCrear(){
+  var lista=_cdFiltradas().filter(function(f){return f.clase!=='nunca' && window._cdCampSel[f.id];}).slice(0,20);
+  if(!lista.length){ toast('No dejaste ningún cliente','twarn'); return; }
+  var f0=(document.getElementById('_cdCampF')||{value:''}).value||_agFechaMas(_cdHoy(),1);
+  var porDia=parseInt((document.getElementById('_cdCampN')||{value:'5'}).value)||5;
+  var h0=(document.getElementById('_cdCampH')||{value:'10:00'}).value||'10:00';
+  var hh=parseInt(h0.split(':')[0])||10, mm=parseInt(h0.split(':')[1])||0;
+  var btn=document.getElementById('_cdCampBtn'); if(btn){ btn.disabled=true; btn.textContent='Armando...'; }
+  var st=window._cd;
+  var filas=lista.map(function(f,i){
+    var dia=_agFechaMas(f0, Math.floor(i/porDia));
+    var min=mm+(i%porDia)*30;
+    var hora=String(hh+Math.floor(min/60)).padStart(2,'0')+':'+String(min%60).padStart(2,'0');
+    var top=(st&&st.items[f.id])||'';
+    return { vendedor_id:VENDEDOR_ID, creado_por:VENDEDOR_ID, creado_por_nombre:VENDEDOR_NOMBRE||'',
+      titulo:'Recuperar a '+f.nombre, tipo:'llamar', color:_agTipo('llamar').col,
+      nota:'Hace '+f.dias+' días que no compra · compró '+fmt(f.plata)+(f.ritmo?(' · ritmo cada '+f.ritmo+'d'):'')+(top?(' · llevaba '+top):''),
+      fecha:dia, hora:hora, estado:'pendiente', recordar_min:30, repetir:'no',
+      cliente_id:f.id, cliente_nombre:f.nombre, avisar_a:[] };
+  });
+  apiPost('agenda_eventos', filas).then(function(){
+    var m=document.getElementById('_moCdCamp'); if(m)m.remove();
+    var cont=_cdContGet(); filas.forEach(function(x){ cont[x.cliente_id]=_cdHoy(); }); _cdContSet(cont);
+    toast('Listo: '+filas.length+' llamados en tu agenda 🗓','tok');
+    _cdRefrescar();
+  }).catch(function(e){
+    console.error('[campaña recuperación]',e);
+    if(btn){ btn.disabled=false; btn.textContent='Poner en la agenda'; }
+    toast('No se pudo armar la campaña','terr');
+  });
+}
+
+// ── entradas ──────────────────────────────────────────────────────────
+function _cdVistaPC(){
+  // la llama _renderClientesVend cuando la vista elegida es "dormidos"
+  if(window._cd){ _cdRender('_cdBody', false); return; }
+  _cdCargar(function(err){
+    var b=document.getElementById('_cdBody'); if(!b)return;
+    if(err){ b.innerHTML="<div style='color:var(--red);text-align:center;padding:2rem'>No se pudo calcular</div>"; return; }
+    _cdRender('_cdBody', false);
+  });
+}
+function _appVerDormidos(){
+  var el=document.getElementById('appMobileInner'); if(!el)return;
+  window._appScreen='dormidos';
+  el.innerHTML=_appHdr('😴 Dormidos','_appVerDormidos()')+"<div id='_cdBody'><div style='text-align:center;padding:2.5rem;color:var(--tx3)'>Mirando quién dejó de comprar...</div></div>";
+  if(window._cd) _cdRender('_cdBody', true);
+  else _cdCargar(function(err){
+    var b=document.getElementById('_cdBody'); if(!b)return;
+    if(err){ b.innerHTML="<div style='color:var(--red);text-align:center;padding:1.5rem'>No se pudo calcular</div>"; return; }
+    _cdRender('_cdBody', true);
+  });
+}
+
+
+// ══════════════════════════════════════════════════════════════════════
 // 🗓 AGENDA DEL VENDEDOR
 // Un tablero de notitas de colores con el día completo: lo que hay que
 // entregar, cobrar y visitar, más las notas propias. Las que arma el
@@ -14617,7 +15078,7 @@ function _appCliRender(){
   var mios=data.filter(function(c){return c.vendedor_asignado_id===VENDEDOR_ID;});
   var sinasig=data.filter(function(c){return !c.vendedor_asignado_id;});
   var tabs=document.getElementById('_appCliTabs');
-  if(tabs)tabs.innerHTML=_appChip(vista,'mios',"_appCliSetVista('mios')","Míos ("+mios.length+")")+_appChip(vista,'sinasignar',"_appCliSetVista('sinasignar')","Sin asignar ("+sinasig.length+")")+_appChip(vista,'todos',"_appCliSetVista('todos')","Todos");
+  if(tabs)tabs.innerHTML=_appChip(vista,'mios',"_appCliSetVista('mios')","Míos ("+mios.length+")")+_appChip(vista,'sinasignar',"_appCliSetVista('sinasignar')","Sin asignar ("+sinasig.length+")")+_appChip(vista,'todos',"_appCliSetVista('todos')","Todos")+_appChip('','__x',"_appVerDormidos()","😴 Dormidos");
   var base=vista==='mios'?mios:(vista==='sinasignar'?sinasig:data);
   var list=base.filter(function(c){
     if(!q)return true;
