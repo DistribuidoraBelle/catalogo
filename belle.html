@@ -1710,6 +1710,7 @@ body{
         <button class="btn btn-g _repTab" data-tab="rentabilidad" onclick="_repCambiarTab('rentabilidad')">💎 Rentabilidad</button>
         <button class="btn btn-g _repTab" data-tab="compra" onclick="_repCambiarTab('compra')">🛒 Sugerido de compra</button>
         <button class="btn btn-g _repTab" data-tab="bajorend" onclick="_repCambiarTab('bajorend')">🐌 Bajo rendimiento</button>
+        <button class="btn btn-g _repTab" data-tab="muertos" onclick="_repCambiarTab('muertos')">💀 Productos muertos</button>
         <button class="btn btn-g _repTab" data-tab="proyeccion" onclick="_repCambiarTab('proyeccion')">🔮 Proyección</button>
         <button class="btn btn-g _repTab" data-tab="vendedores" onclick="_repCambiarTab('vendedores')">👥 Por Vendedor</button>
         <button class="btn btn-g _repTab" data-tab="clientes" onclick="_repCambiarTab('clientes')">🛍️ Clientes</button>
@@ -1945,6 +1946,7 @@ body{
           <input type="text" id="ofCampSrch" placeholder="🔍 Buscar campaña..." oninput="renderCampaniasGrid()"
                  style="flex:1;min-width:200px;padding:.4rem .55rem;background:var(--sur2);border:1px solid var(--bd);border-radius:6px;color:var(--tx);font-size:.75rem">
           <button class="btn btn-a" onclick="abrirModalCampania(null)" style="font-size:.78rem">➕ Nueva campaña</button>
+          <button class="btn btn-g" onclick="_liqAbrir('ofertas')" title="Arma una campaña con los productos que hace 90 días o más que no se venden" style="font-size:.78rem;border-color:var(--acc);color:var(--acc)">⚡ Liquidar lo que no se vende</button>
         </div>
         <div style="font-size:.68rem;color:var(--tx3);margin-bottom:.6rem;line-height:1.5">
           💡 Las campañas son ofertas que aplican a varios productos a la vez (ej: Hot Sale, Black Friday).
@@ -36600,6 +36602,7 @@ function _repRenderTab(){
   else if(tab === "rentabilidad") _repCargarRentabilidad();
   else if(tab === "compra") _repCargarCompra();
   else if(tab === "bajorend") _repCargarBajoRend();
+  else if(tab === "muertos") _repCargarMuertos();
   else if(tab === "proyeccion") _repCargarProyeccion();
   else if(tab === "vendedores") _repCargarVendedores();
   else if(tab === "clientes") _repCargarClientes();
@@ -37783,6 +37786,396 @@ function _repCompraExport(){
     sc.onload=doExport; sc.onerror=function(){toast('No se pudo cargar la librería Excel','terr');};
     document.head.appendChild(sc);
   } else doExport();
+}
+
+// ══════════════════════════════════════════════════════════════════════
+// REPORTES ▸ PRODUCTOS MUERTOS
+// Lo que tiene stock y no se vende: cuánta plata hay ahí quieta y qué se
+// puede liquidar. Desde acá se arma una campaña de liquidación en dos toques.
+// ══════════════════════════════════════════════════════════════════════
+window._repMuertos = null;
+
+function _repCargarMuertos(){
+  var cfg={dias:90, minStock:1};
+  try{ var g=JSON.parse(localStorage.getItem('_repMuertosCfg')||'{}'); if(g.dias)cfg.dias=parseInt(g.dias); if(g.minStock!=null)cfg.minStock=parseInt(g.minStock); }catch(e){}
+  Promise.all([
+    apiGet("productos","select=id,nombre,empresa,tipo,ml,activo,oculto,stock_actual,reserva,costo_ind,costo_log,precio_min_ars,precio_may_ars,ultimo_ingreso_at,reingreso_at,created_at&limit=8000").catch(function(){return [];}),
+    apiGetAll("ventas","select=producto_id,cantidad,created_at&estado=in.(confirmada,archivada_periodo)&limit=60000").catch(function(){return [];})
+  ]).then(function(d){
+    var productos=d[0]||[], ventas=d[1]||[];
+    var cotiz=(typeof cotizActual!=="undefined" && cotizActual)?cotizActual:1550;
+    var ult={};
+    ventas.forEach(function(v){
+      if(!v.producto_id)return;
+      var t=new Date(v.created_at).getTime();
+      if(!ult[v.producto_id] || t>ult[v.producto_id])ult[v.producto_id]=t;
+    });
+    var hoy=Date.now();
+    var rows=[], marcas={};
+    productos.forEach(function(p){
+      if(!p.activo || p.oculto)return;
+      if(p.tipo==='combo')return;
+      var stock=parseFloat(p.stock_actual)||0;
+      if(stock<cfg.minStock)return;
+      var u=ult[p.id]||0;
+      var dias = u? Math.floor((hoy-u)/864e5) : null;   // null = nunca vendió
+      if(dias!=null && dias<cfg.dias)return;
+      var costoU=(parseFloat(p.costo_ind)||0)+(parseFloat(p.costo_log)||0);
+      var ingreso=Math.max(
+        p.ultimo_ingreso_at?new Date(p.ultimo_ingreso_at).getTime():0,
+        p.reingreso_at?new Date(p.reingreso_at).getTime():0,
+        p.created_at?new Date(p.created_at).getTime():0);
+      rows.push({
+        id:p.id, nombre:p.nombre||'', marca:p.empresa||'Sin marca', ml:p.ml||null,
+        stock:stock, res:parseFloat(p.reserva)||0,
+        dias:dias, nunca:(dias==null),
+        antig: ingreso? Math.floor((hoy-ingreso)/864e5) : null,
+        costoU:costoU, inmov:costoU*stock, inmovArs:costoU*stock*cotiz,
+        precio:parseFloat(p.precio_min_ars)||0,
+        sel:true
+      });
+      marcas[p.empresa||'Sin marca']=1;
+    });
+    rows.sort(function(a,b){ return b.inmov-a.inmov; });
+    window._repMuertos={ rows:rows, marcas:Object.keys(marcas).sort(), cfg:cfg, cotiz:cotiz, q:'', marca:'', soloNunca:false };
+    _repMuertosRender();
+  }).catch(function(e){
+    console.error("[belle] _repCargarMuertos error:", e);
+    var el=document.getElementById("_repContenido");
+    if(el)el.innerHTML="<div style='color:var(--red);padding:2rem;text-align:center'>Error al calcular productos muertos</div>";
+  });
+}
+function _repMuertosCfg(k,v){
+  var st=window._repMuertos; if(!st)return;
+  var n=parseInt(v); if(isNaN(n)||n<0)return;
+  st.cfg[k]=n;
+  try{ localStorage.setItem('_repMuertosCfg',JSON.stringify(st.cfg)); }catch(e){}
+  _repCargarMuertos();
+}
+function _repMuertosSet(k,v){ var st=window._repMuertos; if(!st)return; st[k]=v; _repMuertosRender(); }
+function _repMuertosFiltrados(){
+  var st=window._repMuertos; if(!st)return [];
+  var q=(st.q||'').trim().toLowerCase();
+  return st.rows.filter(function(r){
+    if(st.marca && r.marca!==st.marca)return false;
+    if(st.soloNunca && !r.nunca)return false;
+    if(q && (r.nombre+' '+r.marca).toLowerCase().indexOf(q)<0)return false;
+    return true;
+  });
+}
+function _repMuertosTog(id,on){ var st=window._repMuertos; if(!st)return; var r=st.rows.filter(function(x){return x.id===id;})[0]; if(r)r.sel=!!on; _repMuertosContar(); }
+function _repMuertosTodos(on){
+  var st=window._repMuertos; if(!st)return;
+  var vis={}; _repMuertosFiltrados().forEach(function(r){ vis[r.id]=1; });
+  st.rows.forEach(function(r){ if(vis[r.id])r.sel=!!on; });
+  _repMuertosRender();
+}
+function _repMuertosContar(){
+  var st=window._repMuertos; if(!st)return;
+  var sel=st.rows.filter(function(r){return r.sel;});
+  var el=document.getElementById('_repMuertosSel');
+  if(el)el.textContent=sel.length+" elegidos · "+_repMiles(sel.reduce(function(a,r){return a+r.inmov;},0))+" u$d";
+  var b=document.getElementById('_repMuertosBtnCamp');
+  if(b)b.disabled=!sel.length;
+}
+
+function _repMuertosRender(){
+  var st=window._repMuertos; if(!st)return;
+  var el=document.getElementById("_repContenido"); if(!el)return;
+  var lista=_repMuertosFiltrados();
+  var totU=0, totInmov=0, nunca=0;
+  st.rows.forEach(function(r){ totU+=r.stock; totInmov+=r.inmov; if(r.nunca)nunca++; });
+
+  // plata dormida por marca (top 8)
+  var porMarca={};
+  st.rows.forEach(function(r){ porMarca[r.marca]=(porMarca[r.marca]||0)+r.inmov; });
+  var topMarcas=Object.keys(porMarca).map(function(m){return {m:m,v:porMarca[m]};}).sort(function(a,b){return b.v-a.v;}).slice(0,8);
+  var maxMarca=topMarcas.length?topMarcas[0].v:1;
+
+  var h="";
+  h+="<div style='display:flex;justify-content:space-between;align-items:flex-start;gap:.8rem;flex-wrap:wrap;margin-bottom:1rem'>";
+  h+="<div><div style='font-size:1.1rem;font-weight:700;color:var(--tx)'>💀 Productos muertos</div>";
+  h+="<div style='font-size:.7rem;color:var(--tx3);margin-top:.15rem'>Con stock y sin vender hace "+st.cfg.dias+"+ días · no depende del período de arriba</div></div>";
+  h+="<div style='display:flex;gap:.4rem'><button class='btn btn-g' onclick='_repMuertosExport()' style='font-size:.74rem'>⬇ Excel</button>";
+  h+="<button id='_repMuertosBtnCamp' class='btn btn-a' onclick='_liqAbrir(\"reporte\")' style='font-size:.74rem'>⚡ Crear campaña de liquidación</button></div>";
+  h+="</div>";
+
+  h+="<div style='background:var(--sur);border:1px solid var(--bd);border-radius:10px;padding:.85rem 1rem;margin-bottom:1rem;display:flex;gap:1.2rem;flex-wrap:wrap;align-items:flex-end'>";
+  h+="<div><label style='font-size:.66rem;color:var(--tx3);display:block;margin-bottom:.2rem'>Sin vender hace más de</label>";
+  h+="<select onchange='_repMuertosCfg(\"dias\",this.value)' style='padding:.4rem .6rem;background:var(--sur2);border:1px solid var(--bd);border-radius:7px;color:var(--tx);font-size:.8rem'>";
+  [30,60,90,120,180,365].forEach(function(d){ h+="<option value='"+d+"'"+(st.cfg.dias===d?' selected':'')+">"+d+" días</option>"; });
+  h+="</select></div>";
+  h+="<div><label style='font-size:.66rem;color:var(--tx3);display:block;margin-bottom:.2rem'>Con al menos</label>";
+  h+="<div style='display:flex;align-items:center;gap:.4rem'><input type='number' min='1' value='"+st.cfg.minStock+"' onchange='_repMuertosCfg(\"minStock\",this.value)' style='width:70px;padding:.4rem .55rem;background:var(--sur2);border:1px solid var(--bd);border-radius:7px;color:var(--tx);font-size:.82rem'><span style='font-size:.72rem;color:var(--tx3)'>de stock</span></div></div>";
+  h+="<label style='display:flex;align-items:center;gap:.45rem;cursor:pointer;font-size:.76rem;color:var(--tx2)'><input type='checkbox' "+(st.soloNunca?'checked':'')+" onchange='_repMuertosSet(\"soloNunca\",this.checked)' style='width:17px;height:17px;accent-color:var(--acc)'>Solo los que nunca se vendieron</label>";
+  h+="</div>";
+
+  h+="<div style='display:grid;grid-template-columns:repeat(auto-fit,minmax(190px,1fr));gap:.7rem;margin-bottom:1rem'>";
+  h+=_repKPI("💀 Productos parados", String(st.rows.length), {color:st.rows.length?"var(--yel)":"var(--green)", sub:nunca+" nunca se vendieron"});
+  h+=_repKPI("📦 Unidades quietas", _repMiles(totU));
+  h+=_repKPI("🧊 Plata dormida", "u$d "+_repMiles(totInmov), {color:"var(--red)", sub:fmt(totInmov*st.cotiz)+" al cambio de hoy"});
+  h+=_repKPI("🏷 Marcas afectadas", String(st.marcas.length));
+  h+="</div>";
+
+  if(topMarcas.length){
+    h+="<div style='background:var(--sur);border:1px solid var(--bd);border-radius:10px;padding:1rem;margin-bottom:1rem'>";
+    h+="<div style='font-size:.85rem;font-weight:700;margin-bottom:.7rem'>🏷 Dónde está la plata dormida</div>";
+    topMarcas.forEach(function(x){
+      var pct=(x.v/maxMarca*100);
+      h+="<div onclick='_repMuertosSet(\"marca\",\""+_admEsc(x.m).replace(/'/g,"")+"\")' style='cursor:pointer;margin-bottom:.45rem'>";
+      h+="<div style='display:flex;justify-content:space-between;font-size:.74rem;margin-bottom:.15rem'><span>"+_admEsc(x.m)+"</span><b>u$d "+_repMiles(x.v)+"</b></div>";
+      h+="<div style='height:8px;background:var(--sur2);border-radius:4px;overflow:hidden'><div style='height:100%;width:"+pct.toFixed(1)+"%;background:linear-gradient(90deg,#d94848,#e08a3c)'></div></div>";
+      h+="</div>";
+    });
+    h+="</div>";
+  }
+
+  h+="<div style='display:flex;gap:.5rem;flex-wrap:wrap;align-items:center;margin-bottom:.7rem'>";
+  h+="<input type='text' id='_repMuertosQ' value='"+_admEsc(st.q||'')+"' placeholder='Buscar perfume o marca…' oninput='_repMuertosSet(\"q\",this.value)' style='flex:1;min-width:200px;padding:.45rem .7rem;border:1px solid var(--bd);border-radius:7px;font-size:.82rem;background:var(--sur2);color:var(--tx)'>";
+  h+="<select onchange='_repMuertosSet(\"marca\",this.value)' style='padding:.45rem .65rem;border:1px solid var(--bd);border-radius:7px;font-size:.78rem;background:var(--sur2);color:var(--tx)'><option value=''>Todas las marcas</option>";
+  st.marcas.forEach(function(m){ h+="<option value='"+_admEsc(m)+"'"+(st.marca===m?' selected':'')+">"+_admEsc(m)+"</option>"; });
+  h+="</select>";
+  h+="<button class='btn btn-g' onclick='_repMuertosTodos(true)' style='font-size:.72rem'>Marcar los que veo</button>";
+  h+="<button class='btn btn-g' onclick='_repMuertosTodos(false)' style='font-size:.72rem'>Ninguno</button>";
+  h+="<div id='_repMuertosSel' style='font-size:.72rem;color:var(--acc);font-weight:700'></div>";
+  h+="</div>";
+
+  h+="<div style='background:var(--sur);border:1px solid var(--bd);border-radius:10px;overflow:hidden'>";
+  h+="<div style='overflow-x:auto'><table style='width:100%;border-collapse:collapse;min-width:820px'>";
+  h+="<thead><tr style='background:var(--sur2);border-bottom:1px solid var(--bd)'>";
+  ['','Perfume','Marca','Stock','Sin vender','En depósito','Costo u.','Inmovilizado'].forEach(function(t,i){
+    h+="<th style='padding:.5rem .45rem;text-align:"+(i<3?'left':'right')+";font-size:.64rem;text-transform:uppercase;letter-spacing:.04em;color:var(--tx3);white-space:nowrap'>"+t+"</th>";
+  });
+  h+="</tr></thead><tbody>";
+  if(!lista.length) h+="<tr><td colspan='8' style='padding:2rem;text-align:center;color:var(--tx3);font-style:italic;font-size:.82rem'>Nada parado con ese filtro 🎉</td></tr>";
+  lista.slice(0,400).forEach(function(r){
+    h+="<tr style='border-bottom:1px solid var(--bd);font-size:.77rem'>";
+    h+="<td style='padding:.4rem .45rem'><input type='checkbox' "+(r.sel?'checked':'')+" onchange='_repMuertosTog("+r.id+",this.checked)' style='width:17px;height:17px;accent-color:var(--acc)'></td>";
+    h+="<td style='padding:.45rem;max-width:300px'><div style='overflow:hidden;text-overflow:ellipsis;white-space:nowrap'>"+_admEsc(r.nombre)+"</div></td>";
+    h+="<td style='padding:.45rem;color:var(--tx3);font-size:.72rem'>"+_admEsc(r.marca)+"</td>";
+    h+="<td style='padding:.45rem;text-align:right;font-weight:700'>"+Math.round(r.stock)+"</td>";
+    h+="<td style='padding:.45rem;text-align:right;color:"+(r.nunca?'var(--red)':'var(--yel)')+";font-weight:700'>"+(r.nunca?'nunca':(r.dias+'d'))+"</td>";
+    h+="<td style='padding:.45rem;text-align:right;color:var(--tx3)'>"+(r.antig!=null?(r.antig+'d'):'—')+"</td>";
+    h+="<td style='padding:.45rem;text-align:right;color:var(--tx3)'>"+(r.costoU?('u$d '+r.costoU.toFixed(1)):'—')+"</td>";
+    h+="<td style='padding:.45rem;text-align:right;font-weight:800;color:var(--red)'>"+(r.inmov?('u$d '+_repMiles(r.inmov)):'—')+"</td>";
+    h+="</tr>";
+  });
+  h+="</tbody></table></div>";
+  if(lista.length>400) h+="<div style='padding:.6rem;text-align:center;color:var(--tx3);font-size:.72rem'>Mostrando los primeros 400 de "+lista.length+".</div>";
+  h+="</div>";
+
+  el.innerHTML=h;
+  _repMuertosContar();
+  var inp=document.getElementById('_repMuertosQ');
+  if(inp && st.q){ try{ inp.focus(); inp.setSelectionRange(inp.value.length,inp.value.length); }catch(e){} }
+}
+
+function _repMuertosExport(){
+  var st=window._repMuertos; if(!st){ toast('Todavía no se calculó','twarn'); return; }
+  var lista=_repMuertosFiltrados();
+  if(!lista.length){ toast('No hay nada para exportar','twarn'); return; }
+  var doExport=function(){
+    var rows=[['Perfume','Marca','ML','Stock','Reservado','Días sin vender','Días en depósito','Costo u. (u$d)','Inmovilizado (u$d)','Inmovilizado (ARS)','Precio minorista']];
+    lista.forEach(function(r){
+      rows.push([r.nombre, r.marca, r.ml||'', r.stock, r.res, (r.nunca?'nunca vendido':r.dias), (r.antig!=null?r.antig:''),
+                 Math.round(r.costoU*100)/100, Math.round(r.inmov), Math.round(r.inmovArs), Math.round(r.precio)]);
+    });
+    var ws=XLSX.utils.aoa_to_sheet(rows);
+    ws['!cols']=[{wch:42},{wch:18},{wch:6},{wch:8},{wch:10},{wch:16},{wch:16},{wch:14},{wch:18},{wch:18},{wch:15}];
+    var wb=XLSX.utils.book_new();
+    XLSX.utils.book_append_sheet(wb,ws,'Productos muertos');
+    XLSX.writeFile(wb,'productos_muertos_'+new Date().toISOString().slice(0,10)+'.xlsx');
+    toast('Excel descargado 💀','tok');
+  };
+  if(typeof XLSX==='undefined'){
+    var sc=document.createElement('script');
+    sc.src='https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js';
+    sc.onload=doExport; sc.onerror=function(){toast('No se pudo cargar la librería Excel','terr');};
+    document.head.appendChild(sc);
+  } else doExport();
+}
+
+// ══════════════════════════════════════════════════════════════════════
+// CAMPAÑA RÁPIDA DE LIQUIDACIÓN
+// Toma los productos que no se venden y arma la campaña completa de una:
+// pestaña del catálogo (opcional) + campaña + oferta + productos con su
+// descuento. Se abre desde Reportes ▸ Productos muertos y desde Ofertas.
+// ══════════════════════════════════════════════════════════════════════
+window._liq = null;
+
+function _liqAbrir(origen){
+  if(origen==='reporte' && window._repMuertos){
+    var sel=window._repMuertos.rows.filter(function(r){return r.sel;});
+    if(!sel.length){ toast('Elegí al menos un producto','twarn'); return; }
+    _liqModal(sel.map(function(r){ return {id:r.id, nombre:r.nombre, marca:r.marca, stock:r.stock, precio:r.precio, dias:r.dias, nunca:r.nunca, inmov:r.inmov}; }));
+    return;
+  }
+  // Desde Ofertas: calculamos la lista en el momento
+  toast('Buscando productos parados...','tok');
+  Promise.all([
+    apiGet("productos","select=id,nombre,empresa,tipo,activo,oculto,stock_actual,costo_ind,costo_log,precio_min_ars&limit=8000").catch(function(){return [];}),
+    apiGetAll("ventas","select=producto_id,created_at&estado=in.(confirmada,archivada_periodo)&limit=60000").catch(function(){return [];})
+  ]).then(function(d){
+    var productos=d[0]||[], ventas=d[1]||[], ult={}, hoy=Date.now();
+    ventas.forEach(function(v){ if(!v.producto_id)return; var t=new Date(v.created_at).getTime(); if(!ult[v.producto_id]||t>ult[v.producto_id])ult[v.producto_id]=t; });
+    var out=[];
+    productos.forEach(function(p){
+      if(!p.activo||p.oculto||p.tipo==='combo')return;
+      var stock=parseFloat(p.stock_actual)||0; if(stock<1)return;
+      var u=ult[p.id]||0, dias=u?Math.floor((hoy-u)/864e5):null;
+      if(dias!=null && dias<90)return;
+      var costoU=(parseFloat(p.costo_ind)||0)+(parseFloat(p.costo_log)||0);
+      out.push({id:p.id, nombre:p.nombre||'', marca:p.empresa||'', stock:stock,
+                precio:parseFloat(p.precio_min_ars)||0, dias:dias, nunca:(dias==null), inmov:costoU*stock});
+    });
+    out.sort(function(a,b){ return b.inmov-a.inmov; });
+    if(!out.length){ toast('No hay productos parados hace 90 días 🎉','tok'); return; }
+    _liqModal(out);
+  }).catch(function(e){ console.error('[liq]',e); toast('No se pudo armar la lista','terr'); });
+}
+
+function _liqModal(prods){
+  var old=document.getElementById('_liqModal'); if(old)old.remove();
+  var hoy=new Date();
+  var nombreDef='Liquidación '+hoy.toLocaleDateString('es-AR',{month:'long'})+' '+hoy.getFullYear();
+  window._liq={ prods:prods.map(function(p){ return Object.assign({sel:true},p); }), desc:30, dias:15,
+                nombre:nombreDef, etiqueta:'LIQUIDACIÓN', crearPestana:true };
+  var mo=document.createElement('div'); mo.id='_liqModal';
+  mo.style.cssText='position:fixed;inset:0;z-index:99998;background:rgba(0,0,0,.65);display:flex;align-items:center;justify-content:center;padding:1rem';
+  mo.onclick=function(e){ if(e.target===mo)mo.remove(); };
+  mo.innerHTML="<div id='_liqBox' style='background:var(--sur);border:1px solid var(--bd);border-radius:14px;max-width:880px;width:100%;max-height:92vh;display:flex;flex-direction:column;overflow:hidden' onclick='event.stopPropagation()'></div>";
+  document.body.appendChild(mo);
+  _liqRender();
+}
+function _liqSet(k,v){
+  var st=window._liq; if(!st)return;
+  if(k==='desc'||k==='dias'){ var n=parseInt(v); if(isNaN(n))return; st[k]=n; }
+  else if(k==='crearPestana') st[k]=!!v;
+  else st[k]=v;
+  _liqRender(k!=='nombre' && k!=='etiqueta');
+}
+function _liqTog(id,on){ var st=window._liq; if(!st)return; var p=st.prods.filter(function(x){return x.id===id;})[0]; if(p)p.sel=!!on; _liqRender(true); }
+function _liqTodos(on){ var st=window._liq; if(!st)return; st.prods.forEach(function(p){p.sel=!!on;}); _liqRender(true); }
+
+function _liqRender(soloDatos){
+  var st=window._liq; if(!st)return;
+  var box=document.getElementById('_liqBox'); if(!box)return;
+  var sel=st.prods.filter(function(p){return p.sel;});
+  var inmov=sel.reduce(function(a,p){return a+(p.inmov||0);},0);
+  var recupero=sel.reduce(function(a,p){return a+(p.precio*(1-st.desc/100)*p.stock);},0);
+
+  var h="";
+  h+="<div style='padding:1rem 1.1rem;border-bottom:1px solid var(--bd);display:flex;justify-content:space-between;align-items:flex-start;gap:.6rem'>";
+  h+="<div><div style='font-size:1.05rem;font-weight:700'>⚡ Campaña rápida de liquidación</div>";
+  h+="<div style='font-size:.72rem;color:var(--tx3);margin-top:.15rem'>Se crea la campaña con todos estos productos y su descuento, lista para salir</div></div>";
+  h+="<button class='btn btn-g' onclick=\"document.getElementById('_liqModal').remove()\" style='font-size:1rem;padding:.2rem .6rem'>&times;</button>";
+  h+="</div>";
+
+  h+="<div style='padding:.9rem 1.1rem;background:var(--sur2);border-bottom:1px solid var(--bd)'>";
+  h+="<div style='display:grid;grid-template-columns:repeat(auto-fit,minmax(170px,1fr));gap:.7rem'>";
+  h+="<div><label style='font-size:.64rem;color:var(--tx3);display:block;margin-bottom:.2rem;text-transform:uppercase'>Nombre de la campaña</label>";
+  h+="<input type='text' value='"+_admEsc(st.nombre)+"' oninput='_liqSet(\"nombre\",this.value)' style='width:100%;padding:.42rem .6rem;background:var(--sur);border:1px solid var(--bd);border-radius:7px;color:var(--tx);font-size:.82rem;box-sizing:border-box'></div>";
+  h+="<div><label style='font-size:.64rem;color:var(--tx3);display:block;margin-bottom:.2rem;text-transform:uppercase'>Etiqueta en la card</label>";
+  h+="<input type='text' value='"+_admEsc(st.etiqueta)+"' oninput='_liqSet(\"etiqueta\",this.value)' style='width:100%;padding:.42rem .6rem;background:var(--sur);border:1px solid var(--bd);border-radius:7px;color:var(--tx);font-size:.82rem;box-sizing:border-box'></div>";
+  h+="<div><label style='font-size:.64rem;color:var(--tx3);display:block;margin-bottom:.2rem;text-transform:uppercase'>Descuento</label>";
+  h+="<div style='display:flex;align-items:center;gap:.4rem'><input type='number' min='1' max='90' value='"+st.desc+"' onchange='_liqSet(\"desc\",this.value)' style='width:70px;padding:.42rem .55rem;background:var(--sur);border:1px solid var(--bd);border-radius:7px;color:var(--tx);font-size:.82rem'><span style='font-size:.78rem;color:var(--tx3)'>%</span></div></div>";
+  h+="<div><label style='font-size:.64rem;color:var(--tx3);display:block;margin-bottom:.2rem;text-transform:uppercase'>Dura</label>";
+  h+="<div style='display:flex;align-items:center;gap:.4rem'><input type='number' min='1' max='120' value='"+st.dias+"' onchange='_liqSet(\"dias\",this.value)' style='width:70px;padding:.42rem .55rem;background:var(--sur);border:1px solid var(--bd);border-radius:7px;color:var(--tx);font-size:.82rem'><span style='font-size:.78rem;color:var(--tx3)'>días</span></div></div>";
+  h+="</div>";
+  h+="<label style='display:flex;align-items:center;gap:.45rem;cursor:pointer;font-size:.76rem;color:var(--tx2);margin-top:.7rem'><input type='checkbox' "+(st.crearPestana?'checked':'')+" onchange='_liqSet(\"crearPestana\",this.checked)' style='width:17px;height:17px;accent-color:var(--acc)'>Crear una pestaña propia en el catálogo para esta liquidación</label>";
+  h+="</div>";
+
+  h+="<div style='padding:.7rem 1.1rem;background:var(--sur);border-bottom:1px solid var(--bd);display:flex;gap:1.2rem;flex-wrap:wrap;font-size:.76rem'>";
+  h+="<div><span style='color:var(--tx3)'>Elegidos:</span> <b>"+sel.length+"</b> de "+st.prods.length+"</div>";
+  h+="<div><span style='color:var(--tx3)'>Plata dormida:</span> <b style='color:var(--red)'>u$d "+_repMiles(inmov)+"</b></div>";
+  h+="<div><span style='color:var(--tx3)'>Si se vende todo con "+st.desc+"% off:</span> <b style='color:var(--green)'>"+fmt(recupero)+"</b></div>";
+  h+="<div style='flex:1'></div>";
+  h+="<button class='btn btn-g' onclick='_liqTodos(true)' style='font-size:.68rem;padding:.2rem .5rem'>Todos</button>";
+  h+="<button class='btn btn-g' onclick='_liqTodos(false)' style='font-size:.68rem;padding:.2rem .5rem'>Ninguno</button>";
+  h+="</div>";
+
+  h+="<div style='flex:1;overflow-y:auto;padding:.4rem 1.1rem .8rem'>";
+  h+="<table style='width:100%;border-collapse:collapse'><tbody>";
+  st.prods.forEach(function(p){
+    var nuevo=Math.round(p.precio*(1-st.desc/100));
+    h+="<tr style='border-bottom:1px solid var(--bd);font-size:.77rem'>";
+    h+="<td style='padding:.35rem .3rem;width:28px'><input type='checkbox' "+(p.sel?'checked':'')+" onchange='_liqTog("+p.id+",this.checked)' style='width:16px;height:16px;accent-color:var(--acc)'></td>";
+    h+="<td style='padding:.4rem .3rem'><div style='overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:320px'>"+_admEsc(p.nombre)+"</div>";
+    h+="<div style='font-size:.64rem;color:var(--tx3)'>"+_admEsc(p.marca||'')+" · "+Math.round(p.stock)+" u. · "+(p.nunca?'nunca vendido':(p.dias+' días sin vender'))+"</div></td>";
+    h+="<td style='padding:.4rem .3rem;text-align:right;white-space:nowrap'>";
+    if(p.precio>0){
+      h+="<span style='color:var(--tx3);text-decoration:line-through;font-size:.7rem'>"+fmt(p.precio)+"</span> ";
+      h+="<b style='color:var(--green)'>"+fmt(nuevo)+"</b>";
+    } else h+="<span style='color:var(--tx3);font-size:.7rem'>sin precio</span>";
+    h+="</td></tr>";
+  });
+  h+="</tbody></table></div>";
+
+  h+="<div style='padding:.85rem 1.1rem;border-top:1px solid var(--bd);display:flex;gap:.5rem'>";
+  h+="<button class='btn btn-g' onclick=\"document.getElementById('_liqModal').remove()\" style='font-size:.82rem'>Cancelar</button>";
+  h+="<button id='_liqCrear' class='btn btn-a' onclick='_liqCrear()' style='flex:1;font-size:.85rem'"+(sel.length?'':' disabled')+">Crear la campaña con "+sel.length+" producto"+(sel.length===1?'':'s')+"</button>";
+  h+="</div>";
+  box.innerHTML=h;
+}
+
+function _liqCrear(){
+  var st=window._liq; if(!st)return;
+  var sel=st.prods.filter(function(p){return p.sel;});
+  if(!sel.length){ toast('Elegí al menos un producto','twarn'); return; }
+  var nombre=(st.nombre||'').trim(); if(!nombre){ toast('Ponele un nombre a la campaña','twarn'); return; }
+  var btn=document.getElementById('_liqCrear'); if(btn){btn.disabled=true;btn.textContent='Creando...';}
+
+  var desde=new Date(); desde.setHours(0,0,0,0);
+  var hasta=new Date(desde.getTime()+st.dias*864e5); hasta.setHours(23,59,0,0);
+
+  function crearCampania(pestanaId){
+    return apiPost('ofertas_campanias',{
+      nombre:nombre, descripcion:'Liquidación automática de productos sin movimiento',
+      pestana_id:pestanaId||null, abrir_pestana_al_entrar:false, activa:true,
+      tab_destacada:!!pestanaId
+    }).then(function(res){
+      var camp=Array.isArray(res)?res[0]:res;
+      if(!camp||!camp.id) throw new Error('no se pudo crear la campaña');
+      return apiPost('ofertas',{
+        campania_id:camp.id, producto_id:null, activa:true, tipo:'descuento_pct',
+        descuento_pct:st.desc, etiqueta:(st.etiqueta||'').trim()||null,
+        fecha_desde:desde.toISOString(), fecha_hasta:hasta.toISOString()
+      }).then(function(){
+        var filas=sel.map(function(p){ return {campania_id:camp.id, producto_id:p.id, descuento_pct:st.desc, tipo:'descuento_pct'}; });
+        return apiPost('ofertas_campania_productos', filas);
+      }).then(function(){ return camp; });
+    });
+  }
+
+  var prom;
+  if(st.crearPestana){
+    var slugBase=nombre.toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g,'').replace(/[^a-z0-9]+/g,'-').replace(/^-+|-+$/g,'').substring(0,40)||('liquidacion-'+Date.now());
+    prom=apiGet('pestanas_catalogo','select=id,slug,orden').then(function(ex){
+      ex=Array.isArray(ex)?ex:[];
+      var slugs=ex.map(function(p){return p.slug;}), slug=slugBase, i=2;
+      while(slugs.indexOf(slug)>=0){ slug=slugBase+'-'+i; i++; }
+      var maxO=0; ex.forEach(function(p){ var o=parseInt(p.orden)||0; if(o>maxO)maxO=o; });
+      return apiPost('pestanas_catalogo',{nombre:nombre, slug:slug, orden:maxO+1, activa:true});
+    }).then(function(res){
+      var pe=Array.isArray(res)?res[0]:res;
+      return crearCampania(pe&&pe.id?parseInt(pe.id):null);
+    });
+  } else {
+    prom=crearCampania(null);
+  }
+
+  prom.then(function(camp){
+    var m=document.getElementById('_liqModal'); if(m)m.remove();
+    toast('🔥 Campaña "'+nombre+'" creada con '+sel.length+' productos al '+st.desc+'% off','tok');
+    try{
+      var sb=document.querySelector(".sb-item[onclick*=\"navTo('ofertas'\"]");
+      navTo('ofertas', sb);
+    }catch(e){ if(typeof loadOfertasAdmin==='function')loadOfertasAdmin(); }
+  }).catch(function(e){
+    console.error('[liq crear]',e);
+    toast('No se pudo crear la campaña: '+(e.message||''),'terr');
+    var b=document.getElementById('_liqCrear'); if(b){b.disabled=false;b.textContent='Reintentar';}
+  });
 }
 
 function _repCargarBajoRend(){
