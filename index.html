@@ -6843,40 +6843,95 @@ function _hayBusquedaActiva(){
   }catch(e){ return false; }
 }
 
-// 2026-06-26: busqueda tolerante a errores de tipeo / prefijos aproximados (ej "invit" -> "invictus").
-// _levAcotado: distancia de edicion con corte temprano (rapido). _matchTolerante: compara el
-// termino contra el inicio de cada palabra del texto permitiendo 1-2 errores.
-function _levAcotado(a,b,max){
-  var la=a.length, lb=b.length;
-  if(Math.abs(la-lb)>max) return max+1;
-  var prev=[], cur=[], i, j;
-  for(j=0;j<=lb;j++) prev[j]=j;
-  for(i=1;i<=la;i++){
-    cur[0]=i; var best=cur[0];
-    for(j=1;j<=lb;j++){
-      var cost=a.charCodeAt(i-1)===b.charCodeAt(j-1)?0:1;
-      var m=prev[j]+1, n=cur[j-1]+1, o=prev[j-1]+cost;
-      cur[j]=m<n?(m<o?m:o):(n<o?n:o);
-      if(cur[j]<best) best=cur[j];
-    }
-    if(best>max) return max+1; // corte temprano
-    for(j=0;j<=lb;j++) prev[j]=cur[j];
-  }
-  return prev[lb];
+// 2026-08-30: búsqueda tolerante a errores de tipeo. Dos pasadas: primero
+// firme (lo escrito aparece igual, sin espacios, o con el mismo sonido) y
+// solo si no aparece nada se afloja permitiendo letras cambiadas.
+// ── Clave fonética castellana ─────────────────────────────────────────
+// La gente escribe los perfumes como los escucha: "asaro" por AZZARO,
+// "llara" por Yara, "lataffa" por LATTAFA, "mairh" por Maahir. Esta
+// función lleva las dos palabras al mismo sonido para poder compararlas:
+// la h no suena, ll suena como y, z/c(e,i) suenan como s, v como b, y las
+// letras repetidas valen por una sola.
+function _fonEs(s){
+  s = norm(s||'').replace(/[^a-z0-9 ]+/g,' ');
+  s = s.replace(/h/g,'');            // hombre = ombre
+  s = s.replace(/ll/g,'y');          // llave = yave
+  s = s.replace(/y/g,'i');           // yara = iara (y llara tambien)
+  s = s.replace(/qu/g,'k');          // quiero = kiero
+  s = s.replace(/c([ei])/g,'s$1');   // cielo = sielo
+  s = s.replace(/[ck]/g,'k');        // casa = kasa
+  s = s.replace(/z/g,'s');           // zapato = sapato
+  s = s.replace(/g([ei])/g,'j$1');   // gente = jente
+  s = s.replace(/[vw]/g,'b');        // vaca = baka
+  s = s.replace(/x/g,'ks');
+  s = s.replace(/(.)\1+/g,'$1');     // lattafa = latafa, maahir = mahir
+  return s.replace(/\s+/g,' ').trim();
 }
-function _matchTolerante(texto, q){
-  if(!texto||!q||q.length<4) return false;
-  if(texto.indexOf(q)>=0) return true;
-  var tol = q.length>=7 ? 2 : 1;
-  var palabras = texto.split(/[^a-z0-9]+/);
-  for(var i=0;i<palabras.length;i++){
-    var w=palabras[i]; if(!w||w.length<3) continue;
-    var lo=Math.max(3,q.length-1), hi=Math.min(w.length,q.length+1);
-    for(var L=lo;L<=hi;L++){
-      if(_levAcotado(q, w.slice(0,L), tol)<=tol) return true;
+// Distancia con transposición: "mairh" y "mahir" quedan a 1, no a 2.
+function _levTrans(a,b,max){
+  if(a===b) return 0;
+  if(Math.abs(a.length-b.length)>max) return max+1;
+  var prev2=null, prev=[], cur=[], i, j;
+  for(j=0;j<=b.length;j++) prev[j]=j;
+  for(i=1;i<=a.length;i++){
+    cur=[i]; var mejor=i;
+    for(j=1;j<=b.length;j++){
+      var costo=(a.charAt(i-1)===b.charAt(j-1))?0:1;
+      var v=Math.min(cur[j-1]+1, prev[j]+1, prev[j-1]+costo);
+      if(i>1 && j>1 && a.charAt(i-1)===b.charAt(j-2) && a.charAt(i-2)===b.charAt(j-1)){
+        v=Math.min(v, prev2[j-2]+1);
+      }
+      cur[j]=v; if(v<mejor)mejor=v;
     }
+    if(mejor>max) return max+1;   // ya no puede bajar: se corta acá
+    prev2=prev; prev=cur;
   }
-  return false;
+  return prev[b.length];
+}
+function _tolDe(n){ return n>=8?3:(n>=6?2:1); }
+
+// ── ¿El texto "matchea" lo que escribió el cliente, con errores? ──────
+function _matchTolerante(texto, q){
+  if(!texto||!q||q.length<3) return false;
+  texto=String(texto); q=String(q);
+  if(texto.indexOf(q)>=0) return true;
+  // sin espacios: "badboy" encuentra "Bad Boy"
+  var tSin=texto.replace(/\s+/g,''), qSin=q.replace(/\s+/g,'');
+  if(qSin.length>=4 && tSin.indexOf(qSin)>=0) return true;
+  // por sonido: "asaro" encuentra "AZZARO"
+  var tf=_fonEs(texto), qf=_fonEs(q);
+  if(qf.length>=3 && tf.indexOf(qf)>=0) return true;
+  var tfSin=tf.replace(/\s+/g,''), qfSin=qf.replace(/\s+/g,'');
+  if(qfSin.length>=4 && tfSin.indexOf(qfSin)>=0) return true;
+  // Hasta acá la búsqueda es "firme": lo escrito aparece igual, sin
+  // espacios o con el mismo sonido. Lo de abajo (letras cambiadas) solo se
+  // habilita cuando la búsqueda firme no encontró NADA en todo el catálogo:
+  // si no, buscar "yara" traía toda la marca AL HARAMAIN por parecerse a
+  // "ara", y "maahir" traía todo MAISON por parecerse a "mais".
+  if(!window._bqFuzzy) return false;
+  // palabra por palabra: cada palabra que escribió tiene que aparecer en
+  // alguna palabra del producto (entera, como prefijo, o con un par de
+  // letras cambiadas). Así "yean lowe" llega a "Jean Lowe".
+  var pal=qf.split(' ').filter(function(w){ return w.length>=3; });
+  if(!pal.length) return false;
+  var tpal=tf.split(' ').filter(Boolean);
+  if(!tpal.length) return false;
+  for(var i=0;i<pal.length;i++){
+    var w=pal[i], tol=_tolDe(w.length), hallada=false;
+    for(var k=0;k<tpal.length && !hallada;k++){
+      var t=tpal[k];
+      if(t.indexOf(w)===0 || w.indexOf(t)===0){ hallada=true; break; }
+      // se compara contra el arranque de la palabra, del largo de lo escrito
+      // el pedazo comparado arranca del largo de lo escrito: si no, "yara"
+      // (4) contra "ara" (3) daba distancia 1 y matcheaba cualquier cosa
+      var lo=w.length, hi=Math.min(t.length,w.length+tol);
+      for(var L=lo;L<=hi;L++){
+        if(_levTrans(w, t.slice(0,L), tol)<=tol){ hallada=true; break; }
+      }
+    }
+    if(!hallada) return false;
+  }
+  return true;
 }
 
 // 2026-06-26: helpers reutilizables para que TODOS los buscadores (pestanas e inicio) encuentren
@@ -6934,10 +6989,37 @@ function _relevanciaTexto(p, nq){
   return 0;
 }
 // Aplica primero el orden normal (sortedProds) y luego, si hay texto, reordena por relevancia (estable).
+// Qué tan lejos está un producto de lo que se escribió, por sonido. Se usa
+// solo cuando la búsqueda fue aproximada: ahí la relevancia normal no sirve
+// (buscó "savage" y ninguno dice "savage"), y hay que poner adelante al que
+// más se le parece.
+function _bqDistAprox(p, qf){
+  var t=_fonEs((p&&p.nombre)||'')+' '+_fonEs((p&&p.empresa)||'');
+  var tpal=t.split(' ').filter(Boolean);
+  var qpal=String(qf||'').split(' ').filter(function(w){return w.length>=3;});
+  if(!qpal.length||!tpal.length) return 99;
+  var total=0;
+  for(var i=0;i<qpal.length;i++){
+    var w=qpal[i], mejor=99;
+    for(var k=0;k<tpal.length;k++){
+      var d=_levTrans(w, tpal[k].slice(0, Math.min(tpal[k].length, w.length+2)), 4);
+      if(tpal[k].indexOf(w)===0) d=0;
+      if(d<mejor)mejor=d;
+    }
+    total+=mejor;
+  }
+  return total/qpal.length;
+}
 function _ordenarConRelevancia(prods, q){
   var base=(typeof sortedProds==='function')?sortedProds(prods):(prods||[]).slice();
   var nq=norm(q||'');
   if(nq){
+    if(window._bqFueFuzzy){
+      var qf=_fonEs(nq);
+      base.forEach(function(p){ p._aproxTmp=_bqDistAprox(p,qf); });
+      base.sort(function(a,b){ return (a._aproxTmp||0)-(b._aproxTmp||0); });
+      return base;
+    }
     base.forEach(function(p){ p._relevTmp=_relevanciaTexto(p,nq); });
     base.sort(function(a,b){ return (b._relevTmp||0)-(a._relevTmp||0); });
   }
@@ -6975,7 +7057,10 @@ function applyFilters(){
   if(window._bqTodas) poolProds=allProds;
   else if(window._bqCol) poolProds=getTabProds();
   else poolProds=(q||window._soloFavs||famF||precioF)?allProds:getTabProds();
-  var filtered=poolProds.filter(function(p){
+  // Primero se busca firme. Si no aparece NADA, se repite aflojando la
+  // tolerancia a errores de tipeo (ver _matchTolerante).
+  window._bqFuzzy=false; window._bqFueFuzzy=false;
+  var _filtroProd=function(p){
     if(window._soloFavs && _catFavs.indexOf(p.id)<0) return false;
     if(genF){var g=p.genero||"";var _fem=g.indexOf("\u2640")>=0,_mas=g.indexOf("\u2642")>=0,_uni=(!g)||(g==="U")||(_fem&&_mas)||/unisex/i.test(g);if(genF==="fem"&&!(_fem||_uni))return false;if(genF==="mas"&&!(_mas||_uni))return false;if(genF==="U"&&g!=="U")return false;}
     if(kitF && !_esKit(p)) return false;   // 2026-08-08: usa la regla única (_esKit)
@@ -7034,7 +7119,14 @@ function applyFilters(){
     }
     if(_notasFiltro&&_notasFiltro.length){var mn=_notasFiltro.every(function(nota){return norm(p.notas||"").indexOf(norm(nota))>=0||norm(p.nombre||"").indexOf(norm(nota))>=0;});if(!mn)return false;}
     return true;
-  });
+  };
+  var filtered=poolProds.filter(_filtroProd);
+  if(q && !filtered.length){
+    window._bqFuzzy=true;
+    filtered=poolProds.filter(_filtroProd);
+    window._bqFuzzy=false;
+    window._bqFueFuzzy=filtered.length>0;
+  }
   // document.getElementById("rcount").textContent=filtered.length+" productos";
   renderCombosEnCatalogo();
   if(curTab==="inicio" && !window._soloFavs){
@@ -7096,6 +7188,13 @@ function renderList(prods){
   if(!container)return;
   var totalUnits=getCartTotalUnits();
   var html=prods.map(function(p){return renderCard(p,totalUnits);}).join("");
+  // Si lo que se muestra salió de la búsqueda con tolerancia, se avisa: el
+  // cliente tiene que saber que no es lo que escribió tal cual.
+  if(window._bqFueFuzzy && prods.length){
+    var _qEsc=String((document.getElementById("srch")||{value:""}).value||"").replace(/</g,"&lt;");
+    html = "<div style='grid-column:1/-1;background:rgba(196,150,90,.12);border:1px solid var(--accent,#c4965a);border-radius:9px;padding:.6rem .8rem;margin-bottom:.7rem;font-size:.8rem;color:var(--tx-main,#1a1a1a)'>"+
+           "No encontré <b>&ldquo;"+_qEsc+"&rdquo;</b> tal cual. Te muestro lo más parecido:</div>" + html;
+  }
   container.innerHTML=html||"<p class='empty'>Sin resultados</p>";
   window._lastRenderProds=prods;
 }
