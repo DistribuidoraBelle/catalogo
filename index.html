@@ -18862,6 +18862,213 @@ function _catRenderTabCompras(box){
   });
 }
 
+// ══════════════════════════════════════════════════════════════════════
+// 🔁 REPETIR PEDIDO
+// El cliente vuelve a pedir lo mismo de la otra vez, pero sin sorpresas:
+// primero se le muestra qué hay, qué se quedó sin stock y qué cambió de
+// precio desde aquel día. Recién ahí lo pasa al carrito.
+// ══════════════════════════════════════════════════════════════════════
+window._rep = null;
+
+function _repItems(p){
+  var items=[];
+  try{ items = typeof p.items==='string' ? JSON.parse(p.items) : (Array.isArray(p.items)?p.items:[]); }
+  catch(e){ items=[]; }
+  return Array.isArray(items)?items:[];
+}
+
+function _repAbrir(pedId){
+  var mo=document.getElementById('_repMo');
+  if(mo)mo.remove();
+  mo=document.createElement('div');
+  mo.id='_repMo';
+  mo.style.cssText='position:fixed;inset:0;background:rgba(20,15,8,.7);z-index:1300;display:flex;align-items:center;justify-content:center;padding:1rem';
+  mo.addEventListener('click',function(e){ if(e.target===mo)_repCerrar(); });
+  mo.innerHTML="<div style='background:var(--bg-card,#fff);border-radius:14px;max-width:480px;width:100%;max-height:88vh;display:flex;flex-direction:column;box-shadow:0 8px 40px rgba(0,0,0,.3)'>"+
+    "<div style='padding:1rem 1.1rem;border-bottom:1px solid var(--border-color,#e8d9bf);display:flex;justify-content:space-between;align-items:center'>"+
+      "<div style='font-size:.95rem;font-weight:700;color:var(--tx-main,#1a1a1a)'>🔁 Repetir este pedido</div>"+
+      "<button onclick='_repCerrar()' style='background:none;border:none;font-size:1.3rem;cursor:pointer;color:var(--tx-mid,#555);padding:0;line-height:1'>&times;</button>"+
+    "</div>"+
+    "<div id='_repBody' style='overflow-y:auto;padding:1rem 1.1rem;flex:1'><div style='text-align:center;padding:2rem 1rem;color:var(--tx-mid,#555)'><div class='cat-spin' style='margin-bottom:.5rem'></div>Mirando qué hay disponible...</div></div>"+
+    "<div id='_repPie' style='padding:.85rem 1.1rem;border-top:1px solid var(--border-color,#e8d9bf)'></div>"+
+    "</div>";
+  document.body.appendChild(mo);
+  try{ if(typeof _catModalBackRegistrar==='function')_catModalBackRegistrar('_repMo', _repCerrar); }catch(e){}
+
+  apiGet("pedidos_catalogo","select=id,nro_orden,items,created_at,total&id=eq."+pedId+"&limit=1").then(function(rows){
+    var ped=(Array.isArray(rows)&&rows[0])?rows[0]:null;
+    if(!ped){ document.getElementById('_repBody').innerHTML="<div style='text-align:center;padding:2rem;color:#c5443a'>No encontré ese pedido</div>"; return; }
+    _repArmar(ped);
+  }).catch(function(e){
+    console.error('[repetir]',e);
+    var b=document.getElementById('_repBody');
+    if(b)b.innerHTML="<div style='text-align:center;padding:2rem;color:#c5443a'>No se pudo cargar el pedido</div>";
+  });
+}
+function _repCerrar(){ var m=document.getElementById('_repMo'); if(m)m.remove(); window._rep=null; }
+
+function _repArmar(ped){
+  var items=_repItems(ped);
+  var filas=[];
+  items.forEach(function(it,idx){
+    var qty=parseInt(it.qty||it.cant||1)||1;
+    var precioAntes=parseFloat(it.precio)||0;
+    var base={idx:idx, nombre:it.nombre||'Producto', qtyPedida:qty, precioAntes:precioAntes,
+              isDecan:!!it.isDecan, isCombo:!!it.isCombo, prodId:it.producto_id||null, elegido:true};
+    if(it.isCombo){
+      base.estado='combo'; base.motivo='Los combos cambian seguido — armalo de nuevo desde la sección de combos';
+      base.elegido=false; filas.push(base); return;
+    }
+    if(it.isBonificado){
+      base.estado='bonif'; base.motivo='Era un regalo de aquella compra'; base.elegido=false; filas.push(base); return;
+    }
+    var p=(typeof allProds!=='undefined'&&allProds)?allProds.filter(function(x){return x.id===base.prodId;})[0]:null;
+    if(!p){ base.estado='nohay'; base.motivo='Ya no está en el catálogo'; base.elegido=false; filas.push(base); return; }
+    base.prod=p;
+    base.nombre=p.nombre||base.nombre;
+    var stock=parseInt(p.stock_actual)||0;
+    if(stock<=0){ base.estado='sinstock'; base.motivo='Sin stock por ahora'; base.elegido=false; filas.push(base); return; }
+    // Primero cuántas se pueden llevar, y RECIÉN AHÍ el precio: el precio
+    // depende del tramo por cantidad, así que si quedan menos unidades de las
+    // que pidió, el precio que se muestra tiene que ser el de esas unidades.
+    base.qty=Math.min(qty, base.isDecan?qty:stock);
+    base.stock=stock;
+    base.estado=(base.qty<qty)?'poco':'listo';
+    if(base.estado==='poco') base.motivo='Quedan '+stock+' de los '+qty+' que llevaste';
+    // precio de hoy, con las ofertas que estén corriendo
+    var r=(typeof calcP==='function')?calcP(p):null;
+    var precioHoy=0;
+    if(r){
+      if(base.isDecan) precioHoy=r.decan||0;
+      else if(!r.oferta && p.precio_pestana>0) precioHoy=p.precio_pestana;
+      else {
+        var seg=(typeof getBestSeg==='function')?getBestSeg(base.qty,r):'pi';
+        precioHoy=r[seg]||r.pi||0;
+        base.porTramo=true;   // este precio puede mejorar si suma más unidades
+      }
+      base.hayOferta=!!r.oferta;
+      base.ofertaEtiqueta=r.oferta_etiqueta||'';
+    }
+    base.precioHoy=Math.round(precioHoy);
+    filas.push(base);
+  });
+  window._rep={ped:ped, filas:filas};
+  _repPintar();
+}
+
+function _repPintar(){
+  var st=window._rep; if(!st)return;
+  var body=document.getElementById('_repBody'), pie=document.getElementById('_repPie');
+  if(!body||!pie)return;
+  var esc=(typeof _catEsc==='function')?_catEsc:function(s){return String(s==null?'':s);};
+  var money=(typeof _catFmtMoney==='function')?_catFmtMoney:function(n){return '$'+Math.round(n||0).toLocaleString('es-AR');};
+
+  var fecha=(typeof _catFmtFecha==='function')?_catFmtFecha(st.ped.created_at,true):'';
+  var h="<div style='font-size:.78rem;color:var(--tx-mid,#555);margin-bottom:.8rem;line-height:1.5'>"+
+        "Estás repitiendo <b>"+esc(st.ped.nro_orden||('#'+st.ped.id))+"</b>"+(fecha?(" de "+fecha):"")+
+        ". Destildá lo que no quieras y fijate los precios de hoy.</div>";
+
+  var disponibles=st.filas.filter(function(f){ return f.estado==='listo'||f.estado==='poco'; });
+  var otros=st.filas.filter(function(f){ return f.estado!=='listo'&&f.estado!=='poco'; });
+
+  disponibles.forEach(function(f){
+    var subio=(f.precioAntes>0 && f.precioHoy>f.precioAntes);
+    var bajo=(f.precioAntes>0 && f.precioHoy<f.precioAntes);
+    h+="<label style='display:flex;gap:.6rem;align-items:flex-start;padding:.6rem .1rem;border-bottom:1px solid var(--border-color,#eee);cursor:pointer'>";
+    h+="<input type='checkbox' "+(f.elegido?'checked':'')+" onchange='_repTildar("+f.idx+",this.checked)' style='margin-top:.2rem;accent-color:var(--accent,#c4965a);width:17px;height:17px;flex-shrink:0'>";
+    h+="<div style='flex:1;min-width:0'>";
+    h+="<div style='font-size:.82rem;font-weight:600;color:var(--tx-main,#1a1a1a);line-height:1.3'>"+esc(f.nombre)+(f.isDecan?" <span style='font-size:.66rem;color:var(--tx-mid,#555)'>(decant)</span>":"")+"</div>";
+    h+="<div style='display:flex;align-items:center;gap:.5rem;margin-top:.25rem;flex-wrap:wrap'>";
+    h+="<span style='font-size:.74rem;color:var(--tx-mid,#555)'>"+f.qty+" u.</span>";
+    if(f.precioHoy>0){
+      h+="<span style='font-size:.8rem;font-weight:700;color:var(--accent,#c4965a)'>"+money(f.precioHoy)+"</span>";
+      if(subio)h+="<span style='font-size:.66rem;color:#c5443a'>antes "+money(f.precioAntes)+" ▲</span>";
+      else if(bajo)h+="<span style='font-size:.66rem;color:#5a8a4a'>antes "+money(f.precioAntes)+" ▼</span>";
+    }
+    if(f.hayOferta)h+="<span style='font-size:.62rem;font-weight:700;color:#fff;background:#c5443a;padding:.1rem .4rem;border-radius:8px'>🔥 "+esc(f.ofertaEtiqueta||'OFERTA')+"</span>";
+    h+="</div>";
+    if(f.motivo)h+="<div style='font-size:.68rem;color:#b8860b;margin-top:.15rem'>"+esc(f.motivo)+"</div>";
+    h+="</div></label>";
+  });
+
+  if(!disponibles.length){
+    h+="<div style='text-align:center;padding:1.5rem 1rem;color:var(--tx-mid,#555);font-size:.85rem'>De aquel pedido no quedó nada disponible por ahora.</div>";
+  }
+  if(disponibles.some(function(f){ return f.porTramo; })){
+    h+="<div style='font-size:.68rem;color:var(--tx-mid,#555);margin-top:.5rem;line-height:1.4;font-style:italic'>Estos precios son por la cantidad de acá. Si en el carrito juntás más unidades, te queda mejor todavía.</div>";
+  }
+
+  if(otros.length){
+    h+="<div style='margin-top:.9rem;font-size:.7rem;text-transform:uppercase;letter-spacing:.04em;font-weight:700;color:var(--tx-mid,#555)'>No se pueden repetir</div>";
+    otros.forEach(function(f){
+      h+="<div style='padding:.5rem .1rem;border-bottom:1px solid var(--border-color,#eee);opacity:.65'>"+
+         "<div style='font-size:.8rem;color:var(--tx-main,#1a1a1a)'>"+esc(f.nombre)+"</div>"+
+         "<div style='font-size:.68rem;color:var(--tx-mid,#555)'>"+esc(f.motivo||'')+"</div></div>";
+    });
+  }
+  body.innerHTML=h;
+
+  var elegidos=disponibles.filter(function(f){ return f.elegido; });
+  var total=elegidos.reduce(function(a,f){ return a+(f.precioHoy*f.qty); },0);
+  var pieH="";
+  if(elegidos.length){
+    pieH+="<div style='display:flex;justify-content:space-between;align-items:baseline;margin-bottom:.6rem'>"+
+          "<span style='font-size:.78rem;color:var(--tx-mid,#555)'>"+elegidos.length+" producto"+(elegidos.length===1?'':'s')+"</span>"+
+          "<span style='font-size:1.05rem;font-weight:700;color:var(--accent,#c4965a)'>"+money(total)+"</span></div>";
+  }
+  pieH+="<button "+(elegidos.length?"":"disabled ")+"onclick='_repAlCarrito()' style='width:100%;background:"+(elegidos.length?'var(--accent,#c4965a)':'#bbb')+";color:#fff;border:none;border-radius:10px;padding:.8rem;font-size:.9rem;font-weight:700;cursor:"+(elegidos.length?'pointer':'default')+";font-family:inherit'>"+
+        (elegidos.length?("Agregar al carrito"):"Nada para agregar")+"</button>";
+  pie.innerHTML=pieH;
+}
+function _repTildar(idx, val){
+  var st=window._rep; if(!st)return;
+  st.filas.forEach(function(f){ if(f.idx===idx)f.elegido=!!val; });
+  _repPintar();
+}
+
+function _repAlCarrito(){
+  var st=window._rep; if(!st)return;
+  var elegidos=st.filas.filter(function(f){ return f.elegido && (f.estado==='listo'||f.estado==='poco'); });
+  if(!elegidos.length)return;
+
+  // Se usa el mismo addCart/addDecan de siempre para que el precio, la oferta
+  // y el tramo salgan exactamente igual que si los agregara a mano. Se les
+  // tapa el toast y el re-render mientras dura, si no parpadea todo.
+  var toastOrig=window.showToast, filtrosOrig=window.applyFilters;
+  var agregados=0;
+  try{
+    window.showToast=function(){};
+    window.applyFilters=function(){};
+    elegidos.forEach(function(f){
+      try{
+        if(f.isDecan){
+          if(typeof decanState!=='undefined'){ decanState[f.prodId]=f.qty; }
+          if(typeof addDecan==='function'){ addDecan(f.prodId); agregados++; }
+        }else{
+          if(typeof cstate!=='undefined'){ cstate[f.prodId]={qty:f.qty}; }
+          if(typeof addCart==='function'){ addCart(f.prodId); agregados++; }
+        }
+      }catch(e){ console.warn('[repetir item]',f.nombre,e); }
+    });
+  } finally {
+    window.showToast=toastOrig;
+    window.applyFilters=filtrosOrig;
+  }
+  try{ if(typeof updateCartCount==='function')updateCartCount(); }catch(e){}
+  try{ if(typeof applyFilters==='function')applyFilters(); }catch(e){}
+  try{ if(typeof renderDrawer==='function')renderDrawer(); }catch(e){}
+  _repCerrar();
+  try{ if(typeof showToast==='function')showToast(agregados+' producto'+(agregados===1?'':'s')+' en tu carrito 🔁'); }catch(e){}
+  // abrir el carrito para que lo vea
+  setTimeout(function(){
+    try{
+      var dr=document.getElementById('drawer');
+      if(dr && dr.classList.contains('open'))return;
+      if(typeof toggleCart==='function')toggleCart();
+    }catch(e){}
+  },250);
+}
+
 // Card de un pedido (resumen + click para ver detalle)
 function _catCardPedido(p){
   var estadoLabel = _catEstadoLabel(p);
@@ -18894,6 +19101,10 @@ function _catCardPedido(p){
   }
   h += "<span style='font-size:.65rem;color:var(--mid);margin-left:auto'>Ver detalle &rarr;</span>";
   h += "</div>";
+  // 🔁 Repetir: vuelve a pedir lo mismo (para el pulgar, botón propio)
+  if(items.length){
+    h += "<button onclick='event.stopPropagation();_repAbrir("+p.id+")' style='width:100%;margin-top:.6rem;background:rgba(196,150,90,.12);border:1px solid var(--accent,#c4965a);color:var(--accent,#c4965a);border-radius:8px;padding:.5rem;font-size:.78rem;font-weight:700;cursor:pointer;font-family:inherit'>&#128257; Repetir este pedido</button>";
+  }
   h += "</div>";
   return h;
 }
@@ -19029,6 +19240,13 @@ function _catVerPedido(pedId){
     // Timeline de estados
     h += "<div style='font-size:.7rem;color:var(--mid);text-transform:uppercase;font-weight:600;margin-bottom:.5rem'>Seguimiento</div>";
     h += _catTimelinePedido(ped, logs);
+
+    // 🔁 Repetir este pedido, también desde el detalle
+    if(_repItems(ped).length){
+      h += "<div style='margin-top:1.1rem'>";
+      h += "<button onclick='_catCerrarPedido();_repAbrir("+ped.id+")' style='width:100%;background:var(--accent,#c4965a);color:#fff;border:none;border-radius:10px;padding:.75rem;font-size:.86rem;font-weight:700;cursor:pointer;font-family:inherit'>&#128257; Volver a pedir lo mismo</button>";
+      h += "</div>";
+    }
 
     // Botón "Necesito ayuda" — abre WhatsApp con mensaje pre-armado
     var nroOrden = ped.nro_orden || ("#" + ped.id);
