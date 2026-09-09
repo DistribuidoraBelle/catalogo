@@ -19,6 +19,7 @@ const SECRETO = Deno.env.get("CRON_SECRET") || "";
 const BUCKET  = "respaldos";
 const DIAS_QUE_SE_GUARDAN = 30;
 const PAGINA = 1000;
+const FILAS_POR_PARTE = 5000;   // techo de memoria por tanda
 
 const cab = {
   apikey: KEY_SRV,
@@ -36,9 +37,31 @@ async function gzip(texto: string): Promise<Uint8Array> {
   return new Uint8Array(await new Response(flujo).arrayBuffer());
 }
 
-// Trae una tabla entera, de a 1000 filas
-async function traerTabla(tabla: string): Promise<unknown[]> {
-  const filas: unknown[] = [];
+// Vuelca una tabla a storage SIN cargarla entera en memoria.
+// Antes se juntaban todas las filas en un array, se hacía JSON.stringify de
+// todo junto y recién ahí se comprimía. Con precios_historico (47.854 filas,
+// 12 MB) eso pasaba de los 100 MB entre el array, el texto y el gzip, y la
+// función se moría a la mitad. Ahora se corta de a FILAS_POR_PARTE: cada
+// tanda se comprime y se sube sola, así la memoria queda acotada sin importar
+// cuánto crezca la tabla.
+async function volcarTabla(tabla: string, fecha: string): Promise<{filas:number; bytes:number; partes:string[]}> {
+  let buffer: unknown[] = [];
+  let filas = 0, bytes = 0, parte = 0;
+  const partes: string[] = [];
+
+  const flush = async (ultima: boolean) => {
+    if (!buffer.length && !(ultima && parte === 0)) return;
+    parte++;
+    // Si entra en una sola parte se mantiene el nombre de siempre, para que
+    // los respaldos viejos y los nuevos se lean igual.
+    const nombre = (ultima && parte === 1) ? `${tabla}.json.gz` : `${tabla}.parte${String(parte).padStart(3,"0")}.json.gz`;
+    const gz = await gzip(JSON.stringify(buffer));
+    await subir(`${fecha}/${nombre}`, gz, "application/gzip");
+    bytes += gz.length;
+    partes.push(nombre);
+    buffer = [];
+  };
+
   for (let desde = 0; ; desde += PAGINA) {
     const r = await fetch(
       `${URL_SB}/rest/v1/${encodeURIComponent(tabla)}?select=*&limit=${PAGINA}&offset=${desde}`,
@@ -47,11 +70,14 @@ async function traerTabla(tabla: string): Promise<unknown[]> {
     if (!r.ok) throw new Error(`${tabla}: HTTP ${r.status} ${(await r.text()).slice(0, 160)}`);
     const tanda = await r.json();
     if (!Array.isArray(tanda) || tanda.length === 0) break;
-    filas.push(...tanda);
+    buffer.push(...tanda);
+    filas += tanda.length;
+    if (buffer.length >= FILAS_POR_PARTE) await flush(false);
     if (tanda.length < PAGINA) break;
-    if (filas.length > 500000) break;   // freno de seguridad
+    if (filas > 500000) break;   // freno de seguridad
   }
-  return filas;
+  await flush(true);
+  return { filas, bytes, partes };
 }
 
 async function subir(ruta: string, datos: Uint8Array, tipo: string) {
@@ -117,6 +143,32 @@ Deno.serve(async (req: Request) => {
   const detalle: Array<Record<string, unknown>> = [];
   let filasTotal = 0, bytesTotal = 0, fallaron = 0;
 
+  // Se anota el arranque ANTES de empezar. Si la función se muere a la mitad
+  // (se pasó de memoria, se cortó el tiempo), la fila queda en "en_curso" y
+  // se ve que algo pasó. Antes el registro se escribía sólo al final: un
+  // respaldo cortado no dejaba ni rastro y nadie se enteraba.
+  let idFila: number | null = null;
+  try {
+    const ri = await fetch(`${URL_SB}/rest/v1/respaldos_log`, {
+      method: "POST",
+      headers: { ...cab, Prefer: "return=representation" },
+      body: JSON.stringify({ fecha, carpeta: fecha, estado: "en_curso", disparado_por: quien }),
+    });
+    if (ri.ok) { const f = await ri.json(); idFila = Array.isArray(f) && f[0] ? f[0].id : null; }
+  } catch { /* si no se puede anotar, igual seguimos con el respaldo */ }
+
+  const cerrarFila = async (datos: Record<string, unknown>) => {
+    if (idFila) {
+      await fetch(`${URL_SB}/rest/v1/respaldos_log?id=eq.${idFila}`, {
+        method: "PATCH", headers: cab, body: JSON.stringify(datos),
+      }).catch(() => {});
+    } else {
+      await fetch(`${URL_SB}/rest/v1/respaldos_log`, {
+        method: "POST", headers: cab, body: JSON.stringify({ fecha, carpeta: fecha, ...datos }),
+      }).catch(() => {});
+    }
+  };
+
   try {
     const rt = await fetch(`${URL_SB}/rest/v1/rpc/fn_tablas_para_respaldo`, {
       method: "POST", headers: cab, body: "{}",
@@ -126,12 +178,11 @@ Deno.serve(async (req: Request) => {
 
     for (const t of tablas) {
       try {
-        const filas = await traerTabla(t.tabla);
-        const gz = await gzip(JSON.stringify(filas));
-        await subir(`${fecha}/${t.tabla}.json.gz`, gz, "application/gzip");
-        filasTotal += filas.length;
-        bytesTotal += gz.length;
-        detalle.push({ tabla: t.tabla, filas: filas.length, bytes: gz.length });
+        const res = await volcarTabla(t.tabla, fecha);
+        filasTotal += res.filas;
+        bytesTotal += res.bytes;
+        detalle.push({ tabla: t.tabla, filas: res.filas, bytes: res.bytes,
+                       partes: res.partes.length > 1 ? res.partes.length : undefined });
       } catch (e) {
         fallaron++;
         detalle.push({ tabla: t.tabla, error: String(e).slice(0, 200) });
@@ -149,15 +200,12 @@ Deno.serve(async (req: Request) => {
     const borrados = await limpiarViejos();
 
     const estado = fallaron === 0 ? "ok" : (fallaron < detalle.length ? "parcial" : "error");
-    await fetch(`${URL_SB}/rest/v1/respaldos_log`, {
-      method: "POST", headers: cab,
-      body: JSON.stringify({
-        fecha, carpeta: fecha, estado,
-        tablas: detalle.length - fallaron, filas: filasTotal, bytes: bytesTotal,
-        duracion_ms: Date.now() - arranque, detalle,
-        error: fallaron ? `${fallaron} tabla(s) fallaron` : null,
-        disparado_por: quien,
-      }),
+    await cerrarFila({
+      estado,
+      tablas: detalle.length - fallaron, filas: filasTotal, bytes: bytesTotal,
+      duracion_ms: Date.now() - arranque, detalle,
+      error: fallaron ? `${fallaron} tabla(s) fallaron` : null,
+      disparado_por: quien,
     });
 
     return new Response(JSON.stringify({
@@ -167,15 +215,12 @@ Deno.serve(async (req: Request) => {
     }), { headers: { "Content-Type": "application/json" } });
 
   } catch (e) {
-    await fetch(`${URL_SB}/rest/v1/respaldos_log`, {
-      method: "POST", headers: cab,
-      body: JSON.stringify({
-        fecha, carpeta: fecha, estado: "error",
-        tablas: 0, filas: filasTotal, bytes: bytesTotal,
-        duracion_ms: Date.now() - arranque, detalle,
-        error: String(e).slice(0, 500), disparado_por: quien,
-      }),
-    }).catch(() => {});
+    await cerrarFila({
+      estado: "error",
+      tablas: detalle.length - fallaron, filas: filasTotal, bytes: bytesTotal,
+      duracion_ms: Date.now() - arranque, detalle,
+      error: String(e).slice(0, 500), disparado_por: quien,
+    });
     return new Response(JSON.stringify({ ok: false, error: String(e) }), {
       status: 500, headers: { "Content-Type": "application/json" },
     });
