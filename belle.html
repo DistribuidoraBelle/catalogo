@@ -41454,8 +41454,21 @@ function recRenderTab(){
     return t.indexOf(srch)>=0;
   });
 
+  // Las devoluciones ya aprobadas salían de la lista y no quedaban a la vista en
+  // ningún lado: hay que poder ver cuánto se le descontó a cada vendedor.
+  var cerradosFilt=(d.recHistorial||[]).filter(function(r){
+    if(r.clase!=='devolucion' && r.categoria!=='devolucion') return false;
+    if(filtroEst && r.estado!==filtroEst) return false;
+    if(srch){
+      var t=((r.titulo||'')+' '+(r.descripcion||'')+' '+(r.objeto_desc||'')+' '+(r.vendedor_nombre||'')+' '+(r.nro_reclamo||'')).toLowerCase();
+      if(t.indexOf(srch)<0) return false;
+    }
+    return true;
+  });
+
   var dFilt={
     reclamos:reclamosFilt,
+    devoluciones:reclamosFilt.concat(cerradosFilt),
     recHistorial:d.recHistorial,
     faltantes:faltantesFilt,
     fallados:falladosFilt,
@@ -41465,7 +41478,7 @@ function recRenderTab(){
 
   if(_recTab==='faltantes') recRenderFaltantes(el,dFilt);
   else if(_recTab==='fallados') recRenderFallados(el,dFilt);
-  else if(_recTab==='devoluciones') recRenderFiltrado(el,dFilt.reclamos,'devolucion');
+  else if(_recTab==='devoluciones') recRenderFiltrado(el,dFilt.devoluciones,'devolucion');
   else if(_recTab==='ventas') recRenderFiltrado(el,dFilt.reclamos,'venta');
   else if(_recTab==='historial')recRenderHistorialReclamos(el,dFilt);
   else recRenderFiltrado(el,dFilt.reclamos,'otros');
@@ -41573,15 +41586,16 @@ function recRenderFiltrado(el,reclamos,tipo){
     var _its=Array.isArray(r.items)?r.items:[];
     var _monto=Math.round(parseFloat(r.monto_devuelto_cliente)||0);
     var _reing=_its.filter(function(i){return i.reingresa_stock;});
+    var _vNom=r.vendedor_nombre||('Vendedor '+(r.vendedor_id||'?'));
     var _detalle='';
     if(_its.length){
       _detalle='<div style="font-size:.7rem;color:var(--tx2);background:rgba(94,141,238,.07);border:1px solid var(--bd);border-radius:4px;padding:.4rem .6rem;margin-bottom:.5rem">'+
         '<div style="font-weight:600;color:var(--tx3);margin-bottom:.2rem">Productos:</div>'+
         _its.map(function(i){return '&bull; '+(i.producto_nombre||'Producto')+' &times;'+(i.cantidad||1)+(i.reingresa_stock?' <span style="color:var(--green);font-weight:600">&#8617; a stock</span>':'');}).join('<br>')+
-        (_monto>0?'<div style="margin-top:.3rem;color:var(--acc);font-weight:600">Dinero devuelto al cliente: $'+_monto.toLocaleString('es-AR')+'</div>':'')+
+        (_monto>0?'<div style="margin-top:.3rem;color:var(--acc);font-weight:600">💰 '+_vNom+' le devolvió $'+_monto.toLocaleString('es-AR')+' al cliente'+(r.aplicado?'':' &mdash; al aprobar se le descuentan de lo que tiene para rendir')+'</div>':'')+
       '</div>';
     } else if(_monto>0){
-      _detalle='<div style="font-size:.72rem;color:var(--acc);font-weight:600;margin-bottom:.5rem">Dinero devuelto al cliente: $'+_monto.toLocaleString('es-AR')+'</div>';
+      _detalle='<div style="font-size:.72rem;color:var(--acc);font-weight:600;margin-bottom:.5rem">💰 '+_vNom+' le devolvió $'+_monto.toLocaleString('es-AR')+' al cliente'+(r.aplicado?'':' &mdash; al aprobar se le descuentan de lo que tiene para rendir')+'</div>';
     }
     var _necesitaAplicar=(r.categoria==='devolucion'||r.clase==='devolucion'||_monto>0||_reing.length>0);
     var _acciones;
@@ -41611,22 +41625,26 @@ function recRenderFiltrado(el,reclamos,tipo){
       '<div style="font-size:.74rem;color:var(--tx2);background:var(--sur3);padding:.4rem .6rem;border-radius:4px;margin-bottom:.5rem">'+r.descripcion+'</div>'+
       _detalle+
       (r.respuesta_admin?'<div style="font-size:.72rem;color:var(--acc);background:rgba(255,160,0,.08);padding:.4rem .6rem;border-radius:4px;margin-bottom:.5rem;border-left:2px solid var(--acc)"><b>Respuesta:</b> '+r.respuesta_admin+'</div>':'')+
-      '<div style="display:flex;gap:.3rem;flex-wrap:wrap">'+
-        '<button class="btn btn-g" onclick="responderReclamo('+r.id+')" style="font-size:.68rem;color:var(--acc)">✏ Responder</button>'+
-        '<button class="btn btn-g" onclick="cambiarEstadoReclamo('+r.id+',\'en_revision\')" style="font-size:.68rem;color:var(--cyan)">🔍 En revisión</button>'+
-        '<button class="btn btn-green" onclick="cambiarEstadoReclamo('+r.id+',\'aceptado\')" style="font-size:.68rem">✓ Aceptar</button>'+
-        '<button class="btn btn-red" onclick="cambiarEstadoReclamo('+r.id+',\'rechazado\')" style="font-size:.68rem">✗ Rechazar</button>'+
-      '</div>'+
+      // Antes acá estaban los 4 botones fijos y _acciones se calculaba al pedo:
+      // el botón "Aprobar y aplicar" nunca llegaba a la pantalla, así que el
+      // dinero de una devolución no se le descontaba nunca al vendedor.
+      '<div style="display:flex;gap:.3rem;flex-wrap:wrap;align-items:center">'+_acciones+'</div>'+
     '</div>';
   }).join('');
 }
 
 // === APROBAR Y APLICAR (devoluciones / reclamos con stock o dinero) ===
 function recAprobarYAplicar(id){
+  // Candado contra el doble clic: el gasto se postea antes del patch, así que sin
+  // esto dos clics rápidos le descontarían la plata dos veces al vendedor.
+  window._recAplicando=window._recAplicando||{};
+  if(window._recAplicando[id]) return;
+  window._recAplicando[id]=true;
+  var _soltar=function(){ try{ delete window._recAplicando[id]; }catch(e){ window._recAplicando[id]=false; } };
   apiGet('reclamos','select=*&id=eq.'+id+'&limit=1').then(function(rows){
     var r=rows&&rows[0];
-    if(!r){toast('Reclamo no encontrado','terr');return;}
-    if(r.aplicado){toast('Este reclamo ya fue aplicado','twarn');return;}
+    if(!r){_soltar();toast('Reclamo no encontrado','terr');return;}
+    if(r.aplicado){_soltar();toast('Este reclamo ya fue aplicado','twarn');return;}
     var items=Array.isArray(r.items)?r.items:[];
     var monto=Math.round(parseFloat(r.monto_devuelto_cliente)||0);
     var reingresan=items.filter(function(i){return i.reingresa_stock && i.producto_id;});
@@ -41634,21 +41652,36 @@ function recAprobarYAplicar(id){
     if(monto>0) resumen+='\u2022 Descontar $'+monto.toLocaleString('es-AR')+' a '+(r.vendedor_nombre||('vendedor '+r.vendedor_id))+' (gasto en su rendición)\n';
     if(reingresan.length) resumen+='\u2022 Sumar al stock: '+reingresan.map(function(i){return i.cantidad+'u '+i.producto_nombre;}).join(', ')+'\n';
     if(!resumen) resumen='No hay dinero ni stock para aplicar (solo se marca como aceptado).\n';
-    if(!confirm('Aprobar y aplicar esta '+(r.clase==='devolucion'||r.categoria==='devolucion'?'devolución':'incidencia')+'?\n\n'+resumen))return;
+    if(!confirm('Aprobar y aplicar esta '+(r.clase==='devolucion'||r.categoria==='devolucion'?'devolución':'incidencia')+'?\n\n'+resumen)){_soltar();return;}
+
+    // El gasto tiene que caer en el período abierto: la app del vendedor filtra
+    // por periodo=eq.<actual>, así que un período vacío lo dejaría invisible.
+    if(monto>0 && !periodoActual){
+      _soltar();
+      toast('No hay período actual configurado — no puedo descontarle la plata al vendedor','terr');
+      return;
+    }
 
     var proms=[];
+    var _gastoOk=true;
     // 1) Descontar dinero al vendedor como gasto en su rendición del período actual
     if(monto>0 && r.vendedor_id){
       proms.push(apiPost('gastos_vendedor',{
         vendedor_id:r.vendedor_id,
-        concepto:((r.clase==='devolucion'||r.categoria==='devolucion')?'Devolución':'Reclamo')+' '+(r.nro_operacion||('#'+r.id))+(r.objeto_desc?(' — '+r.objeto_desc):''),
+        concepto:((r.clase==='devolucion'||r.categoria==='devolucion')?'Devolución':'Reclamo')+' '+(r.nro_reclamo||('#'+r.id))+(r.objeto_desc?(' — '+r.objeto_desc):''),
         monto:monto,
-        periodo:periodoActual||'',
+        periodo:periodoActual,
         aprobado:true,
         periodo_cerrado:false,
-        categoria:'devolucion',
+        categoria:'DEVOLUCION',
+        nro_operacion:r.nro_reclamo||('REC-'+r.id),
         registrado_por:'admin'+(typeof curUser!=='undefined'&&curUser?(' '+curUser):'')
-      }).catch(function(e){console.error('gasto devol error',e);}));
+      }).catch(function(e){
+        // Si el descuento falla no podemos marcar la devolución como aplicada:
+        // quedaría cerrada sin que al vendedor se le haya descontado nada.
+        _gastoOk=false;
+        console.error('gasto devol error',e);
+      }));
     }
     // 2) Reingresar stock de los productos marcados
     reingresan.forEach(function(i){
@@ -41665,13 +41698,17 @@ function recAprobarYAplicar(id){
     });
 
     Promise.all(proms).then(function(){
-      return apiPatch('reclamos',{estado:'aceptado',aplicado:true,aplicado_at:new Date().toISOString(),aplicado_por:'admin'+(typeof curUser!=='undefined'&&curUser?(' '+curUser):''),monto_ajuste_vendedor:monto},'id=eq.'+id);
+      if(!_gastoOk) throw new Error('no se pudo registrar el descuento al vendedor');
+      // El filtro aplicado=is.null evita que dos clics seguidos generen dos gastos.
+      return apiPatch('reclamos',{estado:'aceptado',aplicado:true,aplicado_at:new Date().toISOString(),aplicado_por:'admin'+(typeof curUser!=='undefined'&&curUser?(' '+curUser):''),monto_ajuste_vendedor:monto},'id=eq.'+id+'&aplicado=not.is.true');
     }).then(function(){
-      toast('Aprobado y aplicado ✅','tok');
+      toast(monto>0?('Aplicado ✅ — $'+monto.toLocaleString('es-AR')+' descontados a '+(r.vendedor_nombre||('vendedor '+r.vendedor_id))):'Aprobado y aplicado ✅','tok');
       if(typeof loadReclamos==='function') loadReclamos();
       if(typeof renderStock==='function') renderStock();
-    }).catch(function(e){toast('Error al aplicar: '+(e&&e.message||e),'terr');});
-  }).catch(function(e){toast('Error: '+(e&&e.message||e),'terr');});
+      if(typeof loadRendiciones==='function') loadRendiciones();
+      _soltar();
+    }).catch(function(e){_soltar();toast('Error al aplicar: '+(e&&e.message||e),'terr');});
+  }).catch(function(e){_soltar();toast('Error: '+(e&&e.message||e),'terr');});
 }
 
 // === ACCIONES FALTANTES ===
@@ -42133,6 +42170,19 @@ function _recExportExcel(){
 
 
 function cambiarEstadoReclamo(id, estado){
+  // Un "Aceptar" a secas sobre una devolución con plata o stock no movía nada:
+  // quedaba aceptada y el vendedor nunca veía el descuento. Si hay algo que
+  // aplicar, se va por el camino que lo aplica de verdad.
+  if(estado==='aceptado' && !window._recSaltarAplicar){
+    var _todos=((window._recData&&window._recData.reclamos)||[]).concat((window._recData&&window._recData.recHistorial)||[]);
+    var _r=_todos.find(function(x){return String(x.id)===String(id);});
+    if(_r && !_r.aplicado){
+      var _m=Math.round(parseFloat(_r.monto_devuelto_cliente)||0);
+      var _its=Array.isArray(_r.items)?_r.items:[];
+      var _hayStock=_its.some(function(i){return i.reingresa_stock&&i.producto_id;});
+      if(_m>0||_hayStock){ return recAprobarYAplicar(id); }
+    }
+  }
   var patch={estado:estado,updated_at:new Date().toISOString()};
   if(estado==='aceptado'||estado==='rechazado') patch.resuelto_at=new Date().toISOString();
   
