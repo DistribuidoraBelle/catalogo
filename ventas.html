@@ -11239,6 +11239,7 @@ var PAGES=["clientes-vend","catalogo","pedidos-web","avisos","rutas","transferid
 // ═══════════════════════════════════════════════════════════════════════
 var _recVentas=[], _recGastos=[], _recRendiciones=[];
 var _recVentasGrupos=[];   // ventas agrupadas por nro_orden
+var _recPedidos=[];        // pedidos crudos, para las órdenes sin línea de venta
 var _recClientesUnicos=[]; // lista única de clientes (para autocomplete)
 var _recSelMode='ultimas'; // ultimas | nroorden | cliente
 var _recSelVenta=null;     // venta agrupada seleccionada
@@ -11269,6 +11270,83 @@ function recSwitchVista(v){
 // Mapa nro_orden -> "Nombre Apellido" del cliente (las ventas no guardan el nombre;
 // se arma cruzando pedidos_catalogo.cliente_id con clientes). Usado por reclamos y devoluciones.
 window._ordenClienteMap={};
+// ══════════════════════════════════════════════════════════════════════
+// 🧾 ÓRDENES QUE NO DEJARON LÍNEAS EN "ventas"
+// Reclamos y Devoluciones armaban la lista de órdenes leyendo la tabla
+// "ventas". Pero hay pedidos cobrados que NUNCA generan filas ahí — los de
+// cuenta corriente, por ejemplo, se contabilizan aparte. Resultado: a un
+// cliente de cuenta corriente no se le podía reclamar ni devolver nada,
+// porque sus compras no aparecían en la lista.
+// Estas funciones completan la lista con esos pedidos, sacando los
+// productos del propio pedido (columna items).
+// ══════════════════════════════════════════════════════════════════════
+
+// items puede venir como texto o como array, según cómo se guardó
+function _pedItems(p){
+  var it = p && p.items;
+  if(typeof it === 'string'){ try{ it = JSON.parse(it); }catch(e){ it = []; } }
+  return Array.isArray(it) ? it : [];
+}
+
+// ¿Esta orden ya se le entregó al cliente? Solo esas se pueden reclamar.
+function _pedEsEntregada(p){
+  if(!p) return false;
+  if(p.estado === 'cancelado' || p.estado === 'anulado') return false;
+  return p.estado === 'cobrado' || p.estado === 'cobrado_parcial' || p.estado_envio === 'entregado';
+}
+
+// Arma los grupos que faltan: pedidos entregados del vendedor que no tienen
+// ni una línea en "ventas". Devuelve el mismo formato que usan los grupos
+// hechos a partir de ventas, para que el resto de la pantalla no cambie.
+function _pedGruposHuerfanos(pedidos, nrosConVenta){
+  var out = [];
+  (Array.isArray(pedidos) ? pedidos : []).forEach(function(p){
+    if(!_pedEsEntregada(p)) return;
+    if(p.vendedor_id && String(p.vendedor_id) !== String(VENDEDOR_ID)) return;
+    if(p.nro_orden && nrosConVenta[p.nro_orden]) return;   // esa ya vino por ventas
+    var items = _pedItems(p);
+    if(!items.length) return;                              // sin productos no hay nada que reclamar
+    var productos = items.map(function(it, i){
+      var cant = parseInt(it.qty != null ? it.qty : it.cantidad) || 1;
+      var precio = parseFloat(it.precio) || 0;
+      return {
+        // Id sintético: no hay línea de venta a la cual apuntar. Es estable
+        // (mismo pedido + misma posición) para que el control de "esto ya se
+        // devolvió" siga funcionando.
+        id: 'ped' + p.id + '_' + i,
+        producto_id: it.producto_id || null,
+        producto_nombre: it.nombre || it.producto_nombre || 'Producto',
+        cantidad: cant,
+        precio_unitario: precio,
+        segmento: it.segmento || '',
+        total: parseFloat(it.total) || (precio * cant)
+      };
+    });
+    var nom = (window._ordenClienteMap && p.nro_orden && window._ordenClienteMap[p.nro_orden]) ||
+              (p.cliente_nombre || '').trim() || '(sin cliente)';
+    out.push({
+      nro_orden: p.nro_orden || null,
+      cliente_nombre: nom,
+      created_at: p.created_at,
+      total: parseFloat(p.total_con_envio) || parseFloat(p.total) || 0,
+      productos: productos,
+      id_principal: productos[0] ? productos[0].id : null,
+      // marca para poder avisar en pantalla de dónde salió
+      desdePedido: true,
+      pedido_id: p.id,
+      es_cc: !!p.es_cc
+    });
+  });
+  return out;
+}
+
+// Índice de qué números de orden ya trajeron líneas de venta
+function _pedNrosConVenta(ventas){
+  var m = {};
+  (Array.isArray(ventas) ? ventas : []).forEach(function(v){ if(v.nro_orden) m[v.nro_orden] = 1; });
+  return m;
+}
+
 function _buildOrdenClienteMap(peds, clis){
   var cliById={};
   (Array.isArray(clis)?clis:[]).forEach(function(c){ cliById[c.id]=((c.nombre||'')+' '+(c.apellido||'')).trim(); });
@@ -11287,12 +11365,13 @@ function loadReclamo(){
     apiGetAll('ventas','select=id,producto_id,producto_nombre,cantidad,precio_unitario,total,segmento,nro_orden,created_at,forma_cobro&vendedor_id=eq.'+VENDEDOR_ID+'&order=created_at.desc&limit=5000'),
     api('GET','gastos_vendedor',null,'vendedor_id=eq.'+VENDEDOR_ID+'&order=created_at.desc&limit=50&select=id,concepto,monto,created_at'),
     api('GET','rendiciones',null,'vendedor_id=eq.'+VENDEDOR_ID+'&tipo=neq.reclamo&order=created_at.desc&limit=50&select=id,concepto,monto,created_at'),
-    apiGetAll('pedidos_catalogo','select=nro_orden,cliente_id'),
+    apiGetAll('pedidos_catalogo','select=id,nro_orden,cliente_id,cliente_nombre,items,total,total_con_envio,estado,estado_envio,es_cc,vendedor_id,created_at'),
     apiGet('clientes','select=id,nombre,apellido&limit=3000')
   ]).then(function(res){
     _recVentas=Array.isArray(res[0])?res[0]:[];
     _recGastos=Array.isArray(res[1])?res[1]:[];
     _recRendiciones=Array.isArray(res[2])?res[2]:[];
+    _recPedidos=Array.isArray(res[3])?res[3]:[];
     _buildOrdenClienteMap(res[3], res[4]);
     // Agrupar ventas por nro_orden
     _recAgruparVentas();
@@ -11336,6 +11415,13 @@ function _recAgruparVentas(){
     if(new Date(v.created_at) < new Date(mapa[k].created_at)) mapa[k].created_at = v.created_at;
   });
   _recVentasGrupos = Object.keys(mapa).map(function(k){return mapa[k];});
+  // Sumar las órdenes entregadas que nunca dejaron líneas en "ventas"
+  // (las de cuenta corriente, entre otras). Sin esto no se les podía
+  // reclamar nada: no aparecían en la lista.
+  try{
+    _recVentasGrupos = _recVentasGrupos.concat(
+      _pedGruposHuerfanos(_recPedidos, _pedNrosConVenta(_recVentas)));
+  }catch(e){ console.warn('[reclamos pedidos sin venta]', e); }
   // Ordenar por fecha desc
   _recVentasGrupos.sort(function(a,b){return new Date(b.created_at)-new Date(a.created_at);});
   // Lista única de clientes para autocomplete
@@ -12336,7 +12422,7 @@ function loadDevoluciones(){
     apiGetAll("ventas","select=id,producto_id,producto_nombre,cantidad,precio_unitario,total,segmento,nro_orden,created_at,estado&vendedor_id=eq."+VENDEDOR_ID+"&order=created_at.desc&limit=5000"),
     apiGet("reclamos","select=*&vendedor_id=eq."+VENDEDOR_ID+"&clase=eq.devolucion&order=created_at.desc&limit=100").catch(function(){return [];}),
     apiGet("incidencias","select=*&vendedor_id=eq."+VENDEDOR_ID+"&tipo=eq.devolucion&order=created_at.desc&limit=100").catch(function(){return [];}),
-    apiGetAll("pedidos_catalogo","select=nro_orden,cliente_id"),
+    apiGetAll("pedidos_catalogo","select=id,nro_orden,cliente_id,cliente_nombre,items,total,total_con_envio,estado,estado_envio,es_cc,vendedor_id,created_at"),
     apiGet("clientes","select=id,nombre,apellido&limit=3000")
   ]).then(function(res){
     var ventas=Array.isArray(res[0])?res[0]:[];
@@ -12354,13 +12440,13 @@ function loadDevoluciones(){
         if(i&&i.linea_id!=null) window._dvYaDevuelto[i.linea_id]=(window._dvYaDevuelto[i.linea_id]||0)+(parseInt(i.cantidad)||1);
       });
     });
-    _dvAgrupar(ventas);
+    _dvAgrupar(ventas, res[3]);
     _dvMode='ultimas'; _dvSelOrden=null; _dvSel={}; _dvDinero=false; _dvMonto=0;
     _dvRenderPage(pg, histNuevo, histViejo);
   }).catch(function(e){ pg.innerHTML="<div class='empty'>Error: "+(e&&e.message||e)+"</div>"; });
 }
 
-function _dvAgrupar(ventas){
+function _dvAgrupar(ventas, pedidos){
   var mapa={};
   ventas.forEach(function(v){
     var k=v.nro_orden||('s_'+v.id);
@@ -12370,6 +12456,11 @@ function _dvAgrupar(ventas){
     if(new Date(v.created_at)<new Date(mapa[k].created_at)) mapa[k].created_at=v.created_at;
   });
   _dvGrupos=Object.keys(mapa).map(function(k){return mapa[k];});
+  // Sumar las órdenes entregadas que nunca dejaron líneas en "ventas"
+  // (cuenta corriente y algunas más). Antes no se les podía devolver nada.
+  try{
+    _dvGrupos = _dvGrupos.concat(_pedGruposHuerfanos(pedidos, _pedNrosConVenta(ventas)));
+  }catch(e){ console.warn('[devoluciones pedidos sin venta]', e); }
   _dvGrupos.sort(function(a,b){return new Date(b.created_at)-new Date(a.created_at);});
   var cs={}; _dvGrupos.forEach(function(g){ if(g.cliente_nombre && g.cliente_nombre!=='(sin cliente)'){var key=g.cliente_nombre.toLowerCase().trim(); if(!cs[key])cs[key]=g.cliente_nombre;} });
   _dvClientes=Object.keys(cs).map(function(k){return cs[k];}).sort();
@@ -12541,7 +12632,17 @@ function _dvEnviar(){
   if(!ids.length){toast('Marcá al menos un producto','twarn');return;}
   var motivo=(document.getElementById('dvMotivo')||{value:'otro'}).value;
   var obs=(document.getElementById('dvObs')||{value:''}).value;
-  var items=ids.map(function(k){var s=_dvSel[k];return {linea_id:parseInt(k,10),producto_id:s.producto_id,producto_nombre:s.producto_nombre,cantidad:s.cantidad,reingresa_stock:!!s.reingresa};});
+  // OJO con el linea_id: las órdenes que salen de un pedido (sin línea de
+  // venta) tienen id sintético tipo "ped1173_0". Un parseInt lo dejaría en
+  // NaN → null, y el control de "esta línea ya se devolvió" no lo vería:
+  // se podría devolver dos veces la misma cosa (doble stock y doble plata).
+  // Por eso el id numérico va como número y el sintético se guarda tal cual.
+  var items=ids.map(function(k){
+    var s=_dvSel[k];
+    var num=parseInt(k,10);
+    var lid=(String(num)===String(k))?num:k;
+    return {linea_id:lid,producto_id:s.producto_id,producto_nombre:s.producto_nombre,cantidad:s.cantidad,reingresa_stock:!!s.reingresa};
+  });
   var algReingresa=items.some(function(i){return i.reingresa_stock;});
   var monto=_dvDinero?(_dvMonto||0):0;
   // 🐛 FIX 2026-08-08: el monto no puede ser negativo ni superar el total de la venta
@@ -12559,7 +12660,7 @@ function _dvEnviar(){
     vendedor_id:VENDEDOR_ID,
     vendedor_nombre:VNOMBRE[VENDEDOR_ID]||VENDEDOR_NOMBRE||'Vendedor',
     tipo_objeto:'venta',
-    objeto_id:items[0].linea_id,
+    objeto_id:(typeof items[0].linea_id==='number')?items[0].linea_id:null,
     objeto_desc:nroTxt+(nroTxt?' · ':'')+_dvSelOrden.cliente_nombre+' · '+resumen,
     categoria:'devolucion',
     clase:'devolucion',
