@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<!-- BELLE_BUILD 20260913-1400 deposito-alertas-venta -->
+<!-- BELLE_BUILD 20260913-1600 comision-marcela-especial -->
 <html lang="es">
 <head>
 <meta charset="UTF-8">
@@ -171,7 +171,7 @@ select.sel{padding:.38rem .6rem;background:var(--sur);border:1px solid var(--bd)
 .tot-row:last-child{border:none;font-weight:700;font-size:.9rem;margin-top:.28rem;padding-top:.35rem}
 .tot-lbl{color:var(--tx2)}
 .tbl-wrap{background:var(--sur2);border:1px solid var(--bd);border-radius:10px;overflow:hidden;margin-bottom:.6rem}
-.ped-card{background:var(--sur2);border:1px solid var(--bd);border-radius:10px;padding:.8rem .95rem;margin-bottom:.55rem}
+.ped-card{background:var(--sur2);border:1px solid var(--bd);border-radius:10px;padding:.8rem .95rem;margin-bottom:.55rem}.ped-card.marcela{background:linear-gradient(180deg,rgba(167,139,250,.16),rgba(167,139,250,.07));border-color:rgba(167,139,250,.55);box-shadow:inset 3px 0 0 #a78bfa}.ped-card.nuevo.marcela{border-color:rgba(167,139,250,.65)}.mc-strip{display:flex;align-items:center;gap:.5rem;flex-wrap:wrap;margin:.2rem 0 .55rem;padding:.42rem .6rem;border-radius:8px;background:rgba(167,139,250,.13);border:1px solid rgba(167,139,250,.4);font-size:.72rem;color:var(--tx)}.mc-strip .mc-t{flex:1;min-width:150px;line-height:1.3}.mc-strip .mc-m{font-weight:800;color:#c4b5fd;font-size:.86rem}.mc-strip .mc-d{font-size:.62rem;color:var(--tx3)}.mc-btn{border-radius:999px;padding:.24rem .6rem;font-size:.64rem;font-weight:700;cursor:pointer;font-family:inherit;border:1px solid rgba(167,139,250,.6);background:transparent;color:#c4b5fd;white-space:nowrap}.mc-btn.on{background:#7c3aed;border-color:#7c3aed;color:#fff}.mc-btn:disabled{opacity:.5;cursor:default}.mc-esp{display:inline-block;font-size:.56rem;font-weight:800;color:#fff;background:#7c3aed;border-radius:4px;padding:.08rem .38rem;margin-left:.35rem;vertical-align:middle}
 .ped-card.nuevo{border-color:var(--acc);background:var(--adim)}
 .ped-header{display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:.4rem}
 .ped-fecha{font-size:.67rem;color:var(--tx3)}
@@ -6076,35 +6076,103 @@ function _logEstadoPedidoV(pedidoId, estado, nota){
 // ── Helper: si el pedido vino transferido por Marcela (id=3),
 // crear la comisión correspondiente en gastos_vendedor.
 // Idempotente: si ya existe el registro para ese nro_orden, no duplica.
+// ── 💜 Comisión Marcela: cálculo unificado (2026-09-13) ─────────────
+// Regla configurada por admin: minorista $5.000 (1-2 u.), perfume $2.000 (3+ u. o cliente mayorista/CC), decant $500.
+// EXCEPCIÓN "comisión especial" (pedido generado por Marcela por su cuenta): TODOS los perfumes a $5.000, sin importar cantidad ni cliente.
+var _MC_ESPECIAL=5000;
+function _mcItemsDe(pedido){ var items=[]; try{ items=typeof pedido.items==='string'?JSON.parse(pedido.items):(pedido.items||[]); }catch(e){ items=[]; } return Array.isArray(items)?items:[]; }
+function _mcCalc(pedido, esMayorista){
+  var items=_mcItemsDe(pedido);
+  var totalUn=items.filter(function(it){return !it.isDecan;}).reduce(function(s,it){return s+(it.qty||1);},0);
+  var totalDec=items.filter(function(it){return it.isDecan;}).reduce(function(s,it){return s+(it.qty||1);},0);
+  var comDec=(_comisiones&&_comisiones.decan)||500;
+  var especial=pedido.comision_especial===true;
+  var comBase, regla;
+  if(especial){ comBase=_MC_ESPECIAL; regla='especial'; }
+  else if(esMayorista){ comBase=(_comisiones&&_comisiones.perfume)||2000; regla='mayorista'; }
+  else { var segTot=totalUn>=10?'pm':totalUn>=3?'pe':'pi'; comBase=segTot==='pi'?((_comisiones&&_comisiones.minorista)||5000):((_comisiones&&_comisiones.perfume)||2000); regla=segTot==='pi'?'minorista':'perfume'; }
+  var monto=Math.round(totalUn*comBase+totalDec*comDec);
+  var partes=[]; if(totalUn)partes.push(totalUn+" perf. × "+fmt(comBase)); if(totalDec)partes.push(totalDec+" decant × "+fmt(comDec));
+  return {monto:monto, base:comBase, un:totalUn, dec:totalDec, especial:especial, regla:regla, detalle:partes.join(" + ")};
+}
+// ¿El cliente del pedido paga precio mayorista? (CC o VIP). Cache por cliente_id para las tarjetas.
+window._mcCliMay=window._mcCliMay||{};
+function _mcEsMayoristaSync(pedido){ if(pedido.es_cc===true)return true; if(pedido.cliente_id!=null&&window._mcCliMay[pedido.cliente_id]!=null)return window._mcCliMay[pedido.cliente_id]; return false; }
+function _mcEsMayorista(pedido){
+  if(pedido.es_cc===true)return Promise.resolve(true);
+  if(!pedido.cliente_id)return Promise.resolve(false);
+  if(window._mcCliMay[pedido.cliente_id]!=null)return Promise.resolve(window._mcCliMay[pedido.cliente_id]);
+  return apiGet('clientes','select=cuenta_corriente_habilitada,precio_mayorista&id=eq.'+pedido.cliente_id+'&limit=1').then(function(rows){
+    var c=Array.isArray(rows)&&rows[0]?rows[0]:null; var esMay=!!(c&&(c.cuenta_corriente_habilitada||c.precio_mayorista));
+    window._mcCliMay[pedido.cliente_id]=esMay; return esMay;
+  }).catch(function(){ return false; });
+}
+// Tira violeta en la tarjeta del pedido: monto de comisión + botón de comisión especial
+function _mcStripHTML(ped, cobrado, cancelado){
+  if(ped.transferida_por_id!==3)return "";
+  var c=_mcCalc(ped,_mcEsMayoristaSync(ped));
+  var esp=ped.comision_especial===true;
+  var quePaga=esp?"Excepción: $"+_MC_ESPECIAL.toLocaleString('es-AR')+" por perfume (venta generada por Marcela)":(c.regla==='mayorista'?"Regla: cliente mayorista/CC":(c.regla==='minorista'?"Regla: minorista (1-2 u.)":"Regla: 3 o más unidades"));
+  var btn="";
+  if(!cobrado&&!cancelado){
+    btn="<button type='button' class='mc-btn"+(esp?" on":"")+"' onclick='event.stopPropagation();_mcToggleEspecial("+ped.id+","+(esp?"false":"true")+")' title='"+(esp?"Volver a la regla configurada":"Pagar $5.000 por cada perfume (venta generada por Marcela)")+"'>"+(esp?"★ Comisión especial":"☆ Comisión especial")+"</button>";
+  } else if(esp){
+    btn="<span class='mc-esp'>★ ESPECIAL</span>";
+  }
+  return "<div class='mc-strip' id='mcs-"+ped.id+"' data-ped='"+ped.id+"'><span>💜</span>"+
+    "<div class='mc-t'><div>Comisión Marcela: <span class='mc-m'>"+fmt(c.monto)+"</span>"+(cobrado?" <span class='mc-d'>(registrada al cobrar)</span>":"")+"</div>"+
+    "<div class='mc-d'>"+c.detalle+" · "+quePaga+"</div></div>"+btn+"</div>";
+}
+// Refresca los montos de las tiras cuando ya sabemos si el cliente es mayorista (consulta en segundo plano)
+function _mcRefrescarStrips(pedidos){
+  try{
+    var lista=(pedidos||[]).filter(function(p){return p.transferida_por_id===3&&p.cliente_id&&p.es_cc!==true&&window._mcCliMay[p.cliente_id]==null;});
+    var ids=[]; lista.forEach(function(p){ if(ids.indexOf(p.cliente_id)<0)ids.push(p.cliente_id); });
+    if(!ids.length)return;
+    apiGet('clientes','select=id,cuenta_corriente_habilitada,precio_mayorista&id=in.('+ids.join(',')+')').then(function(rows){
+      (Array.isArray(rows)?rows:[]).forEach(function(c){ window._mcCliMay[c.id]=!!(c.cuenta_corriente_habilitada||c.precio_mayorista); });
+      lista.forEach(function(p){
+        var el=document.getElementById('mcs-'+p.id); if(!el)return;
+        var cobrado=p.estado==='cobrado'||p.confirmado_cobro===true, cancelado=p.estado==='cancelado';
+        var tmp=document.createElement('div'); tmp.innerHTML=_mcStripHTML(p,cobrado,cancelado);
+        if(tmp.firstChild)el.parentNode.replaceChild(tmp.firstChild,el);
+      });
+    }).catch(function(){});
+  }catch(e){}
+}
+var _mcToggling={};
+function _mcToggleEspecial(pedId, on){
+  if(_mcToggling[pedId])return; _mcToggling[pedId]=true;
+  var msg=on?"Marcar este pedido con COMISIÓN ESPECIAL?\n\nMarcela cobra $"+_MC_ESPECIAL.toLocaleString('es-AR')+" por cada perfume, sin importar la cantidad ni el cliente. Es la excepción para ventas que ella generó por su cuenta (no derivadas de un vendedor).":"Volver a la regla de comisión configurada por el admin para este pedido?";
+  if(!confirm(msg)){ delete _mcToggling[pedId]; return; }
+  apiPatch('pedidos_catalogo',{comision_especial:on},'id=eq.'+pedId).then(function(res){
+    var row=Array.isArray(res)?res[0]:null;
+    if(!row)throw new Error('La base no confirmó el cambio');
+    try{ _logEstadoPedidoV(pedId, row.estado||'pendiente', on?'Comisión especial Marcela activada ($'+_MC_ESPECIAL+' por perfume)':'Comisión especial Marcela desactivada'); }catch(e){}
+    var el=document.getElementById('mcs-'+pedId);
+    if(el){ var tmp=document.createElement('div'); tmp.innerHTML=_mcStripHTML(row,false,false); if(tmp.firstChild)el.parentNode.replaceChild(tmp.firstChild,el); }
+    toast(on?"★ Comisión especial activada: $"+_MC_ESPECIAL.toLocaleString('es-AR')+" por perfume":"Comisión especial desactivada","tok");
+  }).catch(function(e){ toast("No se pudo cambiar: "+((e&&e.message)||''),"terr"); }).then(function(){ delete _mcToggling[pedId]; });
+}
+
 function _crearComisionMarcelaSiAplica(pedido){
   if(!pedido) return;
   if(pedido.transferida_por_id !== 3) return;
   if(!pedido.nro_orden) return;
-  var items=[];
-  try{ items = typeof pedido.items==='string' ? JSON.parse(pedido.items) : (pedido.items||[]); }catch(e){ items=[]; }
+  var items=_mcItemsDe(pedido);
   if(!items.length) return;
-  var comItems = items.filter(function(it){return !it.isDecan;});
-  var comDecans = items.filter(function(it){return it.isDecan;});
-  var totalUn = comItems.reduce(function(s,it){return s+(it.qty||1);},0);
-  var totalDec = comDecans.reduce(function(s,it){return s+(it.qty||1);},0);
-  var comDec = (_comisiones && _comisiones.decan) || 500;
 
   // 🎯 FEAT 2026-05-22: si cliente CC o VIP, comisión SIEMPRE mayorista ($2000/u)
+  // 💜 2026-09-13: si el pedido tiene comision_especial, $5.000 por perfume (excepción a la regla)
   function _finalizar(esMayorista){
-    var comBase;
-    if(esMayorista){
-      comBase = (_comisiones && _comisiones.perfume) || 2000;
-    } else {
-      var segTot = totalUn>=10?'pm':totalUn>=3?'pe':'pi';
-      comBase = segTot==='pi' ? ((_comisiones && _comisiones.minorista) || 5000) : ((_comisiones && _comisiones.perfume) || 2000);
-    }
-    var totalCom = Math.round(totalUn*comBase + totalDec*comDec);
+    var c=_mcCalc(pedido, esMayorista);
+    var totalCom=c.monto;
     if(totalCom <= 0) return;
     apiGet('gastos_vendedor','select=id&vendedor_id=eq.'+VENDEDOR_ID+'&nro_operacion=eq.'+encodeURIComponent(pedido.nro_orden)+'&concepto=ilike.%25Comision%20Marcela%25').then(function(existentes){
       if(Array.isArray(existentes) && existentes.length) return;
       apiPost('gastos_vendedor',{
         vendedor_id: VENDEDOR_ID,
-        concepto: 'Comision Marcela — '+pedido.nro_orden,
+        concepto: 'Comision Marcela — '+pedido.nro_orden+(c.especial?' (especial $'+_MC_ESPECIAL+'/u)':''),
         monto: totalCom,
         periodo: periodoActual||'general',
         aprobado: true,
@@ -6114,6 +6182,8 @@ function _crearComisionMarcelaSiAplica(pedido){
     }).catch(function(e){console.error("[belle] check comision marcela:",e);});
   }
 
+  // Comisión especial: no depende del cliente
+  if(pedido.comision_especial === true){ _finalizar(false); return; }
   // Atajo: si el pedido es CC, sabemos que paga precio mayorista
   if(pedido.es_cc === true){
     _finalizar(true);
@@ -7157,6 +7227,7 @@ function loadPedidosWeb(){
     var pedidos=sinCobrar.concat(Array.isArray(res[2])?res[2]:[]).concat(Array.isArray(res[3])?res[3]:[]);
     // Las transferidas ya son pedidos_catalogo, no necesitan flag _esTransf
     var transferidas=Array.isArray(res[4])?res[4]:[];
+    setTimeout(function(){ try{ _mcRefrescarStrips(pedidos.concat(transferidas)); }catch(e){} }, 300);
     // Refrescar cache prods (stock_actual/reserva) — corrige el badge desactualizado
     try{
       var _fp=Array.isArray(res[5])?res[5]:[];
@@ -7982,7 +8053,7 @@ function renderPedCard(ped,cobrado){
     var _cpMto=Math.max(parseFloat(ped.cobrado_parcial)||0,parseFloat(ped.cobrado_total)||0);
     if(_cpMto>0) _sinConfBadge+="<span class='badge' style='font-size:.55rem;margin-left:.4rem;background:rgba(91,141,238,.14);color:var(--blue);border:1px solid rgba(91,141,238,.5);font-weight:700'>💰 Cobro parcial</span>";
   }
-  var html="<div class='ped-card"+(cobrado||cancelado?"":" nuevo")+"'>";
+  var html="<div class='ped-card"+(cobrado||cancelado?"":" nuevo")+(ped.transferida_por_id===3?" marcela":"")+"'>";
   html+="<div class='ped-header'>";
   html+="<div><div style='font-size:.86rem;font-weight:700;color:var(--tx);overflow:hidden;text-overflow:ellipsis;white-space:nowrap'>👤 "+_vcEsc(_pedNombreCli(ped))+"</div>"+
     "<div style='font-size:.72rem;font-weight:500;color:var(--tx2);margin-top:.1rem'>Pedido web <span style='color:var(--acc);font-size:.7rem'>"+(ped.nro_orden||("#"+ped.id))+"</span>"+
@@ -8018,6 +8089,8 @@ function renderPedCard(ped,cobrado){
     html+="<div style='display:flex;justify-content:space-between;align-items:center;padding:.05rem 0;"+_tacho+"'>"+(_cobIdx.indexOf(_ii)>=0?"\u2713 ":"")+"<span>"+_resB+_itBadge+it.nombre+_mlPvTag+" x"+(it.qty||1)+(_itPrecio>0?" <span style='font-size:.62rem;color:var(--tx3)'>— "+fmt(_itPrecio)+"/u</span>":"")+"</span><span style='font-weight:600'>"+fmt(it.total||0)+"</span></div>";
   });
   html+="</div>";
+  // 💜 Pedido transferido por Marcela: comisión que cobra + botón de comisión especial
+  html+=_mcStripHTML(ped, cobrado, cancelado);
   // Alerta de cambio de precio
   var _estados_activos=['pendiente','reservado','cobrado_parcial'];
   if(_estados_activos.indexOf(ped.estado)>=0&&Array.isArray(items)&&prods.length){
@@ -16141,7 +16214,9 @@ function _appPedRender(tab){
       if(!p.vendedor_id) deQuien=" <span style='font-size:.6rem;color:#e8b86d'>· sin asignar</span>";
       else if(p.vendedor_id!==VENDEDOR_ID){ var _vn=(typeof _vendedorNombre==='function')?_vendedorNombre(p.vendedor_id):('vendedor '+p.vendedor_id); deQuien=" <span style='font-size:.6rem;color:#5b9fe0'>· "+_vn+"</span>"; }
     }
-    h+="<div onclick=\"_gestionarPedido('web',"+p.id+")\" style='background:var(--sur2,#26221e);border:1px solid var(--bd);border-radius:13px;padding:.85rem;margin-bottom:.6rem;cursor:pointer'>"+
+    var _esMc=(p.transferida_por_id===3); var _mcApp='';
+    if(_esMc){ try{ var _mcC=_mcCalc(p,_mcEsMayoristaSync(p)); _mcApp="<div style='font-size:.7rem;color:#c4b5fd;margin-top:.3rem;font-weight:700'>💜 Comisión Marcela "+fmt(_mcC.monto)+(p.comision_especial?" <span class='mc-esp'>★ ESPECIAL</span>":"")+"</div>"; }catch(e){} }
+    h+="<div onclick=\"_gestionarPedido('web',"+p.id+")\" style='"+(_esMc?"background:linear-gradient(180deg,rgba(167,139,250,.18),rgba(167,139,250,.07));border:1px solid rgba(167,139,250,.55);box-shadow:inset 3px 0 0 #a78bfa;":"background:var(--sur2,#26221e);border:1px solid var(--bd);")+"border-radius:13px;padding:.85rem;margin-bottom:.6rem;cursor:pointer'>"+
       "<div style='display:flex;justify-content:space-between;align-items:flex-start;gap:.5rem'>"+
         "<div style='flex:1;min-width:0'><div style='font-weight:700;color:var(--tx);font-size:.95rem;overflow:hidden;text-overflow:ellipsis;white-space:nowrap'>"+cli+(envio?" <span style='font-size:.62rem;color:#5b9fe0'>🛵 envío</span>":"")+deQuien+"</div>"+
           "<div style='font-size:.68rem;color:var(--tx3);margin-top:.15rem'>"+(p.nro_orden||"#"+p.id)+" · "+fecha+(hora?" "+hora:"")+"</div></div>"+
@@ -16152,7 +16227,7 @@ function _appPedRender(tab){
       (t?"<div style='font-size:.7rem;color:var(--tx3);margin-top:.15rem'>📞 "+t+"</div>":"")+
       (cm>0&&!esCob(p)?"<div style='font-size:.7rem;color:#e8b86d;margin-top:.15rem'>Cobrado "+fmt(cm)+" de "+fmt(p.total||0)+"</div>":"")+
       (!esCob(p)&&_rrApp==='ok'?"<div style='font-size:.66rem;color:#4caf80;margin-top:.15rem'>✅ Stock reservado</div>":"")+
-      alertaRes+
+      alertaRes+_mcApp+
     "</div>";
   });
   b.innerHTML=h;
