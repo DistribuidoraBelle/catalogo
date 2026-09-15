@@ -19,7 +19,7 @@
     </div><!DOCTYPE html>
 <html lang="es">
 <head>
-<!-- BELLE_BUILD 20260915-0930 cc-y-vip-dorado -->
+<!-- BELLE_BUILD 20260915-1030 ficha-cliente-todos-los-pedidos -->
 <meta charset="UTF-8">
 <link rel="icon" type="image/svg+xml" href="favicon.svg">
 <meta name="viewport" content="width=device-width,initial-scale=1">
@@ -5132,7 +5132,7 @@ function _verComoCliente(clienteId){
 
   Promise.all([
     apiGet('clientes', 'select=*&id=eq.'+clienteId+'&limit=1').catch(function(){return [];}),
-    apiGet('pedidos_catalogo', 'select=*&cliente_id=eq.'+clienteId+'&order=created_at.desc&limit=20').catch(function(){return [];}),
+    apiGet('pedidos_catalogo', 'select=*&cliente_id=eq.'+clienteId+'&order=created_at.desc&limit=1000').catch(function(){return [];}),
     apiGet('cc_pagos', 'select=*&cliente_id=eq.'+clienteId+'&order=created_at.desc&limit=10').catch(function(){return [];}),
     apiGet('clientes_direcciones', 'select=*&cliente_id=eq.'+clienteId).catch(function(){return [];})
   ]).then(function(data){
@@ -24765,21 +24765,42 @@ function _adminVerCC(clienteId, clienteNombre){
 // Era función huérfana (nadie la llamaba) que escribía en cuenta_corriente_movimientos (tabla legacy).
 // El admin registra pagos via _adminVerCC → modal FIFO → cc_pagos.
 
+// 🔗 Vincular al cliente un pedido que el vendedor cargó solo con el nombre/teléfono en la nota
+function _admVincularPedidoCliente(pedId, cliId){
+  apiPatch('pedidos_catalogo',{cliente_id:cliId},'id=eq.'+pedId+'&cliente_id=is.null').then(function(r){
+    if(!Array.isArray(r)||!r.length){ toast('Ese pedido ya tiene otro cliente asignado','twarn'); }
+    else { toast('Pedido vinculado ✓','tok'); try{ apiPost('pedidos_estados_log',{pedido_id:pedId,pedido_tabla:'pedidos_catalogo',estado:'cliente_vinculado',nota:'Vinculado al cliente #'+cliId+' desde la ficha',usuario:curUser||'admin'}).catch(function(){}); }catch(e){} }
+    var _m=document.getElementById('_moClienteFicha'); if(_m)_m.remove();
+    verClienteFicha(cliId);
+  }).catch(function(e){ toast('No se pudo vincular: '+((e&&e.message)||''),'terr'); });
+}
+function _admVincularTodosCliente(cliId){
+  apiPost('rpc/fn_pedidos_de_cliente',{p_cliente_id:cliId}).then(function(rows){
+    var ids=(Array.isArray(rows)?rows:[]).filter(function(p){return p.vinculo&&p.vinculo!=='id';}).map(function(p){return p.id;});
+    if(!ids.length){ toast('No hay pedidos para vincular','twarn'); return; }
+    if(!confirm('¿Asignar este cliente a '+ids.length+' pedido'+(ids.length>1?'s':'')+' que coinciden por nombre o teléfono?')) return;
+    return apiPatch('pedidos_catalogo',{cliente_id:cliId},'id=in.('+ids.join(',')+')&cliente_id=is.null').then(function(r){
+      toast((Array.isArray(r)?r.length:0)+' pedidos vinculados ✓','tok');
+      var _m=document.getElementById('_moClienteFicha'); if(_m)_m.remove();
+      verClienteFicha(cliId);
+    });
+  }).catch(function(e){ toast('No se pudo vincular: '+((e&&e.message)||''),'terr'); });
+}
 function verClienteFicha(id){
   _clienteFicha=clientesData.find(function(x){return x.id===id;});
   if(!_clienteFicha)return;
   var c=_clienteFicha;
   Promise.all([
-    apiGet("pedidos_catalogo","select=id,nro_orden,total,estado,created_at&cliente_id=eq."+id+"&order=created_at.desc&limit=10"),
+    // 2026-09-15: TODOS los pedidos del cliente (vinculados por id + los que el vendedor cargó
+    // con su nombre/teléfono en la nota sin vincular), sin límite
+    apiPost("rpc/fn_pedidos_de_cliente",{p_cliente_id:id}).catch(function(){return [];}),
     apiGet("clientes_direcciones","select=id,etiqueta,direccion_completa,localidad,provincia,es_principal,principal&cliente_id=eq."+id),
-    apiGet("vendedores","select=id,nombre&activo=is.true"),
-    // Query separada solo para sumar histórico completo (sin traer todos los items, solo total y estado)
-    apiGet("pedidos_catalogo","select=total,estado&cliente_id=eq."+id+"&estado=neq.cancelado&limit=2000")
+    apiGet("vendedores","select=id,nombre&activo=is.true")
   ]).then(function(res){
     var pedidos=Array.isArray(res[0])?res[0]:[];
     var dirs=Array.isArray(res[1])?res[1]:[];
     var vends=Array.isArray(res[2])?res[2]:[];
-    var pedidosHist=Array.isArray(res[3])?res[3]:[];
+    var pedidosHist=pedidos.filter(function(p){return p.estado!=='cancelado';});
     var nombre=((c.nombre||"")+" "+(c.apellido||"")).trim()||"Cliente #"+id;
     // Total comprado: usar histórico completo, no solo los 10 últimos
     var totalComprado=pedidosHist.reduce(function(s,p){return s+(parseFloat(p.total)||0);},0);
@@ -24987,20 +25008,32 @@ function verClienteFicha(id){
     }
     h+="</div>";
 
-    // Últimos pedidos
+    // Todos los pedidos (2026-09-15: sin límite; incluye los cargados por el vendedor con el nombre en la nota)
     if(pedidos.length){
+      var _sinVinc=pedidos.filter(function(p){return p.vinculo&&p.vinculo!=='id';}).length;
       h+="<div style='background:var(--sur);border:1px solid var(--bd);border-radius:8px;padding:.7rem .85rem'>";
-      h+="<div style='font-size:.7rem;color:var(--tx3);text-transform:uppercase;font-weight:600;margin-bottom:.45rem'>Últimos pedidos"+(cantPedidosHist>10?" (10 de "+cantPedidosHist+")":"")+"</div>";
+      h+="<div style='display:flex;justify-content:space-between;align-items:center;gap:.5rem;flex-wrap:wrap;margin-bottom:.45rem'>"+
+         "<div style='font-size:.7rem;color:var(--tx3);text-transform:uppercase;font-weight:600'>Todos los pedidos ("+pedidos.length+")</div>"+
+         (_sinVinc?"<button class='btn btn-g' style='font-size:.64rem;padding:.2rem .5rem' onclick='_admVincularTodosCliente("+c.id+")' title='Asignar el cliente a los pedidos que coinciden por nombre o teléfono'>🔗 Vincular "+_sinVinc+" pedido"+(_sinVinc>1?"s":"")+"</button>":"")+
+         "</div>";
+      h+="<div style='max-height:340px;overflow-y:auto'>";
       pedidos.forEach(function(p){
         var fecha=new Date(p.created_at).toLocaleDateString("es-AR",{day:"2-digit",month:"2-digit",year:"2-digit"});
-        h+="<div style='display:flex;justify-content:space-between;padding:.4rem .55rem;background:var(--sur2);border-radius:6px;margin-bottom:.3rem;font-size:.76rem;align-items:center;gap:.4rem'>";
-        h+="<span style='font-weight:600;flex-shrink:0'>"+(p.nro_orden||"#"+p.id)+"</span>";
+        var _vnd=p.transferida_por_id===3?"Marcela":(p.vendedor_id?_adminVendedorNombre(p.vendedor_id):"");
+        var _orig=(p.origen==='web'||p.origen==='catalogo')?"🌐 web":(_vnd?"🤝 "+_vnd:"");
+        var _tag=p.vinculo==='nombre'?"<span title='Cargado por el vendedor con el nombre en la nota, sin vincular al cliente' style='font-size:.58rem;color:#e8b86d;border:1px dashed #e8b86d;border-radius:4px;padding:.02rem .3rem'>por nombre</span>"
+                :p.vinculo==='telefono'?"<span title='Coincide por teléfono, sin vincular al cliente' style='font-size:.58rem;color:#e8b86d;border:1px dashed #e8b86d;border-radius:4px;padding:.02rem .3rem'>por teléfono</span>":"";
+        var _btnV=(p.vinculo&&p.vinculo!=='id')?"<button class='btn btn-g' style='font-size:.6rem;padding:.12rem .4rem' onclick='_admVincularPedidoCliente("+p.id+","+c.id+")'>🔗 Vincular</button>":"";
+        h+="<div style='display:flex;justify-content:space-between;padding:.4rem .55rem;background:var(--sur2);border-radius:6px;margin-bottom:.3rem;font-size:.76rem;align-items:center;gap:.4rem;flex-wrap:wrap'>";
+        h+="<span style='font-weight:600;flex-shrink:0;cursor:pointer;color:var(--acc)' title='Abrir el pedido' onclick='if(typeof _adminAbrirDetallePedido===\"function\")_adminAbrirDetallePedido("+p.id+")'>"+(p.nro_orden||"#"+p.id)+"</span>";
         h+="<span style='color:var(--tx3);font-size:.7rem'>"+fecha+"</span>";
+        h+="<span style='color:var(--tx3);font-size:.66rem'>"+_orig+"</span>";
         h+="<span style='color:var(--tx3);font-size:.66rem;text-transform:capitalize;flex-shrink:0'>"+p.estado+"</span>";
-        h+="<span style='font-weight:600;color:var(--acc);flex-shrink:0'>"+fmt(p.total)+"</span>";
+        h+=_tag+_btnV;
+        h+="<span style='font-weight:600;color:var(--acc);flex-shrink:0;margin-left:auto'>"+fmt(p.total)+"</span>";
         h+="</div>";
       });
-      h+="</div>";
+      h+="</div></div>";
     }
 
     // Botones (super poderes admin)

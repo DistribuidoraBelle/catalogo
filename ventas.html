@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<!-- BELLE_BUILD 20260915-0930 cc-y-vip-dorado -->
+<!-- BELLE_BUILD 20260915-1030 ficha-cliente-todos-los-pedidos -->
 <html lang="es">
 <head>
 <meta charset="UTF-8">
@@ -4289,6 +4289,25 @@ function _vcContinuarPedido(clienteId,clienteNombre,accion,items,total,segKey,sk
 }
 
 // ── Historial de pedidos del cliente ──────────────────────────
+function _vcVincularPedido(pedId, cliId, nombre){
+  apiPatch('pedidos_catalogo',{cliente_id:cliId},'id=eq.'+pedId+'&cliente_id=is.null').then(function(r){
+    if(!Array.isArray(r)||!r.length) toast('Ese pedido ya tiene otro cliente asignado','twarn'); else toast('Pedido vinculado ✓','tok');
+    var _m=document.getElementById('_moVcHistorial'); if(_m)_m.remove();
+    vcVerHistorial(cliId, nombre);
+  }).catch(function(e){ toast('No se pudo vincular: '+((e&&e.message)||''),'terr'); });
+}
+function _vcVincularTodos(cliId, nombre){
+  apiPost('rpc/fn_pedidos_de_cliente',{p_cliente_id:cliId}).then(function(rows){
+    var ids=(Array.isArray(rows)?rows:[]).filter(function(p){return p.vinculo&&p.vinculo!=='id';}).map(function(p){return p.id;});
+    if(!ids.length){ toast('No hay pedidos para vincular','twarn'); return; }
+    if(!confirm('¿Asignar este cliente a '+ids.length+' pedido'+(ids.length>1?'s':'')+' que coinciden por nombre o teléfono?')) return;
+    return apiPatch('pedidos_catalogo',{cliente_id:cliId},'id=in.('+ids.join(',')+')&cliente_id=is.null').then(function(r){
+      toast((Array.isArray(r)?r.length:0)+' pedidos vinculados ✓','tok');
+      var _m=document.getElementById('_moVcHistorial'); if(_m)_m.remove();
+      vcVerHistorial(cliId, nombre);
+    });
+  }).catch(function(e){ toast('No se pudo vincular: '+((e&&e.message)||''),'terr'); });
+}
 function vcVerHistorial(clienteId, clienteNombre){
   var mo=document.createElement("div");mo.className="mo open";mo.id="_moVcHistorial";
   mo.innerHTML="<div class='md' style='max-width:560px;width:95%;max-height:85vh;overflow-y:auto'>"+
@@ -4297,23 +4316,35 @@ function vcVerHistorial(clienteId, clienteNombre){
     "<div class='mb' id='_vcHistContenido'><div class='loading'><div class='spin'></div></div></div></div>";
   document.body.appendChild(mo);
   mo.addEventListener("click",function(e){if(e.target===mo)mo.remove();});
-  // Cargar pedidos_catalogo vinculados a este cliente
-  apiGet("pedidos_catalogo","select=id,nro_orden,total,estado,cobrado_parcial,cobrado_total,es_cc,created_at&cliente_id=eq."+clienteId+"&order=created_at.desc&limit=20").then(function(peds){
+  // 2026-09-15: TODOS los pedidos del cliente, sin tope: los vinculados por id y los que se cargaron
+  // con su nombre o teléfono en la nota (reservas propias) sin vincular — con botón para vincularlos.
+  apiPost("rpc/fn_pedidos_de_cliente",{p_cliente_id:clienteId}).then(function(peds){
     var el=document.getElementById("_vcHistContenido");if(!el)return;
     if(!Array.isArray(peds)||!peds.length){el.innerHTML="<div class='empty'>Sin pedidos</div>";return;}
-    var labels={pendiente:"Pendiente",confirmado:"Confirmado",en_preparacion:"En prep.",en_reparto:"En reparto",entregado:"Entregado",cancelado:"Cancelado",cobrado:"Cobrado"};
-    el.innerHTML=peds.map(function(p){
+    var labels={pendiente:"Pendiente",confirmado:"Confirmado",en_preparacion:"En prep.",en_reparto:"En reparto",entregado:"Entregado",cancelado:"Cancelado",cobrado:"Cobrado",cobrado_parcial:"Cobro parcial",reservado:"Reservado"};
+    var _sinVinc=peds.filter(function(p){return p.vinculo&&p.vinculo!=='id';}).length;
+    var _tot=peds.filter(function(p){return p.estado!=='cancelado';}).reduce(function(s,p){return s+(parseFloat(p.total)||0);},0);
+    var _nomEsc=String(clienteNombre||'').replace(/["\\]/g,'');
+    el.innerHTML="<div style='display:flex;justify-content:space-between;align-items:center;gap:.5rem;flex-wrap:wrap;margin-bottom:.5rem;font-size:.72rem;color:var(--tx2)'>"+
+      "<span><b style='color:var(--tx)'>"+peds.length+"</b> pedidos · "+fmt(_tot)+" (sin cancelados)</span>"+
+      (_sinVinc?"<button class='btn btn-g' style='font-size:.66rem;padding:.2rem .5rem' onclick='_vcVincularTodos("+clienteId+",\""+_nomEsc+"\")'>🔗 Vincular "+_sinVinc+" pedido"+(_sinVinc>1?"s":"")+"</button>":"")+
+      "</div>"+peds.map(function(p){
       var fecha=new Date(p.created_at).toLocaleDateString("es-AR",{day:"2-digit",month:"2-digit",year:"2-digit"});
       var cobrado=Math.max(parseFloat(p.cobrado_total)||0, parseFloat(p.cobrado_parcial)||0);
       var pendiente=p.total-cobrado;
       var esCC=p.es_cc;
+      var _vnd=p.transferida_por_id===3?"Marcela":(p.vendedor_id?(typeof _vendedorNombre==='function'?_vendedorNombre(p.vendedor_id):('V#'+p.vendedor_id)):"");
+      var _orig=(p.origen==='web'||p.origen==='catalogo')?"🌐 web":(_vnd?"🤝 "+_vnd:"");
+      var _tag=p.vinculo==='nombre'?" <span title='Cargado con el nombre en la nota, sin vincular al cliente' style='font-size:.58rem;color:#e8b86d;border:1px dashed #e8b86d;border-radius:4px;padding:.02rem .3rem'>por nombre</span>"
+              :p.vinculo==='telefono'?" <span style='font-size:.58rem;color:#e8b86d;border:1px dashed #e8b86d;border-radius:4px;padding:.02rem .3rem'>por teléfono</span>":"";
+      var _btnV=(p.vinculo&&p.vinculo!=='id')?"<button class='btn btn-g' style='width:100%;font-size:.7rem;padding:.3rem;margin-top:.3rem' onclick='_vcVincularPedido("+p.id+","+clienteId+",\""+_nomEsc+"\")'>🔗 Vincular este pedido al cliente</button>":"";
       return "<div style='border:1px solid var(--bd);border-radius:8px;padding:.6rem .8rem;margin-bottom:.5rem'>"+
         "<div style='display:flex;justify-content:space-between;align-items:center;margin-bottom:.3rem'>"+
-        "<div><div style='font-size:.82rem;font-weight:600'>"+p.nro_orden+(esCC?" <span style='font-size:.65rem;color:var(--acc);background:rgba(196,150,90,.12);border:1px solid var(--acc);border-radius:4px;padding:.05rem .3rem'>💳 CC</span>":"")+"</div>"+
-        "<div style='font-size:.68rem;color:var(--tx3)'>"+fecha+" — "+(labels[p.estado]||p.estado)+"</div></div>"+
+        "<div><div style='font-size:.82rem;font-weight:600'>"+p.nro_orden+_tag+(esCC?" <span style='font-size:.65rem;color:var(--acc);background:rgba(196,150,90,.12);border:1px solid var(--acc);border-radius:4px;padding:.05rem .3rem'>💳 CC</span>":"")+"</div>"+
+        "<div style='font-size:.68rem;color:var(--tx3)'>"+fecha+" — "+(labels[p.estado]||p.estado)+(_orig?" · "+_orig:"")+"</div></div>"+
         "<div style='text-align:right'><div style='font-size:.82rem;font-weight:600;color:var(--acc)'>"+fmt(p.total)+"</div>"+
         (esCC&&pendiente>0?"<div style='font-size:.68rem;color:var(--red)'>Debe: "+fmt(pendiente)+"</div>":"")+"</div></div>"+
-        (esCC&&p.estado!=="cobrado"?"<button class='btn btn-a' style='width:100%;font-size:.72rem;padding:.3rem' onclick='vcCobrarPedidoCC("+p.id+",\""+p.nro_orden+"\","+p.total+","+cobrado+","+clienteId+")'>💰 Cobrar</button>":"")+"</div>";
+        (esCC&&p.estado!=="cobrado"?"<button class='btn btn-a' style='width:100%;font-size:.72rem;padding:.3rem' onclick='vcCobrarPedidoCC("+p.id+",\""+p.nro_orden+"\","+p.total+","+cobrado+","+clienteId+")'>💰 Cobrar</button>":"")+_btnV+"</div>";
     }).join("");
   });
 }
