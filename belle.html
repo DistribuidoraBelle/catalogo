@@ -19,7 +19,7 @@
     </div><!DOCTYPE html>
 <html lang="es">
 <head>
-<!-- BELLE_BUILD 20260915-0700 borradores-no-resucitan -->
+<!-- BELLE_BUILD 20260915-0800 emparejador-arreglado -->
 <meta charset="UTF-8">
 <link rel="icon" type="image/svg+xml" href="favicon.svg">
 <meta name="viewport" content="width=device-width,initial-scale=1">
@@ -6123,6 +6123,7 @@ function loadProds(stState){
   apiGet("productos","select=*&activo=is.true&order=empresa,nombre&limit=2000").then(function(data){
     if(!Array.isArray(data)){toast("Error cargando productos","terr");return;}
     prods=data;
+    try{ window._bcMarcasCat=null; window._bcMarcaCandCache=null; if(typeof _bcResetFindCache==='function')_bcResetFindCache(); }catch(e){}
     try{ _mlIndexar(prods); }catch(e){}
     // Detectar si columna cat es numerica (debe ser TEXT)
     var sample=prods.find(function(p){return p.cat!==null&&p.cat!==undefined;});
@@ -30590,7 +30591,7 @@ function bcWords(s){
   if(window._bcWordsCache.hasOwnProperty(s)) return window._bcWordsCache[s];
   var r = bcNorm(s)
     // Quitar tipo de perfume (no aporta al matching)
-    .replace(/\b(edp|edt|edc|eau de parfum|eau de toilette|parfum|extrait|elixir|cologne|colonia)\b/g,' ')
+    .replace(/\b(edp|edt|edc|eau de parfum|eau de toilette|parfum|extrait|cologne|colonia)\b/g,' ')
     // Quitar volumen completo (números + ml/oz)
     .replace(/\d+\s*(?:ml|oz)\b/g,' ')
     // Quitar "for her/him/men/women/unisex" (no aporta + a veces los proveedores cambian)
@@ -30681,8 +30682,12 @@ function bcSim(a, b){
   // 4. Si TODAS las palabras de uno están en el otro → boost a match casi total.
   // Esto cubre el caso "Maison Alhambra Salvo EDP 100ml" vs "Maison Alhambra Salvo"
   // (mismo producto, uno tiene info extra de tipo/vol que ya filtramos)
+  // 🐛 FIX 2026-09-15: antes bastaba con que el corto estuviera contenido en el largo, y
+  // "afnan 9pm" (9pm Elixir) empataba al 95% con "afnan 9pm night out". Ahora el boost solo
+  // aplica si al largo le sobra como mucho UNA palabra (ej: "Hayaati Maleky" vs "Hayaati Al Maleky").
   if(matchExact === wa.length || matchExact === wb.length){
-    if(matchExact >= 2){
+    var _sobran=Math.max(wa.length,wb.length)-matchExact;
+    if(matchExact >= 2 && _sobran <= 1){
       f1 = Math.max(f1, 0.95);
     }
   }
@@ -31589,7 +31594,9 @@ var _BC_PERFILES = {
 // Marca comercial real: matchea el nombre de proveedor contra las marcas del
 // catálogo (p.empresa), porque el campo "marca" de la lista viene ruidoso.
 function _bcMarcasCatalogo(){
-  if(window._bcMarcasCat) return window._bcMarcasCat;
+  var _n=(typeof prods!=='undefined'&&prods)?prods.length:0;
+  if(window._bcMarcasCat && window._bcMarcasCatN===_n) return window._bcMarcasCat;
+  window._bcMarcasCatN=_n;
   var set={};
   (prods||[]).forEach(function(p){
     var e=(p.empresa||'').trim(); if(!e) return;
@@ -37414,7 +37421,7 @@ function _bcNM(s){
 var _BC_GENERO = {her:'F',him:'M',his:'M',men:'M',man:'M',woman:'F',women:'F',homme:'M',femme:'F',
   hombre:'M',mujer:'F',masculino:'M',masculina:'M',femenino:'F',femenina:'F',boy:'M',girl:'F',mens:'M',womens:'F'};
 // Palabras genéricas (tipo/conectores/ruido) que NO distinguen un producto de otro
-var _BC_GEN = {edp:1,edt:1,edc:1,edn:1,eau:1,de:1,del:1,la:1,el:1,les:1,parfum:1,parfums:1,toilette:1,
+var _BC_GEN = {edp:1,edt:1,edc:1,edn:1,eau:1,de:1,del:1,la:1,el:1,les:1,parfum:1,parfums:1,toilette:1,extrait:1,
   cologne:1,perfume:1,perfumes:1,ml:1,oz:1,fl:1,spr:1,spray:1,vapo:1,vaporisateur:1,natural:1,
   the:1,and:1,y:1,pour:1,for:1,por:1,fragrance:1,fragancia:1,unisex:1,em:1,by:1,new:1};
 // Volúmenes comunes (se descartan como el ml)
@@ -37540,11 +37547,17 @@ function bcFindInProds(item){
     // volúmenes distintos. Se cachea igual que el camino estricto.
     var _fzBest=null, _fzScore=0;
     var _pMarcaN=_bcNM(provMarca||'');
+    var _pw=bcWords(provRaw), _fzDiff=99;
     prods.forEach(function(p){
       var _cMarcaN=_bcNM(p.empresa||'');
       if(_pMarcaN && _cMarcaN && _pMarcaN!==_cMarcaN && _pMarcaN.indexOf(_cMarcaN)<0 && _cMarcaN.indexOf(_pMarcaN)<0 && _bcMarcaConocida(provMarca)) return;
-      var _s=bcSim(provRaw, (p.empresa||'')+' '+(p.nombre||''));
-      if(_s>_fzScore){ _fzScore=_s; _fzBest=p; }
+      var _catTxt=(p.empresa||'')+' '+(p.nombre||'');
+      var _s=bcSim(provRaw, _catTxt);
+      if(_s<0.70) return;
+      // 🐛 FIX 2026-09-15: palabra distintiva del catálogo que el proveedor no nombra (o al revés) → otro producto
+      if(_bcMatchSospechoso(provRaw, p) || _bcMatchSospechoso(_catTxt, {empresa:'',nombre:provRaw})) return;
+      var _d=Math.abs(bcWords(_catTxt).length-_pw.length);
+      if(_s>_fzScore || (_s===_fzScore && _d<_fzDiff)){ _fzScore=_s; _fzBest=p; _fzDiff=_d; }
     });
     if(_fzBest && _fzScore>=0.70){
       window._bcFindCache[nombre]=_fzBest.id;
