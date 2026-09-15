@@ -19,7 +19,7 @@
     </div><!DOCTYPE html>
 <html lang="es">
 <head>
-<!-- BELLE_BUILD 20260915-0600 listas-proveedor-prolijas -->
+<!-- BELLE_BUILD 20260915-0700 borradores-no-resucitan -->
 <meta charset="UTF-8">
 <link rel="icon" type="image/svg+xml" href="favicon.svg">
 <meta name="viewport" content="width=device-width,initial-scale=1">
@@ -27532,12 +27532,44 @@ function _bcAvisarGuardadoFallo(e){
   window._bcUltimoAvisoFallo=ahora;
   try{ toast('⚠️ No se pudo guardar en la nube (quedó guardado en este equipo). Revisá la conexión.','twarn'); }catch(_e){}
 }
+// ── Borradores borrados ("lápidas") 2026-09-15 ────────────────────────────
+// Un borrador borrado volvía a aparecer cuando otra pestaña/PC todavía lo tenía en memoria o en
+// localStorage y lo volvía a subir, o cuando un guardado en vuelo llegaba después del DELETE.
+// Ahora cada borrado deja una lápida (id → fecha) en localStorage y en la fila __deleted__ de la
+// base; nadie sube ni conserva un borrador con lápida, y al abrir se vuelven a borrar los que
+// hayan resucitado.
+var _bcTomb={};
+try{ _bcTomb=JSON.parse(localStorage.getItem('belleDraftsDeleted')||'{}')||{}; }catch(e){ _bcTomb={}; }
+function _bcTombGuardarLocal(){ try{ localStorage.setItem('belleDraftsDeleted',JSON.stringify(_bcTomb)); }catch(e){} }
+function _bcTombMerge(obj){ var cambio=false; try{ Object.keys(obj||{}).forEach(function(id){ var t=parseInt(obj[id],10)||0; if(t>(_bcTomb[id]||0)){ _bcTomb[id]=t; cambio=true; } }); }catch(e){} if(cambio)_bcTombGuardarLocal(); return cambio; }
+function _bcTombPodar(){ var lim=Date.now()-45*864e5; Object.keys(_bcTomb).forEach(function(id){ if((_bcTomb[id]||0)<lim) delete _bcTomb[id]; }); }
+function _bcEstaBorrado(d){ if(!d||!d.id) return false; var t=_bcTomb[d.id]; if(!t) return false; return (d._ts||0)<=t; } // si lo editaron DESPUÉS de borrarlo (otra PC), gana la edición
+function _bcTombSubir(){ _bcTombPodar(); return apiUpsert('bellcito_drafts',{draft_id:'__deleted__',label:'deleted',items:'[]',proveedores:'{}',pedidos:'{}',extra:JSON.stringify(_bcTomb),updated_at:new Date().toISOString()}); }
+function _bcTombBajar(){ return apiGet('bellcito_drafts','select=extra&draft_id=eq.__deleted__').then(function(rows){ var r=Array.isArray(rows)&&rows[0]; if(r&&r.extra){ try{ _bcTombMerge(JSON.parse(r.extra)); }catch(e){} } }).catch(function(){}); }
+// Saca de memoria los borradores con lápida; devuelve true si sacó alguno.
+function _bcPurgarBorrados(){
+  var antes=drafts.length;
+  drafts=drafts.filter(function(d){ return !_bcEstaBorrado(d); });
+  if(drafts.length!==antes){
+    if(!drafts.find(function(x){return x.id===activeDraftId;})){ if(drafts.length){ activeDraftId=drafts[0].id; try{ draftLoad(activeDraftId); }catch(e){} } }
+    try{localStorage.setItem('belleDrafts',JSON.stringify(drafts));}catch(e){}
+    try{ draftRenderTabs(); }catch(e){}
+    return true;
+  }
+  return false;
+}
 function draftPersist(){
   // Cache local inmediato
+  _bcPurgarBorrados();
   try{localStorage.setItem('belleDrafts',JSON.stringify(drafts));
       localStorage.setItem('belleDraftsActive',activeDraftId);}catch(e){}
-  // Supabase: upsert cada draft
+  // Antes de subir, mirar si otra PC borró algo (para no resucitarlo)
+  _bcTombBajar().then(function(){ _bcPurgarBorrados(); _draftPersistSubir(); });
+}
+function _draftPersistSubir(){
+  // Supabase: upsert cada draft (nunca uno con lápida)
   drafts.forEach(function(d){
+    if(_bcEstaBorrado(d)) return;
     apiUpsert('bellcito_drafts',{
       draft_id:d.id,
       label:d.label||d.nombre||'Borrador',
@@ -27597,10 +27629,23 @@ function draftInit(){
   apiGet('bellcito_drafts','select=*&order=updated_at.asc').then(function(rows){
     if(Array.isArray(rows)&&rows.length){
       var activeRow=rows.find(function(r){return r.draft_id==='__active__';});
+      // Lápidas de la base (borrados desde cualquier PC)
+      var _delRow=rows.find(function(r){return r.draft_id==='__deleted__';});
+      if(_delRow&&_delRow.extra){ try{ _bcTombMerge(JSON.parse(_delRow.extra)); }catch(e){} }
       // Excluir el registro especial __active__, los __matches__ (matches manuales) y __crossreject__ (rechazos)
       var draftRows=rows.filter(function(r){
         var d=(r.draft_id||'');
-        return d!=='__active__' && d.indexOf('__matches__')!==0 && d.indexOf('__crossreject__')!==0;
+        return d!=='__active__' && d!=='__deleted__' && d.indexOf('__matches__')!==0 && d.indexOf('__crossreject__')!==0;
+      });
+      // Resucitados: filas que tienen lápida más nueva que su última edición → se borran de nuevo
+      draftRows=draftRows.filter(function(r){
+        var ts=r.updated_at?new Date(r.updated_at).getTime():0;
+        if(_bcTomb[r.draft_id]&&ts<=_bcTomb[r.draft_id]){
+          apiDelete('bellcito_drafts','draft_id=eq.'+r.draft_id).catch(function(){});
+          apiDelete('bellcito_drafts','draft_id=eq.__matches__'+r.draft_id).catch(function(){});
+          return false;
+        }
+        return true;
       });
       if(draftRows.length){
         // Reconciliación last-write-wins: si el navegador tiene una versión MÁS NUEVA
@@ -27623,8 +27668,11 @@ function draftInit(){
         });
         // Borradores creados en este navegador que todavía NO están en la base → conservarlos.
         if(Array.isArray(_localDrafts))_localDrafts.forEach(function(loc){
-          if(loc&&loc.id&&!drafts.find(function(x){return x.id===loc.id;})){ drafts.push(loc); _huboLocalGanador=true; }
+          if(loc&&loc.id&&!_bcEstaBorrado(loc)&&!drafts.find(function(x){return x.id===loc.id;})){ drafts.push(loc); _huboLocalGanador=true; }
         });
+        if(!drafts.length){ // todos tenían lápida → arrancar uno nuevo
+          var _idN='draft-'+Date.now(); drafts=[{id:_idN,label:'Borrador 1',items:[],proveedores:{},pedidos:{}}]; _huboLocalGanador=true;
+        }
         try{localStorage.setItem('belleDrafts',JSON.stringify(drafts));}catch(e){}
         // Si el navegador tenía algo más nuevo, subirlo a la base para sincronizar.
         if(_huboLocalGanador){ try{ clearTimeout(_draftTimer); _draftTimer=setTimeout(draftPersist,800); }catch(e){} }
@@ -27639,7 +27687,7 @@ function draftInit(){
     // Fallback localStorage
     try{
       var s=localStorage.getItem('belleDrafts');
-      if(s){drafts=JSON.parse(s);}
+      if(s){drafts=(JSON.parse(s)||[]).filter(function(d){return !_bcEstaBorrado(d);});}
       var la=localStorage.getItem('belleDraftsActive');
       if(la&&drafts.find(function(x){return x.id===la;})) activeDraftId=la;
     }catch(e){}
@@ -27721,6 +27769,8 @@ function draftDelete(id){
   // 1) UPDATE LOCAL INMEDIATO — saca del array y re-renderiza tabs YA
   //    (no esperar nada de la red para feedback visual)
   drafts=drafts.filter(function(d){return d.id!==id;});
+  _bcTomb[id]=Date.now(); _bcTombGuardarLocal(); // lápida: nadie lo vuelve a subir
+  try{ clearTimeout(_draftTimer); }catch(e){}
   try{
     localStorage.setItem('belleDrafts',JSON.stringify(drafts));
     localStorage.removeItem('bcMatches_'+id);
@@ -27736,9 +27786,21 @@ function draftDelete(id){
   // 3) Si era el activo, cargar el nuevo (red, pero ya con UI clara)
   if(eraActivo) draftLoad(activeDraftId);
 
-  // 4) Borrar de Supabase en background (fire-and-forget, no bloquea UI)
-  apiDelete('bellcito_drafts','draft_id=eq.'+id).catch(function(e){console.error('[draftDelete] err:',e);});
+  // 4) Borrar de Supabase en background y dejar la lápida en la base (para las otras PCs)
+  _bcTombSubir();
+  _bcBorrarDraftEnBase(id, 0);
+}
+// Borra la fila y verifica que no quede; reintenta hasta 3 veces (antes fallaba en silencio y volvía a aparecer).
+function _bcBorrarDraftEnBase(id, intento){
   apiDelete('bellcito_drafts','draft_id=eq.__matches__'+id).catch(function(){});
+  return apiDelete('bellcito_drafts','draft_id=eq.'+id).then(function(){
+    return apiGet('bellcito_drafts','select=draft_id&draft_id=eq.'+id);
+  }).then(function(rows){
+    if(Array.isArray(rows)&&rows.length){ throw new Error('sigue en la base'); }
+  }).catch(function(e){
+    if(intento<3){ setTimeout(function(){ _bcBorrarDraftEnBase(id, intento+1); }, 1500*(intento+1)); }
+    else { console.error('[draftDelete] no se pudo borrar de la base:',id,e); try{ toast('No se pudo borrar el borrador de la base, se vuelve a intentar al abrir','twarn'); }catch(_e){} }
+  });
 }
 
 function draftRenderTabs(){
@@ -34216,11 +34278,14 @@ function _bcMaybePromptDraftClose(){
   setTimeout(function(){
     if(!confirm('✅ Todos los proveedores fueron confirmados.\n\n¿Cerrar este borrador y crear uno nuevo para el próximo pedido?'))return;
     var idCerrar=activeDraftId;
-    // Crear nuevo borrador y activarlo
-    draftNew();
-    // Borrar el viejo
+    // Primero la lápida y sacarlo de memoria, así el guardado del borrador nuevo no lo vuelve a subir
     drafts=drafts.filter(function(d){return d.id!==idCerrar;});
-    apiDelete('bellcito_drafts','draft_id=eq.'+idCerrar).catch(function(){});
+    _bcTomb[idCerrar]=Date.now(); _bcTombGuardarLocal();
+    try{ clearTimeout(_draftTimer); }catch(e){}
+    // Crear nuevo borrador y activarlo (draftNew persiste: ya sin el viejo)
+    draftNew();
+    _bcTombSubir();
+    _bcBorrarDraftEnBase(idCerrar, 0);
     try{localStorage.setItem('belleDrafts',JSON.stringify(drafts));}catch(e){}
     draftRenderTabs();
     toast('Borrador cerrado, nuevo creado','tok');
