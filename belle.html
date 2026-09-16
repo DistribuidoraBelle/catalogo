@@ -19,7 +19,7 @@
     </div><!DOCTYPE html>
 <html lang="es">
 <head>
-<!-- BELLE_BUILD 20260916-1200 alias-marcas-proveedor -->
+<!-- BELLE_BUILD 20260916-1230 macheos-merge-seguro -->
 <meta charset="UTF-8">
 <link rel="icon" type="image/svg+xml" href="favicon.svg">
 <meta name="viewport" content="width=device-width,initial-scale=1">
@@ -27695,7 +27695,8 @@ function _bcFlushGuardado(){
   try{
     clearTimeout(window._bcMatchSaveTimer);
     var data=window._bcManualMatches||(typeof bcManualMatches!=='undefined'?bcManualMatches:{})||{};
-    apiUpsert('bellcito_drafts',{draft_id:'__matches__global',label:'matches',items:JSON.stringify(data),proveedores:'{}',pedidos:'{}',updated_at:new Date().toISOString()});
+    // 🛡️ al cerrar no hay tiempo de leer la base: solo subir si esta sesión tocó macheos (evita pisar con una copia vieja)
+    if(window._bcMatchesTocados) apiUpsert('bellcito_drafts',{draft_id:'__matches__global',label:'matches',items:JSON.stringify(data),proveedores:'{}',pedidos:'{}',updated_at:new Date().toISOString()});
   }catch(e){}
 }
 function draftGuardarYa(){
@@ -32733,7 +32734,7 @@ function bcCrossPickNone(){
 }
 function bcCrossPickAuto(){
   var ctx=window._bcPickerCtx||{}; window._bcManualMatches=window._bcManualMatches||{};
-  delete window._bcManualMatches[_bcPickerStoreKey(ctx)];
+  delete window._bcManualMatches[_bcPickerStoreKey(ctx)]; _bcMatchOlvidar(_bcPickerStoreKey(ctx));
   _bcAfterCrossPick(ctx,'Volvió a automático');
 }
 function _bcAfterCrossPick(ctx,msg){
@@ -32765,7 +32766,7 @@ function _bcFlashRow(norm){
 function bcCruzDescartar(prodId, prov){
   window._bcManualMatches=window._bcManualMatches||{};
   var key='cruz#'+prodId+'@@'+prov;
-  if(window._bcManualMatches[key]===-1){ delete window._bcManualMatches[key]; if(typeof toast==='function')toast('Volvió a automático','tok'); }
+  if(window._bcManualMatches[key]===-1){ delete window._bcManualMatches[key]; _bcMatchOlvidar(key); if(typeof toast==='function')toast('Volvió a automático','tok'); }
   else { window._bcManualMatches[key]=-1; if(typeof toast==='function')toast('Descartado — queda guardado','twarn'); }
   if(typeof bcSaveCrossReject==='function') bcSaveCrossReject();
   if(typeof bcRenderCruzadosTable==='function') bcRenderCruzadosTable();
@@ -32775,7 +32776,7 @@ function bcCruzDescartar(prodId, prov){
 function bcRechazarCrossProv(baseNorm, prov){
   window._bcManualMatches = window._bcManualMatches || {};
   var key = baseNorm + '@@' + prov;
-  if(window._bcManualMatches[key] === -1){ delete window._bcManualMatches[key]; toast('Reactivado el match automático','tok'); }
+  if(window._bcManualMatches[key] === -1){ delete window._bcManualMatches[key]; _bcMatchOlvidar(key); toast('Reactivado el match automático','tok'); }
   else { window._bcManualMatches[key] = -1; toast('Quitado — queda guardado','twarn'); }
   bcMatchCache = null;
   bcSaveCrossReject();
@@ -32783,8 +32784,12 @@ function bcRechazarCrossProv(baseNorm, prov){
 }
 // PERSISTENCIA UNIFICADA (2026-07): un solo objeto (bcManualMatches === window._bcManualMatches)
 // y un solo registro en Supabase (__matches__global). Antes se pisaban dos registros.
+// 🛡️ 2026-09-16: macheos borrados en ESTA sesión (para no resucitarlos al mezclar con la base)
+window._bcMatchesBorradas=window._bcMatchesBorradas||{};
+function _bcMatchOlvidar(k){ if(k) window._bcMatchesBorradas[k]=1; }
 function _bcPersistMatches(){
   var data=window._bcManualMatches||bcManualMatches||{};
+  window._bcMatchesTocados=true;
   try{bcManualMatches=data;}catch(e){}
   window._bcManualMatches=data;
   try{localStorage.setItem('bcMatches_global',JSON.stringify(data));}catch(e){}
@@ -32794,7 +32799,15 @@ function _bcPersistMatches(){
   bcMatchCache=null;
   clearTimeout(window._bcMatchSaveTimer);
   window._bcMatchSaveTimer=setTimeout(function(){
-    apiUpsert('bellcito_drafts',{draft_id:'__matches__global',label:'matches',items:JSON.stringify(data),proveedores:'{}',pedidos:'{}',updated_at:new Date().toISOString()}).catch(function(e){console.error('[bc] save matches err:',e);});
+    // 🛡️ 2026-09-16: antes de subir, mezclar con lo que haya en la base (macheos hechos desde otra PC
+    // o cargados por admin después de abrir esta pestaña). Lo borrado acá no se resucita.
+    apiGet('bellcito_drafts','select=items&draft_id=eq.__matches__global').catch(function(){return null;}).then(function(rows){
+      try{
+        var db=(Array.isArray(rows)&&rows[0]&&rows[0].items)?JSON.parse(rows[0].items):null;
+        if(db&&typeof db==='object'){ var cur=window._bcManualMatches||bcManualMatches||{}; var n=0; Object.keys(db).forEach(function(k){ if(!(k in cur)&&!window._bcMatchesBorradas[k]){ cur[k]=db[k]; n++; } }); if(n){ bcManualMatches=window._bcManualMatches=cur; data=cur; try{localStorage.setItem('bcMatches_global',JSON.stringify(cur));}catch(e){} bcMatchCache=null; } }
+      }catch(e){}
+      return apiUpsert('bellcito_drafts',{draft_id:'__matches__global',label:'matches',items:JSON.stringify(data),proveedores:'{}',pedidos:'{}',updated_at:new Date().toISOString()});
+    }).catch(function(e){console.error('[bc] save matches err:',e);});
   },700);
 }
 function _bcLoadMatchesUnificado(){
@@ -35158,7 +35171,7 @@ function bcListaMarcarNuevo(mk, nombre){
 }
 function bcListaQuitarNuevo(mk, nombre){
   if(!mk) return;
-  delete bcManualMatches[mk];
+  delete bcManualMatches[mk]; _bcMatchOlvidar(mk);
   window._bcManualMatches=bcManualMatches;
   // 🛠️ 2026-08 AUDITORÍA: invalidar SOLO esta clave (ver bcListaMarcarNuevo)
   try{ if(window._bcFindCache) delete window._bcFindCache[mk]; if(window._bcFindScoreCache) delete window._bcFindScoreCache[mk]; }catch(e){}
@@ -45966,7 +45979,7 @@ function bcGetMatchKey(item){return (typeof _bcMK==='function')?_bcMK(item):bcNo
 
 // Fix #8: matches en Supabase + cache local (resiliente offline)
 function bcSetManualMatch(k,pid){
-  if(pid===null||pid===undefined){delete bcManualMatches[k];}
+  if(pid===null||pid===undefined){delete bcManualMatches[k]; _bcMatchOlvidar(k);}
   else{bcManualMatches[k]=parseInt(pid);}
   window._bcManualMatches=bcManualMatches;
   // PERF: invalidar SOLO la key que cambió (no toda la caché → evita recalcular ~500 productos)
