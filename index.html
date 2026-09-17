@@ -1,7 +1,7 @@
 <!DOCTYPE html>
 <html lang="es">
 <head>
-<!-- BELLE_BUILD 20260915-0300 realtime-total-y-primero -->
+<!-- BELLE_BUILD 20260917-0400 oscuro-fotos-sin-fondo -->
 <meta charset="UTF-8">
 <link rel="icon" type="image/svg+xml" href="favicon.svg">
 <meta name="viewport" content="width=device-width,initial-scale=1.0">
@@ -322,6 +322,8 @@ header{background:var(--bg-header);border-bottom:1px solid var(--border-color);p
 .cimg{width:140px;min-width:140px;background:var(--bg-cimg);display:flex;align-items:center;justify-content:center;overflow:hidden;position:relative;flex-shrink:0;border-radius:10px 0 0 10px}.share-btn{position:absolute;bottom:6px;left:6px;top:auto;right:auto;z-index:10;background:rgba(255,255,255,.95);backdrop-filter:blur(6px);border:none;border-radius:50%;width:32px;height:32px;cursor:pointer;display:flex;align-items:center;justify-content:center;font-size:.85rem;box-shadow:0 2px 8px rgba(0,0,0,.15);color:#888;transition:transform .2s,box-shadow .2s}
 .share-btn:hover{transform:scale(1.1);box-shadow:0 3px 12px rgba(0,0,0,.22);color:#c4965a}
 .cimg img{width:100%;height:100%;object-fit:cover;display:none;mix-blend-mode:multiply}[data-theme="dark"] .cimg{background:#fff}[data-theme="dark"] .cimg img{mix-blend-mode:multiply}
+/* 🌙 2026-09-17: en modo oscuro las fotos se recortan (fondo blanco → transparente) y ya no necesitan placa blanca */
+[data-theme="dark"] img.dk-cut{mix-blend-mode:normal!important}[data-theme="dark"] .dk-plate{background:transparent!important}[data-theme="dark"] .dk-plate.cimg{background:radial-gradient(ellipse at 50% 60%,rgba(255,255,255,.07),transparent 70%)!important}
 /* 🆕 2026-08-28 (solo PC): foto más ancha y COMPLETA — antes 140px con recorte (cover)
    dejaba varios frascos cortados a los costados, habiendo lugar de sobra al medio.
    El mobile no se toca: esto vive dentro de @media(min-width:681px). */
@@ -2071,7 +2073,74 @@ function _volverArriba(){ try{window.scrollTo({top:0,behavior:'smooth'});}catch(
 
 
 <script>
-function toggleTheme(){var isDark=document.documentElement.getAttribute('data-theme')=='dark';var t=isDark?'light':'dark';document.documentElement.setAttribute('data-theme',t);localStorage.setItem('belle_cat_theme',t);_applyThemeBtn(t);}function _applyThemeBtn(t){var icon=document.getElementById('themeIcon');var label=document.getElementById('themeLabel');var btn=document.getElementById('themeBtn');if(t==='dark'){if(icon)icon.innerHTML='&#9728;';if(label)label.textContent='Modo claro';if(btn)btn.style.borderColor='rgba(232,184,109,.5)';}else{if(icon)icon.innerHTML='&#127769;';if(label)label.textContent='Modo oscuro';if(btn)btn.style.borderColor='';}}function initTheme(){var saved=localStorage.getItem('belle_cat_theme');if(!saved){saved='light';}if(saved==='dark')document.documentElement.setAttribute('data-theme','dark');_applyThemeBtn(saved);}
+function toggleTheme(){var isDark=document.documentElement.getAttribute('data-theme')=='dark';var t=isDark?'light':'dark';document.documentElement.setAttribute('data-theme',t);localStorage.setItem('belle_cat_theme',t);_applyThemeBtn(t);if(typeof _dkFondoBarrer==='function')_dkFondoBarrer();}
+// ═══ 🌙 FOTOS SIN FONDO EN MODO OSCURO (2026-09-17) ═══════════════════════════════
+// En claro, mix-blend-mode:multiply "borra" el fondo blanco de las fotos. En oscuro eso no
+// sirve (multiply sobre fondo oscuro oscurece todo), así que se recorta de verdad: se pinta la
+// foto en un canvas, se detecta el fondo blanco conectado a los bordes (flood fill) y se lo
+// vuelve transparente con borde suave. Los brillos blancos DENTRO de la botella no se tocan
+// porque no están conectados al borde. Resultado en caché (blob) por URL. Si la foto no tiene
+// fondo claro o el canvas queda "tainted" por CORS, se deja como está.
+var _dkFondoBarrer;
+(function(){
+  var cache={}, pend={}, cola=[], activos=0, MAXC=2;
+  function isDark(){ return document.documentElement.getAttribute('data-theme')==='dark'; }
+  function srcDe(img){ return img.getAttribute('data-orig')||img.getAttribute('src')||''; }
+  function esProd(src){ return /supabase\.co\/storage\/v1\/object\/public\//.test(src); }
+  function procesar(src){
+    if(cache[src]!==undefined) return Promise.resolve(cache[src]==='x'?null:cache[src]);
+    if(pend[src]) return pend[src];
+    pend[src]=new Promise(function(res){
+      var im=new Image(); im.crossOrigin='anonymous';
+      im.onload=function(){
+        try{
+          var W=im.naturalWidth,H=im.naturalHeight; if(!W||!H){cache[src]='x';res(null);return;}
+          var sc=Math.min(1,720/Math.max(W,H)); var w=Math.round(W*sc),h=Math.round(H*sc);
+          var c=document.createElement('canvas'); c.width=w;c.height=h; var ctx=c.getContext('2d',{willReadFrequently:true}); ctx.drawImage(im,0,0,w,h);
+          var d=ctx.getImageData(0,0,w,h), px=d.data;
+          // ¿el borde es claro? (si la foto tiene fondo de color/oscuro, no se toca)
+          var n=0,lum=0,i;
+          for(var x=0;x<w;x+=3){ i=x*4; lum+=px[i]*.299+px[i+1]*.587+px[i+2]*.114; i=((h-1)*w+x)*4; lum+=px[i]*.299+px[i+1]*.587+px[i+2]*.114; n+=2; }
+          for(var y=0;y<h;y+=3){ i=(y*w)*4; lum+=px[i]*.299+px[i+1]*.587+px[i+2]*.114; i=(y*w+w-1)*4; lum+=px[i]*.299+px[i+1]*.587+px[i+2]*.114; n+=2; }
+          if(lum/n<222){ cache[src]='x'; res(null); return; }
+          var TH=214, seen=new Uint8Array(w*h), st=new Int32Array(w*h), sp=0; // 214: también se lleva las sombras grises claras del fondo
+          function claro(k){ var j=k*4; return px[j]>=TH&&px[j+1]>=TH&&px[j+2]>=TH; }
+          for(var x2=0;x2<w;x2++){ st[sp++]=x2; st[sp++]=(h-1)*w+x2; } for(var y2=0;y2<h;y2++){ st[sp++]=y2*w; st[sp++]=y2*w+w-1; }
+          while(sp>0){ var k=st[--sp]; if(seen[k]||!claro(k)) continue; seen[k]=1; var xx=k%w; if(xx>0)st[sp++]=k-1; if(xx<w-1)st[sp++]=k+1; if(k>=w)st[sp++]=k-w; if(k<w*(h-1))st[sp++]=k+w; }
+          // fondo → transparente; los píxeles de fondo cercanos al blanco puro desaparecen del todo, los grises claros del borde quedan con alpha parcial (antialias natural)
+          for(var k2=0;k2<w*h;k2++){ if(seen[k2]){ var j=k2*4; var l=px[j]*.299+px[j+1]*.587+px[j+2]*.114; var a=(255-l)/(255-TH); a=a<0?0:(a>1?1:a); px[j+3]=Math.round(px[j+3]*a*a*a); } }
+          ctx.putImageData(d,0,0);
+          c.toBlob(function(b){ if(!b){cache[src]='x';res(null);return;} var u=URL.createObjectURL(b); cache[src]=u; res(u); },'image/png');
+        }catch(e){ cache[src]='x'; res(null); }
+      };
+      im.onerror=function(){ cache[src]='x'; res(null); };
+      im.src=src;
+    }).then(function(u){ delete pend[src]; return u; });
+    return pend[src];
+  }
+  function siguiente(){
+    while(activos<MAXC&&cola.length){ var img=cola.shift(); if(!document.contains(img)||!isDark()||img.classList.contains('dk-cut')){ delete img.dataset.dkBusy; continue; }
+      activos++; (function(img){ var src=srcDe(img); procesar(src).then(function(u){ activos--; delete img.dataset.dkBusy; if(u&&isDark()&&document.contains(img)&&srcDe(img)===src){ if(!img.getAttribute('data-orig')) img.setAttribute('data-orig',src); img.src=u; img.classList.add('dk-cut'); if(img.parentElement) img.parentElement.classList.add('dk-plate'); } siguiente(); }); })(img); }
+  }
+  function aplicar(img){
+    if(!isDark()||img.classList.contains('dk-cut')||img.dataset.dkBusy) return;
+    var src=srcDe(img); if(!esProd(src)) return;
+    img.dataset.dkBusy='1'; cola.push(img); siguiente();
+  }
+  function restaurar(img){ var o=img.getAttribute('data-orig'); if(o) img.src=o; img.classList.remove('dk-cut'); img.removeAttribute('data-orig'); delete img.dataset.dkBusy; if(img.parentElement) img.parentElement.classList.remove('dk-plate'); }
+  _dkFondoBarrer=function(){ var imgs=document.querySelectorAll('img'); for(var i=0;i<imgs.length;i++){ if(isDark()) aplicar(imgs[i]); else if(imgs[i].classList.contains('dk-cut')) restaurar(imgs[i]); } };
+  try{
+    var mo=new MutationObserver(function(ms){
+      if(!isDark()) return;
+      for(var i=0;i<ms.length;i++){ var m=ms[i];
+        if(m.type==='childList'){ for(var j=0;j<m.addedNodes.length;j++){ var nd=m.addedNodes[j]; if(nd.nodeType!==1) continue; if(nd.tagName==='IMG') aplicar(nd); else if(nd.querySelectorAll){ var ims=nd.querySelectorAll('img'); for(var k=0;k<ims.length;k++) aplicar(ims[k]); } } }
+        else if(m.type==='attributes'&&m.target.tagName==='IMG'){ var t=m.target, sv=t.getAttribute('src')||''; if(sv.indexOf('blob:')===0) continue; if(t.classList.contains('dk-cut')){ t.classList.remove('dk-cut'); t.removeAttribute('data-orig'); } aplicar(t); }
+      }
+    });
+    mo.observe(document.documentElement,{childList:true,subtree:true,attributes:true,attributeFilter:['src']});
+  }catch(e){}
+  if(document.readyState==='loading') document.addEventListener('DOMContentLoaded',function(){ _dkFondoBarrer(); }); else _dkFondoBarrer();
+})();function _applyThemeBtn(t){var icon=document.getElementById('themeIcon');var label=document.getElementById('themeLabel');var btn=document.getElementById('themeBtn');if(t==='dark'){if(icon)icon.innerHTML='&#9728;';if(label)label.textContent='Modo claro';if(btn)btn.style.borderColor='rgba(232,184,109,.5)';}else{if(icon)icon.innerHTML='&#127769;';if(label)label.textContent='Modo oscuro';if(btn)btn.style.borderColor='';}}function initTheme(){var saved=localStorage.getItem('belle_cat_theme');if(!saved){saved='light';}if(saved==='dark')document.documentElement.setAttribute('data-theme','dark');_applyThemeBtn(saved);}
 function fixImgUrl(url){
   if(!url) return '';
   url = url.trim();
