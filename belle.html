@@ -19,7 +19,7 @@
     </div><!DOCTYPE html>
 <html lang="es">
 <head>
-<!-- BELLE_BUILD 20260916-1330 filtro-solo-ofertas -->
+<!-- BELLE_BUILD 20260919-2000 reportes-auditoria-graficos -->
 <meta charset="UTF-8">
 <link rel="icon" type="image/svg+xml" href="favicon.svg">
 <meta name="viewport" content="width=device-width,initial-scale=1">
@@ -38235,6 +38235,325 @@ window._repCacheClientes = null;
 window._repCacheProductos = null;
 
 // ── Helpers de período ──
+// ════════════════════════════════════════════════════════════════════
+// REPORTES ▸ NÚCLEO COMPARTIDO (auditoría 2026-09-19)
+// Antes cada pestaña calculaba el costo, el período anterior y el ticket a su
+// manera y los números no cerraban entre sí. Ahora todas usan esto:
+//  · _repCostoFactory: MISMA fórmula que Stock y precios (calcP): el costo en
+//    u$d se redondea al entero superior y se multiplica por la cotización.
+//    Decan = 5 ml prorrateados sobre los ml reales del frasco + perfumero vacío.
+//    Combo = suma de sus componentes. Si la venta no trae producto_id (pasa con
+//    los decants del catálogo) se resuelve el producto por nombre.
+//  · _repRangoAnterior: el período anterior es el de CALENDARIO (agosto contra
+//    septiembre, no "los 30 días anteriores").
+//  · _repComparativa: si el período está en curso, compara contra el MISMO
+//    tramo del anterior (19 días contra 19 días), no contra el mes completo.
+//  · _repTicket: ticket promedio real = por pedido (nro_orden), no por unidad.
+// ════════════════════════════════════════════════════════════════════
+var _REP_ESTADOS_V = "estado=in.(confirmada,archivada_periodo)";
+var _REP_DECAN_ML = 5, _REP_PERFUMERO_USD = 0.94;
+
+function _repCotiz(){
+  var c = (typeof cotizActual !== "undefined") ? parseFloat(cotizActual) : 0;
+  if(!c && window._cotizActual) c = parseFloat(window._cotizActual);
+  return c || 1520;
+}
+function _repNormNombre(s){
+  s = String(s||"").toLowerCase();
+  s = s.replace(/\(decan[^)]*\)/g, " ");
+  s = s.replace(/\b\d+\s*ml\b/g, " ");
+  s = s.replace(/\b(edp|edt|extrait de parfum|extrait|parfum|elixir|eau de parfum|eau de toilette)\b/g, " ");
+  s = s.replace(/[^a-z0-9áéíóúñü]+/g, " ");
+  return s.replace(/\s+/g, " ").trim();
+}
+// Índice de productos por id y por nombre normalizado (para ventas sin producto_id)
+function _repIndiceProductos(productos){
+  var byId = {}, byNom = {}, byMarcaNom = {};
+  (productos||[]).forEach(function(p){
+    byId[p.id] = p;
+    var k = _repNormNombre(p.nombre); if(k && !byNom[k]) byNom[k] = p;
+    var sinMarca = String(p.nombre||"").replace(/^[^-]+-\s*/, "");
+    var k2 = _repNormNombre((p.empresa||"")+" "+sinMarca); if(k2 && !byMarcaNom[k2]) byMarcaNom[k2] = p;
+  });
+  return {
+    byId: byId,
+    de: function(v){
+      if(!v) return null;
+      if(v.producto_id && byId[v.producto_id]) return byId[v.producto_id];
+      var k = _repNormNombre(v.producto_nombre);
+      return byNom[k] || byMarcaNom[k] || null;
+    }
+  };
+}
+function _repCostoFactory(productos, combos, cotiz){
+  cotiz = cotiz || _repCotiz();
+  var idx = _repIndiceProductos(productos);
+  var cpv = _REP_PERFUMERO_USD * cotiz;
+  function costoFrasco(p){ // en pesos, fórmula calcP
+    if(!p) return 0;
+    var c = (parseFloat(p.costo_ind)||0) + (parseFloat(p.costo_log)||0);
+    return c > 0 ? Math.ceil(c) * cotiz : 0;
+  }
+  function costoDecan(p){
+    var cb = costoFrasco(p); if(!cb) return cpv;
+    var ml = (p && parseFloat(p.ml)) || 100;
+    return (cb * _REP_DECAN_ML / ml) + cpv;
+  }
+  var mapCombo = {};
+  (combos||[]).forEach(function(c){
+    var t = 0;
+    (c.combo_items||[]).forEach(function(ci){
+      var p = idx.byId[ci.producto_id], q = parseInt(ci.cantidad)||1;
+      t += (ci.es_decan ? costoDecan(p) : costoFrasco(p)) * q;
+    });
+    if(c.nombre) mapCombo[_repNormNombre(c.nombre)] = t;
+  });
+  function costoUnit(v){
+    var seg = String(v.segmento||"").toLowerCase();
+    if(seg === "financiacion") return 0;
+    if(seg === "combo"){
+      var nl = String(v.producto_nombre||"").replace(/^Combo:\s*/i, "");
+      return mapCombo[_repNormNombre(nl)] || 0;
+    }
+    var p = idx.de(v);
+    if(seg === "decan") return costoDecan(p);
+    return costoFrasco(p);
+  }
+  return {
+    cotiz: cotiz,
+    costoUnit: costoUnit,
+    producto: idx.de,
+    costoFrasco: costoFrasco,
+    // true si la venta es de mercadería y no pudimos ponerle costo
+    sinCosto: function(v){ var seg=String(v.segmento||"").toLowerCase(); if(seg==="financiacion") return false; return costoUnit(v) <= 0; }
+  };
+}
+// Categoría de un gasto: la cargada, o la que se deduce del concepto
+function _repGastoCat(g){
+  var c = String(g.categoria||"").trim();
+  if(c) return c.toUpperCase();
+  var con = String(g.concepto||"").trim();
+  if(/^comisi[oó]n/i.test(con)) return "COMISIONES";
+  var pre = con.split(/[:—-]/)[0].trim();
+  return pre ? pre.toUpperCase().slice(0,28) : "SIN CATEGORÍA";
+}
+// Período anterior alineado al calendario
+function _repRangoAnterior(periodo, r){
+  var d = new Date(r.desde), h = new Date(r.hasta), dur = r.hasta - r.desde;
+  function mesAtras(x, n){ return new Date(x.getFullYear(), x.getMonth()-n, 1); }
+  if(periodo === "mes" || periodo === "mesPasado") return { desde: mesAtras(d,1), hasta: new Date(d) };
+  if(periodo === "trimestre") return { desde: mesAtras(d,3), hasta: new Date(d) };
+  if(periodo === "anio" || periodo === "anioPasado") return { desde: new Date(d.getFullYear()-1,0,1), hasta: new Date(d) };
+  // hoy/ayer/semana/ultN/custom: mismo largo, pegado antes
+  var dias = Math.round(dur/86400000);
+  var ad = new Date(d); ad.setDate(ad.getDate()-dias);
+  return { desde: ad, hasta: new Date(d) };
+}
+// Comparativa justa: si el período está en curso, se compara contra el mismo tramo del anterior
+function _repComparativa(periodo){
+  var r = _repCalcRango(periodo), rAnt = _repRangoAnterior(periodo, r);
+  var ahora = Date.now();
+  var enCurso = r.desde.getTime() <= ahora && ahora < r.hasta.getTime();
+  var trans = enCurso ? (ahora - r.desde.getTime()) : (r.hasta - r.desde);
+  var hastaTramo = new Date(Math.min(rAnt.hasta.getTime(), rAnt.desde.getTime() + trans));
+  var diasTot = Math.max(1, Math.round((r.hasta - r.desde)/86400000));
+  var diasTrans = enCurso ? Math.max(0.5, trans/86400000) : diasTot;
+  return { r:r, rAnt:rAnt, enCurso:enCurso, hastaTramo:hastaTramo, diasTot:diasTot, diasTrans:diasTrans, frac:Math.min(1, diasTrans/diasTot),
+           etiqueta: enCurso ? ("vs mismos "+Math.max(1,Math.floor(diasTrans))+" días del período anterior") : "vs período anterior" };
+}
+function _repMesKey(dateStr){ var d=new Date(dateStr); if(isNaN(d)) return String(dateStr||"").slice(0,7); return d.getFullYear()+"-"+_repPad(d.getMonth()+1); }
+function _repEnRango(dateStr, desde, hasta){ var t=new Date(dateStr).getTime(); return t>=desde.getTime() && t<hasta.getTime(); }
+// Ticket promedio por pedido (agrupa las líneas de venta por nro_orden)
+function _repTicket(ventas){
+  var ped = {}, tot = 0, unid = 0, sinOrden = 0;
+  (ventas||[]).forEach(function(v){
+    var t = parseFloat(v.total)||0; tot += t; unid += parseInt(v.cantidad)||0;
+    var k = v.nro_orden || ("#"+(v.id||("s"+(sinOrden++))));
+    ped[k] = (ped[k]||0) + t;
+  });
+  var n = Object.keys(ped).length;
+  return { pedidos:n, ticket: n>0 ? tot/n : 0, porUnidad: unid>0 ? tot/unid : 0, total:tot, unidades:unid };
+}
+function _repDeltaHTML(actual, anterior, etiqueta, invertir){
+  if(!anterior || anterior === 0) return actual>0 ? "<div style='font-size:.62rem;color:var(--tx3);margin-top:.15rem'>sin comparativa (anterior en $0)</div>" : "";
+  var pct = (actual-anterior)/Math.abs(anterior)*100;
+  var bueno = invertir ? pct<=0 : pct>=0;
+  return "<div style='font-size:.62rem;color:"+(bueno?"var(--green)":"var(--red)")+";margin-top:.15rem'>"+(pct>=0?"▲":"▼")+" "+Math.abs(pct).toFixed(1)+"% <span style='color:var(--tx3)'>"+(etiqueta||"vs período anterior")+" · antes "+fmt(anterior)+"</span></div>";
+}
+
+// ════════════════════════════════════════════════════════════════════
+// REPORTES ▸ MOTOR DE GRÁFICOS (2026-09-19)
+// Un solo motor SVG para líneas, áreas y barras verticales:
+//  · escala "linda" con soporte de valores negativos (la ganancia neta puede
+//    bajar de cero y antes se dibujaba fuera del gráfico)
+//  · eje derecho con sus propios rótulos (% o $) cuando hay series ahí
+//  · rótulos del eje X espaciados para que no se pisen
+//  · tooltip al pasar el mouse con TODAS las series del punto + línea guía
+//  · unidades bien formateadas: $, unidades o %
+// ════════════════════════════════════════════════════════════════════
+window._repCharts = window._repCharts || {};
+function _repChartCss(){
+  if(document.getElementById("rep-chart-css")) return;
+  var st = document.createElement("style"); st.id = "rep-chart-css";
+  st.textContent = ".rch{position:relative}.rch svg{width:100%;height:auto;display:block;font-family:inherit;overflow:visible}" +
+    ".rch-tip{position:absolute;pointer-events:none;z-index:5;background:rgba(18,20,30,.96);border:1px solid var(--bd);border-radius:8px;padding:.45rem .6rem;font-size:.7rem;color:var(--tx);box-shadow:0 6px 18px rgba(0,0,0,.35);display:none;min-width:150px;max-width:260px}" +
+    ".rch-tip .t{font-weight:700;color:var(--tx2);margin-bottom:.25rem;font-size:.66rem;text-transform:uppercase;letter-spacing:.04em}" +
+    ".rch-tip .r{display:flex;justify-content:space-between;gap:.8rem;line-height:1.5}.rch-tip .r i{display:inline-block;width:8px;height:8px;border-radius:50%;margin-right:.35rem}" +
+    ".rch-leg{display:flex;gap:.9rem;flex-wrap:wrap;justify-content:center;margin-top:.45rem}.rch-leg span{display:inline-flex;align-items:center;gap:.35rem;font-size:.7rem;color:var(--tx2)}.rch-leg i{width:14px;height:3px;border-radius:2px;display:inline-block}.rch-leg small{color:var(--tx3);font-size:.62rem}" +
+    ".rch-hit{fill:transparent;cursor:crosshair}";
+  document.head.appendChild(st);
+}
+function _repFmtV(v, f){
+  if(v == null || isNaN(v)) return "—";
+  if(f === "pct") return (Math.round(v*10)/10).toFixed(1).replace(".", ",")+"%";
+  if(f === "unid") return _repMiles(v)+" u";
+  if(f === "dias") return (Math.round(v*10)/10).toString().replace(".", ",")+" d";
+  return fmt(Math.round(v));
+}
+function _repFmtEje(v, f){
+  if(f === "pct") return Math.round(v)+"%";
+  if(f === "unid" || f === "dias"){ var a=Math.abs(v); var s=v<0?"-":""; if(a>=1000000) return s+(a/1000000).toFixed(1).replace(".",",")+"M"; if(a>=10000) return s+Math.round(a/1000)+"k"; return s+_repMiles(a); }
+  return _repAbrev(v);
+}
+// Ticks lindos: devuelve {min,max,step,ticks[]}
+function _repTicks(min, max, n){
+  n = n || 5;
+  if(!isFinite(min)) min = 0; if(!isFinite(max)) max = 0;
+  if(min > 0) min = 0; if(max < 0) max = 0;
+  if(max === min){ max = min + 1; }
+  var raw = (max - min) / n, exp = Math.pow(10, Math.floor(Math.log10(raw))), f = raw/exp;
+  var step = (f<=1?1:f<=2?2:f<=2.5?2.5:f<=5?5:10) * exp;
+  var lo = Math.floor(min/step)*step, hi = Math.ceil(max/step)*step;
+  if(hi === lo) hi = lo + step;
+  var ticks = []; for(var v=lo; v<=hi+step*0.001; v+=step) ticks.push(Math.round(v*1e6)/1e6);
+  return { min:lo, max:hi, step:step, ticks:ticks };
+}
+function _repChartXY(labels, series, opts){
+  opts = opts || {}; _repChartCss();
+  labels = labels || []; series = (series||[]).filter(function(s){ return s && s.datos; });
+  var n = labels.length;
+  if(!n || !series.length) return "<div style='text-align:center;color:var(--tx3);padding:1.5rem;font-size:.78rem;font-style:italic'>Sin datos para graficar</div>";
+  var id = "rch" + (++_repChartXY._seq || (_repChartXY._seq=1));
+  var izq = series.filter(function(s){ return s.eje !== "der"; }), der = series.filter(function(s){ return s.eje === "der"; });
+  var fmtIzq = opts.fmtIzq || (izq[0] && izq[0].fmt) || "money";
+  var fmtDer = der.length ? (der[0].fmt || "pct") : null;
+  var hayBar = series.some(function(s){ return s.tipo === "bar"; });
+  var W = 880, H = opts.h || 320, pl = 68, pr = der.length ? 62 : 22, pt = 20, largo = n > 16;
+  var pb = largo ? 62 : 40, iw = W-pl-pr, ih = H-pt-pb;
+  function ext(list, extra){ var mn=0, mx=0; list.forEach(function(s){ s.datos.forEach(function(d){ if(d==null||isNaN(d)) return; if(d<mn)mn=d; if(d>mx)mx=d; }); }); (extra||[]).forEach(function(v){ if(v<mn)mn=v; if(v>mx)mx=v; }); return [mn,mx]; }
+  var lineasH = opts.lineasH || [];
+  var eI = ext(izq, lineasH.filter(function(l){return l.eje!=="der";}).map(function(l){return l.v;}));
+  var tI = _repTicks(eI[0], eI[1], 5);
+  // eje derecho: las series con el mismo fmt que la primera comparten escala; las otras van con escala propia
+  var derPrin = der.filter(function(s){ return (s.fmt||"pct") === fmtDer; }), derOtras = der.filter(function(s){ return (s.fmt||"pct") !== fmtDer; });
+  var eD = ext(derPrin), tD = _repTicks(eD[0], eD[1], 5);
+  derOtras.forEach(function(s){ var e=ext([s]); s._t=_repTicks(e[0], e[1], 5); });
+  var slot = hayBar ? iw/n : (n<=1 ? iw : iw/(n-1));
+  var x = function(i){ return hayBar ? pl + slot*(i+0.5) : (n<=1 ? pl+iw/2 : pl + slot*i); };
+  var yDe = function(t){ return function(v){ return pt + ih - (v - t.min)/(t.max - t.min)*ih; }; };
+  var yI = yDe(tI), yD = yDe(tD);
+  function yFn(s){ if(s.eje!=="der") return yI; if(s._t) return yDe(s._t); return yD; }
+  var svg = "<svg viewBox='0 0 "+W+" "+H+"'>";
+  svg += "<defs>"; series.forEach(function(s,i){ svg += "<linearGradient id='"+id+"g"+i+"' x1='0' y1='0' x2='0' y2='1'><stop offset='0%' stop-color='"+s.color+"' stop-opacity='.30'/><stop offset='100%' stop-color='"+s.color+"' stop-opacity='.02'/></linearGradient>"; }); svg += "</defs>";
+  // grilla + rótulos izq
+  tI.ticks.forEach(function(v){
+    var yy = yI(v); var cero = Math.abs(v) < 1e-9;
+    svg += "<line x1='"+pl+"' y1='"+yy.toFixed(1)+"' x2='"+(W-pr)+"' y2='"+yy.toFixed(1)+"' stroke='"+(cero?"rgba(255,255,255,.28)":"rgba(255,255,255,.07)")+"' stroke-width='"+(cero?1.2:1)+"'/>";
+    svg += "<text x='"+(pl-8)+"' y='"+(yy+3.5).toFixed(1)+"' text-anchor='end' font-size='10' fill='var(--tx3)'>"+_repFmtEje(v, fmtIzq)+"</text>";
+  });
+  if(der.length){
+    tD.ticks.forEach(function(v){ var yy=yD(v); svg += "<text x='"+(W-pr+8)+"' y='"+(yy+3.5).toFixed(1)+"' text-anchor='start' font-size='10' fill='"+(derPrin[0]?derPrin[0].color:"var(--tx3)")+"' opacity='.9'>"+_repFmtEje(v, fmtDer)+"</text>"; });
+  }
+  // rótulos X espaciados
+  var maxLbl = largo ? 14 : 12, step = Math.max(1, Math.ceil(n/maxLbl));
+  for(var i=0; i<n; i++){
+    var esUlt = i === n-1, mostrar = (i % step === 0) && (!(esUlt) || true);
+    if(!mostrar && esUlt && ((n-1) % step) >= step*0.6) mostrar = true;
+    if(!mostrar) continue;
+    var xx = x(i);
+    if(largo) svg += "<text x='"+xx.toFixed(1)+"' y='"+(H-pb+14)+"' text-anchor='end' font-size='9.5' fill='var(--tx2)' transform='rotate(-45 "+xx.toFixed(1)+" "+(H-pb+14)+")'>"+_admEsc(String(labels[i]))+"</text>";
+    else svg += "<text x='"+xx.toFixed(1)+"' y='"+(H-pb+19)+"' text-anchor='middle' font-size='10.5' fill='var(--tx2)'>"+_admEsc(String(labels[i]))+"</text>";
+  }
+  // líneas horizontales de referencia (meta, promedio…)
+  lineasH.forEach(function(l){
+    var yy = (l.eje==="der"?yD:yI)(l.v);
+    svg += "<line x1='"+pl+"' y1='"+yy.toFixed(1)+"' x2='"+(W-pr)+"' y2='"+yy.toFixed(1)+"' stroke='"+(l.color||"#5a9fd4")+"' stroke-width='1.4' stroke-dasharray='3 4'/>";
+    if(l.label) svg += "<text x='"+(W-pr-2)+"' y='"+(yy-5).toFixed(1)+"' text-anchor='end' font-size='9.5' fill='"+(l.color||"#5a9fd4")+"'>"+_admEsc(l.label)+"</text>";
+  });
+  // barras
+  var bars = series.filter(function(s){ return s.tipo === "bar"; }), nb = bars.length;
+  bars.forEach(function(s, bi){
+    var y0 = yFn(s)(0), bw = Math.max(3, (slot*0.7)/nb);
+    s.datos.forEach(function(d,i){ if(d==null||isNaN(d)) return; var yy=yFn(s)(d); var xx = x(i) - (slot*0.7)/2 + bi*bw; var top=Math.min(yy,y0), hh=Math.abs(y0-yy);
+      svg += "<rect x='"+xx.toFixed(1)+"' y='"+top.toFixed(1)+"' width='"+(bw-1).toFixed(1)+"' height='"+Math.max(1,hh).toFixed(1)+"' rx='2' fill='"+s.color+"' opacity='.85'><title>"+_admEsc(s.nombre)+" · "+_admEsc(String(labels[i]))+": "+_repFmtV(d, s.fmt||fmtIzq)+"</title></rect>"; });
+  });
+  // líneas / áreas
+  series.forEach(function(s, si){
+    if(s.tipo === "bar") return;
+    var yf = yFn(s), pts = [], segs = [], cur = [];
+    s.datos.forEach(function(d,i){ if(d==null||isNaN(d)){ if(cur.length){segs.push(cur);cur=[];} return; } var p=[x(i), yf(d)]; cur.push(p); pts.push(p); });
+    if(cur.length) segs.push(cur);
+    var esArea = s.tipo === "area";
+    segs.forEach(function(sg){
+      if(sg.length < 2 && !esArea) return;
+      var d = "M" + sg.map(function(p){ return p[0].toFixed(1)+","+p[1].toFixed(1); }).join(" L");
+      if(esArea){ var y0 = yf(0); svg += "<path d='"+d+" L"+sg[sg.length-1][0].toFixed(1)+","+y0.toFixed(1)+" L"+sg[0][0].toFixed(1)+","+y0.toFixed(1)+" Z' fill='url(#"+id+"g"+si+")'/>"; }
+      svg += "<path d='"+d+"' fill='none' stroke='"+s.color+"' stroke-width='"+(s.grosor||2.4)+"' stroke-linejoin='round' stroke-linecap='round'"+(s.dash?" stroke-dasharray='5 4'":"")+(s.opacidad?" opacity='"+s.opacidad+"'":"")+"/>";
+    });
+    if(n <= 45 && !s.sinPuntos) pts.forEach(function(p){ svg += "<circle cx='"+p[0].toFixed(1)+"' cy='"+p[1].toFixed(1)+"' r='2.8' fill='var(--sur)' stroke='"+s.color+"' stroke-width='1.8'/>"; });
+    // valor final destacado
+    if(opts.valorFinal !== false){ var li=-1; for(var k=s.datos.length-1;k>=0;k--){ if(s.datos[k]!=null&&!isNaN(s.datos[k])){li=k;break;} } if(li>=0 && !s.sinFinal) svg += "<text x='"+(x(li)-6).toFixed(1)+"' y='"+(yf(s.datos[li])-8).toFixed(1)+"' text-anchor='end' font-size='10' font-weight='700' fill='"+s.color+"'>"+_repFmtV(s.datos[li], s.fmt||fmtIzq)+"</text>"; }
+  });
+  // guía + zonas de hover
+  svg += "<line id='"+id+"guia' x1='0' y1='"+pt+"' x2='0' y2='"+(pt+ih)+"' stroke='rgba(255,255,255,.35)' stroke-width='1' style='display:none'/>";
+  for(var j=0;j<n;j++){ var x0 = hayBar ? pl+slot*j : (j===0 ? pl : x(j)-slot/2), wz = hayBar ? slot : (n<=1 ? iw : (j===0||j===n-1 ? slot/2 : slot)); svg += "<rect class='rch-hit' x='"+x0.toFixed(1)+"' y='"+pt+"' width='"+Math.max(1,wz).toFixed(1)+"' height='"+ih+"' onmousemove=\"_repChartHover(event,'"+id+"',"+j+")\" onmouseleave=\"_repChartOut('"+id+"')\"/>"; }
+  svg += "</svg>";
+  // registro para el tooltip
+  window._repCharts[id] = { labels:labels, series:series.map(function(s){ return {nombre:s.nombre, color:s.color, datos:s.datos, fmt:s.fmt||(s.eje==="der"?fmtDer:fmtIzq)}; }), xs:labels.map(function(_,i){ return x(i)/W; }) };
+  var leg = "<div class='rch-leg'>";
+  series.forEach(function(s){
+    var f = s.fmt || (s.eje==="der"?fmtDer:fmtIzq), vals = s.datos.filter(function(d){ return d!=null && !isNaN(d); });
+    var tot = vals.reduce(function(a,b){return a+b;},0), prom = vals.length ? tot/vals.length : 0;
+    var res = s.resumen === false ? "" : (f==="pct" ? "prom "+_repFmtV(prom,f) : (s.acumulado ? "" : "total "+_repFmtV(tot,f)));
+    leg += "<span><i style='background:"+s.color+(s.dash?";height:0;border-top:2px dashed "+s.color+";background:none":"")+"'></i>"+_admEsc(s.nombre)+(res?" <small>("+res+")</small>":"")+"</span>";
+  });
+  lineasH.forEach(function(l){ if(l.label) leg += "<span><i style='height:0;border-top:2px dashed "+(l.color||"#5a9fd4")+"'></i>"+_admEsc(l.label)+" <small>("+_repFmtV(l.v, l.eje==="der"?fmtDer:fmtIzq)+")</small></span>"; });
+  leg += "</div>";
+  var nota = opts.nota ? "<div style='text-align:center;font-size:.6rem;color:var(--tx3);margin-top:.3rem;font-style:italic'>"+opts.nota+"</div>" : "";
+  var tabla = opts.tabla ? _repPanoTablaDatos(labels, series.map(function(s){ return {nombre:s.nombre,color:s.color,datos:s.datos.map(function(d){return d==null?0:d;}),fmt:s.fmt||(s.eje==="der"?fmtDer:fmtIzq)}; })) : "";
+  return "<div class='rch' id='"+id+"'>"+svg+"<div class='rch-tip' id='"+id+"tip'></div></div>"+leg+nota+tabla;
+}
+function _repChartHover(ev, id, i){
+  var ch = window._repCharts[id], wrap = document.getElementById(id); if(!ch || !wrap) return;
+  var tip = document.getElementById(id+"tip"), guia = document.getElementById(id+"guia"), svg = wrap.querySelector("svg");
+  var vb = svg.viewBox.baseVal, gx = ch.xs[i]*vb.width;
+  if(guia){ guia.setAttribute("x1", gx); guia.setAttribute("x2", gx); guia.style.display = "block"; }
+  var h = "<div class='t'>"+_admEsc(String(ch.labels[i]))+"</div>";
+  ch.series.forEach(function(s){ var d=s.datos[i]; if(d==null||isNaN(d)) return; h += "<div class='r'><span><i style='background:"+s.color+"'></i>"+_admEsc(s.nombre)+"</span><b>"+_repFmtV(d, s.fmt)+"</b></div>"; });
+  tip.innerHTML = h; tip.style.display = "block";
+  var rect = wrap.getBoundingClientRect(), px = ev.clientX - rect.left, py = ev.clientY - rect.top;
+  var tw = tip.offsetWidth || 160, left = px + 14; if(left + tw > rect.width) left = px - tw - 14; if(left < 0) left = 0;
+  tip.style.left = left + "px"; tip.style.top = Math.max(0, py - 10) + "px";
+}
+function _repChartOut(id){ var tip=document.getElementById(id+"tip"), guia=document.getElementById(id+"guia"); if(tip) tip.style.display="none"; if(guia) guia.style.display="none"; }
+
+// ── Compatibilidad: las pestañas siguen llamando a estas tres ──
+function _repChartLineas(labels, series){
+  return _repChartXY(labels, series.map(function(s,i){ return Object.assign({tipo: series.length<=2 ? "area" : "line"}, s); }), { fmtIzq: (series[0]&&series[0].fmt)||"money" });
+}
+function _repChartMulti(labels, seriesIzq, seriesDer){
+  var ss = (seriesIzq||[]).map(function(s){ return Object.assign({eje:"izq"}, s); }).concat((seriesDer||[]).map(function(s){ return Object.assign({eje:"der", dash: s.fmt==="pct"}, s); }));
+  var hayPct = (seriesDer||[]).some(function(s){ return s.fmt==="pct"; }), hayDerMoney = (seriesDer||[]).some(function(s){ return s.fmt!=="pct"; });
+  var nota = (hayPct||hayDerMoney) ? ("Eje izquierdo = $"+(hayPct?" · eje derecho = %":"")+(hayDerMoney?" · el ticket promedio usa escala propia (pasá el mouse para ver su valor)":"")) : "";
+  return _repChartXY(labels, ss, { tabla:true, nota:nota, h:340 });
+}
+function _repChartProyeccion(labels, real, proy, meta){
+  var ss = [ {nombre:"Real acumulado", color:"#c9963a", datos:real, tipo:"area", acumulado:true},
+             {nombre:"Proyección", color:"#c9963a", datos:proy, dash:true, opacidad:.8, acumulado:true, sinPuntos:true} ];
+  var lineas = meta>0 ? [{v:meta, label:"Período anterior", color:"#5a9fd4"}] : [];
+  return _repChartXY(labels, ss, { lineasH:lineas, h:300, valorFinal:true });
+}
+
 function _repCalcRango(periodo){
   var hoy = new Date(); hoy.setHours(0,0,0,0);
   var d, h;
@@ -38300,6 +38619,7 @@ function _repFmtRango(periodo){
   return "";
 }
 
+function _repFmtRangoCorto(rr){ var f=function(d){return _repPad(d.getDate())+"/"+_repPad(d.getMonth()+1);}; var h=new Date(rr.hasta); h.setDate(h.getDate()-1); return f(rr.desde)+" → "+f(h); }
 function _repInit(){
   // Setear default si entra primera vez
   if(!window._repPeriodo) window._repPeriodo = "mes";
@@ -38417,8 +38737,9 @@ function _repObtenerCobrosPeriodo(){
   // ventas: cobros DIRECTOS solamente — excluye 'pendiente' (esas ya cuentan como cc_pagos)
   // FIX: filtrar forma_cobro != 'pendiente' para evitar double counting de ventas a crédito
   return Promise.all([
-    apiGet("cc_pagos", "select=*&fecha=gte."+desdeISO+"&fecha=lt."+hastaISO+"&order=fecha.desc&limit=5000").catch(function(){return [];}),
-    apiGetAll("ventas", "select=*&estado=eq.confirmada&forma_cobro=neq.pendiente&created_at=gte."+r.desde.toISOString()+"&created_at=lt."+r.hasta.toISOString()+"&order=created_at.desc&limit=5000").catch(function(){return [];})
+    apiGetAll("cc_pagos", "select=*&fecha=gte."+desdeISO+"&fecha=lt."+hastaISO+"&order=fecha.desc&limit=5000").catch(function(){return [];}),
+    // incluye las ventas archivadas al cerrar período: son cobros reales igual (antes los meses cerrados daban $0)
+    apiGetAll("ventas", "select=*&"+_REP_ESTADOS_V+"&forma_cobro=neq.pendiente&created_at=gte."+r.desde.toISOString()+"&created_at=lt."+r.hasta.toISOString()+"&order=created_at.desc&limit=5000").catch(function(){return [];})
   ]).then(function(res){
     _repCacheCobros = { ccPagos: res[0]||[], ventas: res[1]||[] };
     return _repCacheCobros;
@@ -38486,7 +38807,15 @@ function _repSerieTiempo(items, rango, valorFn){
   var buckets=_repPanoBuckets(rango, group), idx={};
   buckets.forEach(function(b,i){ b.v=0; idx[b.key]=i; });
   (items||[]).forEach(function(it){ if(!it||!it.created_at)return; var k=_repVentaKey(it.created_at, group); if(idx[k]!==undefined) buckets[idx[k]].v += (valorFn?(valorFn(it)||0):0); });
-  return { labels: buckets.map(function(b){return b.label;}), datos: buckets.map(function(b){return b.v;}) };
+  // si el período todavía no terminó, los tramos futuros van en blanco (antes se dibujaban como $0 y hundían la curva)
+  var futuro = _repBucketFuturoDesde(buckets, group, rango);
+  return { labels: buckets.map(function(b){return b.label;}), datos: buckets.map(function(b,i){return (futuro>=0 && i>=futuro) ? null : b.v;}) };
+}
+// índice del primer tramo que está en el futuro (−1 si el período ya cerró o no hay futuro)
+function _repBucketFuturoDesde(buckets, group, rango){
+  if(!rango || Date.now() >= rango.hasta.getTime()) return -1;
+  var hoy = _repBucketHoyIdx(buckets, group);
+  return hoy+1 < buckets.length ? hoy+1 : -1;
 }
 function _repBloqueEvol(titulo, sub, labels, series){
   var tiene = series && series.length && labels && labels.length && series.some(function(s){return s.datos.some(function(d){return d>0;});});
@@ -38502,7 +38831,7 @@ var _REP_PANO_VARS = [
   {k:"ganNeta",  lbl:"Ganancia neta",  color:"#2f8f6a", eje:"izq", fmt:"money"},
   {k:"costos",   lbl:"Costos",         color:"#e0655a", eje:"izq", fmt:"money"},
   {k:"gastos",   lbl:"Gastos",         color:"#d4589a", eje:"izq", fmt:"money"},
-  {k:"ticket",   lbl:"Ticket prom.",   color:"#9a8fd4", eje:"der", fmt:"money"},
+  {k:"ticket",   lbl:"Ticket prom. (por pedido)", color:"#9a8fd4", eje:"der", fmt:"money"},
   {k:"rentab",   lbl:"Rentabilidad %", color:"#5a9fd4", eje:"der", fmt:"pct"}
 ];
 
@@ -38511,30 +38840,15 @@ function _repCargarPanorama(){
   var estadosV = "estado=in.(confirmada,archivada_periodo)";
   Promise.all([
     apiGetAll("ventas", "select=producto_id,producto_nombre,cantidad,total,segmento,created_at&"+estadosV+"&created_at=gte."+r.desde.toISOString()+"&created_at=lt."+r.hasta.toISOString()+"&limit=8000").catch(function(){return [];}),
-    (Array.isArray(prods) && prods.length) ? Promise.resolve(prods) : apiGet("productos", "select=id,nombre,empresa,costo_ind,costo_log&limit=5000").catch(function(){return [];}),
+    (Array.isArray(prods) && prods.length) ? Promise.resolve(prods) : apiGetAll("productos", "select=id,nombre,empresa,ml,costo_ind,costo_log&limit=5000").catch(function(){return [];}),
     apiGet("combos", "select=id,nombre,combo_items(producto_id,cantidad,es_decan)&limit=2000").catch(function(){return [];}),
-    apiGet("gastos_vendedor", "select=monto,created_at&aprobado=is.true"+_gxQ()+"&created_at=gte."+r.desde.toISOString()+"&created_at=lt."+r.hasta.toISOString()+"&limit=5000").catch(function(){return [];})
+    apiGetAll("gastos_vendedor", "select=monto,created_at&aprobado=is.true"+_gxQ()+"&created_at=gte."+r.desde.toISOString()+"&created_at=lt."+r.hasta.toISOString()+"&limit=5000").catch(function(){return [];})
   ]).then(function(data){
     var ventas = data[0]||[], productos = data[1]||[], combos = data[2]||[], gastos = data[3]||[];
-    var cotiz = (typeof cotizActual !== "undefined" && cotizActual) ? cotizActual : 1550;
-    var DECAN_ML=5, PERFUME_ML=100, cpv = 0.94*cotiz;
-    var mapCostoProd = {};
-    var mapMarca={};
-    productos.forEach(function(p){ mapCostoProd[p.id] = ((parseFloat(p.costo_ind)||0)+(parseFloat(p.costo_log)||0))*cotiz; mapMarca[p.id]=(p.empresa||"").trim(); });
-    var mapCostoCombo = {};
-    combos.forEach(function(c){
-      var ct=0;
-      (c.combo_items||[]).forEach(function(ci){ var cb=mapCostoProd[ci.producto_id]||0, q=parseInt(ci.cantidad)||1; ct += ci.es_decan ? ((cb*DECAN_ML/PERFUME_ML)+cpv)*q : cb*q; });
-      if(c.nombre) mapCostoCombo[c.nombre]=ct;
-    });
-    function _costoUnit(v){
-      var seg=(v.segmento||"").toLowerCase();
-      if(seg==="combo"){ var nl=(v.producto_nombre||"").replace(/^Combo:\s*/i,"").trim(); return mapCostoCombo[nl]||mapCostoCombo[v.producto_nombre]||0; }
-      var cb=mapCostoProd[v.producto_id]||0;
-      if(seg==="decan") return (cb*DECAN_ML/PERFUME_ML)+cpv;
-      return cb;
-    }
-    window._repPanoRaw = { ventas:ventas, costoUnit:_costoUnit, gastos:gastos, rango:r, mapMarca:mapMarca };
+    // costo unificado (misma fórmula que Stock y precios; resuelve decants sin producto_id por nombre)
+    var cf = _repCostoFactory(productos, combos);
+    var mapMarca={}; productos.forEach(function(p){ mapMarca[p.id]=(p.empresa||"").trim(); });
+    window._repPanoRaw = { ventas:ventas, costoUnit:cf.costoUnit, prodDe:cf.producto, gastos:gastos, rango:r, mapMarca:mapMarca, cotiz:cf.cotiz };
     _repPanoRender();
   }).catch(function(e){
     console.error("[belle] _repCargarPanorama error:", e);
@@ -38547,13 +38861,14 @@ function _repPanoRender(){
   var raw = window._repPanoRaw; if(!raw) return;
   var group = _repPanoGroupEff(raw.rango);
   var buckets = _repPanoBuckets(raw.rango, group);
-  var idx = {}; buckets.forEach(function(b,i){ b.ing=0; b.cost=0; b.gan=0; b.unid=0; b.nv=0; b.gasto=0; idx[b.key]=i; });
+  var idx = {}; buckets.forEach(function(b,i){ b.ing=0; b.cost=0; b.gan=0; b.unid=0; b.nv=0; b.gasto=0; b._ped={}; idx[b.key]=i; });
 
-  var totIng=0, totCost=0, totUnid=0, ventasCount=0;
+  var totIng=0, totCost=0, totUnid=0, ventasCount=0, sinCostoN=0, sinCostoFact=0;
   var porProd = {}, porMarca = {};
   function _marcaDeVenta(v){
-    var m=(raw.mapMarca && raw.mapMarca[v.producto_id])||"";
-    if(m) return m;
+    var pr = raw.prodDe ? raw.prodDe(v) : null;
+    var m=(pr && pr.empresa) || (raw.mapMarca && raw.mapMarca[v.producto_id]) || "";
+    if(m) return m.trim();
     var nm=v.producto_nombre||"";
     if(nm.indexOf(" - ")>0) return nm.split(" - ")[0].trim();
     if(nm.indexOf("-")>0) return nm.split("-")[0].trim();
@@ -38561,10 +38876,11 @@ function _repPanoRender(){
   }
   raw.ventas.forEach(function(v){
     var t=parseFloat(v.total)||0, q=parseInt(v.cantidad)||0;
-    var cl=_repPanoSafeCosto(raw.costoUnit, v)*q;
+    var cu=_repPanoSafeCosto(raw.costoUnit, v), cl=cu*q;
+    if(cu<=0 && String(v.segmento||"").toLowerCase()!=="financiacion" && t>0){ sinCostoN++; sinCostoFact+=t; }
     totIng+=t; totCost+=cl; totUnid+=q; ventasCount++;
     var k=_repVentaKey(v.created_at, group);
-    if(idx[k]!==undefined){ var b=buckets[idx[k]]; b.ing+=t; b.cost+=cl; b.gan+=(t-cl); b.unid+=q; b.nv++; }
+    if(idx[k]!==undefined){ var b=buckets[idx[k]]; b.ing+=t; b.cost+=cl; b.gan+=(t-cl); b.unid+=q; b.nv++; b._ped[v.nro_orden||("#"+v.id)]=1; }
     var pn=v.producto_nombre||("ID "+(v.producto_id||"?"));
     if(!porProd[pn]) porProd[pn]={nombre:pn, fact:0, unid:0};
     porProd[pn].fact+=t; porProd[pn].unid+=q;
@@ -38578,20 +38894,22 @@ function _repPanoRender(){
   var totGan = totIng - totCost;
   var ganNeta = totGan - totGasto;
   var margen = totIng>0 ? (totGan/totIng*100) : 0;
-  var ticket = totUnid>0 ? totIng/totUnid : 0;
+  var tk = _repTicket(raw.ventas);
 
-  // series por variable
+  // series por variable (los tramos futuros de un período en curso van en blanco)
+  var futuro = _repBucketFuturoDesde(buckets, group, raw.rango);
+  function serie(fn){ return buckets.map(function(b,i){ return (futuro>=0 && i>=futuro) ? null : fn(b); }); }
   var serieData = {
-    ingresos: buckets.map(function(b){return b.ing;}),
-    ganBruta: buckets.map(function(b){return b.gan;}),
-    ganNeta:  buckets.map(function(b){return b.gan - b.gasto;}),
-    costos:   buckets.map(function(b){return b.cost;}),
-    gastos:   buckets.map(function(b){return b.gasto;}),
-    ticket:   buckets.map(function(b){return b.unid>0 ? b.ing/b.unid : 0;}),
-    rentab:   buckets.map(function(b){return b.ing>0 ? b.gan/b.ing*100 : 0;})
+    ingresos: serie(function(b){return b.ing;}),
+    ganBruta: serie(function(b){return b.gan;}),
+    ganNeta:  serie(function(b){return b.gan - b.gasto;}),
+    costos:   serie(function(b){return b.cost;}),
+    gastos:   serie(function(b){return b.gasto;}),
+    ticket:   serie(function(b){var np=Object.keys(b._ped).length; return np>0 ? b.ing/np : 0;}),
+    rentab:   serie(function(b){return b.ing>0 ? b.gan/b.ing*100 : 0;})
   };
 
-  var groupLbl = group==="dia"?"por día":group==="semana"?"por semana":"por mes";
+  var groupLbl = group==="dia"?"por día":group==="semana"?"por semana":group==="anio"?"por año":"por mes";
   var h="";
   h += _repHeaderSeccion("📈 Panorama", "panorama");
 
@@ -38602,8 +38920,10 @@ function _repPanoRender(){
   h += _repPanoKpi("🧾 Costo productos", fmt(totCost), "var(--red)");
   h += _repPanoKpi("💸 Gastos operativos", fmt(totGasto), "#d4589a");
   h += _repPanoKpi("✅ Ganancia neta", fmt(ganNeta), ganNeta>=0?"var(--green)":"var(--red)");
-  h += _repPanoKpi("📦 Unidades", totUnid.toLocaleString("es-AR"), "var(--tx)", ventasCount+" ventas · ticket "+fmt(ticket));
+  h += _repPanoKpi("📦 Unidades", totUnid.toLocaleString("es-AR"), "var(--tx)", tk.pedidos+" pedidos · "+ventasCount+" líneas");
+  h += _repPanoKpi("🧾 Ticket promedio", fmt(tk.ticket), "#9a8fd4", "por pedido · "+fmt(tk.porUnidad)+" por unidad");
   h += "</div>";
+  if(sinCostoN>0) h += "<div style='font-size:.7rem;color:var(--tx3);margin:-.4rem 0 1rem;padding:.45rem .7rem;background:rgba(230,180,60,.08);border:1px solid rgba(230,180,60,.25);border-radius:7px'>⚠️ "+sinCostoN+" venta"+(sinCostoN===1?"":"s")+" por "+fmt(sinCostoFact)+" no tienen costo cargado (el producto no tiene costo en la ficha o no se pudo identificar): su ganancia figura al 100%.</div>";
 
   // Controles
   h += "<div style='background:var(--sur);border:1px solid var(--bd);border-radius:10px;padding:1rem;margin-bottom:1rem'>";
@@ -38662,58 +38982,6 @@ function _repPanoRender(){
   var el=document.getElementById("_repContenido"); if(el) el.innerHTML=h;
 }
 
-// Gráfico multi-línea: eje izq = $ (escala real), eje der = % , ticket con escala propia
-function _repChartMulti(labels, seriesIzq, seriesDer){
-  var series=seriesIzq.concat(seriesDer);
-  var n=labels.length, rot=n>14;
-  var W=880, H=340, pl=70, pr=56, pt=22, pb=(rot?78:46);
-  var iw=W-pl-pr, ih=H-pt-pb;
-  var derPct=seriesDer.filter(function(s){return s.fmt==="pct";});
-  var derMoney=seriesDer.filter(function(s){return s.fmt!=="pct";});
-  var maxI=0; seriesIzq.forEach(function(s){ s.datos.forEach(function(d){ if(d>maxI)maxI=d; }); }); maxI=_repNiceMax(maxI||1);
-  var maxP=0; derPct.forEach(function(s){ s.datos.forEach(function(d){ if(d>maxP)maxP=d; }); }); maxP=_repNiceMax(maxP||1);
-  derMoney.forEach(function(s){ var mx=0; s.datos.forEach(function(d){ if(d>mx)mx=d; }); s._max=_repNiceMax(mx||1); });
-  var x=function(i){ return pl+(n<=1?iw/2:(iw*i/(n-1))); };
-  var yI=function(v){ return pt+ih-(maxI>0?ih*v/maxI:0); };
-  var yP=function(v){ return pt+ih-(maxP>0?ih*v/maxP:0); };
-  function fmtVal(d,s){ return s.fmt==="pct"?(d.toFixed(1)+"%"):fmt(Math.round(d)); }
-  var svg="<svg viewBox='0 0 "+W+" "+H+"' style='width:100%;height:auto;display:block;font-family:inherit'>";
-  var gl=4;
-  for(var g=0;g<=gl;g++){
-    var yy=pt+ih*(1-g/gl);
-    svg+="<line x1='"+pl+"' y1='"+yy.toFixed(1)+"' x2='"+(W-pr)+"' y2='"+yy.toFixed(1)+"' stroke='rgba(255,255,255,.07)'/>";
-    if(seriesIzq.length) svg+="<text x='"+(pl-8)+"' y='"+(yy+3).toFixed(1)+"' text-anchor='end' font-size='9.5' fill='var(--tx3)'>"+fmt(Math.round(maxI*g/gl))+"</text>";
-    if(derPct.length) svg+="<text x='"+(W-pr+8)+"' y='"+(yy+3).toFixed(1)+"' text-anchor='start' font-size='9.5' fill='#5a9fd4'>"+(maxP*g/gl).toFixed(0)+"%</text>";
-  }
-  for(var i=0;i<n;i++){
-    var xx=x(i);
-    svg+="<line x1='"+xx.toFixed(1)+"' y1='"+pt+"' x2='"+xx.toFixed(1)+"' y2='"+(pt+ih)+"' stroke='rgba(255,255,255,.03)'/>";
-    if(rot) svg+="<text x='"+xx.toFixed(1)+"' y='"+(H-pb+15)+"' text-anchor='end' font-size='9' fill='var(--tx2)' transform='rotate(-50 "+xx.toFixed(1)+" "+(H-pb+15)+")'>"+labels[i]+"</text>";
-    else svg+="<text x='"+xx.toFixed(1)+"' y='"+(H-pb+20)+"' text-anchor='middle' font-size='11' fill='var(--tx2)'>"+labels[i]+"</text>";
-  }
-  function drawSerie(s, yfn){
-    if(!n) return;
-    var pts=s.datos.map(function(d,i){ return x(i).toFixed(1)+","+yfn(d).toFixed(1); });
-    var dash=s.fmt==="pct"?" stroke-dasharray='6 3'":"";
-    svg+="<path d='M"+pts.join(" L")+"' fill='none' stroke='"+s.color+"' stroke-width='2.6' stroke-linejoin='round' stroke-linecap='round'"+dash+"/>";
-    if(n<=40){ s.datos.forEach(function(d,i){ svg+="<circle cx='"+x(i).toFixed(1)+"' cy='"+yfn(d).toFixed(1)+"' r='3' fill='var(--sur)' stroke='"+s.color+"' stroke-width='1.8'><title>"+s.nombre+" · "+labels[i]+": "+fmtVal(d,s)+"</title></circle>"; }); }
-    var li=n-1, lv=s.datos[li];
-    svg+="<text x='"+(x(li)-5).toFixed(1)+"' y='"+(yfn(lv)-7).toFixed(1)+"' text-anchor='end' font-size='10' font-weight='700' fill='"+s.color+"'>"+fmtVal(lv,s)+"</text>";
-  }
-  seriesIzq.forEach(function(s){ drawSerie(s, yI); });
-  derPct.forEach(function(s){ drawSerie(s, yP); });
-  derMoney.forEach(function(s){ drawSerie(s, function(v){return pt+ih-(s._max>0?ih*v/s._max:0);}); });
-  svg+="</svg>";
-  var leg="<div style='display:flex;gap:.8rem;flex-wrap:wrap;justify-content:center;margin-top:.5rem'>";
-  series.forEach(function(s){
-    var tot=s.datos.reduce(function(a,b){return a+b;},0), prom=s.datos.length?tot/s.datos.length:0;
-    var resumen=s.fmt==="pct"?("prom "+prom.toFixed(1)+"%"):("total "+fmt(Math.round(tot)));
-    leg+="<span style='display:inline-flex;align-items:center;gap:.35rem;font-size:.7rem;color:var(--tx2)'><span style='width:14px;height:3px;border-radius:2px;background:"+s.color+";display:inline-block"+(s.fmt==="pct"?";opacity:.7":"")+"'></span>"+s.nombre+" <span style='color:var(--tx3);font-size:.62rem'>("+resumen+")</span></span>";
-  });
-  leg+="</div>";
-  var nota="<div style='text-align:center;font-size:.6rem;color:var(--tx3);margin-top:.35rem;font-style:italic'>Costado izquierdo = $ · costado derecho = % rentabilidad. El ticket promedio usa su propia escala; su valor exacto está en la tabla y en cada punto.</div>";
-  return svg+leg+nota+_repPanoTablaDatos(labels, series);
-}
 // Tabla de datos detallada: cada variable por período + total/promedio
 function _repPanoTablaDatos(labels, series){
   if(!series.length || !labels.length) return "";
@@ -38754,53 +39022,9 @@ function _repPanoSetGroup(g){ window._repPanoGroup=g; _repPanoRender(); }
 function _repPanoToggleVar(k){ window._repPanoVars[k]=!window._repPanoVars[k]; _repPanoRender(); }
 function _repPanoSetTop(t){ window._repPanoTop=t; _repPanoRender(); }
 
-// ── Gráfico de líneas SVG ──
-function _repChartLineas(labels, series){
-  var W=820, H=300, pl=64, pr=18, pt=18, pb=40;
-  var iw=W-pl-pr, ih=H-pt-pb;
-  var n=labels.length;
-  var maxV=0; series.forEach(function(s){ s.datos.forEach(function(d){ if(d>maxV) maxV=d; }); });
-  maxV=_repNiceMax(maxV);
-  var x=function(i){ return pl + (n<=1?iw/2:(iw*i/(n-1))); };
-  var y=function(v){ return pt + ih - (maxV>0?(ih*v/maxV):0); };
-  var svg="<svg viewBox='0 0 "+W+" "+H+"' style='width:100%;height:auto;display:block;font-family:inherit'>";
-  // defs gradientes
-  svg+="<defs>";
-  series.forEach(function(s,i){ svg+="<linearGradient id='rpg"+i+"' x1='0' y1='0' x2='0' y2='1'><stop offset='0%' stop-color='"+s.color+"' stop-opacity='.28'/><stop offset='100%' stop-color='"+s.color+"' stop-opacity='0'/></linearGradient>"; });
-  svg+="</defs>";
-  // grid horizontal + labels Y
-  var gl=4;
-  for(var g=0; g<=gl; g++){
-    var val=maxV*g/gl, yy=y(val);
-    svg+="<line x1='"+pl+"' y1='"+yy.toFixed(1)+"' x2='"+(W-pr)+"' y2='"+yy.toFixed(1)+"' stroke='rgba(255,255,255,.07)' stroke-width='1'/>";
-    svg+="<text x='"+(pl-8)+"' y='"+(yy+3).toFixed(1)+"' text-anchor='end' font-size='10' fill='var(--tx3)'>"+_repAbrev(val)+"</text>";
-  }
-  // labels X (espaciados si hay muchos)
-  var step=Math.ceil(n/9);
-  for(var i=0;i<n;i++){ if(i%step!==0 && i!==n-1) continue; svg+="<text x='"+x(i).toFixed(1)+"' y='"+(H-pb+18)+"' text-anchor='middle' font-size='10' fill='var(--tx3)'>"+labels[i]+"</text>"; }
-  // series: area + linea + puntos
-  series.forEach(function(s,si){
-    if(!n) return;
-    var pts=s.datos.map(function(d,i){ return x(i).toFixed(1)+","+y(d).toFixed(1); });
-    // area
-    var area="M"+x(0).toFixed(1)+","+y(0).toFixed(1)+" L"+pts.join(" L")+" L"+x(n-1).toFixed(1)+","+y(0).toFixed(1)+" Z";
-    svg+="<path d='"+area+"' fill='url(#rpg"+si+")'/>";
-    // linea
-    svg+="<path d='M"+pts.join(" L")+"' fill='none' stroke='"+s.color+"' stroke-width='2.4' stroke-linejoin='round' stroke-linecap='round'/>";
-    // puntos (solo si pocos)
-    if(n<=32){ s.datos.forEach(function(d,i){ svg+="<circle cx='"+x(i).toFixed(1)+"' cy='"+y(d).toFixed(1)+"' r='3' fill='var(--sur)' stroke='"+s.color+"' stroke-width='2'><title>"+labels[i]+": "+fmt(d)+"</title></circle>"; }); }
-  });
-  svg+="</svg>";
-  // leyenda
-  var leg="<div style='display:flex;gap:1rem;flex-wrap:wrap;justify-content:center;margin-top:.5rem'>";
-  series.forEach(function(s){ leg+="<span style='display:inline-flex;align-items:center;gap:.35rem;font-size:.7rem;color:var(--tx2)'><span style='width:14px;height:3px;border-radius:2px;background:"+s.color+";display:inline-block'></span>"+s.nombre+"</span>"; });
-  leg+="</div>";
-  return svg+leg;
-}
-
 // ── Gráfico de barras horizontales SVG ──
 function _repChartBarras(items, esUnid){
-  var maxV=0; items.forEach(function(it){ if(it.valor>maxV) maxV=it.valor; });
+  var maxV=0, sumV=0; items.forEach(function(it){ if(it.valor>maxV) maxV=it.valor; sumV+=(it.valor||0); });
   if(maxV<=0) maxV=1;
   var rowH=34, gap=8, W=820, labelW=0;
   var h="<div style='display:flex;flex-direction:column;gap:"+gap+"px'>";
@@ -38812,7 +39036,7 @@ function _repChartBarras(items, esUnid){
     h += "<div style='flex:1;min-width:0'>";
     h += "<div style='display:flex;justify-content:space-between;gap:.5rem;margin-bottom:.2rem'>";
     h += "<span style='font-size:.74rem;color:var(--tx);white-space:nowrap;overflow:hidden;text-overflow:ellipsis'>"+_admEsc(it.label)+"</span>";
-    h += "<span style='font-size:.72rem;font-weight:700;color:var(--acc);flex-shrink:0'>"+it.sub+"</span>";
+    h += "<span style='font-size:.72rem;font-weight:700;color:var(--acc);flex-shrink:0'>"+it.sub+(sumV>0?" <span style='color:var(--tx3);font-weight:500;font-size:.62rem'>"+(it.valor/sumV*100).toFixed(1)+"% del top</span>":"")+"</span>";
     h += "</div>";
     h += "<div style='height:9px;background:var(--sur2);border-radius:5px;overflow:hidden'><div style='height:100%;width:"+pct.toFixed(1)+"%;background:"+color+";border-radius:5px;transition:width .6s cubic-bezier(.2,.8,.3,1)'></div></div>";
     h += "</div></div>";
@@ -38832,13 +39056,14 @@ function _repCargarFinanciero(){
   Promise.all([
     _repObtenerCobrosPeriodo(),
     // Cuentas por cobrar — pedidos no cobrados completos
-    apiGet("pedidos_catalogo", "select=id,nro_orden,total,cobrado_total,cliente_id,created_at,es_cc&estado=neq.cancelado&estado=neq.cobrado&limit=5000").catch(function(){return [];}),
+    apiGetAll("pedidos_catalogo", "select=id,nro_orden,total,cobrado_total,cliente_id,created_at,es_cc,estado&estado=neq.cancelado&estado=neq.cobrado&limit=5000").catch(function(){return [];}),
     // Saldo a favor de clientes
-    apiGet("clientes", "select=id,nombre,apellido,saldo_cc&saldo_cc=gt.0&order=saldo_cc.desc&limit=2000").catch(function(){return [];}),
-    // Período anterior para comparar
+    apiGetAll("clientes", "select=id,nombre,apellido,saldo_cc&saldo_cc=gt.0&order=saldo_cc.desc&limit=2000").catch(function(){return [];}),
+    // Período anterior para comparar (mismo tramo si el período está en curso)
     _repObtenerPeriodoAnterior()
   ]).then(function(data){
     var cobros = data[0]; var pendientes = data[1]; var aFavor = data[2]; var anterior = data[3];
+    var cmp = _repComparativa(window._repPeriodo);
 
     // Cálculos
     var totalCCPagos = (cobros.ccPagos||[]).reduce(function(s,p){return s+(parseFloat(p.monto)||0);}, 0);
@@ -38858,11 +39083,14 @@ function _repCargarFinanciero(){
       porForma[f] += parseFloat(v.total)||0;
     });
 
-    // Cuentas por cobrar
-    var totalPendiente = pendientes.reduce(function(s,p){
-      return s + ((parseFloat(p.total)||0) - (parseFloat(p.cobrado_total)||0));
-    }, 0);
-    var pedPendientes = pendientes.length;
+    // Cuentas por cobrar: separamos lo que ya se entregó y falta cobrar (parciales / CC)
+    // de los pedidos que todavía están en curso (reservados / pendientes), que no es deuda todavía.
+    var totalPendiente = 0, pedPendientes = pendientes.length, parcialFalta = 0, parcialN = 0, enCursoTot = 0, enCursoN = 0;
+    pendientes.forEach(function(p){
+      var falta = (parseFloat(p.total)||0) - (parseFloat(p.cobrado_total)||0);
+      totalPendiente += falta;
+      if(p.estado === "cobrado_parcial" || p.es_cc){ parcialFalta += falta; parcialN++; } else { enCursoTot += falta; enCursoN++; }
+    });
 
     // Saldo a favor
     var totalSaldoFavor = aFavor.reduce(function(s,c){return s+(parseFloat(c.saldo_cc)||0);}, 0);
@@ -38880,12 +39108,12 @@ function _repCargarFinanciero(){
     h += _repKPI("💵 Ingresos del período", fmt(totalIngresos), {
       sub: cobros.ccPagos.length + cobros.ventas.length + " cobros",
       delta: deltaPct,
-      deltaSub: "vs período anterior"
+      deltaSub: cmp.etiqueta + " · antes " + fmt(anterior.totalIngresos)
     });
 
-    h += _repKPI("📋 Cuentas por cobrar", fmt(totalPendiente), {
-      sub: pedPendientes + " pedido"+(pedPendientes===1?"":"s")+" pendiente"+(pedPendientes===1?"":"s"),
-      color: totalPendiente > 0 ? "var(--red)" : "var(--green)"
+    h += _repKPI("📋 Falta cobrar", fmt(parcialFalta), {
+      sub: parcialN + " pedido"+(parcialN===1?"":"s")+" cobrado"+(parcialN===1?"":"s")+" parcial / CC · "+enCursoN+" en curso por "+fmt(enCursoTot),
+      color: parcialFalta > 0 ? "var(--red)" : "var(--green)"
     });
 
     h += _repKPI("✅ Saldo a favor (debemos)", fmt(totalSaldoFavor), {
@@ -38898,6 +39126,18 @@ function _repCargarFinanciero(){
     });
 
     h += "</div>";
+
+    // ── Evolución de los cobros en el período ──
+    h += (function(){
+      var vs = (cobros.ventas||[]), cc = (cobros.ccPagos||[]).map(function(p){ return {created_at:(p.fecha||String(p.created_at||"").slice(0,10))+"T12:00:00", total:p.monto}; });
+      var s1 = _repSerieTiempo(vs, r, function(v){ return parseFloat(v.total)||0; });
+      var s2 = _repSerieTiempo(cc, r, function(p){ return parseFloat(p.total)||0; });
+      var chart = _repChartXY(s1.labels, [
+        {nombre:"Cobros directos", color:"#4caf82", datos:s1.datos, tipo:"bar"},
+        {nombre:"Pagos a cuenta corriente", color:"#c9963a", datos:s2.datos, tipo:"bar"}
+      ], {h:280});
+      return "<div style='background:var(--sur);border:1px solid var(--bd);border-radius:10px;padding:1rem;margin-bottom:1rem'><div style='font-size:.85rem;font-weight:700;color:var(--tx);margin-bottom:.2rem'>📈 Cobros en el tiempo</div><div style='font-size:.66rem;color:var(--tx3);margin-bottom:.8rem'>Lo que entró cada día/semana: ventas cobradas en el momento y pagos de cuenta corriente.</div>"+chart+"</div>";
+    })();
 
     // ── Por forma de pago ──
     h += "<div style='background:var(--sur);border:1px solid var(--bd);border-radius:10px;padding:1rem;margin-bottom:1rem'>";
@@ -38978,9 +39218,10 @@ function _repCargarFinanciero(){
 // ════════════════════════════════════════════════════════════════════
 
 // ── Gráfico de dona (reutilizable) ──
-function _repChartDona(items, size){
+function _repChartDona(items, size, fmtFn){
   items = (items||[]).filter(function(i){return i.valor>0;});
   size = size||150;
+  var F = fmtFn || fmt, FA = fmtFn || _repAbrev;
   var r=size/2-13, cx=size/2, cy=size/2, circ=2*Math.PI*r;
   var total=items.reduce(function(s,i){return s+i.valor;},0);
   var svg="<svg viewBox='0 0 "+size+" "+size+"' style='width:"+size+"px;height:"+size+"px;flex-shrink:0'>";
@@ -38991,56 +39232,21 @@ function _repChartDona(items, size){
     var off=0;
     items.forEach(function(it){
       var len=it.valor/total*circ;
-      svg+="<circle cx='"+cx+"' cy='"+cy+"' r='"+r+"' fill='none' stroke='"+it.color+"' stroke-width='15' stroke-dasharray='"+len.toFixed(2)+" "+(circ-len).toFixed(2)+"' stroke-dashoffset='"+(-off).toFixed(2)+"'><title>"+_admEsc(it.label)+": "+fmt(it.valor)+"</title></circle>";
+      svg+="<circle cx='"+cx+"' cy='"+cy+"' r='"+r+"' fill='none' stroke='"+it.color+"' stroke-width='15' stroke-dasharray='"+len.toFixed(2)+" "+(circ-len).toFixed(2)+"' stroke-dashoffset='"+(-off).toFixed(2)+"'><title>"+_admEsc(it.label)+": "+F(it.valor)+"</title></circle>";
       off+=len;
     });
     svg+="</g>";
   }
   svg+="<text x='"+cx+"' y='"+(cy-1)+"' text-anchor='middle' font-size='10' fill='var(--tx3)'>Total</text>";
-  svg+="<text x='"+cx+"' y='"+(cy+14)+"' text-anchor='middle' font-size='13' font-weight='700' fill='var(--tx)'>"+_repAbrev(total)+"</text>";
+  svg+="<text x='"+cx+"' y='"+(cy+14)+"' text-anchor='middle' font-size='13' font-weight='700' fill='var(--tx)'>"+FA(total)+"</text>";
   svg+="</svg>";
   var leg="<div style='display:flex;flex-direction:column;gap:.45rem;justify-content:center;min-width:150px'>";
   items.forEach(function(it){
     var pct=total>0?(it.valor/total*100):0;
-    leg+="<div style='display:flex;align-items:center;gap:.5rem;font-size:.74rem'><span style='width:11px;height:11px;border-radius:3px;background:"+it.color+";flex-shrink:0'></span><span style='color:var(--tx2);flex:1'>"+_admEsc(it.label)+"</span><span style='color:var(--tx);font-weight:700'>"+fmt(it.valor)+"</span><span style='color:var(--tx3);font-size:.66rem;min-width:38px;text-align:right'>"+pct.toFixed(0)+"%</span></div>";
+    leg+="<div style='display:flex;align-items:center;gap:.5rem;font-size:.74rem'><span style='width:11px;height:11px;border-radius:3px;background:"+it.color+";flex-shrink:0'></span><span style='color:var(--tx2);flex:1'>"+_admEsc(it.label)+"</span><span style='color:var(--tx);font-weight:700'>"+F(it.valor)+"</span><span style='color:var(--tx3);font-size:.66rem;min-width:38px;text-align:right'>"+pct.toFixed(0)+"%</span></div>";
   });
   leg+="</div>";
   return "<div style='display:flex;flex-wrap:wrap;gap:1.2rem;align-items:center;justify-content:center'>"+svg+leg+"</div>";
-}
-
-// ── Gráfico de proyección (acumulado real + proyectado punteado) ──
-function _repChartProyeccion(labels, real, proy, meta){
-  var W=820,H=280,pl=64,pr=18,pt=18,pb=38, iw=W-pl-pr, ih=H-pt-pb, n=labels.length;
-  var maxV=meta||0;
-  real.concat(proy).forEach(function(v){ if(v!=null && v>maxV) maxV=v; });
-  maxV=_repNiceMax(maxV);
-  var x=function(i){ return pl+(n<=1?iw/2:iw*i/(n-1)); };
-  var y=function(v){ return pt+ih-(maxV>0?ih*v/maxV:0); };
-  var svg="<svg viewBox='0 0 "+W+" "+H+"' style='width:100%;height:auto;display:block;font-family:inherit'>";
-  svg+="<defs><linearGradient id='rpProj' x1='0' y1='0' x2='0' y2='1'><stop offset='0%' stop-color='#c9963a' stop-opacity='.28'/><stop offset='100%' stop-color='#c9963a' stop-opacity='0'/></linearGradient></defs>";
-  var gl=4;
-  for(var g=0;g<=gl;g++){ var val=maxV*g/gl, yy=y(val); svg+="<line x1='"+pl+"' y1='"+yy.toFixed(1)+"' x2='"+(W-pr)+"' y2='"+yy.toFixed(1)+"' stroke='rgba(255,255,255,.07)'/>"; svg+="<text x='"+(pl-8)+"' y='"+(yy+3).toFixed(1)+"' text-anchor='end' font-size='10' fill='var(--tx3)'>"+_repAbrev(val)+"</text>"; }
-  var step=Math.ceil(n/9);
-  for(var i=0;i<n;i++){ if(i%step!==0 && i!==n-1) continue; svg+="<text x='"+x(i).toFixed(1)+"' y='"+(H-pb+18)+"' text-anchor='middle' font-size='10' fill='var(--tx3)'>"+labels[i]+"</text>"; }
-  // meta (período anterior) línea horizontal
-  if(meta>0){ var ym=y(meta); svg+="<line x1='"+pl+"' y1='"+ym.toFixed(1)+"' x2='"+(W-pr)+"' y2='"+ym.toFixed(1)+"' stroke='#5a9fd4' stroke-width='1.5' stroke-dasharray='2 4'/><text x='"+(W-pr)+"' y='"+(ym-5).toFixed(1)+"' text-anchor='end' font-size='9.5' fill='#5a9fd4'>Período anterior</text>"; }
-  // area + linea real
-  var rpts=[]; real.forEach(function(v,i){ if(v!=null) rpts.push(x(i).toFixed(1)+","+y(v).toFixed(1)); });
-  if(rpts.length){
-    var idxLast=0; real.forEach(function(v,i){ if(v!=null) idxLast=i; });
-    svg+="<path d='M"+x(0).toFixed(1)+","+y(0).toFixed(1)+" L"+rpts.join(" L")+" L"+x(idxLast).toFixed(1)+","+y(0).toFixed(1)+" Z' fill='url(#rpProj)'/>";
-    svg+="<path d='M"+rpts.join(" L")+"' fill='none' stroke='#c9963a' stroke-width='2.6' stroke-linejoin='round' stroke-linecap='round'/>";
-  }
-  // linea proyeccion (punteada)
-  var ppts=[]; proy.forEach(function(v,i){ if(v!=null) ppts.push(x(i).toFixed(1)+","+y(v).toFixed(1)); });
-  if(ppts.length) svg+="<path d='M"+ppts.join(" L")+"' fill='none' stroke='#c9963a' stroke-width='2.2' stroke-dasharray='4 4' stroke-linejoin='round' opacity='.75'/>";
-  svg+="</svg>";
-  var leg="<div style='display:flex;gap:1.2rem;flex-wrap:wrap;justify-content:center;margin-top:.4rem;font-size:.7rem;color:var(--tx2)'>";
-  leg+="<span style='display:inline-flex;align-items:center;gap:.35rem'><span style='width:16px;height:3px;background:#c9963a;border-radius:2px'></span>Real acumulado</span>";
-  leg+="<span style='display:inline-flex;align-items:center;gap:.35rem'><span style='width:16px;height:0;border-top:2px dashed #c9963a'></span>Proyección</span>";
-  if(meta>0) leg+="<span style='display:inline-flex;align-items:center;gap:.35rem'><span style='width:16px;height:0;border-top:2px dashed #5a9fd4'></span>Período anterior</span>";
-  leg+="</div>";
-  return svg+leg;
 }
 
 function _repAlerta(color, icono, titulo, texto){
@@ -39077,25 +39283,22 @@ function _repWaLink(tel, nombre){
 function _repCargarProyeccion(){
   var r = _repCalcRango(window._repPeriodo);
   var dur = r.hasta - r.desde;
-  var rAnt = { desde: new Date(r.desde - dur), hasta: r.desde };
+  var rAnt = _repRangoAnterior(window._repPeriodo, r); // período anterior de calendario (agosto entero contra septiembre)
   var hace60 = new Date(Date.now() - 60*86400000);
   Promise.all([
     apiGetAll("ventas", "select=producto_id,producto_nombre,cantidad,total,segmento,created_at&estado=in.(confirmada,archivada_periodo)&created_at=gte."+r.desde.toISOString()+"&created_at=lt."+r.hasta.toISOString()+"&limit=8000").catch(function(){return [];}),
     apiGetAll("ventas", "select=total&estado=in.(confirmada,archivada_periodo)&created_at=gte."+rAnt.desde.toISOString()+"&created_at=lt."+rAnt.hasta.toISOString()+"&limit=8000").catch(function(){return [];}),
-    apiGet("gastos_vendedor", "select=monto,categoria,concepto&aprobado=is.true"+_gxQ()+"&created_at=gte."+r.desde.toISOString()+"&created_at=lt."+r.hasta.toISOString()+"&limit=5000").catch(function(){return [];}),
-    apiGet("gastos_vendedor", "select=monto&aprobado=is.true"+_gxQ()+"&created_at=gte."+rAnt.desde.toISOString()+"&created_at=lt."+rAnt.hasta.toISOString()+"&limit=5000").catch(function(){return [];}),
-    apiGet("productos", "select=id,nombre,empresa,activo,oculto,costo_ind,costo_log,stock_actual,created_at,ultimo_ingreso_at,reingreso_at&limit=6000").catch(function(){return [];}),
+    apiGetAll("gastos_vendedor", "select=monto,categoria,concepto&aprobado=is.true"+_gxQ()+"&created_at=gte."+r.desde.toISOString()+"&created_at=lt."+r.hasta.toISOString()+"&limit=5000").catch(function(){return [];}),
+    apiGetAll("gastos_vendedor", "select=monto&aprobado=is.true"+_gxQ()+"&created_at=gte."+rAnt.desde.toISOString()+"&created_at=lt."+rAnt.hasta.toISOString()+"&limit=5000").catch(function(){return [];}),
+    apiGetAll("productos", "select=id,nombre,empresa,ml,activo,oculto,costo_ind,costo_log,stock_actual,created_at,ultimo_ingreso_at,reingreso_at&limit=6000").catch(function(){return [];}),
     apiGet("combos", "select=id,nombre,combo_items(producto_id,cantidad,es_decan)&limit=2000").catch(function(){return [];}),
     apiGetAll("pedidos_catalogo", "select=cliente_id,total,created_at&estado=neq.cancelado&limit=20000").catch(function(){return [];}),
-    apiGet("clientes", "select=id,nombre,apellido,telefono_principal,vendedor_asignado_id&limit=6000").catch(function(){return [];}),
+    apiGetAll("clientes", "select=id,nombre,apellido,telefono_principal,vendedor_asignado_id&limit=6000").catch(function(){return [];}),
     apiGet("ventas", "select=producto_id&estado=in.(confirmada,archivada_periodo)&created_at=gte."+hace60.toISOString()+"&limit=8000").catch(function(){return [];})
   ]).then(function(data){
     var vAct=data[0]||[], vAnt=data[1]||[], gAct=data[2]||[], gAnt=data[3]||[], productos=data[4]||[], combos=data[5]||[], pedidos=data[6]||[], clientes=data[7]||[], ventas60=data[8]||[];
-    var cotiz=(typeof cotizActual!=="undefined"&&cotizActual)?cotizActual:1550;
-    var DECAN_ML=5,PERFUME_ML=100, cpv=0.94*cotiz;
-    var mapCP={}; productos.forEach(function(p){ var _c=(parseFloat(p.costo_ind)||0)+(parseFloat(p.costo_log)||0); mapCP[p.id]= _c>0 ? Math.ceil(_c)*cotiz : 0; });
-    var mapCC={}; combos.forEach(function(c){ var ct=0; (c.combo_items||[]).forEach(function(ci){ var cb=mapCP[ci.producto_id]||0,q=parseInt(ci.cantidad)||1; ct+= ci.es_decan?((cb*DECAN_ML/PERFUME_ML)+cpv)*q:cb*q; }); if(c.nombre)mapCC[c.nombre]=ct; });
-    function costoU(v){ var s=(v.segmento||"").toLowerCase(); if(s==="combo"){var nl=(v.producto_nombre||"").replace(/^Combo:\s*/i,"").trim();return mapCC[nl]||mapCC[v.producto_nombre]||0;} var cb=mapCP[v.producto_id]||0; if(s==="decan")return (cb*DECAN_ML/PERFUME_ML)+cpv; return cb; }
+    var cf=_repCostoFactory(productos, combos), cotiz=cf.cotiz;
+    function costoU(v){ return cf.costoUnit(v); }
 
     var group="dia";
     var diasTot=Math.max(1, Math.round(dur/86400000));
@@ -39132,13 +39335,13 @@ function _repCargarProyeccion(){
       var ingreso=Math.max(p.ultimo_ingreso_at?new Date(p.ultimo_ingreso_at).getTime():0, p.reingreso_at?new Date(p.reingreso_at).getTime():0, p.created_at?new Date(p.created_at).getTime():0);
       var diasIng = ingreso>0 ? (Date.now()-ingreso)/86400000 : 999;
       if(diasIng<=60) return; // recién ingresó: período de gracia, no es problema
-      var cu=((parseFloat(p.costo_ind)||0)+(parseFloat(p.costo_log)||0))*cotiz; var pl=st*cu;
+      var cu=cf.costoFrasco(p); var pl=st*cu;
       dormN++; dormPlata+=pl; dormLista.push({nombre:_prodMl(p), marca:p.empresa||"—", stock:st, plata:pl});
     });
     dormLista.sort(function(a,b){return b.plata-a.plata;});
 
     // Gastos por categoría
-    var gastoPorCat={}; gAct.forEach(function(g){ var c=((g.categoria||g.concepto||"Otros")+"").split(":")[0].trim()||"Otros"; gastoPorCat[c]=(gastoPorCat[c]||0)+(parseFloat(g.monto)||0); });
+    var gastoPorCat={}; gAct.forEach(function(g){ var c=_repGastoCat(g); gastoPorCat[c]=(gastoPorCat[c]||0)+(parseFloat(g.monto)||0); });
     var gastoCatArr=Object.keys(gastoPorCat).map(function(k){return {cat:k,monto:gastoPorCat[k]};}).sort(function(a,b){return b.monto-a.monto;});
 
     // Clientes enfriados con teléfono
@@ -39154,7 +39357,7 @@ function _repCargarProyeccion(){
     h+="<div style='display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:.6rem;margin-bottom:1rem'>";
     h+=_repPanoKpi(enCurso?"📈 Proyección de ingresos":"📈 Ingresos del período", fmt(proyIng), "var(--acc)", enCurso?("van "+fmt(ingReal)+" ("+(frac*100).toFixed(0)+"% del período)"):null);
     h+=_repPanoKpi(enCurso?"💎 Proyección de ganancia":"💎 Ganancia del período", fmt(proyGan), "var(--green)", margenAct.toFixed(1)+"% margen");
-    h+=_repPanoKpi("↔️ vs período anterior", (deltaProy>=0?"+":"")+deltaProy.toFixed(1)+"%", deltaProy>=0?"var(--green)":"var(--red)", "anterior: "+fmt(ingAnt));
+    h+=_repPanoKpi("↔️ vs período anterior", (deltaProy>=0?"+":"")+deltaProy.toFixed(1)+"%", deltaProy>=0?"var(--green)":"var(--red)", "anterior completo ("+_repFmtRangoCorto(rAnt)+"): "+fmt(ingAnt));
     h+="</div>";
 
     h+="<div style='background:var(--sur);border:1px solid var(--bd);border-radius:10px;padding:1rem;margin-bottom:1rem'>";
@@ -39246,7 +39449,8 @@ function _repBucketHoyIdx(buckets, group){
   var ahora=Date.now(), best=0;
   for(var i=0;i<buckets.length;i++){
     var k=buckets[i].key, d;
-    if(group==="mes"){ var pp=k.split("-"); d=new Date(+pp[0],+pp[1]-1,1); }
+    if(group==="anio"){ d=new Date(+k,0,1); }
+    else if(group==="mes"){ var pp=k.split("-"); d=new Date(+pp[0],+pp[1]-1,1); }
     else { var p2=k.split("-"); d=new Date(+p2[0],+p2[1]-1,+p2[2]); }
     if(d.getTime()<=ahora) best=i; else break;
   }
@@ -39599,56 +39803,29 @@ function _repCargarMargenes(){
   var r=_repCalcRango(window._repPeriodo);
   Promise.all([
     apiGetAll("ventas","select=producto_id,producto_nombre,cantidad,total,segmento,vendedor_id,created_at&estado=in.(confirmada,archivada_periodo)&limit=60000").catch(function(){return [];}),
-    apiGet("productos","select=id,nombre,empresa,ml,costo_ind,costo_log&limit=8000").catch(function(){return [];}),
+    apiGetAll("productos","select=id,nombre,empresa,ml,costo_ind,costo_log&limit=8000").catch(function(){return [];}),
     apiGet("combos","select=id,nombre,combo_items(producto_id,cantidad,es_decan)&limit=2000").catch(function(){return [];}),
-    apiGet("gastos_vendedor","select=monto,categoria,concepto,vendedor_id,created_at&aprobado=is.true"+_gxQ()+"&limit=20000").catch(function(){return [];})
+    apiGetAll("gastos_vendedor","select=monto,categoria,concepto,vendedor_id,created_at&aprobado=is.true"+_gxQ()+"&limit=20000").catch(function(){return [];})
   ]).then(function(d){
     var ventas=d[0]||[], productos=d[1]||[], combos=d[2]||[], gastos=d[3]||[];
-    var cotiz=(typeof cotizActual!=="undefined" && cotizActual)?cotizActual:1550;
-    var DECAN_ML=5, PERFUME_ML=100, cpv=0.94*cotiz;
+    var cf=_repCostoFactory(productos, combos), cotiz=cf.cotiz;
+    var pById={}; productos.forEach(function(p){ pById[p.id]=p; });
+    function costoUnit(v){ return cf.costoUnit(v); }
 
-    var pById={}, mapCP={};
-    productos.forEach(function(p){
-      pById[p.id]=p;
-      mapCP[p.id]=((parseFloat(p.costo_ind)||0)+(parseFloat(p.costo_log)||0))*cotiz;
-    });
-    var mapCC={};
-    combos.forEach(function(c){
-      var t=0;
-      (c.combo_items||[]).forEach(function(ci){
-        var cb=mapCP[ci.producto_id]||0, q=parseInt(ci.cantidad)||1;
-        t+= ci.es_decan ? ((cb*DECAN_ML/PERFUME_ML)+cpv)*q : cb*q;
-      });
-      if(c.nombre)mapCC[c.nombre]=t;
-    });
-    function costoUnit(v){
-      var s=String(v.segmento||'').toLowerCase();
-      if(s==='combo'){
-        var nl=String(v.producto_nombre||'').replace(/^Combo:\s*/i,'').trim();
-        return mapCC[nl]||mapCC[v.producto_nombre]||0;
-      }
-      var cb=mapCP[v.producto_id]||0;
-      if(s==='decan'){
-        var p=pById[v.producto_id];
-        var ml=(p&&parseFloat(p.ml))||PERFUME_ML;
-        return (cb*DECAN_ML/(ml||PERFUME_ML))+cpv;
-      }
-      return cb;
-    }
-
-    // filas normalizadas (solo ventas con plata real)
+    // filas normalizadas: toda venta con unidades reales. Las de $0 (regalos, muestras) entran
+    // igual porque su costo es real; así la ganancia cierra con Panorama y Rentabilidad.
     var filas=[];
     ventas.forEach(function(v){
       var tot=parseFloat(v.total)||0;
-      if(tot<=0)return;
+      if(tot<0)return;
       var q=parseInt(v.cantidad)||0; if(q<=0)return;
       var cu=costoUnit(v), costo=cu*q;
-      var p=pById[v.producto_id];
+      var p=cf.producto(v);
       filas.push({
-        pid:v.producto_id||null, nombre:v.producto_nombre||(p?p.nombre:'')||'—',
-        marca:(p&&p.empresa)||'Sin marca',
+        pid:(p&&p.id)||v.producto_id||null, nombre:v.producto_nombre||(p?p.nombre:'')||'—',
+        marca:(p&&p.empresa)||'Sin marca', fin:String(v.segmento||'').toLowerCase()==='financiacion',
         seg:_normalizarSegmento(v.segmento), vend:v.vendedor_id||null,
-        fecha:v.created_at, mes:String(v.created_at||'').slice(0,7),
+        fecha:v.created_at, mes:_repMesKey(v.created_at),
         q:q, fact:tot, costo:costo, gan:tot-costo, cu:cu, pu:tot/q
       });
     });
@@ -39657,8 +39834,8 @@ function _repCargarMargenes(){
       return t>=r.desde.getTime() && t<r.hasta.getTime();
     });
     var gs=gastos.map(function(g){
-      return {monto:parseFloat(g.monto)||0, cat:(g.categoria||'Sin categoría'), concepto:g.concepto||'',
-              vend:g.vendedor_id||null, fecha:g.created_at, mes:String(g.created_at||'').slice(0,7)};
+      return {monto:parseFloat(g.monto)||0, cat:_repGastoCat(g), concepto:g.concepto||'',
+              vend:g.vendedor_id||null, fecha:g.created_at, mes:_repMesKey(g.created_at)};
     }).filter(function(g){ return g.monto>0; });
     var gsRango=gs.filter(function(g){
       var t=new Date(g.fecha).getTime();
@@ -39775,7 +39952,7 @@ function _repMgRender(){
   // ── lo que se vendió por debajo del costo ──
   var bajoCosto={};
   f.forEach(function(x){
-    if(x.gan>=0 || x.cu<=0)return;
+    if(x.gan>=0 || x.cu<=0 || x.fin)return;
     var k=x.pid||x.nombre;
     if(!bajoCosto[k])bajoCosto[k]={nombre:x.nombre, marca:x.marca, q:0, perdida:0, seg:{}, pu:x.pu, cu:x.cu};
     var b=bajoCosto[k];
@@ -39789,7 +39966,7 @@ function _repMgRender(){
   h+=_repHeaderSeccion("📐 Márgenes", "margenes");
   h+="<div style='font-size:.72rem;color:var(--tx3);margin:-.6rem 0 1rem;line-height:1.5'>Cada venta con el costo que le corresponde: el decan paga su frasquito y el prorrateo de mililitros, el combo suma sus componentes. Las cruces de abajo usan el período elegido arriba; la evolución mensual va siempre sobre todo el historial.</div>";
 
-  var factSinCosto=0; f.forEach(function(x){ if(x.cu<=0)factSinCosto+=x.fact; });
+  var factSinCosto=0; f.forEach(function(x){ if(x.cu<=0 && !x.fin)factSinCosto+=x.fact; });
   h+="<div style='display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:.7rem;margin-bottom:1rem'>";
   h+=_repKPI("💵 Facturado", fmt(fact), {sub:_repMiles(unid)+" unidades · "+f.length+" ventas"});
   h+=_repKPI("📦 Costo de la mercadería", fmt(costo), {color:"var(--tx3)"});
@@ -40022,7 +40199,7 @@ function _repCargarMuertos(){
       var u=ult[p.id]||0;
       var dias = u? Math.floor((hoy-u)/864e5) : null;   // null = nunca vendió
       if(dias!=null && dias<cfg.dias)return;
-      var costoU=(parseFloat(p.costo_ind)||0)+(parseFloat(p.costo_log)||0);
+      var _cu0=(parseFloat(p.costo_ind)||0)+(parseFloat(p.costo_log)||0); var costoU=_cu0>0?Math.ceil(_cu0):0; // mismo redondeo que Stock y precios
       var ingreso=Math.max(
         p.ultimo_ingreso_at?new Date(p.ultimo_ingreso_at).getTime():0,
         p.reingreso_at?new Date(p.reingreso_at).getTime():0,
@@ -40458,21 +40635,19 @@ function _liqCrear(){
 function _repCargarBajoRend(){
   var UMBRAL = 30; // días para considerar "dormido" (los más nuevos quedan en gracia)
   Promise.all([
-    apiGet("productos", "select=id,nombre,empresa,ml,activo,oculto,costo_ind,costo_log,stock_actual,created_at,ultimo_ingreso_at,reingreso_at,gan_usd_may,gan_usd_med,precio_may_ars,precio_med_ars,precio_min_ars,precio_ml,precio_decan&limit=6000").catch(function(){return [];}),
+    apiGetAll("productos", "select=id,nombre,empresa,ml,activo,oculto,costo_ind,costo_log,stock_actual,created_at,ultimo_ingreso_at,reingreso_at,gan_usd_may,gan_usd_med,precio_may_ars,precio_med_ars,precio_min_ars,precio_ml,precio_decan&limit=6000").catch(function(){return [];}),
     apiGetAll("ventas", "select=producto_id,producto_nombre,cantidad,total,segmento,created_at&estado=in.(confirmada,archivada_periodo)&limit=20000").catch(function(){return [];}),
     apiGet("combos", "select=id,nombre,combo_items(producto_id,cantidad,es_decan)&limit=2000").catch(function(){return [];})
   ]).then(function(data){
     var productos = data[0]||[], ventas = data[1]||[], combos = data[2]||[];
-    var cotiz = (typeof cotizActual !== "undefined" && cotizActual) ? cotizActual : 1550;
-    var DECAN_ML=5, PERFUME_ML=100, cpv=0.94*cotiz;
-    var mapCP={}; productos.forEach(function(p){ var _c=(parseFloat(p.costo_ind)||0)+(parseFloat(p.costo_log)||0); mapCP[p.id]= _c>0 ? Math.ceil(_c)*cotiz : 0; });
-    var mapCC={}; combos.forEach(function(c){ var ct=0; (c.combo_items||[]).forEach(function(ci){ var cb=mapCP[ci.producto_id]||0,q=parseInt(ci.cantidad)||1; ct+= ci.es_decan?((cb*DECAN_ML/PERFUME_ML)+cpv)*q:cb*q; }); if(c.nombre)mapCC[c.nombre]=ct; });
-    function _costoU(v){ var s=(v.segmento||"").toLowerCase(); if(s==="combo"){var nl=(v.producto_nombre||"").replace(/^Combo:\s*/i,"").trim();return mapCC[nl]||mapCC[v.producto_nombre]||0;} var cb=mapCP[v.producto_id]||0; if(s==="decan")return (cb*DECAN_ML/PERFUME_ML)+cpv; return cb; }
+    var cf = _repCostoFactory(productos, combos), cotiz = cf.cotiz;
+    var mapCP={}; productos.forEach(function(p){ mapCP[p.id]=cf.costoFrasco(p); });
+    function _costoU(v){ return cf.costoUnit(v); }
 
     // Agregar por producto: última venta + margen REAL (costo por segmento, sin ventas de $0)
     var agg = {};
     ventas.forEach(function(v){
-      var pid=v.producto_id; if(!pid) return;
+      var _pr=cf.producto(v); var pid=(_pr&&_pr.id)||v.producto_id; if(!pid) return;
       if(!agg[pid]) agg[pid]={ultima:null, unid:0, factM:0, costoM:0, unidM:0};
       var a=agg[pid];
       if(!a.ultima || v.created_at>a.ultima) a.ultima=v.created_at;
@@ -40644,25 +40819,24 @@ function _repExportDormidos(){
 // ════════════════════════════════════════════════════════════════════
 function _repCargarRentabilidad(){
   var r = _repCalcRango(window._repPeriodo);
-  var rAnt = (function(){
-    var dur = r.hasta - r.desde;
-    return { desde: new Date(r.desde - dur), hasta: r.desde };
-  })();
+  // período anterior de calendario; si el actual está en curso, se compara contra el mismo tramo
+  var cmp = _repComparativa(window._repPeriodo);
+  var rAnt = { desde: cmp.rAnt.desde, hasta: cmp.hastaTramo };
 
-  var estadosV = "estado=in.(confirmada,archivada_periodo)";
+  var estadosV = _REP_ESTADOS_V;
 
   Promise.all([
     // Ventas del período
     apiGetAll("ventas", "select=*&"+estadosV+"&created_at=gte."+r.desde.toISOString()+"&created_at=lt."+r.hasta.toISOString()+"&limit=5000").catch(function(){return [];}),
     // Ventas del período anterior (mismo tamaño)
-    apiGetAll("ventas", "select=producto_id,producto_nombre,cantidad,total,vendedor_id,segmento&"+estadosV+"&created_at=gte."+rAnt.desde.toISOString()+"&created_at=lt."+rAnt.hasta.toISOString()+"&limit=5000").catch(function(){return [];}),
+    apiGetAll("ventas", "select=producto_id,producto_nombre,cantidad,total,vendedor_id,segmento,nro_orden,id&"+estadosV+"&created_at=gte."+rAnt.desde.toISOString()+"&created_at=lt."+rAnt.hasta.toISOString()+"&limit=5000").catch(function(){return [];}),
     // Gastos aprobados del período
-    apiGet("gastos_vendedor", "select=*&aprobado=is.true"+_gxQ()+"&created_at=gte."+r.desde.toISOString()+"&created_at=lt."+r.hasta.toISOString()+"&limit=5000").catch(function(){return [];}),
+    apiGetAll("gastos_vendedor", "select=*&aprobado=is.true"+_gxQ()+"&created_at=gte."+r.desde.toISOString()+"&created_at=lt."+r.hasta.toISOString()+"&limit=5000").catch(function(){return [];}),
     // Gastos del anterior
-    apiGet("gastos_vendedor", "select=monto&aprobado=is.true"+_gxQ()+"&created_at=gte."+rAnt.desde.toISOString()+"&created_at=lt."+rAnt.hasta.toISOString()+"&limit=5000").catch(function(){return [];}),
+    apiGetAll("gastos_vendedor", "select=monto&aprobado=is.true"+_gxQ()+"&created_at=gte."+rAnt.desde.toISOString()+"&created_at=lt."+rAnt.hasta.toISOString()+"&limit=5000").catch(function(){return [];}),
     // Productos (necesario para costos si prods global no está cargado)
     (Array.isArray(prods) && prods.length) ? Promise.resolve(prods) :
-      apiGet("productos", "select=id,nombre,costo_ind,costo_log,activo&limit=5000").catch(function(){return [];}),
+      apiGetAll("productos", "select=id,nombre,empresa,ml,costo_ind,costo_log,activo&limit=5000").catch(function(){return [];}),
     // Ventas transferidas del período (items es JSON array)
     apiGet("ventas_transferidas", "select=id,creada_por,asignada_a,items,total,estado,created_at&created_at=gte."+r.desde.toISOString()+"&created_at=lt."+r.hasta.toISOString()+"&limit=5000").catch(function(){return [];}),
     // Combos con sus items (para calcular costo de combos vendidos)
@@ -40675,55 +40849,10 @@ function _repCargarRentabilidad(){
     var productos = data[4] || [];
     var transferidasOriginales = data[5] || [];
     var combos = data[6] || [];
-    var cotiz = (typeof cotizActual !== "undefined" && cotizActual) ? cotizActual : 1520;
-
-    // Mapa producto_id → costo_total_pesos (PERFUME COMPLETO 100ml)
-    var mapCostoProd = {};
-    productos.forEach(function(p){
-      mapCostoProd[p.id] = ((parseFloat(p.costo_ind)||0) + (parseFloat(p.costo_log)||0)) * cotiz;
-    });
-
-    // Costo del perfumero vacío (frasquito de 5ml para decans)
-    var COSTO_PERFUMERO_VACIO_USD = 0.94;
-    var costoPerfumeroVacio = COSTO_PERFUMERO_VACIO_USD * cotiz;
-    // Volumen del decan en ml (siempre 5ml según el negocio)
-    var DECAN_ML = 5;
-    var PERFUME_ML = 100;
-
-    // Mapa nombre_combo → costo_total_combo (sumar items del combo)
-    var mapCostoCombo = {};
-    combos.forEach(function(c){
-      var costoTotal = 0;
-      (c.combo_items||[]).forEach(function(ci){
-        var costoBase = mapCostoProd[ci.producto_id] || 0;
-        var qty = parseInt(ci.cantidad)||1;
-        if(ci.es_decan){
-          costoTotal += ((costoBase * DECAN_ML / PERFUME_ML) + costoPerfumeroVacio) * qty;
-        } else {
-          costoTotal += costoBase * qty;
-        }
-      });
-      // Indexar por nombre exacto (case sensitive)
-      if(c.nombre) mapCostoCombo[c.nombre] = costoTotal;
-    });
-
-    // Helper: calcular costo de UNA unidad de un item de venta
-    function _costoUnitItem(v){
-      var seg = (v.segmento||"").toLowerCase();
-      // Si es combo: buscar por nombre (sacar prefijo "Combo: " si lo tiene)
-      if(seg === "combo"){
-        var nom = v.producto_nombre || "";
-        // Sacar prefijo "Combo: " si existe (el venta-side lo agrega para visualización)
-        var nomLimpio = nom.replace(/^Combo:\s*/i, "").trim();
-        return mapCostoCombo[nomLimpio] || mapCostoCombo[nom] || 0;
-      }
-      var costoBase = mapCostoProd[v.producto_id] || 0;
-      // Si es decan: costo proporcional al volumen + perfumero vacío
-      if(seg === "decan"){
-        return (costoBase * DECAN_ML / PERFUME_ML) + costoPerfumeroVacio;
-      }
-      return costoBase;
-    }
+    // Costo unificado con Stock y precios (calcP): u$d redondeado hacia arriba × cotización.
+    // Decan = 5 ml sobre los ml reales del frasco + perfumero vacío; combo = suma de componentes.
+    var cf = _repCostoFactory(productos, combos), cotiz = cf.cotiz;
+    function _costoUnitItem(v){ return cf.costoUnit(v); }
 
     // Helpers para normalizar segmentos (usados también en export Excel)
     // (Las funciones _normalizarSegmento y _labelSegmento están definidas globalmente más abajo)
@@ -40789,6 +40918,8 @@ function _repCargarRentabilidad(){
         }
       });
       var gasto = (gastos||[]).reduce(function(s,g){return s+(parseFloat(g.monto)||0);}, 0);
+      var tk = _repTicket(ventas);
+      var sinCostoN = 0, sinCostoFact = 0; ventas.forEach(function(v){ if(cf.sinCosto(v) && (parseFloat(v.total)||0)>0){ sinCostoN++; sinCostoFact += parseFloat(v.total)||0; } });
       var ganBruta = fact - costo;
       var ganNeta = fact - costo - gasto;
       var margenBruto = fact > 0 ? (ganBruta/fact*100) : 0;
@@ -40806,7 +40937,8 @@ function _repCargarRentabilidad(){
         unidades: unidades,
         ganBruta: ganBruta, ganNeta: ganNeta,
         margenBruto: margenBruto, margenNeto: margenNeto,
-        ticketProm: unidades > 0 ? fact/unidades : 0,
+        ticketProm: tk.ticket, pedidos: tk.pedidos, precioUnid: tk.porUnidad,
+        sinCostoN: sinCostoN, sinCostoFact: sinCostoFact,
         porSeg: porSeg, porVendedor: porVendedor, porProducto: porProducto
       };
     }
@@ -40817,9 +40949,7 @@ function _repCargarRentabilidad(){
     // Detalle de gastos por categoría (concepto)
     var gastosPorConcepto = {};
     gActual.forEach(function(g){
-      var cat = g.concepto || "Sin categoría";
-      // Tomar las primeras 3 palabras del concepto como agrupador
-      cat = cat.split(":")[0].trim() || "Sin categoría";
+      var cat = _repGastoCat(g);
       if(!gastosPorConcepto[cat]) gastosPorConcepto[cat] = { total:0, count:0 };
       gastosPorConcepto[cat].total += parseFloat(g.monto)||0;
       gastosPorConcepto[cat].count++;
@@ -40842,7 +40972,7 @@ function _repCargarRentabilidad(){
       var pos = diff >= 0;
       var clr = pos ? "var(--green)" : "var(--red)";
       var arrow = pos ? "▲" : "▼";
-      return "<div style='font-size:.62rem;color:"+clr+";margin-top:.15rem'>"+arrow+" "+pct.toFixed(1)+"% vs período anterior</div>";
+      return "<div style='font-size:.62rem;color:"+clr+";margin-top:.15rem'>"+arrow+" "+pct.toFixed(1)+"% <span style='color:var(--tx3)'>"+cmp.etiqueta+" · antes "+fmt(anterior)+"</span></div>";
     }
 
     var h = "";
@@ -40852,7 +40982,8 @@ function _repCargarRentabilidad(){
       var s2=_repSerieTiempo(vActual, r, function(v){return (parseFloat(v.total)||0)-_costoUnitItem(v)*(parseInt(v.cantidad)||0);});
       return _repBloqueEvol("📈 Evolución de facturación y ganancia","Cómo se movieron dentro del período elegido.", s1.labels, [{nombre:"Facturación",color:"#c9963a",datos:s1.datos},{nombre:"Ganancia",color:"#4caf82",datos:s2.datos}]);
     })();
-    h += "<div style='font-size:.7rem;color:var(--tx3);margin-bottom:.8rem;padding:.5rem .7rem;background:var(--sur2);border-radius:7px'>📐 Cotización USD usada: <b style='color:var(--acc)'>$"+cotiz+"</b> · Costos = (costo_ind + costo_log) × cotización × cantidad</div>";
+    h += "<div style='font-size:.7rem;color:var(--tx3);margin-bottom:.8rem;padding:.5rem .7rem;background:var(--sur2);border-radius:7px'>📐 Cotización USD usada: <b style='color:var(--acc)'>$"+cotiz+"</b> · Costo = (costo_ind + costo_log) redondeado al u$d superior × cotización, igual que en Stock y precios · decan = 5 ml del frasco + perfumero · combo = sus componentes"+(cmp.enCurso?" · Comparativa: "+cmp.etiqueta+" ("+_repFmtRangoCorto({desde:rAnt.desde,hasta:rAnt.hasta})+")":" · Comparativa: "+_repFmtRangoCorto(rAnt))+"</div>";
+    if(m.sinCostoN>0) h += _repAlerta("yel","📋","Hay "+m.sinCostoN+" venta"+(m.sinCostoN===1?"":"s")+" por "+fmt(m.sinCostoFact)+" sin costo cargado","Esos productos no tienen costo en la ficha (o no se pudo identificar el producto), así que su ganancia figura al 100%. Cargales el costo en Stock y Precios.")+"<div style='height:.8rem'></div>";
 
     // ── Resumen ejecutivo (KPIs grandes con delta) ──
     h += "<div style='display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:.7rem;margin-bottom:1rem'>";
@@ -40860,7 +40991,7 @@ function _repCargarRentabilidad(){
     h += "<div style='background:var(--sur);border:1px solid var(--bd);border-radius:10px;padding:.85rem 1rem'>";
     h += "<div style='font-size:.66rem;color:var(--tx3);text-transform:uppercase;font-weight:700;letter-spacing:.04em;margin-bottom:.3rem'>💵 Facturación</div>";
     h += "<div style='font-size:1.4rem;font-weight:800;color:var(--green);line-height:1.1'>"+fmt(m.fact)+"</div>";
-    h += "<div style='font-size:.66rem;color:var(--tx3);margin-top:.15rem'>"+m.unidades+" unidades · ticket "+fmt(Math.round(m.ticketProm))+"</div>";
+    h += "<div style='font-size:.66rem;color:var(--tx3);margin-top:.15rem'>"+m.unidades+" unidades · "+m.pedidos+" pedidos · ticket "+fmt(Math.round(m.ticketProm))+" por pedido</div>";
     h += deltaTxt(m.fact, mAnt.fact);
     h += "</div>";
 
@@ -41137,6 +41268,7 @@ function _labelSegmento(seg){
     combo: "Combo",
     especial: "Especial",
     "precio unico": "Precio único",
+    financiacion: "Cuota de financiación",
     otro: "Otro"
   };
   return labels[seg] || seg;
@@ -41159,7 +41291,9 @@ function _repExportRentabilidad(){
     ["Ganancia neta", m.ganNeta],
     ["Margen neto %", m.margenNeto.toFixed(2)+"%"],
     ["Unidades", m.unidades],
-    ["Ticket promedio", m.ticketProm.toFixed(2)],
+    ["Pedidos", m.pedidos],
+    ["Ticket promedio por pedido", m.ticketProm.toFixed(2)],
+    ["Precio promedio por unidad", m.precioUnid.toFixed(2)],
     [],
     ["POR SEGMENTO"],
     ["Segmento","Ventas","Unidades","Productos distintos","Facturación","Costo","Ganancia","Margen %"]
@@ -41191,21 +41325,17 @@ function _repExportRentabilidad(){
 }
 
 function _repObtenerPeriodoAnterior(){
-  // Calcular período inmediatamente anterior del mismo tamaño
-  var r = _repCalcRango(window._repPeriodo);
-  var dur = r.hasta - r.desde; // ms
-  var desdeAnt = new Date(r.desde - dur);
-  var hastaAnt = r.desde;
-  var desdeISO = desdeAnt.toISOString().slice(0,10);
-  var hastaISO = hastaAnt.toISOString().slice(0,10);
-
+  // Período anterior de calendario; si el actual está en curso, solo el mismo tramo (días transcurridos)
+  var cmp = _repComparativa(window._repPeriodo);
+  var desdeAnt = cmp.rAnt.desde, hastaAnt = cmp.hastaTramo;
+  var desdeISO = _repDiaKey(desdeAnt), hastaISO = _repDiaKey(hastaAnt);
   return Promise.all([
-    apiGet("cc_pagos", "select=monto&fecha=gte."+desdeISO+"&fecha=lt."+hastaISO+"&limit=5000").catch(function(){return [];}),
-    apiGetAll("ventas", "select=total&estado=eq.confirmada&forma_cobro=neq.pendiente&created_at=gte."+desdeAnt.toISOString()+"&created_at=lt."+hastaAnt.toISOString()+"&limit=5000").catch(function(){return [];})
+    apiGetAll("cc_pagos", "select=monto&fecha=gte."+desdeISO+"&fecha=lt."+hastaISO+"&limit=5000").catch(function(){return [];}),
+    apiGetAll("ventas", "select=total&"+_REP_ESTADOS_V+"&forma_cobro=neq.pendiente&created_at=gte."+desdeAnt.toISOString()+"&created_at=lt."+hastaAnt.toISOString()+"&limit=5000").catch(function(){return [];})
   ]).then(function(res){
     var t1 = (res[0]||[]).reduce(function(s,p){return s+(parseFloat(p.monto)||0);}, 0);
     var t2 = (res[1]||[]).reduce(function(s,v){return s+(parseFloat(v.total)||0);}, 0);
-    return { totalIngresos: t1 + t2 };
+    return { totalIngresos: t1 + t2, desde: desdeAnt, hasta: hastaAnt };
   });
 }
 
@@ -41264,12 +41394,12 @@ function _repCargarVendedores(){
   Promise.all([
     _repObtenerCobrosPeriodo(),
     // Comisiones pendientes (gastos_vendedor con aprobado=false)
-    apiGet("gastos_vendedor", "select=*&aprobado=is.false&order=created_at.desc&limit=2000").catch(function(){return [];}),
+    apiGetAll("gastos_vendedor", "select=*&aprobado=is.false&order=created_at.desc&limit=2000").catch(function(){return [];}),
     // Lista de vendedores
     apiGet("vendedores", "select=*&order=id.asc&limit=200").catch(function(){return [];}),
     // TODOS los pedidos transferidos en el período (no necesariamente cobrados)
     // Filtramos por transferida_at en el rango del período
-    apiGet("pedidos_catalogo",
+    apiGetAll("pedidos_catalogo",
       "select=id,nro_orden,total,vendedor_id,transferida_por_id,transferida_at,estado,confirmado_cobro"+
       "&transferida_por_id=not.is.null"+
       "&transferida_at=gte."+desdeISO+
@@ -41546,9 +41676,9 @@ function _repCargarClientes(){
 
   Promise.all([
     // Pedidos del período → para top clientes
-    apiGet("pedidos_catalogo", "select=cliente_id,total,nro_orden,created_at&estado=neq.cancelado&created_at=gte."+r.desde.toISOString()+"&created_at=lt."+r.hasta.toISOString()+"&limit=5000").catch(function(){return [];}),
+    apiGetAll("pedidos_catalogo", "select=cliente_id,total,nro_orden,created_at&estado=neq.cancelado&created_at=gte."+r.desde.toISOString()+"&created_at=lt."+r.hasta.toISOString()+"&limit=5000").catch(function(){return [];}),
     // Todos los clientes con datos relevantes
-    apiGet("clientes", "select=id,nombre,apellido,bloqueado,bloqueado_motivo,cuota_proxima_monto,cuota_proxima_fecha,cuota_proxima_dias_gracia,saldo_cc,ultimo_pedido_at,created_at,vendedor_asignado_id&order=created_at.desc&limit=5000").catch(function(){return [];})
+    apiGetAll("clientes", "select=id,nombre,apellido,bloqueado,bloqueado_motivo,cuota_proxima_monto,cuota_proxima_fecha,cuota_proxima_dias_gracia,saldo_cc,ultimo_pedido_at,created_at,vendedor_asignado_id&order=created_at.desc&limit=5000").catch(function(){return [];})
   ]).then(function(data){
     var pedsPeriodo = data[0]; var clientes = data[1];
 
@@ -41603,7 +41733,8 @@ function _repCargarClientes(){
     h += _repHeaderSeccion("🛍️ Clientes", "clientes");
     h += (function(){
       var s=_repSerieTiempo(pedsPeriodo, r, function(p){return parseFloat(p.total)||0;});
-      return _repBloqueEvol("📈 Compras de clientes en el tiempo","Facturación de pedidos del catálogo durante el período.", s.labels, [{nombre:"Facturación",color:"#c9963a",datos:s.datos}]);
+      var s2=_repSerieTiempo(pedsPeriodo, r, function(p){return 1;});
+      return _repBloqueEvol("📈 Compras de clientes en el tiempo","Facturación y cantidad de pedidos del catálogo durante el período.", s.labels, [{nombre:"Facturación",color:"#c9963a",datos:s.datos,tipo:"area"},{nombre:"Pedidos",color:"#5a9fd4",datos:s2.datos,fmt:"unid",eje:"der"}]);
     })();
 
     // KPIs
@@ -41678,18 +41809,20 @@ function _repCargarProductos(){
   var r = _repCalcRango(window._repPeriodo);
 
   Promise.all([
-    apiGetAll("ventas", "select=*&estado=eq.confirmada&created_at=gte."+r.desde.toISOString()+"&created_at=lt."+r.hasta.toISOString()+"&limit=5000").catch(function(){return [];}),
-    apiGet("productos", "select=id,nombre,empresa,stock_actual,deposito_m,activo&activo=is.true&limit=2000").catch(function(){return [];})
+    apiGetAll("ventas", "select=*&"+_REP_ESTADOS_V+"&created_at=gte."+r.desde.toISOString()+"&created_at=lt."+r.hasta.toISOString()+"&limit=5000").catch(function(){return [];}),
+    apiGetAll("productos", "select=id,nombre,empresa,ml,stock_actual,deposito_m,activo&activo=is.true&limit=2000").catch(function(){return [];})
   ]).then(function(data){
     var ventas = data[0]; var productos = data[1];
+    var idxP = _repIndiceProductos(productos);
 
-    // Top vendidos del período
+    // Top vendidos del período (los decants del catálogo no traen producto_id: se resuelven por nombre)
     var statsProd = {};
     ventas.forEach(function(v){
-      if(!v.producto_id) return;
-      if(!statsProd[v.producto_id]) statsProd[v.producto_id] = { id: v.producto_id, nombre: v.producto_nombre, cantidad:0, monto:0 };
-      statsProd[v.producto_id].cantidad += parseInt(v.cantidad)||0;
-      statsProd[v.producto_id].monto += parseFloat(v.total)||0;
+      var pr = idxP.de(v); var pid = (pr && pr.id) || v.producto_id;
+      if(!pid) return;
+      if(!statsProd[pid]) statsProd[pid] = { id: pid, nombre: (pr && pr.nombre) || v.producto_nombre, cantidad:0, monto:0 };
+      statsProd[pid].cantidad += parseInt(v.cantidad)||0;
+      statsProd[pid].monto += parseFloat(v.total)||0;
     });
     var topVendidos = Object.values(statsProd).sort(function(a,b){return b.cantidad - a.cantidad;}).slice(0, 20);
 
@@ -41724,7 +41857,7 @@ function _repCargarProductos(){
          "</div>";
     h += (function(){
       var s=_repSerieTiempo(ventas, r, function(v){return parseInt(v.cantidad)||0;});
-      return _repBloqueEvol("📈 Unidades vendidas en el tiempo","Volumen de unidades despachadas durante el período.", s.labels, [{nombre:"Unidades",color:"#5a9fd4",datos:s.datos}]);
+      return _repBloqueEvol("📈 Unidades vendidas en el tiempo","Volumen de unidades despachadas durante el período.", s.labels, [{nombre:"Unidades",color:"#5a9fd4",datos:s.datos,fmt:"unid",tipo:"bar"}]);
     })();
 
     // KPIs
@@ -41858,7 +41991,7 @@ function _prodStatsRender(p, vs){
   h+=_kpi('Stock', (p.stock_actual||0)+'u'+((p.en_viaje||0)>0?' +✈️'+p.en_viaje:'')+((p.reserva||0)>0?' ('+p.reserva+'res)':''));
   h+=_kpi('Ventas (tickets)', String(vs.length));
   h+="</div>";
-  h+="<div style='background:var(--sur2);border:1px solid var(--bd);border-radius:10px;padding:.8rem;margin-bottom:1rem'><div style='font-size:.8rem;font-weight:700;margin-bottom:.4rem'>📈 Unidades vendidas por mes (últimos 12)</div>"+_repChartLineas(labels,[{nombre:'Unidades',color:'#6366f1',datos:datos}])+"</div>";
+  h+="<div style='background:var(--sur2);border:1px solid var(--bd);border-radius:10px;padding:.8rem;margin-bottom:1rem'><div style='font-size:.8rem;font-weight:700;margin-bottom:.4rem'>📈 Unidades vendidas por mes (últimos 12)</div>"+_repChartLineas(labels,[{nombre:'Unidades',color:'#6366f1',datos:datos,fmt:'unid'}])+"</div>";
   h+="<div style='display:grid;grid-template-columns:repeat(auto-fit,minmax(300px,1fr));gap:1rem'>";
   h+="<div style='background:var(--sur2);border:1px solid var(--bd);border-radius:10px;padding:.8rem'><div style='font-size:.8rem;font-weight:700;margin-bottom:.5rem'>🥧 Facturación por vendedor</div>"+(vendItems.length?_repChartDona(vendItems,150):"<div style='color:var(--tx3);font-size:.75rem;padding:1rem;text-align:center'>Sin datos</div>")+"</div>";
   h+="<div style='background:var(--sur2);border:1px solid var(--bd);border-radius:10px;padding:.8rem'><div style='font-size:.8rem;font-weight:700;margin-bottom:.5rem'>🥧 Ventas por segmento (x1/x3/x10)</div>"+(segItems.length?_repChartDona(segItems,150):"<div style='color:var(--tx3);font-size:.75rem;padding:1rem;text-align:center'>Sin datos</div>")+"</div>";
@@ -41960,65 +42093,76 @@ function _repProdListaExport(){
 // ════════════════════════════════════════════════════════════════════
 function _repCargarOperativa(){
   var r = _repCalcRango(window._repPeriodo);
-
-  apiGet("pedidos_catalogo", "select=*&created_at=gte."+r.desde.toISOString()+"&created_at=lt."+r.hasta.toISOString()+"&limit=5000")
+  apiGetAll("pedidos_catalogo", "select=id,nro_orden,total,estado,created_at,confirmado_at,entregado_at,cobrado_at,modo_entrega,origen,forma_pago,es_cc,vendedor_id,transferida_por_id,costo_envio,cliente_id&created_at=gte."+r.desde.toISOString()+"&created_at=lt."+r.hasta.toISOString()+"&limit=5000")
   .catch(function(){return [];})
   .then(function(pedidos){
-    // Estados
-    var porEstado = {};
+    pedidos = pedidos || [];
+    var porEstado = {}, porEntrega = {}, porPago = {}, porOrigen = {};
+    var validos = pedidos.filter(function(p){ return p.estado !== "cancelado"; });
+    var cancelados = pedidos.length - validos.length;
+    var factValida = 0; validos.forEach(function(p){ factValida += parseFloat(p.total)||0; });
     pedidos.forEach(function(p){
-      var e = p.estado || "sin_estado";
-      porEstado[e] = (porEstado[e]||0) + 1;
+      var e = p.estado || "sin_estado"; porEstado[e] = (porEstado[e]||0) + 1;
+      if(p.estado === "cancelado") return;
+      var me = p.modo_entrega || "sin dato"; porEntrega[me] = (porEntrega[me]||0) + 1;
+      var fp = p.es_cc ? "cuenta corriente" : (p.forma_pago || "sin dato"); porPago[fp] = (porPago[fp]||0) + (parseFloat(p.total)||0);
+      var og = p.transferida_por_id ? "transferido" : (p.origen || "directo"); porOrigen[og] = (porOrigen[og]||0) + 1;
     });
-
-    // Tiempo promedio pedido → cobro
-    var tiempos = [];
+    function prom(arr){ return arr.length ? arr.reduce(function(s,t){return s+t;},0)/arr.length : 0; }
+    function mediana(arr){ if(!arr.length) return 0; var a=arr.slice().sort(function(x,y){return x-y;}); var m=Math.floor(a.length/2); return a.length%2 ? a[m] : (a[m-1]+a[m])/2; }
+    // Tiempos: pedido → cobro y pedido → entrega (en días)
+    var tCobro = [], tEntrega = [];
     pedidos.forEach(function(p){
-      if(p.estado === "cobrado" && p.confirmado_at && p.created_at){
-        var diff = (new Date(p.confirmado_at) - new Date(p.created_at)) / 86400000; // días
-        if(diff > 0 && diff < 365) tiempos.push(diff);
+      if(p.estado === "cobrado" && (p.cobrado_at || p.confirmado_at) && p.created_at){
+        var d = (new Date(p.cobrado_at || p.confirmado_at) - new Date(p.created_at)) / 86400000; if(d >= 0 && d < 365) tCobro.push(d);
+      }
+      if(p.entregado_at && p.created_at && p.estado !== "cancelado"){
+        var d2 = (new Date(p.entregado_at) - new Date(p.created_at)) / 86400000; if(d2 >= 0 && d2 < 365) tEntrega.push(d2);
       }
     });
-    var tiempoProm = tiempos.length ? (tiempos.reduce(function(s,t){return s+t;},0) / tiempos.length) : 0;
-
-    // Tiempo promedio pedido → entregado (si existe entregado_at)
-    var tiemposEntrega = [];
-    pedidos.forEach(function(p){
-      if((p.estado === "entregado" || p.estado === "cobrado") && p.entregado_at && p.created_at){
-        var diff = (new Date(p.entregado_at) - new Date(p.created_at)) / 86400000;
-        if(diff > 0 && diff < 365) tiemposEntrega.push(diff);
-      }
-    });
-    var tiempoEntregaProm = tiemposEntrega.length ? (tiemposEntrega.reduce(function(s,t){return s+t;},0) / tiemposEntrega.length) : 0;
+    var tk = { pedidos: validos.length, ticket: validos.length ? factValida/validos.length : 0 };
+    var tasaCancel = pedidos.length ? cancelados/pedidos.length*100 : 0;
+    var enCurso = validos.filter(function(p){ return p.estado !== "cobrado"; });
 
     var h = "";
     h += _repHeaderSeccion("🚚 Operativa", "operativa");
 
     // KPIs
-    h += "<div style='display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:.7rem;margin-bottom:1rem'>";
-    h += _repKPI("📋 Total pedidos", String(pedidos.length));
-    h += _repKPI("⏱ Tiempo prom. cobro", tiempoProm > 0 ? tiempoProm.toFixed(1)+" días" : "—", {sub: tiempos.length+" pedidos cobrados"});
-    if(tiemposEntrega.length){
-      h += _repKPI("🚚 Tiempo prom. entrega", tiempoEntregaProm.toFixed(1)+" días", {sub: tiemposEntrega.length+" pedidos entregados"});
-    }
+    h += "<div style='display:grid;grid-template-columns:repeat(auto-fit,minmax(170px,1fr));gap:.7rem;margin-bottom:1rem'>";
+    h += _repKPI("📋 Pedidos", String(pedidos.length), {sub: validos.length+" válidos · "+cancelados+" cancelado"+(cancelados===1?"":"s")});
+    h += _repKPI("🧾 Ticket promedio", fmt(tk.ticket), {sub: "por pedido válido · "+fmt(factValida)+" en total"});
+    h += _repKPI("❌ Tasa de cancelación", tasaCancel.toFixed(1)+"%", {color: tasaCancel>15?"var(--red)":tasaCancel>8?"var(--yel)":"var(--green)", sub: cancelados+" de "+pedidos.length});
+    h += _repKPI("⏱ Pedido → cobro", tCobro.length ? mediana(tCobro).toFixed(1)+" días" : "—", {sub: tCobro.length ? "mediana · promedio "+prom(tCobro).toFixed(1)+" d · "+tCobro.length+" pedidos" : "sin pedidos cobrados"});
+    if(tEntrega.length) h += _repKPI("🚚 Pedido → entrega", mediana(tEntrega).toFixed(1)+" días", {sub: "mediana · promedio "+prom(tEntrega).toFixed(1)+" d · "+tEntrega.length+" con fecha de entrega"});
+    h += _repKPI("🕓 En curso ahora", String(enCurso.length), {color: enCurso.length?"var(--yel)":"var(--tx)", sub: fmt(enCurso.reduce(function(s,p){return s+(parseFloat(p.total)||0);},0))+" sin cerrar"});
     h += "</div>";
 
-    // Por estado
-    h += "<div style='background:var(--sur);border:1px solid var(--bd);border-radius:10px;padding:1rem;margin-bottom:1rem'>";
-    h += "<div style='font-size:.85rem;font-weight:700;margin-bottom:.7rem'>📊 Pedidos por estado</div>";
-    var coloresEstado = {
-      pendiente: "var(--yel)", reservado: "var(--acc)", en_preparacion: "var(--acc)",
-      en_reparto: "#3990d4", entregado: "var(--green)", cobrado: "var(--green)",
-      cancelado: "var(--red)", sin_estado: "var(--tx3)"
-    };
-    Object.keys(porEstado).sort(function(a,b){return porEstado[b]-porEstado[a];}).forEach(function(est){
-      var clr = coloresEstado[est] || "var(--tx)";
-      var pct = pedidos.length > 0 ? (porEstado[est]/pedidos.length*100) : 0;
-      h += "<div style='display:flex;justify-content:space-between;align-items:center;padding:.5rem .75rem;background:var(--sur2);border-radius:7px;margin-bottom:.3rem;font-size:.78rem'>";
-      h += "<div><span style='display:inline-block;width:10px;height:10px;background:"+clr+";border-radius:50%;margin-right:.5rem;vertical-align:middle'></span><b>"+est+"</b></div>";
-      h += "<div><b>"+porEstado[est]+"</b> <span style='color:var(--tx3);font-size:.66rem'>· "+pct.toFixed(1)+"%</span></div>";
-      h += "</div>";
-    });
+    // Evolución: pedidos por tramo (barras) + facturación (línea, eje derecho)
+    h += (function(){
+      var s1 = _repSerieTiempo(validos, r, function(){ return 1; });
+      var s2 = _repSerieTiempo(validos, r, function(p){ return parseFloat(p.total)||0; });
+      var s3 = _repSerieTiempo(pedidos.filter(function(p){return p.estado==="cancelado";}), r, function(){ return 1; });
+      var chart = _repChartXY(s1.labels, [
+        {nombre:"Pedidos válidos", color:"#5a9fd4", datos:s1.datos, tipo:"bar", fmt:"unid"},
+        {nombre:"Cancelados", color:"#e0655a", datos:s3.datos, tipo:"bar", fmt:"unid"},
+        {nombre:"Facturación", color:"#c9963a", datos:s2.datos, eje:"der", fmt:"money"}
+      ], {fmtIzq:"unid", h:300});
+      return "<div style='background:var(--sur);border:1px solid var(--bd);border-radius:10px;padding:1rem;margin-bottom:1rem'><div style='font-size:.85rem;font-weight:700;color:var(--tx);margin-bottom:.2rem'>📈 Pedidos en el tiempo</div><div style='font-size:.66rem;color:var(--tx3);margin-bottom:.8rem'>Cantidad de pedidos por tramo (barras, eje izquierdo) y lo que facturaron (línea, eje derecho).</div>"+chart+"</div>";
+    })();
+
+    // Donas: estado, forma de entrega, forma de pago, origen
+    var colEst = { pendiente:"#e0b43c", reservado:"#c9963a", en_preparacion:"#c9963a", en_reparto:"#3990d4", entregado:"#4caf82", cobrado:"#4caf82", cobrado_parcial:"#9a8fd4", cancelado:"#e0655a", sin_estado:"#777" };
+    var PALO = ["#5a9fd4","#4caf82","#c9963a","#9a8fd4","#e0655a","#d4b13c","#46918d","#b07fd4"];
+    function dona(titulo, sub, obj, colores, esPlata){
+      var items = Object.keys(obj).sort(function(a,b){return obj[b]-obj[a];}).map(function(k,i){ return {label:k.replace(/_/g," "), valor:obj[k], color:(colores&&colores[k])||PALO[i%PALO.length]}; });
+      var cuerpo = items.length ? (esPlata ? _repChartDona(items,150) : _repChartDonaN(items,150)) : "<div style='color:var(--tx3);font-size:.75rem;padding:1rem;text-align:center'>Sin datos</div>";
+      return "<div style='background:var(--sur);border:1px solid var(--bd);border-radius:10px;padding:1rem'><div style='font-size:.85rem;font-weight:700;margin-bottom:.15rem'>"+titulo+"</div><div style='font-size:.66rem;color:var(--tx3);margin-bottom:.7rem'>"+sub+"</div>"+cuerpo+"</div>";
+    }
+    h += "<div style='display:grid;grid-template-columns:repeat(auto-fit,minmax(340px,1fr));gap:1rem;margin-bottom:1rem'>";
+    h += dona("📊 Pedidos por estado", "Todos los pedidos del período, cancelados incluidos.", porEstado, colEst, false);
+    h += dona("🚚 Cómo se entregaron", "Pedidos válidos según el modo de entrega.", porEntrega, null, false);
+    h += dona("💳 Cómo pagaron", "Facturación de pedidos válidos según la forma de pago.", porPago, {efectivo:"#4caf82",transferencia:"#c9963a","cuenta corriente":"#9a8fd4","sin dato":"#777"}, true);
+    h += dona("🧭 De dónde vinieron", "Pedidos válidos: directos, transferidos entre vendedores, etc.", porOrigen, null, false);
     h += "</div>";
 
     var el = document.getElementById("_repContenido"); if(el) el.innerHTML = h;
@@ -42028,6 +42172,8 @@ function _repCargarOperativa(){
     if(el) el.innerHTML = "<div style='color:var(--red);padding:2rem;text-align:center'>Error al cargar operativa</div>";
   });
 }
+// Dona para cantidades (no plata): misma dona, con los números en unidades
+function _repChartDonaN(items, size){ return _repChartDona(items, size, function(n){ return _repMiles(n); }); }
 
 // ════════════════════════════════════════════════════════════════════
 // EXPORTAR A EXCEL (CSV en realidad, abre con Excel)
