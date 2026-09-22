@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<!-- BELLE_BUILD 20260919-2300 clientes-enfriados-whatsapp -->
+<!-- BELLE_BUILD 20260922-2230 cobros-a-cuenta-visibles -->
 <html lang="es">
 <head>
 <meta charset="UTF-8">
@@ -7819,6 +7819,20 @@ function _gestionarPedido(tipo,id){
     // Build body
     var html='';
 
+    // 💰 Barrita de cobrado / faltan (2026-09-22): se ve de un vistazo cuánto entró a cuenta y cuánto falta
+    if(cobradoYa>0 && total>0){
+      var _pctC=Math.max(0,Math.min(100,cobradoYa/total*100)), _sald=saldo<=0.5;
+      html+='<div style="background:'+(_sald?'rgba(76,175,130,.10)':'rgba(230,180,60,.10)')+';border:1px solid '+(_sald?'rgba(76,175,130,.40)':'rgba(230,180,60,.40)')+';border-radius:10px;padding:.65rem .8rem;margin-bottom:.8rem">'+
+        '<div style="display:flex;justify-content:space-between;align-items:flex-end;gap:.6rem">'+
+          '<div><div style="font-size:.56rem;color:var(--tx3);text-transform:uppercase;letter-spacing:.05em">Cobrado</div><div style="font-size:1.25rem;font-weight:800;color:var(--green);line-height:1.1">'+fmt(cobradoYa)+'</div></div>'+
+          (_sald?'<div style="text-align:right"><div style="font-size:.56rem;color:var(--tx3);text-transform:uppercase">Estado</div><div style="font-size:1rem;font-weight:800;color:var(--green)">✅ Pagado completo</div></div>'
+                :'<div style="text-align:right"><div style="font-size:.56rem;color:var(--tx3);text-transform:uppercase;letter-spacing:.05em">Faltan</div><div style="font-size:1.25rem;font-weight:800;color:var(--yel);line-height:1.1">'+fmt(saldo)+'</div><div style="font-size:.58rem;color:var(--tx3)">de '+fmt(total)+'</div></div>')+
+        '</div>'+
+        '<div style="height:7px;background:var(--sur3);border-radius:4px;overflow:hidden;margin-top:.45rem"><div style="height:100%;width:'+_pctC.toFixed(1)+'%;background:'+(_sald?'var(--green)':'linear-gradient(90deg,var(--green),var(--yel))')+';border-radius:4px"></div></div>'+
+        '<div style="font-size:.56rem;color:var(--tx3);margin-top:.2rem;text-align:right">'+_pctC.toFixed(0)+'% cobrado</div>'+
+      '</div>';
+    }
+
     // Items list
     html+='<div style="margin-bottom:.8rem">';
     html+='<div style="font-size:.7rem;font-weight:700;color:var(--tx3);text-transform:uppercase;margin-bottom:.4rem">Productos</div>';
@@ -9714,12 +9728,17 @@ function loadHistorial(){
     apiGet("gastos_vendedor","select=*&vendedor_id=eq."+VENDEDOR_ID+"&periodo_cerrado=eq.false&periodo=eq."+periodoActual+"&order=created_at.desc"+(VENDEDOR_ID===2?"&created_at=gte."+FACU_DESDE:"")),
     // 🐛 FIX 2026-08-08: el "Saldo encima" del Historial omitía los cobros de cuenta
     // corriente (la pestaña Dinero sí los sumaba) → dos pantallas con saldos distintos.
-    apiGet("v_cobros_cc_saldo","select=monto_computar&vendedor_id=eq."+VENDEDOR_ID+"&periodo=eq."+encodeURIComponent(periodoActual)+"&pedido_tiene_venta=eq.false").catch(function(){return [];})
+    apiGet("v_cobros_cc_saldo","select=*&vendedor_id=eq."+VENDEDOR_ID+"&periodo=eq."+encodeURIComponent(periodoActual)+"&pedido_tiene_venta=eq.false").catch(function(){return [];})
   ]).then(function(res){
     var ventas=Array.isArray(res[0])?res[0]:[];
     var rendics=Array.isArray(res[1])?res[1]:[];
     var gastos=Array.isArray(res[2])?res[2]:[];
-    var _ccHist=(Array.isArray(res[3])?res[3]:[]).reduce(function(s,c){return s+(parseFloat(c.monto_computar)||0);},0);
+    var _ccLista=Array.isArray(res[3])?res[3]:[];
+    var _ccHist=_ccLista.reduce(function(s,c){return s+(parseFloat(c.monto_computar)||0);},0);
+    window._hvCobrosCuenta=_ccLista;
+    // pedidos de esos pagos (para saber cuáles siguen sin saldar y mostrar número y cliente)
+    var _ccIds={}; _ccLista.forEach(function(c){ if(c.pedido_id)_ccIds[c.pedido_id]=1; });
+    var _hvCcPedsProm=Object.keys(_ccIds).length?apiGet("pedidos_catalogo","select=id,nro_orden,total,cobrado_total,cliente_nombre,estado&id=in.("+Object.keys(_ccIds).join(",")+")").then(function(peds){ var m={}; (peds||[]).forEach(function(p){ m[p.id]=p; }); return m; }).catch(function(){return {};}):Promise.resolve({});
     var tv=ventas.reduce(function(s,v){return s+(v.total||0);},0);
     var rendNorm=rendics.filter(function(r){return r.estado==="aprobada"&&r.tipo!=="saldo_arrastrado";});
     var rendArr=rendics.filter(function(r){return r.estado==="aprobada"&&r.tipo==="saldo_arrastrado";});
@@ -9760,7 +9779,7 @@ function loadHistorial(){
       });
       return nuevosMapped.concat(legacy);
     });
-    _svTransfProm.then(function(tEnvAll){
+    Promise.all([_svTransfProm,_hvCcPedsProm]).then(function(_arr){ var tEnvAll=_arr[0]; var _ccPedMap=_arr[1]||{};
       var tEnvAll2=Array.isArray(tEnvAll)?tEnvAll.filter(function(t){return t.estado!=='cancelada';}):[];
       var tEnvConf=tEnvAll2.filter(function(t){return t.estado==='confirmada';});
       var tEnvPend=tEnvAll2.filter(function(t){return t.estado==='pendiente';});
@@ -9792,10 +9811,29 @@ function loadHistorial(){
       sh+="</div>";
 
       // Resumen
-      sh+="<div style='display:grid;grid-template-columns:repeat(2,1fr);gap:.35rem;padding:.55rem .75rem;border-bottom:1px solid var(--bd)'>";
+      // solo los pagos a cuenta de pedidos que TODAVÍA no se saldaron
+      var _ccL=(window._hvCobrosCuenta||[]).filter(function(c){ var p=_ccPedMap[c.pedido_id]; if(!p) return false; if(p.estado==='cancelado') return false; return ((parseFloat(p.total)||0)-(parseFloat(p.cobrado_total)||0))>0.5; });
+      var _ccPeds={}; _ccL.forEach(function(c){ if(c.pedido_id)_ccPeds[c.pedido_id]=1; });
+      var _ccTot=_ccL.reduce(function(s,c){return s+(parseFloat(c.monto_computar)||0);},0);
+      sh+="<div style='display:grid;grid-template-columns:repeat("+(_ccL.length?3:2)+",1fr);gap:.35rem;padding:.55rem .75rem;border-bottom:1px solid var(--bd)'>";
       sh+="<div style='background:var(--sur2);border-radius:8px;padding:.48rem .6rem;text-align:center;border-top:3px solid var(--green)'><div style='font-size:.55rem;color:var(--tx3);text-transform:uppercase'>Total cobrado</div><div style='font-size:.92rem;font-weight:700;color:var(--green)'>"+fmt(tv)+"</div><div style='font-size:.6rem;color:var(--tx3)'>"+nPedidos+" pedidos &bull; "+unidTotal+"u</div></div>";
       sh+="<div style='background:var(--sur2);border-radius:8px;padding:.48rem .6rem;text-align:center;border-top:3px solid var(--yel)'><div style='font-size:.55rem;color:var(--tx3);text-transform:uppercase'>Saldo encima</div><div style='font-size:.92rem;font-weight:700;color:var(--yel)'>"+fmt(tv+_ccHist-tg-tr+ta)+"</div><div style='font-size:.6rem;color:var(--tx3)'>Ticket prom: "+fmt(nPedidos>0?Math.round(tv/nPedidos):0)+"</div></div>";
+      if(_ccL.length){
+        sh+="<div style='background:var(--sur2);border-radius:8px;padding:.48rem .6rem;text-align:center;border-top:3px solid var(--acc)' title='Pagos a cuenta de pedidos que todavía no se saldaron. Ya cuentan en tu saldo encima; la venta aparece cuando el pedido se termina de pagar.'><div style='font-size:.55rem;color:var(--tx3);text-transform:uppercase'>💵 Cobros a cuenta</div><div style='font-size:.92rem;font-weight:700;color:var(--acc)'>"+fmt(_ccTot)+"</div><div style='font-size:.6rem;color:var(--tx3)'>"+_ccL.length+" pago"+(_ccL.length===1?"":"s")+" &bull; "+Object.keys(_ccPeds).length+" pedido"+(Object.keys(_ccPeds).length===1?"":"s")+" sin saldar</div></div>";
+      }
       sh+="</div>";
+      // 💵 detalle de los pagos a cuenta (2026-09-22): qué pedido, cuánto y cuándo
+      if(_ccL.length){
+        sh+="<div style='padding:.5rem .75rem;border-bottom:1px solid var(--bd)' id='_hvCobrosCuentaBox'>";
+        sh+="<div style='font-size:.6rem;font-weight:700;color:var(--acc);text-transform:uppercase;margin-bottom:.35rem'>💵 Pagos a cuenta de pedidos sin saldar</div>";
+        sh+="<div style='display:flex;flex-direction:column;gap:.25rem'>";
+        _ccL.slice().sort(function(a,b){return String(b.fecha||'').localeCompare(String(a.fecha||''));}).forEach(function(c){
+          var f=c.fecha?String(c.fecha).slice(8,10)+'/'+String(c.fecha).slice(5,7):'';
+          var p=_ccPedMap[c.pedido_id]||{}; var falta=Math.max(0,(parseFloat(p.total)||0)-(parseFloat(p.cobrado_total)||0));
+          sh+="<div onclick=\"_gestionarPedido('web',"+(c.pedido_id||0)+")\" style='display:flex;justify-content:space-between;align-items:center;background:var(--sur2);border-radius:7px;padding:.35rem .55rem;font-size:.72rem;cursor:pointer'><span><span style='color:var(--tx3)'>"+f+"</span> &middot; <b style='color:var(--tx)'>"+_cdEsc(p.nro_orden||('#'+(c.pedido_id||'?')))+"</b>"+(p.cliente_nombre?" &middot; "+_cdEsc(p.cliente_nombre):"")+(falta>0?" <span style='color:var(--yel);font-size:.64rem'>faltan "+fmt(falta)+"</span>":"")+"</span><b style='color:var(--acc)'>"+fmt(c.monto_computar)+"</b></div>";
+        });
+        sh+="</div></div>";
+      }
 
       // Por tipo
       sh+="<div style='padding:.5rem .75rem;border-bottom:1px solid var(--bd)'>";

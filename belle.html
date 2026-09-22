@@ -19,7 +19,7 @@
     </div><!DOCTYPE html>
 <html lang="es">
 <head>
-<!-- BELLE_BUILD 20260922-2100 cobros-parciales-visibles -->
+<!-- BELLE_BUILD 20260922-2230 financiero-pagos-a-cuenta -->
 <meta charset="UTF-8">
 <link rel="icon" type="image/svg+xml" href="favicon.svg">
 <meta name="viewport" content="width=device-width,initial-scale=1">
@@ -38783,8 +38783,14 @@ function _repObtenerCobrosPeriodo(){
     // incluye las ventas archivadas al cerrar período: son cobros reales igual (antes los meses cerrados daban $0)
     apiGetAll("ventas", "select=*&"+_REP_ESTADOS_V+"&forma_cobro=neq.pendiente&created_at=gte."+r.desde.toISOString()+"&created_at=lt."+r.hasta.toISOString()+"&order=created_at.desc&limit=5000").catch(function(){return [];})
   ]).then(function(res){
-    _repCacheCobros = { ccPagos: res[0]||[], ventas: res[1]||[] };
-    return _repCacheCobros;
+    var cc = res[0]||[];
+    var ids = cc.map(function(p){ return p.id; }).filter(Boolean);
+    if(!ids.length){ _repCacheCobros = { ccPagos: cc, ventas: res[1]||[], apps: [] }; return _repCacheCobros; }
+    // 💵 2026-09-22: a qué pedido fue cada pago y si lo saldó (para distinguir "a cuenta" de "saldó el pedido")
+    return apiGetAll("cc_pagos_aplicaciones", "select=pago_id,pedido_id,monto_aplicado,cubrio_pedido_completo,pedidos_catalogo(nro_orden,total,cobrado_total,estado)&pago_id=in.("+ids.join(",")+")&limit=5000").catch(function(){return [];}).then(function(apps){
+      _repCacheCobros = { ccPagos: cc, ventas: res[1]||[], apps: apps||[] };
+      return _repCacheCobros;
+    });
   });
 }
 
@@ -39137,6 +39143,15 @@ function _repCargarFinanciero(){
     // Saldo a favor
     var totalSaldoFavor = aFavor.reduce(function(s,c){return s+(parseFloat(c.saldo_cc)||0);}, 0);
 
+    // 💵 Pagos a cuenta: parte de los pagos CC que fue a pedidos que siguen SIN saldar (todavía no son ventas)
+    var appsPorPago = {}; (cobros.apps||[]).forEach(function(a){ (appsPorPago[a.pago_id] = appsPorPago[a.pago_id] || []).push(a); });
+    var aCuentaTot = 0, aCuentaN = 0, aCuentaPed = {};
+    (cobros.apps||[]).forEach(function(a){ if(a.cubrio_pedido_completo) return; aCuentaTot += parseFloat(a.monto_aplicado)||0; aCuentaN++; if(a.pedido_id) aCuentaPed[a.pedido_id]=1; });
+    function _descPago(p){
+      var as = appsPorPago[p.id]||[]; if(!as.length) return p.nota||"";
+      return as.map(function(a){ var pd=a.pedidos_catalogo||{}; var nro=pd.nro_orden||("#"+a.pedido_id); if(a.cubrio_pedido_completo) return "saldó "+nro; var falta=Math.max(0,(parseFloat(pd.total)||0)-(parseFloat(pd.cobrado_total)||0)); return "a cuenta de "+nro+(falta>0?" · faltan "+fmt(falta):""); }).join(" · ")+(p.nota?" — "+p.nota:"");
+    }
+
     // Comparativa
     var deltaIngresos = totalIngresos - anterior.totalIngresos;
     var deltaPct = anterior.totalIngresos > 0 ? (deltaIngresos / anterior.totalIngresos * 100) : 0;
@@ -39165,6 +39180,11 @@ function _repCargarFinanciero(){
 
     h += _repKPI("📊 Cobros del período", String(cobros.ccPagos.length + cobros.ventas.length), {
       sub: cobros.ccPagos.length + " CC + " + cobros.ventas.length + " directos"
+    });
+
+    h += _repKPI("💵 Pagos a cuenta", fmt(aCuentaTot), {
+      sub: aCuentaN + " pago"+(aCuentaN===1?"":"s")+" a "+Object.keys(aCuentaPed).length+" pedido"+(Object.keys(aCuentaPed).length===1?"":"s")+" sin saldar · ya están en Ingresos, todavía no en Ventas",
+      color: "var(--acc)"
     });
 
     h += "</div>";
@@ -39209,7 +39229,8 @@ function _repCargarFinanciero(){
 
     var todosCobros = [];
     (cobros.ccPagos||[]).forEach(function(p){
-      todosCobros.push({tipo:"CC", fecha:p.fecha||p.created_at, monto:p.monto, forma:p.forma_pago, vendedor:p.vendedor_id, registrado:p.registrado_por, nota:p.nota||""});
+      var _as=appsPorPago[p.id]||[], _parcial=_as.length&&_as.every(function(a){return !a.cubrio_pedido_completo;});
+      todosCobros.push({tipo:_parcial?"A cuenta":"CC", fecha:p.fecha||p.created_at, monto:p.monto, forma:p.forma_pago, vendedor:p.vendedor_id, registrado:p.registrado_por, nota:_descPago(p)});
     });
     (cobros.ventas||[]).forEach(function(v){
       todosCobros.push({tipo:"Venta", fecha:v.created_at, monto:v.total, forma:v.forma_cobro, vendedor:v.vendedor_id, registrado:"", nota:(v.nro_orden||"")+" — "+_nomMl(v.producto_nombre,v.producto_id)});
@@ -39227,7 +39248,7 @@ function _repCargarFinanciero(){
       todosCobros.slice(0, 100).forEach(function(c){
         h += "<tr style='border-bottom:1px solid var(--bd)'>";
         h += "<td style='padding:.45rem .5rem'>"+_admFmtFechaCorta(c.fecha)+"</td>";
-        h += "<td><span style='background:"+(c.tipo==="CC"?"rgba(196,150,90,.15)":"rgba(76,175,130,.15)")+";color:"+(c.tipo==="CC"?"var(--acc)":"var(--green)")+";padding:.1rem .4rem;border-radius:4px;font-size:.66rem;font-weight:600'>"+c.tipo+"</span></td>";
+        h += "<td><span style='background:"+(c.tipo==="Venta"?"rgba(76,175,130,.15)":c.tipo==="A cuenta"?"rgba(230,180,60,.15)":"rgba(196,150,90,.15)")+";color:"+(c.tipo==="Venta"?"var(--green)":c.tipo==="A cuenta"?"var(--yel)":"var(--acc)")+";padding:.1rem .4rem;border-radius:4px;font-size:.66rem;font-weight:600'>"+c.tipo+"</span></td>";
         h += "<td style='font-weight:700;color:var(--green)'>"+fmt(c.monto)+"</td>";
         h += "<td>"+(c.forma||"—")+"</td>";
         h += "<td>"+_repNombreVendedor(c.vendedor)+"</td>";
