@@ -19,7 +19,7 @@
     </div><!DOCTYPE html>
 <html lang="es">
 <head>
-<!-- BELLE_BUILD 20260919-2130 reportes-ejes-precisos -->
+<!-- BELLE_BUILD 20260922-2100 cobros-parciales-visibles -->
 <meta charset="UTF-8">
 <link rel="icon" type="image/svg+xml" href="favicon.svg">
 <meta name="viewport" content="width=device-width,initial-scale=1">
@@ -1826,6 +1826,11 @@ body{
           <div id="hd-vendido" style="font-size:1.2rem;font-weight:700;color:var(--green)">$0</div>
           <div id="hd-cant" style="font-size:.62rem;color:var(--tx3)">0 op.</div>
         </div>
+        <div class="tbl-wrap" style="padding:.65rem .8rem;border-left:3px solid var(--acc)" title="Pagos a cuenta de pedidos que todavía no se terminaron de pagar. No son ventas: la venta se genera cuando el pedido se salda.">
+          <div style="font-size:.6rem;color:var(--tx3);text-transform:uppercase">💵 Cobros parciales</div>
+          <div id="hd-parc" style="font-size:1.2rem;font-weight:700;color:var(--acc)">$0</div>
+          <div id="hd-parc-cant" style="font-size:.62rem;color:var(--tx3)">a cuenta de pedidos sin saldar</div>
+        </div>
         <div class="tbl-wrap" style="padding:.65rem .8rem;border-left:3px solid var(--blue)">
           <div style="font-size:.6rem;color:var(--tx3);text-transform:uppercase">🏦 Rendido</div>
           <div id="hd-rendido" style="font-size:1.2rem;font-weight:700;color:var(--blue)">$0</div>
@@ -1863,6 +1868,7 @@ body{
           <option value="confirmada">Confirmada</option>
           <option value="devuelta">Devuelta</option>
           <option value="pendiente">Pendiente</option>
+          <option value="cobros">💵 Cobros parciales</option>
         </select>
         <input class="fi" type="number" id="hdMinMonto" placeholder="Monto mínimo" style="max-width:130px" onchange="loadHistorialVentas()">
       </div>
@@ -9665,13 +9671,28 @@ function loadHistorialVentas(){
     (tipo==='' || tipo==='gastos') ? apiGet('gastos_vendedor', qGastos) : Promise.resolve([]),
     (tipo==='' || tipo==='transferidas') ? apiGet('ventas_transferidas', qTransferidas) : Promise.resolve([]),
     isMarcela ? apiGet('gastos_vendedor', qMarcelaGastos) : Promise.resolve([]),
-    Promise.resolve([]),
+    // 💵 Cobros parciales (2026-09-22): pagos a cuenta de pedidos que NO quedaron saldados con ese pago.
+    // El pago que salda el pedido no se lista acá porque en ese momento nacen las ventas (ya aparecen como pedido).
+    (function(){
+      if(isMarcela || (tipo!=='' && tipo!=='cobros')) return Promise.resolve([]);
+      var q='select=id,monto_aplicado,created_at,pedido_id,cubrio_pedido_completo,cc_pagos(id,monto,forma_pago,fecha,vendedor_id,registrado_por,nota),pedidos_catalogo(id,nro_orden,cliente_nombre,cliente_id,total,cobrado_total,estado,vendedor_id)&cubrio_pedido_completo=eq.false&order=created_at.desc&limit=1000';
+      if(desde)q+='&created_at=gte.'+desde+'T00:00:00';
+      if(hasta)q+='&created_at=lte.'+hasta+'T23:59:59';
+      return apiGet('cc_pagos_aplicaciones', q).catch(function(){return [];});
+    })(),
   ]).then(function(res){
     var allVentas=Array.isArray(res[0])?res[0]:[];
     var rendics=Array.isArray(res[1])?res[1]:[];
     var gastos=Array.isArray(res[2])?res[2]:[];
     var transf=Array.isArray(res[3])?res[3]:[];
     var marGastos=Array.isArray(res[4])?res[4]:[];
+    var cobrosParc=(Array.isArray(res[5])?res[5]:[]).filter(function(a){
+      var pg=a.cc_pagos||{}, pd=a.pedidos_catalogo||{};
+      if(pd.estado==='cancelado') return false;
+      if(vendedor!=='todos' && String(pg.vendedor_id||pd.vendedor_id||'')!==String(vendedor)) return false;
+      if(minMonto && (parseFloat(a.monto_aplicado)||0)<minMonto) return false;
+      return true;
+    });
 
     if(isMarcela){
       allVentas=[];
@@ -9702,6 +9723,11 @@ function loadHistorialVentas(){
     if(hdr)hdr.textContent=fmt(tr+tg);
     if(hds)hds.textContent=fmt(saldo);
     if(hdc)hdc.textContent=(ventas.length+pendientes.length)+(devoluciones.length?' (-'+devoluciones.length+' dev)':'');
+    var hdp=document.getElementById('hd-parc'), hdpc=document.getElementById('hd-parc-cant');
+    var tparc=cobrosParc.reduce(function(s,a){return s+(parseFloat(a.monto_aplicado)||0);},0);
+    if(hdp)hdp.textContent=fmt(tparc);
+    if(hdpc)hdpc.textContent=cobrosParc.length?(cobrosParc.length+' pago'+(cobrosParc.length===1?'':'s')+' a cuenta de pedidos sin saldar'):'a cuenta de pedidos sin saldar';
+    window._hdCobrosParc=cobrosParc;
     var hdtransf=document.getElementById('hd-transf');
     var transfTotalAmt=(transf||[]).filter(function(t){return t.estado!=='cancelada';}).reduce(function(s,t){return s+(t.total||0);},0);
     if(hdtransf)hdtransf.textContent=fmt(transfTotalAmt)+(transf&&transf.length?' ('+transf.length+')':'');
@@ -10566,6 +10592,21 @@ function _adminAbrirDetallePedidoUI(p,items,cli,logs,movs,pagos){
     h+="<div><div style='font-size:.6rem;color:var(--tx3);text-transform:uppercase'>Pago</div><div style='font-size:.78rem;color:var(--tx);font-weight:600'>"+p.forma_pago+"</div></div>";
   }
   h+="</div></div>";
+
+  // 💰 Cobrado / faltan, bien grande (2026-09-22): el pedido puede tener plata cobrada a cuenta
+  // sin que existan ventas todavía; acá se ve de un vistazo cuánto entró y cuánto falta.
+  if(estReal!=='cancelado' && totMto>0 && cobMto>0){
+    var _pct=Math.max(0,Math.min(100,cobMto/totMto*100)), _saldado=falta<=0.5;
+    h+="<div style='background:"+(_saldado?"rgba(76,175,130,.10)":"rgba(230,180,60,.10)")+";border:1px solid "+(_saldado?"rgba(76,175,130,.40)":"rgba(230,180,60,.40)")+";border-radius:10px;padding:.8rem .9rem'>";
+    h+="<div style='display:flex;justify-content:space-between;align-items:flex-end;gap:.8rem;flex-wrap:wrap'>";
+    h+="<div><div style='font-size:.6rem;color:var(--tx3);text-transform:uppercase;letter-spacing:.05em'>Cobrado</div><div style='font-size:1.5rem;font-weight:800;color:var(--green);line-height:1.1'>"+fmt(cobMto)+"</div><div style='font-size:.62rem;color:var(--tx3)'>"+(pagos.length?(pagos.length+' pago'+(pagos.length===1?'':'s')+' a cuenta'):'')+"</div></div>";
+    if(_saldado) h+="<div style='text-align:right'><div style='font-size:.6rem;color:var(--tx3);text-transform:uppercase;letter-spacing:.05em'>Estado</div><div style='font-size:1.2rem;font-weight:800;color:var(--green);line-height:1.1'>✅ Pagado completo</div></div>";
+    else h+="<div style='text-align:right'><div style='font-size:.6rem;color:var(--tx3);text-transform:uppercase;letter-spacing:.05em'>Faltan</div><div style='font-size:1.5rem;font-weight:800;color:var(--yel);line-height:1.1'>"+fmt(falta)+"</div><div style='font-size:.62rem;color:var(--tx3)'>de "+fmt(totMto)+" · la venta se genera al saldar</div></div>";
+    h+="</div>";
+    h+="<div style='height:8px;background:var(--sur3);border-radius:4px;overflow:hidden;margin-top:.55rem'><div style='height:100%;width:"+_pct.toFixed(1)+"%;background:"+(_saldado?"var(--green)":"linear-gradient(90deg,var(--green),var(--yel))")+";border-radius:4px'></div></div>";
+    h+="<div style='font-size:.6rem;color:var(--tx3);margin-top:.25rem;text-align:right'>"+_pct.toFixed(0)+"% cobrado</div>";
+    h+="</div>";
+  }
 
   // Card cliente
   if(cli){
@@ -46770,6 +46811,23 @@ function hdRenderAll(ventas, rendics, gastos, transf){
     });
   });
 
+  // 💵 Cobros parciales: pagos a cuenta de pedidos que siguen sin saldar (no son ventas todavía)
+  (window._hdCobrosParc||[]).forEach(function(a){
+    var pg=a.cc_pagos||{}, pd=a.pedidos_catalogo||{};
+    var nro=pd.nro_orden||('#'+a.pedido_id);
+    var cliNom=pd.cliente_nombre||(window._pedidosClienteCache&&window._pedidosClienteCache[pd.cliente_id]?(((window._pedidosClienteCache[pd.cliente_id].nombre||'')+' '+(window._pedidosClienteCache[pd.cliente_id].apellido||'')).trim()):'');
+    if(srch&&norm(nro).indexOf(srch)<0&&norm(cliNom).indexOf(srch)<0)return;
+    var tot=parseFloat(pd.total)||0, cob=parseFloat(pd.cobrado_total)||0, falta=Math.max(0,tot-cob);
+    items.push({
+      tipo:'cobro parcial', fecha:a.created_at, id:a.id,
+      titulo:'💵 Pago a cuenta · '+nro+(cliNom?' · '+cliNom:''),
+      subtitulo:_hdVendNom(pg.vendedor_id||pd.vendedor_id)+(pg.forma_pago?' · '+pg.forma_pago:'')+' · pedido '+fmt(tot)+' · cobrado '+fmt(cob)+(falta>0?' · <b style="color:var(--yel)">faltan '+fmt(falta)+'</b>':' · <b style="color:var(--green)">saldado</b>'),
+      monto:parseFloat(a.monto_aplicado)||0, estado:'a cuenta',
+      color:'var(--acc)', icon:'💵',
+      raw:a, tabla:'cc_pagos_aplicaciones', op:'1', pedidoId:pd.id||a.pedido_id
+    });
+  });
+
   (transf||[]).forEach(function(t){
     var its=[];try{its=typeof t.items==='string'?JSON.parse(t.items):t.items||[];}catch(e){}
     var unids=its.reduce(function(s,i){return s+(i.qty||1);},0);
@@ -46824,6 +46882,7 @@ function hdRenderAll(ventas, rendics, gastos, transf){
     var sign=item.monto<0?'-':'+';
     var mc=item.monto<0?'var(--red)':'var(--green)';
     if(item.tipo==='rendicion')mc='var(--blue)';
+    if(item.tipo==='cobro parcial')mc='var(--acc)';
     var acciones='';
 
     if(item.tipo==='venta'){
@@ -46837,6 +46896,8 @@ function hdRenderAll(ventas, rendics, gastos, transf){
     } else if(item.tipo==='gasto'){
       acciones+='<button onclick="adminEditarGastoModal('+item.id+')" title="Editar" style="'+bs+'var(--acc);color:var(--acc);border-radius:4px;cursor:pointer;font-size:.62rem;padding:.1rem .3rem">✏️</button> ';
       acciones+='<button onclick="adminBorrarGasto('+item.id+')" title="Eliminar" style="'+bs+'var(--red);color:var(--red);border-radius:4px;cursor:pointer;font-size:.62rem;padding:.1rem .3rem">🗑</button>';
+    } else if(item.tipo==='cobro parcial'){
+      if(item.pedidoId) acciones+='<button onclick="_adminAbrirDetallePedido('+item.pedidoId+')" title="Ver pedido" style="'+bs+'var(--acc);color:var(--acc);border-radius:4px;cursor:pointer;font-size:.62rem;padding:.1rem .3rem">📋 Pedido</button>';
     } else if(item.tipo==='rendicion'){
       acciones+='<button onclick="openRendModal('+item.id+')" title="Editar" style="'+bs+'var(--bd2);color:var(--tx3);border-radius:4px;cursor:pointer;font-size:.62rem;padding:.1rem .3rem">✏️</button> ';
       acciones+='<button onclick="adminBorrarRendicion('+item.id+')" title="Eliminar" style="'+bs+'var(--red);color:var(--red);border-radius:4px;cursor:pointer;font-size:.62rem;padding:.1rem .3rem">🗑</button>';
