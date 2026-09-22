@@ -19,7 +19,7 @@
     </div><!DOCTYPE html>
 <html lang="es">
 <head>
-<!-- BELLE_BUILD 20260922-2300 rentabilidad-a-cuenta -->
+<!-- BELLE_BUILD 20260922-2330 reportes-caja-dia-que-entra -->
 <meta charset="UTF-8">
 <link rel="icon" type="image/svg+xml" href="favicon.svg">
 <meta name="viewport" content="width=device-width,initial-scale=1">
@@ -38686,7 +38686,7 @@ function _repInit(){
     if(selMas){ var enSel = ["ayer","semanaPasada","ult7","ult30","ult90","trimestre","anio","anioPasado"].indexOf(window._repPeriodo) >= 0; selMas.value = enSel ? window._repPeriodo : ""; }
   }, 50);
   // Limpiar caches y cargar
-  _repCacheCobros = null; _repCacheVendedores = null;
+  _repCacheCobros = null; _repCacheVendedores = null; _repCacheApps = null;
   _repCacheClientes = null; _repCacheProductos = null;
   window._repRentabilidadData = null;
   _repRenderTab();
@@ -38785,13 +38785,99 @@ function _repObtenerCobrosPeriodo(){
   ]).then(function(res){
     var cc = res[0]||[];
     var ids = cc.map(function(p){ return p.id; }).filter(Boolean);
-    if(!ids.length){ _repCacheCobros = { ccPagos: cc, ventas: res[1]||[], apps: [] }; return _repCacheCobros; }
-    // 💵 2026-09-22: a qué pedido fue cada pago y si lo saldó (para distinguir "a cuenta" de "saldó el pedido")
-    return apiGetAll("cc_pagos_aplicaciones", "select=pago_id,pedido_id,monto_aplicado,cubrio_pedido_completo,pedidos_catalogo(nro_orden,total,cobrado_total,estado)&pago_id=in.("+ids.join(",")+")&limit=5000").catch(function(){return [];}).then(function(apps){
-      _repCacheCobros = { ccPagos: cc, ventas: res[1]||[], apps: apps||[] };
+    // 💵 2026-09-22: a qué pedido fue cada pago y si lo saldó (para distinguir "a cuenta" de "saldó el pedido").
+    // Además, las ventas de pedidos cobrados por partes entran netas: lo que ya entró por cc_pagos no se cuenta de nuevo.
+    return _repObtenerAplicaciones().then(function(todasApps){
+      var apps = (todasApps||[]).filter(function(a){ return ids.indexOf(a.pago_id)>=0; });
+      var caja = _repCaja(todasApps, res[1]||[], null, null);
+      _repCacheCobros = { ccPagos: cc, ventas: caja.ventasNeto(), apps: apps };
       return _repCacheCobros;
     });
   });
+}
+
+// ════════════════════════════════════════════════════════════════════
+// 💵 CAJA (2026-09-22): la plata cuenta el día que entra.
+// Un pedido cobrado por partes deja pagos en cc_pagos (con fecha) y, recién al saldarse, la venta
+// completa en ventas. Para que los reportes no "pierdan" los pagos a cuenta hasta que se salde el
+// pedido, y tampoco los cuenten dos veces cuando se salda:
+//  · cada pago registrado (cc_pagos_aplicaciones) cuenta en la fecha en que entró, con el costo
+//    proporcional de los productos del pedido (misma fórmula de costo que todo Reportes)
+//  · la venta registrada cuenta solo por la parte del pedido que NO entró como pago registrado
+// ════════════════════════════════════════════════════════════════════
+window._repCacheApps = null;
+function _repObtenerAplicaciones(){
+  if(_repCacheApps) return Promise.resolve(_repCacheApps);
+  return apiGetAll("cc_pagos_aplicaciones", "select=id,pago_id,pedido_id,monto_aplicado,cubrio_pedido_completo,created_at,cc_pagos(fecha,vendedor_id,forma_pago,cliente_id),pedidos_catalogo(id,nro_orden,total,items,vendedor_id,cliente_id,estado)&order=created_at.asc&limit=5000")
+    .then(function(rows){ _repCacheApps = rows||[]; return _repCacheApps; })
+    .catch(function(e){ console.warn("[rep] cc_pagos_aplicaciones", e); _repCacheApps = []; return []; });
+}
+// items del pedido (a veces vienen doblemente serializados)
+function _repItemsPedido(ped){
+  var items = ped && ped.items;
+  try{ if(typeof items==="string") items=JSON.parse(items); if(typeof items==="string") items=JSON.parse(items); }catch(e){ items=[]; }
+  return Array.isArray(items) ? items : [];
+}
+function _repCostoPedido(ped, cf){
+  if(!cf) return 0;
+  var c=0;
+  _repItemsPedido(ped).forEach(function(it){
+    var seg = it.isDecan ? "decan" : (it.isCombo ? "combo" : (it.segmento||""));
+    c += (cf.costoUnit({producto_id:it.producto_id, producto_nombre:it.nombre, segmento:seg})||0) * (parseInt(it.qty||it.cantidad)||1);
+  });
+  return c;
+}
+// segmento dominante del pedido (por plata), para que los pagos a cuenta caigan en el segmento que corresponde
+function _repSegmentoPedido(ped){
+  var por={}; _repItemsPedido(ped).forEach(function(it){ var sg=it.isDecan?"decan":(it.isCombo?"combo":(it.segmento||"otro")); por[sg]=(por[sg]||0)+(parseFloat(it.total)||0); });
+  var best="otro", bv=-1; Object.keys(por).forEach(function(k){ if(por[k]>bv){ bv=por[k]; best=k; } }); return best;
+}
+// apps: todas las aplicaciones de pagos · ventas: ventas del rango · rango: {desde,hasta} (null = sin extras) · cf: fábrica de costos
+function _repCaja(apps, ventas, rango, cf){
+  var porNro = {};
+  (apps||[]).forEach(function(a){
+    var pd=a.pedidos_catalogo; if(!pd||!pd.nro_orden) return;
+    var pg=a.cc_pagos||{};
+    var o = porNro[pd.nro_orden] || (porNro[pd.nro_orden]={ ped:pd, apps:[], sumApps:0 });
+    var monto=parseFloat(a.monto_aplicado)||0;
+    o.apps.push({ fecha:(pg.fecha||String(a.created_at||"").slice(0,10)), monto:monto, vendedor_id:(pg.vendedor_id||pd.vendedor_id||0), forma:(pg.forma_pago||""), cubrio:!!a.cubrio_pedido_completo, cliente_id:(pg.cliente_id||pd.cliente_id||null) });
+    o.sumApps += monto;
+  });
+  // parte de la venta registrada que NO vino como pago registrado en cc_pagos
+  var totNro={}; (ventas||[]).forEach(function(v){ if(v.nro_orden && porNro[v.nro_orden]) totNro[v.nro_orden]=(totNro[v.nro_orden]||0)+(parseFloat(v.total)||0); });
+  var ratio={}; Object.keys(totNro).forEach(function(n){ var T=totNro[n]; ratio[n] = T>0 ? Math.max(0, T-porNro[n].sumApps)/T : 1; });
+  function factor(v){ return (v && v.nro_orden && ratio[v.nro_orden]!==undefined) ? ratio[v.nro_orden] : 1; }
+  // pagos registrados dentro del rango → "extras" (pseudo-ventas con fecha del pago y costo proporcional)
+  var extras=[], extraMonto=0, extraCosto=0, extraPed={};
+  if(rango){
+    var dK=_repDiaKey(rango.desde), hK=_repDiaKey(rango.hasta);
+    Object.keys(porNro).forEach(function(n){
+      var o=porNro[n], T=parseFloat(o.ped.total)||0, costoPed=null, seg=null;
+      o.apps.forEach(function(a){
+        if(a.fecha<dK || a.fecha>=hK) return;
+        if(costoPed===null){ costoPed=_repCostoPedido(o.ped, cf); seg=_repSegmentoPedido(o.ped); }
+        var prop = T>0 ? a.monto/T : 0;
+        var e = { _extra:true, created_at:a.fecha+"T15:00:00.000Z", fecha:a.fecha, total:a.monto, _costo:costoPed*prop, cantidad:0,
+                  segmento:seg, producto_id:null, producto_nombre:"💵 Pago "+(a.cubrio?"final":"a cuenta")+" "+n, vendedor_id:a.vendedor_id, nro_orden:n,
+                  origen:"a_cuenta", forma_cobro:a.forma, cliente_id:a.cliente_id, cubrio:a.cubrio, saldado:(o.ped.estado==="cobrado"), estado:"confirmada" };
+        extras.push(e); extraMonto+=a.monto; extraCosto+=e._costo; extraPed[n]=1;
+      });
+    });
+  }
+  return {
+    factor: factor,
+    fact: function(v){ return v._extra ? (parseFloat(v.total)||0) : (parseFloat(v.total)||0)*factor(v); },
+    costo: function(v, cu){ return v._extra ? (v._costo||0) : (cu||0)*(parseInt(v.cantidad)||0)*factor(v); },
+    extras: extras, todo: (ventas||[]).concat(extras),
+    extraMonto: extraMonto, extraCosto: extraCosto, extraN: extras.length, extraPedN: Object.keys(extraPed).length,
+    // ventas del rango netas: sin las que ya entraron por cc_pagos (factor 0), escaladas las parciales
+    ventasNeto: function(){ var out=[]; (ventas||[]).forEach(function(v){ var f=factor(v); if(f<=0) return; if(f<1){ var t=parseFloat(v.total)||0; v=Object.assign({}, v, {total_bruto:t, total:Math.round(t*f), _neto_caja:true}); } out.push(v); }); return out; }
+  };
+}
+// nota chica para los KPI: cuánto de la facturación entró como pagos registrados de pedidos cobrados por partes
+function _repNotaCaja(caja, fmtFn){
+  if(!caja || !(caja.extraMonto>0)) return "";
+  return "<div style='font-size:.62rem;color:var(--acc);margin-top:.3rem;padding-top:.3rem;border-top:1px dashed var(--bd)' title='Pedidos cobrados por partes: cada pago cuenta el día que entró (con su costo proporcional) y la venta final solo por lo que faltaba. Así no se cuenta dos veces.'>💵 incluye "+fmtFn(caja.extraMonto)+" cobrados en el período de "+caja.extraPedN+" pedido"+(caja.extraPedN===1?"":"s")+" pagado"+(caja.extraPedN===1?"":"s")+" por partes ("+caja.extraN+" pago"+(caja.extraN===1?"":"s")+")</div>";
 }
 
 // ════════════════════════════════════════════════════════════════════
@@ -38890,13 +38976,16 @@ function _repCargarPanorama(){
     apiGetAll("ventas", "select=producto_id,producto_nombre,cantidad,total,segmento,created_at&"+estadosV+"&created_at=gte."+r.desde.toISOString()+"&created_at=lt."+r.hasta.toISOString()+"&limit=8000").catch(function(){return [];}),
     (Array.isArray(prods) && prods.length) ? Promise.resolve(prods) : apiGetAll("productos", "select=id,nombre,empresa,ml,costo_ind,costo_log&limit=5000").catch(function(){return [];}),
     apiGet("combos", "select=id,nombre,combo_items(producto_id,cantidad,es_decan)&limit=2000").catch(function(){return [];}),
-    apiGetAll("gastos_vendedor", "select=monto,created_at&aprobado=is.true"+_gxQ()+"&created_at=gte."+r.desde.toISOString()+"&created_at=lt."+r.hasta.toISOString()+"&limit=5000").catch(function(){return [];})
+    apiGetAll("gastos_vendedor", "select=monto,created_at&aprobado=is.true"+_gxQ()+"&created_at=gte."+r.desde.toISOString()+"&created_at=lt."+r.hasta.toISOString()+"&limit=5000").catch(function(){return [];}),
+    _repObtenerAplicaciones()
   ]).then(function(data){
-    var ventas = data[0]||[], productos = data[1]||[], combos = data[2]||[], gastos = data[3]||[];
+    var ventas = data[0]||[], productos = data[1]||[], combos = data[2]||[], gastos = data[3]||[], apps = data[4]||[];
     // costo unificado (misma fórmula que Stock y precios; resuelve decants sin producto_id por nombre)
     var cf = _repCostoFactory(productos, combos);
     var mapMarca={}; productos.forEach(function(p){ mapMarca[p.id]=(p.empresa||"").trim(); });
-    window._repPanoRaw = { ventas:ventas, costoUnit:cf.costoUnit, prodDe:cf.producto, gastos:gastos, rango:r, mapMarca:mapMarca, cotiz:cf.cotiz };
+    // 💵 caja: la plata cuenta el día que entra (pagos a cuenta incluidos, sin contar dos veces al saldar)
+    var caja = _repCaja(apps, ventas, r, cf);
+    window._repPanoRaw = { ventas:ventas, caja:caja, costoUnit:cf.costoUnit, prodDe:cf.producto, gastos:gastos, rango:r, mapMarca:mapMarca, cotiz:cf.cotiz };
     _repPanoRender();
   }).catch(function(e){
     console.error("[belle] _repCargarPanorama error:", e);
@@ -38922,13 +39011,16 @@ function _repPanoRender(){
     if(nm.indexOf("-")>0) return nm.split("-")[0].trim();
     return "Otras";
   }
-  raw.ventas.forEach(function(v){
-    var t=parseFloat(v.total)||0, q=parseInt(v.cantidad)||0;
-    var cu=_repPanoSafeCosto(raw.costoUnit, v), cl=cu*q;
-    if(cu<=0 && String(v.segmento||"").toLowerCase()!=="financiacion" && t>0){ sinCostoN++; sinCostoFact+=t; }
-    totIng+=t; totCost+=cl; totUnid+=q; ventasCount++;
+  var caja = raw.caja;
+  (caja ? caja.todo : raw.ventas).forEach(function(v){
+    var ex = !!v._extra;
+    var t = caja ? caja.fact(v) : (parseFloat(v.total)||0), q = ex ? 0 : (parseInt(v.cantidad)||0);
+    var cu = ex ? 0 : _repPanoSafeCosto(raw.costoUnit, v), cl = caja ? caja.costo(v, cu) : cu*q;
+    if(!ex && cu<=0 && String(v.segmento||"").toLowerCase()!=="financiacion" && t>0){ sinCostoN++; sinCostoFact+=t; }
+    totIng+=t; totCost+=cl; totUnid+=q; if(!ex) ventasCount++;
     var k=_repVentaKey(v.created_at, group);
-    if(idx[k]!==undefined){ var b=buckets[idx[k]]; b.ing+=t; b.cost+=cl; b.gan+=(t-cl); b.unid+=q; b.nv++; b._ped[v.nro_orden||("#"+v.id)]=1; }
+    if(idx[k]!==undefined){ var b=buckets[idx[k]]; b.ing+=t; b.cost+=cl; b.gan+=(t-cl); b.unid+=q; if(!ex){ b.nv++; b._ped[v.nro_orden||("#"+v.id)]=1; } }
+    if(ex) return;   // los pagos a cuenta no tienen producto/marca asignados
     var pn=v.producto_nombre||("ID "+(v.producto_id||"?"));
     if(!porProd[pn]) porProd[pn]={nombre:pn, fact:0, unid:0};
     porProd[pn].fact+=t; porProd[pn].unid+=q;
@@ -38963,7 +39055,7 @@ function _repPanoRender(){
 
   // KPIs
   h += "<div style='display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:.6rem;margin-bottom:1rem'>";
-  h += _repPanoKpi("💵 Ingresos", fmt(totIng), "var(--acc)");
+  h += _repPanoKpi("💵 Ingresos", fmt(totIng), "var(--acc)", (caja && caja.extraMonto>0) ? "incluye "+fmt(caja.extraMonto)+" de "+caja.extraN+" pago"+(caja.extraN===1?"":"s")+" de pedidos por partes" : "");
   h += _repPanoKpi("💎 Ganancia bruta", fmt(totGan), "var(--green)", margen.toFixed(1)+"% margen");
   h += _repPanoKpi("🧾 Costo productos", fmt(totCost), "var(--red)");
   h += _repPanoKpi("💸 Gastos operativos", fmt(totGasto), "#d4589a");
@@ -39183,7 +39275,7 @@ function _repCargarFinanciero(){
     });
 
     h += _repKPI("💵 Pagos a cuenta", fmt(aCuentaTot), {
-      sub: aCuentaN + " pago"+(aCuentaN===1?"":"s")+" a "+Object.keys(aCuentaPed).length+" pedido"+(Object.keys(aCuentaPed).length===1?"":"s")+" sin saldar · ya están en Ingresos, todavía no en Ventas",
+      sub: aCuentaN + " pago"+(aCuentaN===1?"":"s")+" a "+Object.keys(aCuentaPed).length+" pedido"+(Object.keys(aCuentaPed).length===1?"":"s")+" sin saldar · cuentan el día que entran (también en Panorama y Rentabilidad)",
       color: "var(--acc)"
     });
 
@@ -39233,7 +39325,7 @@ function _repCargarFinanciero(){
       todosCobros.push({tipo:_parcial?"A cuenta":"CC", fecha:p.fecha||p.created_at, monto:p.monto, forma:p.forma_pago, vendedor:p.vendedor_id, registrado:p.registrado_por, nota:_descPago(p)});
     });
     (cobros.ventas||[]).forEach(function(v){
-      todosCobros.push({tipo:"Venta", fecha:v.created_at, monto:v.total, forma:v.forma_cobro, vendedor:v.vendedor_id, registrado:"", nota:(v.nro_orden||"")+" — "+_nomMl(v.producto_nombre,v.producto_id)});
+      todosCobros.push({tipo:"Venta", fecha:v.created_at, monto:v.total, forma:v.forma_cobro, vendedor:v.vendedor_id, registrado:"", nota:(v.nro_orden||"")+" — "+_nomMl(v.producto_nombre,v.producto_id)+(v._neto_caja?" · neto de pagos a cuenta ya registrados (de "+fmt(v.total_bruto)+")":"")});
     });
     todosCobros.sort(function(a,b){return new Date(b.fecha) - new Date(a.fecha);});
 
@@ -40904,8 +40996,8 @@ function _repCargarRentabilidad(){
     apiGet("ventas_transferidas", "select=id,creada_por,asignada_a,items,total,estado,created_at&created_at=gte."+r.desde.toISOString()+"&created_at=lt."+r.hasta.toISOString()+"&limit=5000").catch(function(){return [];}),
     // Combos con sus items (para calcular costo de combos vendidos)
     apiGet("combos", "select=id,nombre,combo_items(producto_id,cantidad,es_decan)&limit=2000").catch(function(){return [];}),
-    // 💵 Pagos a cuenta del período (pedidos sin saldar): se informan aparte, NO son facturación
-    _repObtenerCobrosPeriodo().catch(function(){return {apps:[]};})
+    // 💵 Pagos registrados de pedidos cobrados por partes: cuentan el día que entran (ver _repCaja)
+    _repObtenerAplicaciones()
   ]).then(function(data){
     var vActual = data[0] || [];
     var vAnterior = data[1] || [];
@@ -40914,28 +41006,28 @@ function _repCargarRentabilidad(){
     var productos = data[4] || [];
     var transferidasOriginales = data[5] || [];
     var combos = data[6] || [];
-    var aCuentaTot = 0, aCuentaN = 0, aCuentaPed = {};
-    ((data[7]||{}).apps||[]).forEach(function(a){ if(a.cubrio_pedido_completo) return; aCuentaTot += parseFloat(a.monto_aplicado)||0; aCuentaN++; if(a.pedido_id) aCuentaPed[a.pedido_id]=1; });
-    var aCuentaPedN = Object.keys(aCuentaPed).length;
+    var apps = data[7] || [];
     // Costo unificado con Stock y precios (calcP): u$d redondeado hacia arriba × cotización.
     // Decan = 5 ml sobre los ml reales del frasco + perfumero vacío; combo = suma de componentes.
     var cf = _repCostoFactory(productos, combos), cotiz = cf.cotiz;
     function _costoUnitItem(v){ return cf.costoUnit(v); }
+    // 💵 caja: la plata cuenta el día que entra (pagos a cuenta incluidos, sin contar dos veces al saldar)
+    var caja = _repCaja(apps, vActual, r, cf), cajaAnt = _repCaja(apps, vAnterior, rAnt, cf);
 
     // Helpers para normalizar segmentos (usados también en export Excel)
     // (Las funciones _normalizarSegmento y _labelSegmento están definidas globalmente más abajo)
 
     // ── Cálculos del período actual ──
-    function calcMetricas(ventas, gastos){
+    function calcMetricas(ventas, gastos, cj){
       var fact = 0, costo = 0, unidades = 0;
       var porSeg = {};
       var porVendedor = {};
       var porProducto = {};
-      ventas.forEach(function(v){
-        var t = parseFloat(v.total)||0;
-        var qty = parseInt(v.cantidad)||0;
-        var costoUnit = _costoUnitItem(v);
-        var costoLinea = costoUnit * qty;
+      (cj ? cj.todo : ventas).forEach(function(v){
+        var t = cj ? cj.fact(v) : (parseFloat(v.total)||0);
+        var qty = v._extra ? 0 : (parseInt(v.cantidad)||0);
+        var costoUnit = v._extra ? 0 : _costoUnitItem(v);
+        var costoLinea = cj ? cj.costo(v, costoUnit) : costoUnit * qty;
         fact += t;
         costo += costoLinea;
         unidades += qty;
@@ -40945,8 +41037,8 @@ function _repCargarRentabilidad(){
         porSeg[seg].fact += t;
         porSeg[seg].costo += costoLinea;
         porSeg[seg].unid += qty;
-        porSeg[seg].ventas += 1;
-        if(v.producto_nombre)porSeg[seg].productos[v.producto_nombre]=true;
+        if(!v._extra) porSeg[seg].ventas += 1;
+        if(v.producto_nombre && !v._extra)porSeg[seg].productos[v.producto_nombre]=true;
         // Por vendedor — separado por origen
         var vid = v.vendedor_id || 0;
         if(!porVendedor[vid]) porVendedor[vid] = { fact:0, costo:0, unid:0, ventas:0,
@@ -41011,8 +41103,8 @@ function _repCargarRentabilidad(){
       };
     }
 
-    var m = calcMetricas(vActual, gActual);
-    var mAnt = calcMetricas(vAnterior, gAnterior);
+    var m = calcMetricas(vActual, gActual, caja);
+    var mAnt = calcMetricas(vAnterior, gAnterior, cajaAnt);
 
     // Detalle de gastos por categoría (concepto)
     var gastosPorConcepto = {};
@@ -41046,8 +41138,8 @@ function _repCargarRentabilidad(){
     var h = "";
     h += _repHeaderSeccion("💎 Rentabilidad", "rentabilidad");
     h += (function(){
-      var s1=_repSerieTiempo(vActual, r, function(v){return parseFloat(v.total)||0;});
-      var s2=_repSerieTiempo(vActual, r, function(v){return (parseFloat(v.total)||0)-_costoUnitItem(v)*(parseInt(v.cantidad)||0);});
+      var s1=_repSerieTiempo(caja.todo, r, function(v){return caja.fact(v);});
+      var s2=_repSerieTiempo(caja.todo, r, function(v){return caja.fact(v)-caja.costo(v, v._extra?0:_costoUnitItem(v));});
       return _repBloqueEvol("📈 Evolución de facturación y ganancia","Cómo se movieron dentro del período elegido.", s1.labels, [{nombre:"Facturación",color:"#c9963a",datos:s1.datos},{nombre:"Ganancia",color:"#4caf82",datos:s2.datos}]);
     })();
     h += "<div style='font-size:.7rem;color:var(--tx3);margin-bottom:.8rem;padding:.5rem .7rem;background:var(--sur2);border-radius:7px'>📐 Cotización USD usada: <b style='color:var(--acc)'>$"+cotiz+"</b> · Costo = (costo_ind + costo_log) redondeado al u$d superior × cotización, igual que en Stock y precios · decan = 5 ml del frasco + perfumero · combo = sus componentes"+(cmp.enCurso?" · Comparativa: "+cmp.etiqueta+" ("+_repFmtRangoCorto({desde:rAnt.desde,hasta:rAnt.hasta})+")":" · Comparativa: "+_repFmtRangoCorto(rAnt))+"</div>";
@@ -41061,7 +41153,7 @@ function _repCargarRentabilidad(){
     h += "<div style='font-size:1.4rem;font-weight:800;color:var(--green);line-height:1.1'>"+fmt(m.fact)+"</div>";
     h += "<div style='font-size:.66rem;color:var(--tx3);margin-top:.15rem'>"+m.unidades+" unidades · "+m.pedidos+" pedidos · ticket "+fmt(Math.round(m.ticketProm))+" por pedido</div>";
     h += deltaTxt(m.fact, mAnt.fact);
-    if(aCuentaTot>0) h += "<div style='font-size:.62rem;color:var(--acc);margin-top:.3rem;padding-top:.3rem;border-top:1px dashed var(--bd)' title='Plata cobrada a cuenta de pedidos que todavía no se saldaron. No se suma a la facturación ni a la ganancia: la venta (y su costo) se registra cuando el pedido se paga completo.'>💵 + "+fmt(aCuentaTot)+" a cuenta de "+aCuentaPedN+" pedido"+(aCuentaPedN===1?"":"s")+" sin saldar <span style='color:var(--tx3)'>("+aCuentaN+" pago"+(aCuentaN===1?"":"s")+" · no computado)</span></div>";
+    h += _repNotaCaja(caja, fmt);
     h += "</div>";
 
     h += "<div style='background:var(--sur);border:1px solid var(--bd);border-radius:10px;padding:.85rem 1rem'>";
@@ -41338,6 +41430,7 @@ function _labelSegmento(seg){
     especial: "Especial",
     "precio unico": "Precio único",
     financiacion: "Cuota de financiación",
+    a_cuenta: "Pagos a cuenta",
     otro: "Otro"
   };
   return labels[seg] || seg;
@@ -41400,10 +41493,11 @@ function _repObtenerPeriodoAnterior(){
   var desdeISO = _repDiaKey(desdeAnt), hastaISO = _repDiaKey(hastaAnt);
   return Promise.all([
     apiGetAll("cc_pagos", "select=monto&fecha=gte."+desdeISO+"&fecha=lt."+hastaISO+"&limit=5000").catch(function(){return [];}),
-    apiGetAll("ventas", "select=total&"+_REP_ESTADOS_V+"&forma_cobro=neq.pendiente&created_at=gte."+desdeAnt.toISOString()+"&created_at=lt."+hastaAnt.toISOString()+"&limit=5000").catch(function(){return [];})
+    apiGetAll("ventas", "select=total,nro_orden&"+_REP_ESTADOS_V+"&forma_cobro=neq.pendiente&created_at=gte."+desdeAnt.toISOString()+"&created_at=lt."+hastaAnt.toISOString()+"&limit=5000").catch(function(){return [];}),
+    _repObtenerAplicaciones()
   ]).then(function(res){
     var t1 = (res[0]||[]).reduce(function(s,p){return s+(parseFloat(p.monto)||0);}, 0);
-    var t2 = (res[1]||[]).reduce(function(s,v){return s+(parseFloat(v.total)||0);}, 0);
+    var t2 = _repCaja(res[2]||[], res[1]||[], null, null).ventasNeto().reduce(function(s,v){return s+(parseFloat(v.total)||0);}, 0);
     return { totalIngresos: t1 + t2, desde: desdeAnt, hasta: hastaAnt };
   });
 }
