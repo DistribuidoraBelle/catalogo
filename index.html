@@ -1,7 +1,7 @@
 <!DOCTYPE html>
 <html lang="es">
 <head>
-<!-- BELLE_BUILD 20260920-0700 inicio-portada -->
+<!-- BELLE_BUILD 20260923-0200 auditoria-pedidos -->
 <meta charset="UTF-8">
 <link rel="icon" type="image/svg+xml" href="favicon.svg">
 <meta name="viewport" content="width=device-width,initial-scale=1.0">
@@ -2214,7 +2214,12 @@ function apiGet(t,f){
 function apiPost(t,d){
   var tok = _sbToken();
   var auth = tok ? "Bearer "+tok : "Bearer "+SB_KEY;
-  return fetch(SB_URL+"/rest/v1/"+t,{method:"POST",headers:{"Content-Type":"application/json","apikey":SB_KEY,"Authorization":auth,"Prefer":"return=representation"},body:JSON.stringify(d)}).then(function(r){return r.json();});
+  // FIX 2026-09-23: un 4xx/5xx con cuerpo JSON resolvía como si fuera éxito (se reservaba stock, se abría
+  // WhatsApp y se vaciaba el carrito sin pedido en la base). Ahora un error HTTP rechaza la promesa.
+  return fetch(SB_URL+"/rest/v1/"+t,{method:"POST",headers:{"Content-Type":"application/json","apikey":SB_KEY,"Authorization":auth,"Prefer":"return=representation"},body:JSON.stringify(d)}).then(function(r){
+    if(!r.ok){ return r.text().then(function(txt){ throw new Error("HTTP "+r.status+": "+txt.slice(0,160)); }); }
+    return r.json();
+  });
 }
 // POST sin representacion (Prefer: return=minimal). Necesario cuando el cliente no tiene
 // permiso SELECT por RLS (ej: avisos_stock es solo-staff para leer): pedir RETURNING haria
@@ -8492,6 +8497,9 @@ function _cosmAplicarCombo(prodId,combo){
 }
 function addCosm(prodId,cajaCant,cajaPrecio){
   var p=allProds.find(function(x){return x.id===prodId;}); if(!p) return;
+  // FIX 2026-09-23: las cajas no tenían tope por stock (se podían pedir más unidades de las que hay)
+  var _enCarr=0; Object.values(cart||{}).forEach(function(c){ if(c&&c.isCosm&&c.prodId===prodId) _enCarr+=(c.qty||0)*(c.cajaCant||1); });
+  if(_enCarr+(cajaCant||1) > (p.stock_actual||0)){ showToast("Sin stock suficiente de "+(p.nombre||"").split(" - ").pop()); return; }
   var key="cosm_"+prodId+"_"+cajaCant;
   if(cart[key]) cart[key].qty++;
   else cart[key]={id:key,prodId:prodId,nombre:p.nombre+" (Caja x"+cajaCant+")",qty:1,cajaCant:cajaCant,cajaLabel:(cajaCant<=1?"1 unidad":"Caja x"+cajaCant),precio:cajaPrecio,isCosm:true,pData:{pm:cajaPrecio,pe:cajaPrecio,pi:cajaPrecio}};
@@ -9179,18 +9187,24 @@ function _catChequearAtraso(clienteId, bloqMode){
   var hoyISO = hoy.toISOString().slice(0,10);
   if(bloqMode === 'cuota'){
     // Buscar cuotas vencidas sin pagar (cc_cuotas con fecha_vencimiento < hoy y pagada=false)
-    return apiGet("cc_cuotas",
-      "select=id,nro_cuota,monto,monto_pagado,fecha_vencimiento,pedido_id&cliente_id=eq."+clienteId+
-      "&pagada=eq.false&fecha_vencimiento=lt."+hoyISO+"&limit=20"
-    ).then(function(rows){
+    // FIX 2026-09-23: cc_cuotas no tiene cliente_id ni pagada (la consulta daba 400 y el catch dejaba comprar).
+    // Se buscan los pedidos abiertos del cliente y las cuotas vencidas de esos pedidos.
+    return apiGet("pedidos_catalogo","select=id&cliente_id=eq."+clienteId+"&estado=not.in.(cancelado,cobrado)&limit=200").then(function(peds){
+      var ids=(Array.isArray(peds)?peds:[]).map(function(x){return x.id;}).filter(Boolean);
+      if(!ids.length) return [];
+      return apiGet("cc_cuotas",
+        "select=id,nro_cuota,monto,monto_pagado,fecha_vencimiento,pedido_id&pedido_id=in.("+ids.join(",")+")"+
+        "&estado=in.(pendiente,parcial,vencida)&fecha_vencimiento=lt."+hoyISO+"&limit=20");
+    }).then(function(rows){
       if(!Array.isArray(rows) || !rows.length) return {bloquear:false};
       return {bloquear:true, motivo:'cuota', items:rows};
     });
   } else if(bloqMode === 'pedido'){
     // Buscar pedidos con fecha_vencimiento_pago < hoy y sin cobrar
+    // FIX 2026-09-23: la columna es cc_fecha_vencimiento (fecha_vencimiento_pago no existe → 400 → no bloqueaba)
     return apiGet("pedidos_catalogo",
-      "select=id,nro_orden,total,cobrado_total,fecha_vencimiento_pago&cliente_id=eq."+clienteId+
-      "&estado=not.in.(cancelado,cobrado)&fecha_vencimiento_pago=lt."+hoyISO+"&limit=20"
+      "select=id,nro_orden,total,cobrado_total,cc_fecha_vencimiento&cliente_id=eq."+clienteId+
+      "&estado=not.in.(cancelado,cobrado)&cc_fecha_vencimiento=lt."+hoyISO+"&limit=20"
     ).then(function(rows){
       if(!Array.isArray(rows) || !rows.length) return {bloquear:false};
       // Filtrar los que tienen saldo > 0
@@ -9515,7 +9529,7 @@ window._catCobState = {           // estado del formulario
 function _catCobCalcSubtotal(){
   var items = Object.values(cart);
   if(!items.length) return 0;
-  var perfs = items.filter(function(i){return !i.isDecan && !i.isCosm;});
+  var perfs = items.filter(function(i){return !i.isDecan && !i.isCosm && !i.isBonificado;});   // FIX 2026-09-23: igual que renderDrawer (el regalo no suma unidades)
   var totalUnits = perfs.reduce(function(s,i){return s+(i.qty||0);},0);
   var total = 0;
   items.forEach(function(item){
@@ -10272,7 +10286,7 @@ function _catEvaluarRestricciones(){
 function _catTotalCarrito(){
   var total = 0;
   Object.values(cart||{}).forEach(function(it){
-    var precioU = parseFloat(it.precio_u||0);
+    var precioU = parseFloat((it.precio!==undefined?it.precio:it.precio_u)||0);   // FIX 2026-09-23: precio_u no existe en el carrito (siempre daba 0)
     var qty = parseInt(it.qty||0);
     if(!isNaN(precioU) && !isNaN(qty)) total += precioU * qty;
   });
@@ -11394,7 +11408,9 @@ function _sendWAOriginal(){
   }
   var total=0;var pedidoItems=[];
   var msg="Pedido Web - Distribuidora Belle\n\n";
-  var nroOrden="WEB-"+Math.floor(100000+Math.random()*900000);
+  // FIX 2026-09-23: 6 dígitos al azar chocaban con >50% de probabilidad al pasar los ~1.100 pedidos (no hay
+  // UNIQUE en la base). Ahora el número sale del reloj (único por milisegundo, ventana de 15 min) + azar.
+  var nroOrden="WEB-"+String(100000+((Date.now()*7+Math.floor(Math.random()*7))%900000));
   items.forEach(function(item){
     var price,sub,segL;
     if(item.isBonificado){
@@ -11578,6 +11594,8 @@ function _sendWAOriginal(){
   apiPost("pedidos_catalogo",pedidoData).then(function(rows){
     // FEAT CC v2 (2026-05-14): si es CC y hay plan, generar cuotas automáticamente
     var pedCreado = Array.isArray(rows) && rows.length ? rows[0] : null;
+    // FIX 2026-09-23: sin fila creada no hay pedido → cortar acá (nada de reservar stock ni vaciar el carrito)
+    if(!pedCreado || !pedCreado.id){ throw new Error("Pedido no registrado: "+((rows && (rows.message||rows.hint||rows.details))||"sin respuesta de la base")); }
     if(_esCCCheckout && pedCreado && pedCreado.id && _planElegido){
       // Generar cuotas con el plan elegido por el cliente
       _catGenerarCuotasCliente(pedCreado.id, ctx.cliente_id, _planElegido, total + (ctx.costo_envio||0)).catch(function(e){
@@ -11755,6 +11773,8 @@ function _sendWAOriginal(){
       if(cr&&cr.combo_items)cr.combo_items.forEach(function(ci2){ if(ci2.es_decan)return; var pid=ci2.producto_id; if(pid)_req[pid]=(_req[pid]||0)+((ci2.cantidad||1)*(comboItem.qty||1)); });
     });
     items.forEach(function(it){ if(it.isBonificado&&it.prodId){var pid=parseInt(it.prodId);if(pid)_req[pid]=(_req[pid]||0)+(it.qty||1);} });
+    // FIX 2026-09-23: cajas de cosmética también se revalidan (qty × unidades por caja)
+    items.forEach(function(it){ if(it.isCosm&&it.prodId){var pid=parseInt(it.prodId);if(pid)_req[pid]=(_req[pid]||0)+((it.qty||1)*(it.cajaCant||1));} });
     var _ids=Object.keys(_req);
     if(!_ids.length){ _crearPedidoBelle(); return; }
     var _evaluar=function(_fr){

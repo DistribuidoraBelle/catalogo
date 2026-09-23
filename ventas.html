@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<!-- BELLE_BUILD 20260922-2230 cobros-a-cuenta-visibles -->
+<!-- BELLE_BUILD 20260923-0200 auditoria-cobros-stock -->
 <html lang="es">
 <head>
 <meta charset="UTF-8">
@@ -4340,6 +4340,10 @@ function _vcContinuarPedido(clienteId,clienteNombre,accion,items,total,segKey,sk
     pedidoData.estado="cobrado";
     pedidoData.estado_envio="entregado";
     pedidoData.confirmado_at=new Date().toISOString();
+    // FIX 2026-09-23: antes nacía "cobrado" con cobrado_total null y sin items_cobrados (Gestionar lo mostraba
+    // como "Ya cobrado $0" con todos los ítems pendientes → se podía volver a cobrar y duplicar venta/stock)
+    pedidoData.cobrado_total=total; pedidoData.cobrado_parcial=total; pedidoData.cobrado_at=pedidoData.confirmado_at;
+    pedidoData.forma_pago="efectivo"; pedidoData.items_cobrados=JSON.stringify(items.map(function(_,i){return i;}));
   } else {
     pedidoData.estado="reservado";
     pedidoData.estado_envio="en_preparacion";
@@ -5516,6 +5520,84 @@ window._ccAplicarPagoACuotasPedido = function(pedidoId, monto){
 // FIX 2026-05-18: cuando un pedido CC queda completamente saldado, consolidarlo:
 // descontar stock + crear ventas + marcar confirmado. Idempotente — si ya está
 // confirmado, no hace nada.
+// ═══════════════════════════════════════════════════════════════════════
+// 🧾 _pedSaldarItems (2026-09-23): ÚNICO lugar que convierte ítems de un pedido en venta.
+// Para cada índice pedido (o todos los que falten) que NO figure en items_cobrados:
+//   · stock: reserva → vendido_X (o stock_actual → vendido_X si el pedido nació sin reserva)
+//   · fila en ventas (con nro_orden del pedido) + movimientos_stock
+// y al final marca esos índices en items_cobrados. Idempotente: lo que ya está en
+// items_cobrados no se vuelve a vender aunque se llame dos veces o desde dos flujos distintos.
+// ═══════════════════════════════════════════════════════════════════════
+window._pedSinReserva = function(ped){ return !!ped && ped.origen==='transferencia' && ped.con_reserva===false; };
+window._pedSaldarItems = function(pedidoId, opts){
+  opts = opts || {};
+  if(!pedidoId) return Promise.resolve({hechos:[]});
+  return apiGet('pedidos_catalogo','select=*&id=eq.'+pedidoId+'&limit=1').then(function(rows){
+    var ped = rows && rows[0]; if(!ped) return {hechos:[]};
+    var items = ped.items;
+    try{ if(typeof items==='string') items=JSON.parse(items); if(typeof items==='string') items=JSON.parse(items); }catch(e){ items=[]; }
+    if(!Array.isArray(items)) items=[];
+    var cob = ped.items_cobrados;
+    try{ if(typeof cob==='string') cob=JSON.parse(cob); if(typeof cob==='string') cob=JSON.parse(cob); }catch(e){ cob=[]; }
+    if(!Array.isArray(cob)) cob=[];
+    var nroOrdenChk = ped.nro_orden || ('PED-'+pedidoId);
+    var todos = items.map(function(_,i){ return i; });
+    // Pedidos viejos (ventas ya creadas por flujos anteriores pero sin items_cobrados): dejar constancia y no duplicar
+    var legacy = cob.length ? Promise.resolve(false)
+      : apiGet('ventas','select=id&nro_orden=eq.'+encodeURIComponent(nroOrdenChk)+'&estado=not.in.(cancelada,eliminada_admin)&limit=1').then(function(v){ return Array.isArray(v) && v.length>0; }).catch(function(){ return false; });
+    return legacy.then(function(yaVendido){
+    if(yaVendido){
+      return apiPatch('pedidos_catalogo', {items_cobrados: JSON.stringify(todos)}, 'id=eq.'+pedidoId).then(function(){ return {hechos:[], legacy:true, ped:ped}; });
+    }
+    var pedidos = Array.isArray(opts.idxs) ? opts.idxs : todos;
+    var idxs = pedidos.filter(function(i,k){ return items[i] && cob.indexOf(i)<0 && pedidos.indexOf(i)===k; });
+    if(!idxs.length) return {hechos:[], ped:ped};
+    var vendId = opts.vendId || ped.vendedor_id || VENDEDOR_ID;
+    var forma = opts.forma || ped.forma_pago || 'efectivo';
+    var nroOrden = ped.nro_orden || ('PED-'+pedidoId);
+    var periodo = (typeof periodoActual!=='undefined' && periodoActual) ? periodoActual : 'general';
+    var sinReserva = _pedSinReserva(ped);
+    var origenV = opts.origen || (ped.origen==='transferencia' ? 'transferencia' : (String(nroOrden).indexOf('WEB-')===0 ? 'catalogo' : 'reserva'));
+    var motivo = opts.motivo || ('Venta '+nroOrden);
+    var usuario = (typeof VENDEDOR_NOMBRE!=='undefined' && VENDEDOR_NOMBRE) ? VENDEDOR_NOMBRE : 'sistema';
+    var proms = [];
+    idxs.forEach(function(i){
+      var it = items[i];
+      var qty = parseInt(it.qty)||1, unidades = qty*(parseInt(it.cajaCant)||1);
+      var esDecan = !!it.isDecan || it.segmento==='decan';
+      var cid = comboIdDeItem(it);
+      var base = { vendedor_id:vendId, producto_nombre:it.nombre, cantidad:qty, precio_unitario:it.precio||0, total:it.total||0,
+                   periodo:periodo, estado:'confirmada', origen:origenV, nro_orden:nroOrden, forma_cobro:forma,
+                   descuento:it.descuento||0, descuento_motivo:it.descuento_motivo||'' };
+      if(cid){
+        proms.push(apiGet('combo_items','select=producto_id,cantidad&es_decan=not.is.true&combo_id=eq.'+cid).then(function(ci){
+          if(!Array.isArray(ci)) return;
+          return Promise.all(ci.filter(function(c){ return c.producto_id; }).map(function(c){
+            var cant = (c.cantidad||1)*qty;
+            return patchStockFresco(c.producto_id, sinReserva ? _dV(vendId,+cant,{stock_actual:-cant}) : _dV(vendId,+cant,{reserva:-cant}), motivo+' (combo)');
+          }));
+        }).catch(function(e){ console.error('[saldar combo]', e); }));
+        proms.push(apiPost('ventas', Object.assign(base, {producto_id:null, segmento:'combo'})));
+        return;
+      }
+      if(esDecan || !_esProductoNumerico(it.producto_id)){
+        if(esDecan) proms.push(apiPost('ventas', Object.assign(base, {producto_id:null, segmento:'decan'})));
+        return;
+      }
+      var pid = parseInt(it.producto_id,10);
+      proms.push(patchStockFresco(pid, sinReserva ? _dV(vendId,+unidades,{stock_actual:-unidades}) : _dV(vendId,+unidades,{reserva:-unidades}), motivo));
+      proms.push(apiPost('ventas', Object.assign(base, {producto_id:pid, segmento:it.segmento||'x1'})));
+      proms.push(apiPost('movimientos_stock', { producto_id:pid, producto_nombre:it.nombre, tipo:'venta', cantidad:unidades, motivo:motivo, usuario:usuario, periodo:periodo })
+        .catch(function(e){ console.error('[saldar mov_stock]', e); }));
+    });
+    var merged = cob.concat(idxs);
+    return Promise.all(proms).then(function(){
+      return apiPatch('pedidos_catalogo', {items_cobrados: JSON.stringify(merged)}, 'id=eq.'+pedidoId);
+    }).then(function(){ return {hechos:idxs, ped:ped}; });
+    });
+  });
+};
+
 window._ccVerificarYConsolidarPedidoCC = function(pedidoId){
   if(!pedidoId) return Promise.resolve();
   return Promise.all([
@@ -5560,102 +5642,11 @@ window._ccVerificarYConsolidarPedidoCC = function(pedidoId){
       cobrado_total: parseFloat(ped.total) || 0
     }, 'id=eq.'+pedidoId));
 
-    // 2) Para cada item: descontar stock (reserva → vendido) + crear venta
-    items.forEach(function(it){
-      // Stock vendido va a la columna del RECEPTOR FINAL (quien cobra = vendId del pedido)
-      // David=1 (vendido_david), Facu=2 (vendido_facu). Marcela no cobra, solo transfiere.
-      var colVendido = 'vendido_david';
-      if(vendId === 2) colVendido = 'vendido_facu';
-
-      // Combos
-      var _cid=comboIdDeItem(it);
-      if(_cid){
-        proms.push(apiGet('combo_items','select=producto_id,cantidad&es_decan=not.is.true&combo_id=eq.'+_cid).then(function(ci){
-          if(!Array.isArray(ci)) return;
-          var stockDelta = {};
-          return Promise.all(ci.filter(function(cit){return cit.producto_id;}).map(function(cit){
-            var cantTotal = (cit.cantidad||1)*(it.qty||1);
-            var delta = {reserva:-cantTotal};
-            delta[colVendido] = +cantTotal;
-            return patchStockFresco(cit.producto_id, delta, 'CC saldado combo '+nroOrden);
-          }));
-        }).catch(function(e){console.error('[cc consolidar combo]',e);}));
-        // Venta del combo
-        if(vendId){
-          proms.push(apiPost('ventas', {
-            vendedor_id: vendId,
-            producto_id: null,
-            producto_nombre: it.nombre,
-            cantidad: it.qty || 1,
-            precio_unitario: it.precio || 0,
-            segmento: 'combo',
-            total: it.total || 0,
-            periodo: (typeof periodoActual !== 'undefined' ? periodoActual : 'general'),
-            estado: 'confirmada',
-            origen: 'catalogo',
-            nro_orden: nroOrden,
-            forma_cobro: ped.forma_pago || 'cuenta_corriente',
-            descuento: it.descuento || 0,
-            descuento_motivo: 'Venta CC (consolidación al saldar)'
-          }).catch(function(e){console.error('[cc consolidar venta combo]',e);}));
-        }
-        return;
-      }
-      // Decants o sin producto_id: solo crear venta, no tocar stock
-      if(it.isDecan || !it.producto_id){
-        if(vendId && it.isDecan){
-          proms.push(apiPost('ventas', {
-            vendedor_id: vendId,
-            producto_id: it.producto_id || null,
-            producto_nombre: it.nombre,
-            cantidad: it.qty || 1,
-            precio_unitario: it.precio || 0,
-            segmento: 'decan',
-            total: it.total || 0,
-            periodo: (typeof periodoActual !== 'undefined' ? periodoActual : 'general'),
-            estado: 'confirmada',
-            origen: 'catalogo',
-            nro_orden: nroOrden,
-            forma_cobro: ped.forma_pago || 'cuenta_corriente',
-            descuento: it.descuento || 0,
-            descuento_motivo: 'Venta CC (consolidación al saldar)'
-          }).catch(function(e){console.error('[cc consolidar venta decan]',e);}));
-        }
-        return;
-      }
-      // Producto normal: stock + venta
-      var pid = it.producto_id;
-      var deltaStock = {reserva:-(it.qty||1)*(it.cajaCant||1)};
-      deltaStock[colVendido] = +(it.qty||1)*(it.cajaCant||1);
-      proms.push(patchStockFresco(pid, deltaStock, 'CC saldado '+nroOrden).catch(function(e){console.error('[cc consolidar stock]',e);}));
-      proms.push(apiPost('movimientos_stock', {
-        producto_id: pid,
-        producto_nombre: it.nombre,
-        tipo: 'venta',
-        cantidad: it.qty || 1,
-        motivo: 'Venta CC saldada '+nroOrden+' (consolidación)',
-        usuario: (typeof VENDEDOR_NOMBRE !== 'undefined' ? VENDEDOR_NOMBRE : 'sistema'),
-        periodo: (typeof periodoActual !== 'undefined' ? periodoActual : 'general')
-      }).catch(function(e){console.error('[cc consolidar mov_stock]',e);}));
-      if(vendId){
-        proms.push(apiPost('ventas', {
-          vendedor_id: vendId,
-          producto_id: pid,
-          producto_nombre: it.nombre,
-          cantidad: it.qty || 1,
-          precio_unitario: it.precio || 0,
-          segmento: it.segmento || 'pi',
-          total: it.total || 0,
-          periodo: (typeof periodoActual !== 'undefined' ? periodoActual : 'general'),
-          estado: 'confirmada',
-          origen: 'catalogo',
-          nro_orden: nroOrden,
-          forma_cobro: ped.forma_pago || 'cuenta_corriente',
-          descuento: it.descuento || 0,
-          descuento_motivo: 'Venta CC (consolidación al saldar)'
-        }).catch(function(e){console.error('[cc consolidar venta]',e);}));
-      }
-    });
+    // 2) Ítems: stock (reserva → vendido) + venta, SOLO los que todavía no se cobraron por ítem
+    //    (items_cobrados). Antes recorría todos los ítems y duplicaba lo ya cobrado desde "Gestionar".
+    proms.push(_pedSaldarItems(pedidoId, { vendId: vendId||undefined, forma: ped.forma_pago||'cuenta_corriente', origen:'catalogo',
+                                          motivo:'Venta CC saldada '+nroOrden+' (consolidación)' })
+      .catch(function(e){ console.error('[cc consolidar items]', e); }));
 
     // 3) Log de consolidación
     proms.push(apiPost('pedidos_estados_log', {
@@ -6816,7 +6807,7 @@ function _cobrarProductosCC(pedidoId, clienteId, totalPed){
 
     // Fix #2: si el pedido no es del vendedor que cobra, transferirlo
     // ESCRIBIR AMBOS campos para mantener consistencia con el sistema admin
-    var _patchObj={items_cobrados:JSON.stringify(nuevoCobrados),cobrado_parcial:nuevoCobrado,cobrado_total:nuevoCobrado};
+    var _patchObj={cobrado_parcial:nuevoCobrado,cobrado_total:nuevoCobrado};   // items_cobrados lo marca _pedSaldarItems al registrar venta+stock
     if(esSaldado){_patchObj.estado="cobrado";_patchObj.confirmado_cobro=true;}
     else _patchObj.estado="cobrado_parcial";
     var _vAnterior=p.vendedor_id||null;
@@ -6832,10 +6823,10 @@ function _cobrarProductosCC(pedidoId, clienteId, totalPed){
       }
     }
 
-    var promises=[
-      apiPatch("pedidos_catalogo",_patchObj,"id=eq."+pedidoId)
-    ];
-    // Registrar pago en sistema FIFO nuevo (cc_pagos + aplicación al pedido)
+    var promises=[];
+    // Registrar pago en sistema FIFO nuevo (cc_pagos + aplicación al pedido).
+    // Primero el pago y las cuotas; el estado del pedido se escribe DESPUÉS, así la
+    // consolidación CC (si todas las cuotas quedaron pagas) no se saltea por ver confirmado_cobro=true.
     promises.push(
       apiPost("cc_pagos",{
         cliente_id: clienteId,
@@ -6861,7 +6852,14 @@ function _cobrarProductosCC(pedidoId, clienteId, totalPed){
         }
       })
     );
-    return Promise.all(promises);
+    return Promise.all(promises).then(function(){
+      return apiPatch("pedidos_catalogo",_patchObj,"id=eq."+pedidoId);
+    }).then(function(){
+      // 🐛 FIX 2026-09-23: este flujo nunca registraba la venta ni movía el stock (pedidos quedaban
+      // "cobrados" sin ventas: WEB-361008, WEB-621459, WEB-766137). Ahora los productos cobrados salen
+      // de reserva y generan su venta; si el pedido quedó saldado, también los que faltaban.
+      return _pedSaldarItems(pedidoId,{ idxs:(esSaldado?null:idxs), forma:'efectivo', motivo:'Cobro CC '+(p.nro_orden||('#'+pedidoId)) });
+    });
   }).then(function(){
     // Si el pedido se saldó completo y vino transferido por Marcela, crear comisión
     if(_esSaldadoCC && _pedSnapshotCC){
@@ -6909,7 +6907,6 @@ function _confirmarCobrarCC(pedidoId, clienteId, totalPed, cobradoHasta){
     }
 
     return Promise.all([
-      apiPatch("pedidos_catalogo",_patchPed,"id=eq."+pedidoId),
       apiPost("cc_pagos",{
         cliente_id: clienteId,
         monto: monto,
@@ -6933,7 +6930,14 @@ function _confirmarCobrarCC(pedidoId, clienteId, totalPed, cobradoHasta){
           });
         }
       })
-    ]);
+    ]).then(function(){
+      // el estado se escribe después del pago/cuotas (ver _cobrarProductosCC)
+      return apiPatch("pedidos_catalogo",_patchPed,"id=eq."+pedidoId);
+    }).then(function(){
+      // 🐛 FIX 2026-09-23: al saldar por monto, registrar venta + stock de todo lo que faltaba
+      if(!esSaldado) return;
+      return _pedSaldarItems(pedidoId,{ forma:forma, motivo:'Cobro CC '+((pV&&pV.nro_orden)||('#'+pedidoId)) });
+    });
   }).then(function(){
     // Si se saldó completo y vino transferido por Marcela → crear comisión
     if(esSaldado && _pedSnapshot){
@@ -7293,7 +7297,7 @@ function executeVenta(items,reservaDecs){
         vendedor_id:VENDEDOR_ID,nro_orden:nroOrden,
         producto_id:item.prodId,producto_nombre:item.nombre,cantidad:item.qty,
         precio_unitario:0,segmento:"bonificado",total:0,periodo:periodoActual,estado:"confirmada",
-        origen:"vendedor",descuento:0,descuento_motivo:"Regalo por compra"
+        forma_cobro:getFormaCobro(),origen:"vendedor",descuento:0,descuento_motivo:"Regalo por compra"
       }));
       promises.push(patchStockFresco(item.prodId,{stock_actual:-item.qty},'Bonificado'));
       try{promises.push(api("POST","movimientos_stock",{
@@ -7312,7 +7316,7 @@ function executeVenta(items,reservaDecs){
         producto_nombre:item.nombre,cantidad:item.qty,
         precio_unitario:item.price,segmento:"combo",nro_orden:nroOrden,
         total:sub,periodo:periodoActual,nro_orden:nroOrden,estado:"confirmada",
-        origen:"vendedor",descuento:item.descuento||0,
+        forma_cobro:getFormaCobro(),origen:"vendedor",descuento:item.descuento||0,
         descuento_motivo:item.descMotivo||""
       }));
       // Reduce stock for each component x qty of combo sold — siempre BD fresca
@@ -7331,7 +7335,7 @@ function executeVenta(items,reservaDecs){
         precio_unitario:item.price,
         segmento:item.isDecan?"decan":item.precioManual?"especial":item.seg,
         total:sub,periodo:periodoActual,nro_orden:nroOrden,estado:"confirmada",
-        origen:"vendedor",descuento:item.descuento||0,
+        forma_cobro:getFormaCobro(),origen:"vendedor",descuento:item.descuento||0,
         descuento_motivo:item.descMotivo||""
       }));
       if(!item.isDecan){
@@ -8058,6 +8062,9 @@ function _mgConfirmarCobro(){
 
   var montoCobrar=seleccionados.reduce(function(s,x){return s+x.total;},0);
   var idxs=seleccionados.map(function(x){return x.idx;});
+  // 🐛 FIX 2026-09-23: un pedido ya saldado no se vuelve a cobrar (los cobros por monto no marcaban
+  // items_cobrados y todos los ítems figuraban "Pendiente": re-cobrarlos duplicaba venta y stock)
+  if(rec.estado==='cobrado' && (parseFloat(rec.cobrado_total)||0) >= (parseFloat(rec.total)||0) - 0.5){ toast('Este pedido ya está cobrado completo','twarn'); return; }
 
   // Sistema unificado: todo va por pedidos_catalogo (no más tipo='transferida' legacy)
 
@@ -8112,7 +8119,10 @@ function _mgConfirmarCobro(){
   // vale false por DEFAULT de la base AUNQUE el stock sí esté en reserva. Sin el filtro por
   // transferida_por_id, el cobro descontaba de stock_actual (doble descuento) y dejaba la
   // reserva trabada para siempre. Mismo criterio que los badges de renderPedCard.
-  var _sinReserva=(!!rec.transferida_por_id && rec.con_reserva===false);
+  // 🐛 FIX 2026-09-23: la heurística transferida_por_id+con_reserva=false marcaba como "sin reserva" a
+  // cualquier pedido auto-transferido al cobrarlo otro vendedor (doble descuento de stock). Solo los
+  // pedidos creados por "Transferir venta" sin tildar reserva nacen sin stock apartado.
+  var _sinReserva=_pedSinReserva(rec);
   seleccionados.forEach(function(s){
     var it=items[s.idx];if(!it)return;
     var esDecanItem=it.isDecan||it.segmento==='decan';
@@ -9253,7 +9263,7 @@ function cancelarPedidoWeb(pedId,btn){
     // en cualquier otro pedido vale false por DEFAULT de la base aunque el stock SÍ esté
     // reservado. Sin el filtro por transferida_por_id, cancelar NO devolvía nada al inventario
     // (caso ORD-995806: 3 unidades quedaron fuera del stock). Mismo criterio que los badges.
-    var _sinReservaCanc=(!!ped.transferida_por_id && ped.con_reserva===false);
+    var _sinReservaCanc=_pedSinReserva(ped);   // FIX 2026-09-23: mismo criterio que el cobro (ver _pedSinReserva)
     // Columna vendido_X = vendedor que COBRÓ (receptor final del dinero y del descuento de stock)
     var colVendido = 'vendido_david';
     if(ped.vendedor_id === 2) colVendido = 'vendido_facu';
@@ -9265,7 +9275,9 @@ function cancelarPedidoWeb(pedId,btn){
     if(Array.isArray(items)) items.forEach(function(it,_itIdx){
       // El item se devuelve desde vendido_X SOLO si ese item puntual fue cobrado
       // (items_cobrados); si el pedido figura cobrado sin detalle, se usa el flag global.
-      var _itCobrado=_idxCobrados.length?(_idxCobrados.indexOf(_itIdx)>=0):teniaCobro;
+      // 🐛 FIX 2026-09-23: si no hay detalle por ítem, el stock salió de reserva SOLO si el pedido quedó
+      // saldado (estado cobrado). Un cobro parcial por monto no mueve stock: sigue en reserva.
+      var _itCobrado=_idxCobrados.length?(_idxCobrados.indexOf(_itIdx)>=0):(ped.estado==='cobrado'||ped.confirmado_cobro===true);
       // Sin reserva y sin cobrar → ese item nunca movió stock: no devolver nada.
       if(_sinReservaCanc && !_itCobrado) return;
       // Combos
@@ -11321,7 +11333,9 @@ function _confirmarReservarPedContinuar(){
   if(_editId){
     // EDITAR — leer ítems originales ANTES de actualizar para hacer diff de stock
     savePromise=apiGet("pedidos_catalogo","select=items&id=eq."+_editId).then(function(origData){
-      try{_origItemsForDiff=JSON.parse(((origData||[])[0]||{}).items||"[]");}catch(e){}
+      // FIX 2026-09-23: items puede venir como array jsonb (no siempre string) — JSON.parse(array) tiraba y
+      // el diff quedaba vacío → se volvía a reservar TODO el pedido (doble reserva)
+      try{ var _oi=((origData||[])[0]||{}).items; _origItemsForDiff=(typeof _oi==='string')?JSON.parse(_oi||"[]"):(Array.isArray(_oi)?_oi:[]); if(typeof _origItemsForDiff==='string')_origItemsForDiff=JSON.parse(_origItemsForDiff); if(!Array.isArray(_origItemsForDiff))_origItemsForDiff=[]; }catch(e){ _origItemsForDiff=[]; }
       // Liberar stock de ítems que se quitaron o redujeron
       var stockLibChain=Promise.resolve();
       _origItemsForDiff.filter(function(o){return o.producto_id&&!o.isDecan&&!o.isCombo;}).forEach(function(o){
