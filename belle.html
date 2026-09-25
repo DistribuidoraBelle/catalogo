@@ -19,7 +19,7 @@
     </div><!DOCTYPE html>
 <html lang="es">
 <head>
-<!-- BELLE_BUILD 20260923-0200 auditoria-cobros-stock -->
+<!-- BELLE_BUILD 20260925-0230 reportes-aplicaciones-fallback -->
 <meta charset="UTF-8">
 <link rel="icon" type="image/svg+xml" href="favicon.svg">
 <meta name="viewport" content="width=device-width,initial-scale=1">
@@ -38747,7 +38747,32 @@ function _repObtenerCobrosPeriodo(){
 window._repCacheApps = null;
 function _repObtenerAplicaciones(){
   if(_repCacheApps) return Promise.resolve(_repCacheApps);
+  // 2026-09-25: si el embed no devuelve nada (p.ej. sin FK en la base, api() traga el error y entrega []),
+  // armar la relación a mano. Sin esto Financiero contaba dos veces los pedidos cobrados por partes y
+  // Rentabilidad/Panorama no veían los pagos a cuenta.
+  function armarAMano(){
+    return apiGetAll("cc_pagos_aplicaciones", "select=id,pago_id,pedido_id,monto_aplicado,cubrio_pedido_completo,created_at&order=created_at.asc&limit=5000").then(function(rows){
+      rows = rows||[];
+      var pagoIds = {}, pedIds = {};
+      rows.forEach(function(x){ if(x.pago_id) pagoIds[x.pago_id]=1; if(x.pedido_id) pedIds[x.pedido_id]=1; });
+      var lp = Object.keys(pagoIds), ld = Object.keys(pedIds);
+      return Promise.all([
+        lp.length ? apiGetAll("cc_pagos", "select=id,fecha,vendedor_id,forma_pago,cliente_id&id=in.("+lp.join(",")+")&limit=5000") : Promise.resolve([]),
+        ld.length ? apiGetAll("pedidos_catalogo", "select=id,nro_orden,total,items,vendedor_id,cliente_id,estado&id=in.("+ld.join(",")+")&limit=5000") : Promise.resolve([])
+      ]).then(function(r){
+        var mp = {}, md = {};
+        (r[0]||[]).forEach(function(g){ mp[g.id]=g; }); (r[1]||[]).forEach(function(d){ md[d.id]=d; });
+        rows.forEach(function(x){ x.cc_pagos = mp[x.pago_id]||null; x.pedidos_catalogo = md[x.pedido_id]||null; });
+        return rows;
+      });
+    });
+  }
   return apiGetAll("cc_pagos_aplicaciones", "select=id,pago_id,pedido_id,monto_aplicado,cubrio_pedido_completo,created_at,cc_pagos(fecha,vendedor_id,forma_pago,cliente_id),pedidos_catalogo(id,nro_orden,total,items,vendedor_id,cliente_id,estado)&order=created_at.asc&limit=5000")
+    .then(function(rows){
+      if(Array.isArray(rows) && rows.length && rows[0] && rows[0].pedidos_catalogo !== undefined) return rows;
+      console.warn("[rep] cc_pagos_aplicaciones sin embed, se arma a mano");
+      return armarAMano();
+    })
     .then(function(rows){ _repCacheApps = rows||[]; return _repCacheApps; })
     .catch(function(e){ console.warn("[rep] cc_pagos_aplicaciones", e); _repCacheApps = []; return []; });
 }
