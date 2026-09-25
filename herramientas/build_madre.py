@@ -85,6 +85,7 @@ body.madre-on #campBannerCat,body.madre-on #marcasCarrusel,body.madre-on #mcWrap
   #madrePage .fila .vin{justify-content:flex-start}
   #madrePage .fila.der .vin{justify-content:flex-end}
   #madrePage .card .nombre{font-size:1.5rem;overflow-wrap:anywhere}
+  #madrePage .vin svg{width:200px}
 }
 #madrePage .mini{background:var(--papel);border:2px solid var(--tinta);color:var(--tinta);font:inherit;font-weight:700;font-size:.62rem;letter-spacing:.08em;text-transform:uppercase;padding:.35rem .5rem;cursor:pointer;box-shadow:2px 2px 0 var(--rosa)}
 '''
@@ -121,8 +122,9 @@ function _madreTarjeta(p){
   var chips=pt.chips.slice();
   if(p.ml && !chips.some(function(c){return /ml/i.test(c);})) chips.push(p.ml+' ml');
   var chipsHtml=chips.map(function(c,i){ return '<span class="chip'+(i===0?' violeta':'')+'">'+_mEsc(c)+'</span>'; }).join('')+'<span class="chip rosa">Para ella</span>';
-  var logo=(typeof window._marcaLogoHTML==='function')?window._marcaLogoHTML(marca,'madre-logo'):'';
-  var marcaHtml=logo||('<span>'+_mEsc(marca.toUpperCase())+'</span>');
+  var logoHtml=(typeof window._marcaLogoHTML==='function')?window._marcaLogoHTML(marca,''):'';
+  var mSrc=logoHtml&&logoHtml.match(/src=["']([^"']+)["']/); var logo=mSrc?mSrc[1]:'';
+  var marcaHtml=logo?('<i class="logo" role="img" aria-label="'+_mEsc(marca)+'" style="--logo:url(\''+logo+'\')"></i>'):('<span>'+_mEsc(marca.toUpperCase())+'</span>');
   var q=(cstate[p.id]&&cstate[p.id].qty)||0, dq=(typeof decanState!=='undefined'&&decanState[p.id])||0;
   var vip=r.oferta?(r.precio_unico||r.pm):r.pm;
   return '<article class="card">'+
@@ -191,7 +193,7 @@ madre_html=hero+'<div class="cinta-msj" aria-hidden="true"><div class="track" id
   '<section class="cierre">'+cierre.replace('Prototipo interno · los botones "Agregar" no cargan pedidos todavía','Prueba interna de la pestaña Día de la Madre')+'</section>\n<div class="grano" aria-hidden="true"></div>'
 madre_html=madre_html.replace('<a class="btn" href="#regalos">','<a class="btn" href="#madreRegalos">')
 js+='var MADRE_HTML='+__import__('json').dumps(madre_html,ensure_ascii=False)+';\n'
-CLASES=['card','foto','tapa','marca','nombre','chips','chip','precios','pvip','pmas','decan','acc','qty','qty-d','agregar','fila','vin','rio','fondo','hero','txt','kicker','tit','riso','lead','fecha','btn','sec','escena','cinta-msj','track','cierre','caja','aviso','cargando','grano','hoja','mini','izq','der','rosa','violeta','dm-extra','anim']
+CLASES=['card','foto','tapa','marca','logo','nombre','chips','chip','precios','pvip','pmas','decan','acc','qty','qty-d','agregar','fila','vin','rio','fondo','hero','txt','kicker','tit','riso','lead','fecha','btn','sec','escena','cinta-msj','track','cierre','caja','aviso','cargando','grano','hoja','mini','izq','der','rosa','violeta','dm-extra','anim']
 _alt='|'.join(re.escape(c) for c in CLASES)
 # CSS: toda .clase de la lista se renombra (en CSS un punto seguido de nombre siempre es clase)
 css_all=re.sub(r'\.('+_alt+r')(?![\w-])', lambda m:'.md-'+m.group(1), scoped+extra_css)
