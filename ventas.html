@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<!-- BELLE_BUILD 20260923-0200 auditoria-cobros-stock -->
+<!-- BELLE_BUILD 20260925-0700 auditoria-2 -->
 <html lang="es">
 <head>
 <meta charset="UTF-8">
@@ -1129,40 +1129,34 @@ function _dV(v, qty, base){ base=base||{}; base[(parseInt(v)===2)?"vendido_facu"
 //   {reserva: +1}       → suma 1 a reserva
 // ═══════════════════════════════════════════════════════════
 function patchStockFresco(prodId, delta, motivo){
-  return apiGet('productos','select=id,stock_actual,reserva,vendido_david,vendido_facu&id=eq.'+prodId)
-  .then(function(rows){
-    var r=rows&&rows[0];
-    if(!r)return;
-    var patch={};
-    if(delta.stock_actual!==undefined){
-      patch.stock_actual=Math.max(0,(r.stock_actual||0)+delta.stock_actual);
+  delta = delta || {};
+  var pid = parseInt(prodId,10); if(!pid) return Promise.resolve();
+  // 2026-09-25: ajuste ATÓMICO en la base (ajustar_stock hace el read-modify-write con lock de fila).
+  // Antes dos cobros/reservas simultáneos del mismo producto se pisaban (última escritura gana).
+  function sincronizar(res){
+    var pm=(typeof prods!=='undefined'&&Array.isArray(prods)?prods:[]).find(function(p){return p.id===pid;});
+    if(pm && res){
+      ['stock_actual','reserva','vendido_david','vendido_facu','en_viaje','reingreso_at'].forEach(function(k){ if(res[k]!==undefined) pm[k]=res[k]; });
     }
-    if(delta.reserva!==undefined){
-      patch.reserva=Math.max(0,(r.reserva||0)+delta.reserva);
-    }
-    if(delta.vendido_david!==undefined){
-      patch.vendido_david=Math.max(0,(r.vendido_david||0)+delta.vendido_david);
-    }
-    if(delta.vendido_facu!==undefined){
-      patch.vendido_facu=Math.max(0,(r.vendido_facu||0)+delta.vendido_facu);
-    }
-    // Sincronizar prods en memoria
-    var pm=prods.find(function(p){return p.id===prodId;});
-    if(pm){
-      if(patch.stock_actual!==undefined)pm.stock_actual=patch.stock_actual;
-      if(patch.reserva!==undefined)pm.reserva=patch.reserva;
-      if(patch.vendido_david!==undefined)pm.vendido_david=patch.vendido_david;
-      if(patch.vendido_facu!==undefined)pm.vendido_facu=patch.vendido_facu;
-    }
-    // Auto-detectar RE-INGRESO: stock pasa de 0 a positivo
-    if(delta.stock_actual>0&&(r.stock_actual||0)===0&&patch.stock_actual>0){
-      patch.reingreso_at=new Date().toISOString();
-      if(pm)pm.reingreso_at=patch.reingreso_at;
-    }
-    return apiPatch('productos',patch,'id=eq.'+prodId);
-  }).catch(function(e){
-    console.error('patchStockFresco error:',e);
-  });
+  }
+  function viejo(){
+    return apiGet('productos','select=id,stock_actual,reserva,en_viaje,vendido_david,vendido_facu&id=eq.'+pid).then(function(rows){
+      var r=rows&&rows[0]; if(!r) return;
+      var patch={};
+      ['stock_actual','reserva','en_viaje','vendido_david','vendido_facu'].forEach(function(k){ if(delta[k]!==undefined) patch[k]=Math.max(0,(r[k]||0)+delta[k]); });
+      if(delta.stock_actual>0&&(r.stock_actual||0)===0&&patch.stock_actual>0) patch.reingreso_at=new Date().toISOString();
+      sincronizar(patch);
+      return apiPatch('productos',patch,'id=eq.'+pid);
+    });
+  }
+  return apiPost('rpc/ajustar_stock',{ p_pid:pid, p_stock:delta.stock_actual||0, p_reserva:delta.reserva||0, p_vd:delta.vendido_david||0, p_vf:delta.vendido_facu||0, p_en_viaje:delta.en_viaje||0 })
+    .then(function(res){
+      if(res && res.ok){ sincronizar(res); return res; }
+      console.warn('[stock] ajustar_stock no disponible, se usa el método viejo:', res && res.error);
+      return viejo();
+    })
+    .catch(function(e){ console.warn('[stock] ajustar_stock falló, se usa el método viejo:', e); return viejo(); })
+    .catch(function(e){ console.error('patchStockFresco error:',e); });
 }
 
 // 🆕 2026-08 ANTI-SOBREVENTA VENDEDOR: revalida stock FRESCO de la BD antes de crear un pedido
@@ -6081,13 +6075,20 @@ function _quitarClienteDelModal(){
   var modo=window._busqClienteModo||{tipo:"carrito"};
   if(modo.tipo==="pedido"&&modo.pedId){
     if(!confirm("Desasignar cliente de este pedido?"))return;
-    apiPatch("pedidos_catalogo",{cliente_id:null,estado_envio:null,es_cc:false},"id=eq."+modo.pedId).then(function(){
+    // 2026-09-25: con pagos o cuotas de cuenta corriente aplicados, desasignar rompía la consolidación (es_cc=false)
+    Promise.all([
+      apiGet("cc_pagos_aplicaciones","select=id&pedido_id=eq."+modo.pedId+"&limit=1").catch(function(){return [];}),
+      apiGet("cc_cuotas","select=id&pedido_id=eq."+modo.pedId+"&estado=neq.cancelada&limit=1").catch(function(){return [];})
+    ]).then(function(rr){
+      if((rr[0]&&rr[0].length)||(rr[1]&&rr[1].length)){ toast("Este pedido tiene pagos o cuotas de cuenta corriente: no se puede desasignar el cliente","twarn"); return; }
+    return apiPatch("pedidos_catalogo",{cliente_id:null,estado_envio:null,es_cc:false},"id=eq."+modo.pedId).then(function(){
       _logEstadoPedidoV(modo.pedId,"cliente_desasignado","Cliente desasignado por "+VENDEDOR_NOMBRE);
       toast("Cliente desasignado del pedido","tok");
       var moB=document.getElementById("_moBuscarCliente");if(moB)moB.remove();
       var moG=document.getElementById("_moGestionar");if(moG)moG.remove();
       loadPedidosWeb();
     }).catch(function(e){console.error("[belle] _quitarClienteDelModal error:",e);toast("Error","terr");});
+    });
   } else {
     // Modo carrito: comportamiento existente
     _desasignarCliente();
@@ -6889,9 +6890,11 @@ function _confirmarCobrarCC(pedidoId, clienteId, totalPed, cobradoHasta){
 
   // Fix #2: leer vendedor_id, transferida_por_id, nro_orden, items para auto-asignar y comisión Marcela
   var _pedSnapshot = null; // se completará dentro del primer .then para usar al final
-  apiGet("pedidos_catalogo","select=vendedor_id,transferida_por_id,nro_orden,items&id=eq."+pedidoId+"&limit=1").then(function(rowsV){
+  apiGet("pedidos_catalogo","select=vendedor_id,transferida_por_id,nro_orden,items,cobrado_total,total&id=eq."+pedidoId+"&limit=1").then(function(rowsV){
     var pV=rowsV&&rowsV[0];
     _pedSnapshot = pV; // guardar snapshot para usar después
+    // 2026-09-25: cobrado y total FRESCOS (el modal podía estar abierto mientras otro dispositivo cobraba: el segundo pisaba al primero)
+    if(pV){ var _cobF=Math.max(parseFloat(pV.cobrado_total)||0, cobradoHasta||0), _totF=parseFloat(pV.total)||totalPed; nuevoCobrado=_cobF+monto; esSaldado=nuevoCobrado>=_totF-1; }
     var _vAnt=pV?pV.vendedor_id:null;
     var _patchPed=Object.assign({cobrado_parcial:nuevoCobrado,cobrado_total:nuevoCobrado},esSaldado?{estado:"cobrado",confirmado_cobro:true}:{estado:"cobrado_parcial"});
     if(!_vAnt||_vAnt!==VENDEDOR_ID){
@@ -7199,12 +7202,12 @@ function executeVenta(items,reservaDecs){
       var diffMap={};
       origItems.forEach(function(o){
         if(!o.isDecan&&o.producto_id){
-          diffMap[o.producto_id]=(diffMap[o.producto_id]||0)-(o.qty||1);
+          diffMap[o.producto_id]=(diffMap[o.producto_id]||0)-(o.qty||1)*(parseInt(o.cajaCant)||1);   // 2026-09-25: unidades reales (cajas)
         }
       });
       newItemsData.forEach(function(n){
         if(!n.isDecan&&n.producto_id){
-          diffMap[n.producto_id]=(diffMap[n.producto_id]||0)+(n.qty||1);
+          diffMap[n.producto_id]=(diffMap[n.producto_id]||0)+(n.qty||1)*(parseInt(n.cajaCant)||1);
         }
       });
       Object.keys(diffMap).forEach(function(pidStr){
@@ -7961,7 +7964,7 @@ function _gestionarPedido(tipo,id){
     if(tipo==='web'){
       html+='<button class="btn btn-red" style="padding:.4rem .7rem" onclick="document.getElementById(\'_moGestionar\').remove();cancelarPedidoWeb('+id+',null)">Cancelar</button>';
     } else if(tipo==='reserva'){
-      html+='<button class="btn btn-red" style="padding:.4rem .7rem" onclick="document.getElementById(\'_moGestionar\').remove();cancelarPedReservado('+id+',null)">Cancelar</button>';
+      html+='<button class="btn btn-red" style="padding:.4rem .7rem" onclick="document.getElementById(\'_moGestionar\').remove();cancelarPedidoWeb('+id+',null)">Cancelar</button>';
     }
 
     html+='</div>';
@@ -8772,8 +8775,25 @@ function _finEntregarStock(ped, finId){
     var items=[]; try{items=typeof p.items==='string'?JSON.parse(p.items):(p.items||[]);}catch(e){}
     var chain=Promise.resolve();
     (items||[]).forEach(function(it){
-      if(!it||it.isDecan||it.isCombo||!it.producto_id)return;
+      if(!it||it.isDecan)return;
       var qty=(it.qty||1)*(it.cajaCant||1);
+      // 2026-09-25: los combos también salen de reserva (antes quedaban trabados para siempre)
+      var _cid=comboIdDeItem(it);
+      if(_cid){
+        chain=chain.then(function(){
+          return apiGet('combo_items','select=producto_id,cantidad&es_decan=not.is.true&combo_id=eq.'+_cid).then(function(ci){
+            if(!Array.isArray(ci)) return;
+            var c3=Promise.resolve();
+            ci.filter(function(c){return c.producto_id;}).forEach(function(c){
+              var cant=(c.cantidad||1)*(it.qty||1);
+              c3=c3.then(function(){ return patchStockFresco(c.producto_id,_dV(VENDEDOR_ID,+cant,{reserva:-cant}),"Entrega financiada combo "+(ped.nro_orden||'')); });
+            });
+            return c3;
+          }).catch(function(e){console.error('[fin combo]',e);});
+        });
+        return;
+      }
+      if(!_esProductoNumerico(it.producto_id))return;
       chain=chain.then(function(){
         return patchStockFresco(parseInt(it.producto_id,10),_dV(VENDEDOR_ID,+qty,{reserva:-qty}),"Entrega financiada "+(ped.nro_orden||''))
           .then(function(){
@@ -8951,8 +8971,9 @@ function _finAdelantar(finId){
     return chain;
   }).then(function(){
     // 3) Avance en el pedido
-    return apiGet("pedidos_catalogo","select=cobrado_parcial,cobrado_total&id=eq."+f.pedido_id).then(function(pr){
+    return apiGet("pedidos_catalogo","select=cobrado_parcial,cobrado_total,total&id=eq."+f.pedido_id).then(function(pr){
       var p=pr&&pr[0]||{}; var nuevo=(Math.max(parseFloat(p.cobrado_parcial)||0,parseFloat(p.cobrado_total)||0))+aplicado;
+      if(parseFloat(p.total)>0) nuevo=Math.min(nuevo, parseFloat(p.total));   // 2026-09-25: la mora no infla lo cobrado del pedido (queda en la venta de la cuota)
       return apiPatch("pedidos_catalogo",{cobrado_parcial:nuevo,cobrado_total:nuevo},"id=eq."+f.pedido_id);
     });
   }).then(function(){
@@ -9003,6 +9024,7 @@ function _finCobrarCuota(finId, cuotaId){
     }).then(function(){
       return apiGet("pedidos_catalogo","select=cobrado_parcial,cobrado_total,total&id=eq."+f.pedido_id).then(function(pr){
         var p=pr&&pr[0]||{}; var nuevo=(Math.max(parseFloat(p.cobrado_parcial)||0,parseFloat(p.cobrado_total)||0))+totalCobrar;
+        if(parseFloat(p.total)>0) nuevo=Math.min(nuevo, parseFloat(p.total));   // 2026-09-25: la mora no infla lo cobrado del pedido
         return apiPatch("pedidos_catalogo",{cobrado_parcial:nuevo,cobrado_total:nuevo},"id=eq."+f.pedido_id);
       });
     }).then(function(){
@@ -9170,75 +9192,7 @@ function _finChequearVencimientos(){
   if(!window._finChkTimer){ window._finChkTimer=setInterval(_finChequearVencimientos, 10*60*1000); }
 }
 
-function confirmarCobro(pedId,btn){
-  // Pedir forma de cobro antes de confirmar (Fix Bug E: antes quedaba forma_cobro="pendiente")
-  var formaPago = prompt("Forma de cobro:\n1 = Efectivo\n2 = Transferencia\n3 = Tarjeta\n\nIngresá el número:", "1");
-  if(formaPago === null) { if(btn)btn.disabled=false; return; }
-  var formas = {"1":"efectivo", "2":"transferencia", "3":"tarjeta"};
-  var forma = formas[formaPago.trim()] || "efectivo";
-
-  if(btn)btn.disabled=true;
-  apiGet("pedidos_catalogo","select=*&id=eq."+pedId).then(function(data){
-    if(!Array.isArray(data)||!data.length)return;
-    var ped=data[0];var items=[];
-    try{items=typeof ped.items==="string"?JSON.parse(ped.items):ped.items;}catch(ex){}
-    var nroOrden=ped.nro_orden||("WEB-"+pedId);
-    // FIX: stock y ventas PRIMERO — estado cobrado DESPUÉS
-    var stockProms=[];
-    if(Array.isArray(items))items.forEach(function(it){
-      stockProms.push(apiPost("ventas",{vendedor_id:VENDEDOR_ID,producto_id:it.producto_id||null,producto_nombre:it.nombre,cantidad:it.qty||1,precio_unitario:it.precio||0,segmento:it.segmento||"x1",total:it.total||0,periodo:periodoActual,estado:"confirmada",origen:"catalogo",nro_orden:nroOrden,forma_cobro:forma,descuento:0,descuento_motivo:""}));
-      var _cid=comboIdDeItem(it);
-      if(_cid){
-        stockProms.push(apiGet("combo_items","select=producto_id,cantidad&es_decan=not.is.true&combo_id=eq."+_cid).then(function(ci){
-          if(!Array.isArray(ci))return;
-          return Promise.all(ci.filter(function(cit){return cit.producto_id;}).map(function(cit){
-            return patchStockFresco(cit.producto_id,_dV(VENDEDOR_ID,+(cit.cantidad||1)*(it.qty||1),{reserva:-(cit.cantidad||1)*(it.qty||1)}),'Confirmar cobro combo web');
-          }));
-        }));
-        return;
-      }
-      var pid=it.producto_id;
-      if(it.isDecan||!_esProductoNumerico(pid))return;
-      pid=parseInt(pid,10);
-      stockProms.push(patchStockFresco(pid,_dV(VENDEDOR_ID,+(it.qty||1)*(it.cajaCant||1),{reserva:-(it.qty||1)*(it.cajaCant||1)}),'Confirmar cobro pedido')
-        .then(function(r){
-          if(!r)_alertaStock("El stock de "+_nomMl(it.nombre, it.producto_id)+" no pudo actualizarse al cobrar "+nroOrden);
-        })
-      );
-      stockProms.push(apiPost("movimientos_stock",{producto_id:pid,producto_nombre:it.nombre,tipo:"venta",cantidad:it.qty||1,motivo:"Venta pedido web "+nroOrden+" (desde reserva)",usuario:VENDEDOR_NOMBRE||"vendedor",periodo:periodoActual}).catch(function(e){console.error("[belle] error silencioso:",e);}));
-    });
-    Promise.all(stockProms).then(function(){
-      // Bug 4 fix: si el pedido NO tenía vendedor asignado, auto-asignarlo al que cobra
-      // FIX 2026-05-18: agregar cobrado_total para consistencia
-      var totalPed = parseFloat(ped.total) || 0;
-      var patchFinal={
-        confirmado_cobro:true,
-        confirmado_at:new Date().toISOString(),
-        cobrado_at:new Date().toISOString(), // FIX 2026-06-18: el admin muestra cobrado_at como "fecha cobrado"
-        estado:"cobrado",
-        cobrado_total: totalPed,
-        cobrado_parcial: totalPed,
-        forma_pago: forma,
-        periodo:periodoActual
-      };
-      if(!ped.vendedor_id){
-        patchFinal.vendedor_id=VENDEDOR_ID;
-        _logEstadoPedidoV(pedId,"asignado","Auto-asignado al cobrar por "+VENDEDOR_NOMBRE);
-      }
-      return apiPatch("pedidos_catalogo",patchFinal,"id=eq."+pedId);
-    }).then(function(){
-      // FIX 2026-05-18: log de estado para confirmarCobro
-      apiPost("pedidos_estados_log",{
-        pedido_id: pedId,
-        pedido_tabla: "pedidos_catalogo",
-        estado: "cobrado",
-        nota: "Cobro confirmado por " + VENDEDOR_NOMBRE + " (" + forma + ")",
-        usuario: VENDEDOR_NOMBRE || ("Vendedor " + VENDEDOR_ID)
-      }).catch(function(e){console.error('[confirmarCobro log]',e);});
-      toast("Cobro confirmado!","tok");loadPedidosWeb();loadDineroData();renderCat();
-    }).catch(function(){if(btn)btn.disabled=false;toast("Error al confirmar","terr");});
-  });
-}
+// (función confirmarCobro eliminada en la auditoría 2026-09-25: no tenía uso y arrastraba errores de stock/ventas)
 
 function cancelarPedidoWeb(pedId,btn){
   bellConfirm("Cancelar pedido? El stock se devuelve al inventario. Si ya estaba cobrado, también se borran las ventas y el pago CC.",function(){
@@ -9446,7 +9400,7 @@ function editarPedido(pedId){
         cart[_ck]={id:_ck,nombre:it.nombre,qty:it.qty||1,seg:"combo",price:it.precio||0,isDecan:false,isCombo:true,comboId:_cid,comboItems:((window._comboCompCache&&_cid&&window._comboCompCache[_cid])||it.comboItems||[])};
       } else {
         var prodId=it.producto_id||it.id;
-        cart[prodId]={id:prodId,nombre:it.nombre,qty:it.qty||1,seg:it.segmento||"pi",price:it.precio||0,isDecan:false};
+        cart[prodId]={id:prodId,nombre:it.nombre,qty:it.qty||1,seg:it.segmento||"pi",price:it.precio||0,isDecan:false,cajaCant:it.cajaCant||1,isCosm:!!it.isCosm,prodId:(it.isCosm?prodId:undefined)};   // 2026-09-25: conserva cajas de cosmética
         cstate[prodId]={qty:it.qty||1};
       }
     });
@@ -9511,115 +9465,7 @@ function recalcEditPed(){
   if(tt)tt.textContent=fmt(totalFinal);
 }
 
-function guardarEditPed(){
-  var pedId=document.getElementById("editPedId").value;
-  var newItems=[];
-  var total=0;
-  var stockPromises=[];
-  var _origLog=[], _origTotalLog=0; // para el log de edición (items antes de tocar)
-
-  document.querySelectorAll(".edit-qty-inp").forEach(function(inp){
-    var newQty=parseInt(inp.value)||0;
-    var origQty=parseInt(inp.closest("tr").dataset.origQty)||0;
-    var prodId=parseInt(inp.dataset.prodId)||0;
-    var isDecan=inp.dataset.isDecan==="1";
-    var precio=parseFloat(inp.dataset.precioCalc||inp.dataset.origPrecio)||0;
-    var tr=inp.closest("tr");
-    var nombre=tr?(tr.dataset.nombre||String(tr.cells[0].textContent||"").replace(/\s*·\s*\d+\s*ML\s*$/i,"").trim()):"";
-
-    // Stock adjustment según con_reserva del pedido/transferida
-    // con_reserva=true: stock ya está en 'reserva' → solo ajustar reserva
-    // con_reserva=false o pedido_web: stock está libre → ajustar stock_actual
-    var _conRes=window._editTransfConReserva||false;
-    if(!isDecan&&prodId&&origQty!==newQty){
-      var diff=origQty-newQty; // positivo = bajó cant → devolver al stock
-      if(diff!==0){
-        // FIX: eliminar prods.find() — siempre ajustar stock sin verificar cache
-        if(_conRes){
-          stockPromises.push(patchStockFresco(prodId,{reserva:-diff},'Editar pedido'));
-        } else {
-          stockPromises.push(patchStockFresco(prodId,{stock_actual:+diff},'Editar pedido'));
-        }
-      }
-    }
-
-    if(newQty<=0){ if(origQty>0){ _origLog.push({nombre:nombre,qty:origQty,precio:parseFloat(inp.dataset.origPrecio)||precio,producto_id:prodId||null,segmento:inp.dataset.segmento||"pi",isDecan:isDecan}); _origTotalLog+=origQty*(parseFloat(inp.dataset.origPrecio)||precio); } return; } // skip removed items
-    var sub=newQty*precio;
-    total+=sub;
-    // FIX bug "Precio unico": leer segmento del data-segmento del input (no del textContent del DOM)
-    var segItem=inp.dataset.segmento||"pi";
-    if(segItem==="Precio unico"||segItem==="precio unico"||segItem==="Precio único")segItem="pi";
-    if(origQty>0){ _origLog.push({nombre:nombre,qty:origQty,precio:parseFloat(inp.dataset.origPrecio)||precio,producto_id:prodId||null,segmento:segItem,isDecan:isDecan}); _origTotalLog+=origQty*(parseFloat(inp.dataset.origPrecio)||precio); }
-    newItems.push({
-      nombre:nombre,qty:newQty,precio:precio,total:sub,
-      producto_id:prodId||null,
-      segmento:segItem,
-      isDecan:isDecan
-    });
-  });
-
-  // Reservar combos nuevos agregados en la edición
-  document.querySelectorAll(".edit-combo-row").forEach(function(row){
-    var comboId=parseInt(row.dataset.comboId)||0;
-    var qty=parseInt(row.dataset.qty)||1;
-    var nombre=row.dataset.nombre||"";
-    var precio=parseFloat(row.dataset.precio)||0;
-    var isNew=row.dataset.isNew==="1";
-    if(comboId&&!isNew){ _origLog.push({nombre:nombre,qty:qty,precio:precio,combo_id:comboId,isCombo:true,segmento:"combo"}); _origTotalLog+=precio*qty; }
-    if(comboId&&isNew){
-      // Buscar combo_items en BD y reservar cada producto
-      stockPromises.push(
-        apiGet("combo_items","select=*&es_decan=not.is.true&combo_id=eq."+comboId).then(function(ci){
-          if(!Array.isArray(ci))return;
-          var chain=Promise.resolve();
-          ci.forEach(function(it){
-            var cant=(it.cantidad||1)*qty;
-            chain=chain.then(function(){
-              return patchStockFresco(it.producto_id,{stock_actual:-cant,reserva:+cant},"Editar pedido - combo");
-            });
-          });
-          return chain;
-        })
-      );
-    }
-    newItems.push({
-      nombre:nombre,qty:qty,precio:precio,total:precio*qty,
-      producto_id:null,segmento:"combo",isCombo:true,combo_id:comboId
-    });
-  });
-
-  if(!newItems.length){toast("El pedido no puede quedar sin productos","twarn");return;}
-
-  var desc=parseFloat((document.getElementById("editPedDescuento")||{}).value)||0;
-  var motDesc=(document.getElementById("editPedDescMotivo")||{}).value||"";
-  var totalFinal=Math.max(0,total-desc);
-
-  var savePromise;
-  // Sistema unificado: todo en pedidos_catalogo (sin más prefijo "t_" legacy)
-  savePromise=apiPatch("pedidos_catalogo",{items:JSON.stringify(newItems),total:totalFinal,descuento:desc,notas_descuento:motDesc},"id=eq."+pedId);
-
-  var allPromises=stockPromises.concat([savePromise]);
-
-  Promise.all(allPromises).then(function(){
-    _logEdicionPedido(parseInt(pedId)||pedId, null, _origLog, newItems, _origTotalLog, total);
-    // Notificar productos que volvieron al stock
-    var devueltos=[];
-    document.querySelectorAll(".edit-qty-inp").forEach(function(inp){
-      var newQty=parseInt(inp.value)||0;
-      var origQty=parseInt(inp.closest("tr").dataset.origQty)||0;
-      var tr=inp.closest("tr");
-      var nombre=tr?(tr.dataset.nombre||String(tr.cells[0].textContent||"").replace(/\s*·\s*\d+\s*ML\s*$/i,"").trim()):"";
-      var diff=origQty-newQty;
-      if(diff>0&&nombre){devueltos.push(_nomMl(nombre.split("|")[0].trim(), parseInt(inp.dataset.prodId)||0)+" ("+diff+"u → stock)");}
-    });
-    var msg="Pedido actualizado";
-    if(devueltos.length) msg+="\n✅ Volvió al stock:\n"+devueltos.join("\n");
-    toast(msg,"tok");
-    document.getElementById("moEditPed").classList.remove("open");
-    loadPedidosWeb();
-    renderCat();
-  }).catch(function(){toast("Error al guardar","terr");});
-}
+// (función guardarEditPed eliminada en la auditoría 2026-09-25: no tenía uso y arrastraba errores de stock/ventas)
 
 
 // TRANSFERIDAS
@@ -10847,320 +10693,15 @@ function addRendicion(){
 
 
 
-function confirmarPedReservado(pedId,btn){
-  if(btn)btn.disabled=true;
-  // Ask forma de cobro before confirming
-  var mo=document.getElementById('moFormaCobroReserva');
-  if(!mo){
-    mo=document.createElement('div');mo.id='moFormaCobroReserva';mo.className='mo';
-    mo.innerHTML="<div class='md' style='max-width:360px;width:95%'>"+
-      "<div class='md-h'><span>Forma de cobro</span>"+
-      "<button onclick='this.closest(\".mo\").classList.remove(\"open\")' class='xb'>&#10005;</button></div>"+
-      "<div class='md-b'>"+
-        "<div style='font-size:.78rem;color:var(--tx2);margin-bottom:.7rem'>&#128176; &#191;C\u00f3mo cobr\u00f3 el cliente?</div>"+
-        "<select id='fcrSelect' class='fi' style='font-size:.85rem;padding:.4rem .6rem;margin-bottom:.8rem'>"+
-          "<option value='efectivo'>&#128181; Efectivo</option>"+
-          "<option value='transferencia'>&#127974; Transferencia</option>"+
-          "<option value='debito'>&#128179; D\u00e9bito</option>"+
-          "<option value='credito'>&#128179; Cr\u00e9dito</option>"+
-          "<option value='mixto'>Mixto</option>"+
-        "</select>"+
-        "<div style='display:flex;gap:.5rem'>"+
-          "<button id='fcrConfirmarBtn' class='btn btn-green' style='flex:1'>&#10003; Confirmar cobro</button>"+
-          "<button onclick='if(window._fcrBtn)window._fcrBtn.disabled=false;this.closest(\".mo\").classList.remove(\"open\")' class='btn btn-g'>Cancelar</button>"+
-        "</div>"+
-      "</div></div>";
-    document.body.appendChild(mo);
-  }
-  window._fcrPedId=pedId;
-  window._fcrBtn=btn;
-  document.getElementById('fcrConfirmarBtn').onclick=function(){
-    var formaCobro=(document.getElementById('fcrSelect')||{}).value||'efectivo';
-    mo.classList.remove('open');
-    _ejecutarCobrarReservado(pedId,btn,formaCobro);
-  };
-  mo.classList.add('open');
-}
+// (función confirmarPedReservado eliminada en la auditoría 2026-09-25: no tenía uso y arrastraba errores de stock/ventas)
 
-function _ejecutarCobrarReservado(pedId,btn,formaCobro){
-  // Guard contra doble click
-  if(btn && btn.disabled) return;
-  if(btn){ btn.disabled=true; btn.dataset._origText=btn.textContent; btn.textContent="Procesando..."; }
-  function _restoreBtn(){if(btn){btn.disabled=false;btn.textContent=btn.dataset._origText||"Cobrar";}}
-  apiGet("pedidos_catalogo","select=*&id=eq."+pedId).then(function(data){
-    if(!Array.isArray(data)||!data.length){_restoreBtn();return;}
-    var ped=data[0];var items=[];
-    try{items=typeof ped.items==="string"?JSON.parse(ped.items):ped.items;}catch(ex){}
-    var nroOrden=ped.nro_orden||("RES-"+pedId);
-    var totalPed = parseFloat(ped.total) || 0;
-    // FIX 2026-05-18 BUG #3: patch completo (cobrado_total, confirmado_at, vendedor_id)
-    var patchPed = {
-      confirmado_cobro: true,
-      confirmado_at: new Date().toISOString(),
-      estado: "cobrado",
-      cobrado_total: totalPed,
-      cobrado_parcial: totalPed,
-      forma_pago: formaCobro
-    };
-    // Auto-asignar vendedor si falta
-    if(!ped.vendedor_id){
-      patchPed.vendedor_id = VENDEDOR_ID;
-    }
-    var promises = [apiPatch("pedidos_catalogo", patchPed, "id=eq."+pedId)];
+// (función _ejecutarCobrarReservado eliminada en la auditoría 2026-09-25: no tenía uso y arrastraba errores de stock/ventas)
 
-    if(Array.isArray(items)) items.forEach(function(it){
-      // FIX 2026-05-18: manejar combos (cualquier formato)
-      var _cid=comboIdDeItem(it);
-      if(_cid){
-        promises.push(apiGet('combo_items','select=producto_id,cantidad&es_decan=not.is.true&combo_id=eq.'+_cid).then(function(ci){
-          if(!Array.isArray(ci)) return;
-          return Promise.all(ci.filter(function(cit){return cit.producto_id;}).map(function(cit){
-            var cantTotal = (cit.cantidad||1)*(it.qty||1);
-            return patchStockFresco(cit.producto_id, _dV(VENDEDOR_ID,+cantTotal,{reserva:-cantTotal}), 'Cobrar reservado combo '+nroOrden);
-          }));
-        }).catch(function(e){console.error('[reservado combo]',e);}));
-        // Venta del combo
-        promises.push(apiPost("ventas",{
-          vendedor_id:VENDEDOR_ID, producto_id:null, producto_nombre:it.nombre,
-          cantidad:it.qty||1, precio_unitario:it.precio||0, segmento:'combo',
-          total:it.total||0, periodo:periodoActual, estado:"confirmada",
-          origen:"reserva", nro_orden:nroOrden, forma_cobro:formaCobro,
-          descuento:it.descuento||0, descuento_motivo:it.descuento_motivo||""
-        }).catch(function(e){console.error('[reservado venta combo]',e);}));
-        return;
-      }
-      // Decants: solo crear venta sin tocar stock
-      if(it.isDecan || it.segmento === 'decan'){
-        promises.push(apiPost("ventas",{
-          vendedor_id:VENDEDOR_ID, producto_id:null, producto_nombre:it.nombre,
-          cantidad:it.qty||1, precio_unitario:it.precio||0, segmento:'decan',
-          total:it.total||0, periodo:periodoActual, estado:"confirmada",
-          origen:"reserva", nro_orden:nroOrden, forma_cobro:formaCobro,
-          descuento:it.descuento||0, descuento_motivo:it.descuento_motivo||""
-        }).catch(function(e){console.error('[reservado venta decan]',e);}));
-        return;
-      }
-      // Producto normal
-      if(!it.producto_id) return;
-      promises.push(patchStockFresco(it.producto_id,_dV(VENDEDOR_ID,+(it.qty||1)*(it.cajaCant||1),{reserva:-(it.qty||1)*(it.cajaCant||1)}),'Cobrar reservado '+nroOrden));
-      promises.push(apiPost("ventas",{
-        vendedor_id:VENDEDOR_ID,producto_id:it.producto_id,producto_nombre:it.nombre,
-        cantidad:it.qty||1,precio_unitario:it.precio||0,segmento:it.segmento||"x1",
-        total:it.total||0,periodo:periodoActual,estado:"confirmada",origen:"reserva",
-        nro_orden:nroOrden,forma_cobro:formaCobro,descuento:it.descuento||0,descuento_motivo:""
-      }));
-      // FIX 2026-05-18: agregar movimientos_stock para trazabilidad
-      promises.push(apiPost("movimientos_stock",{
-        producto_id: it.producto_id,
-        producto_nombre: it.nombre,
-        tipo: "venta",
-        cantidad: it.qty||1,
-        motivo: "Venta reserva " + nroOrden + " (cobrar reservado)",
-        usuario: VENDEDOR_NOMBRE || "vendedor",
-        periodo: periodoActual
-      }).catch(function(e){console.error('[reservado mov_stock]',e);}));
-    });
-
-    // FIX 2026-05-18: log de estado
-    promises.push(apiPost("pedidos_estados_log",{
-      pedido_id: pedId,
-      pedido_tabla: "pedidos_catalogo",
-      estado: "cobrado",
-      nota: "Cobrar reservado por " + VENDEDOR_NOMBRE + " (" + formaCobro + ", " + fmt(totalPed) + ")",
-      usuario: VENDEDOR_NOMBRE || ("Vendedor " + VENDEDOR_ID)
-    }).catch(function(e){console.error('[reservado log]',e);}));
-
-    Promise.all(promises).then(function(){
-      toast("Pedido confirmado! ("+formaCobro+")","tok");loadPedidosWeb();loadDineroData();renderCat();
-    }).catch(function(){_restoreBtn();});
-  }).catch(function(){_restoreBtn();});
-}
-
-function cancelarPedReservado(pedId,btn){
-  var mo=document.getElementById("moCancelPed");
-  if(!mo){
-    mo=document.createElement("div");mo.id="moCancelPed";mo.className="mo";
-    var h="<div class='md' style='max-width:420px;width:95%'>";
-    h+="<div class='md-h'><span style='color:var(--red)'>Cancelar pedido</span>";
-    h+="<button onclick='cerrarMoCancelPed()' class='xb'>&#10005;</button></div>";
-    h+="<div class='md-b'>";
-    h+="<div style='font-size:.8rem;color:var(--tx);margin-bottom:.7rem'>&#9888; Esta accion cancela el pedido reservado.</div>";
-    h+="<div class='form-row'><div class='fg'><label>Motivo de cancelacion</label>";
-    h+="<input class='fi' id='cancelPedMotivo' type='text' placeholder='ej: Cliente no pudo retirar, producto roto...'></div></div>";
-    h+="<div style='background:var(--sur2);border-radius:6px;padding:.55rem .7rem;margin:.5rem 0'>";
-    h+="<div style='font-size:.72rem;font-weight:600;color:var(--tx);margin-bottom:.4rem'>&#128230; Devolucion de stock:</div>";
-    h+="<label style='display:flex;align-items:center;gap:.4rem;cursor:pointer;font-size:.78rem;margin-bottom:.3rem'>";
-    h+="<input type='radio' name='cancelStock' value='devolver' checked> Devolver al inventario (cancelacion normal)</label>";
-    h+="<label style='display:flex;align-items:center;gap:.4rem;cursor:pointer;font-size:.78rem'>";
-    h+="<input type='radio' name='cancelStock' value='no_devolver'> NO devolver (producto roto, perdido o destruido)</label>";
-    h+="</div>";
-    h+="<div style='display:flex;gap:.5rem;margin-top:.5rem'>";
-    h+="<button class='btn btn-red' onclick='confirmarCancelPed()' style='flex:1'>Confirmar cancelacion</button>";
-    h+="<button class='btn btn-g' onclick='cerrarMoCancelPed()'>Volver</button>";
-    h+="</div></div></div>";
-    mo.innerHTML=h;
-    document.body.appendChild(mo);
-  }
-  mo._pedId=pedId;mo._btn=btn;
-  document.getElementById("cancelPedMotivo").value="";
-  mo.classList.add("open");
-}
+// (función cancelarPedReservado eliminada en la auditoría 2026-09-25: no tenía uso y arrastraba errores de stock/ventas)
 
 
 
-function confirmarCancelPed(){
-  var mo=document.getElementById("moCancelPed");
-  var pedId=mo._pedId; var btn=mo._btn;
-  var motivo=document.getElementById("cancelPedMotivo").value.trim();
-  var stockEl=document.querySelector("input[name='cancelStock']:checked");
-  var devolverStock=!stockEl||stockEl.value==="devolver";
-  if(!motivo){toast("Ingresa el motivo","twarn");return;}
-  if(btn)btn.disabled=true;
-  mo.classList.remove("open");
-  apiGet("pedidos_catalogo","select=*&id=eq."+pedId).then(function(data){
-    if(!Array.isArray(data)||!data.length)return;
-    var ped=data[0];var items=[];
-    try{items=typeof ped.items==="string"?JSON.parse(ped.items):ped.items||[];}catch(ex){}
-    var periodo=document.getElementById("hPeriodo")?document.getElementById("hPeriodo").textContent||"general":"general";
-    var nroOrden = ped.nro_orden || ("CAN-"+pedId);
-    // FIX 2026-05-18 BUG #7: detectar si tenía cobro (parcial/total)
-    var teniaCobro = (ped.estado==='cobrado' || ped.estado==='cobrado_parcial' || ped.confirmado_cobro || (parseFloat(ped.cobrado_total)||0) > 0);
-    // Columna vendido_X según vendedor del pedido (receptor final que cobró)
-    var colVendido = 'vendido_david';
-    if(ped.vendedor_id === 2) colVendido = 'vendido_facu';
-
-    var promises=[
-      apiPatch("pedidos_catalogo",{estado:"cancelado",notas:(ped.notas||"")+" | CANCELADO: "+motivo},"id=eq."+pedId)
-    ];
-    promises.push(apiPatch('cc_cuotas',{estado:'cancelada',updated_at:new Date().toISOString()},'pedido_id=eq.'+pedId+'&estado=in.(pendiente,parcial,vencida)').catch(function(){}));
-
-    // FIX 2026-05-18 BUG #7: si tenía cobro → borrar ventas asociadas (en lugar de crear una negativa)
-    // Si NO tenía cobro pero queremos rastro contable, crear una venta negativa "cancelada"
-    if(teniaCobro){
-      // Borrar ventas asociadas — más limpio que dejar venta + contra-venta
-      promises.push(apiDelete('ventas','nro_orden=eq.'+encodeURIComponent(nroOrden)).catch(function(e){console.error('[cancelPed] borrar ventas:',e);}));
-      // Limpiar cc_pagos
-      promises.push(apiGet('cc_pagos_aplicaciones','select=id,pago_id&pedido_id=eq.'+pedId).then(function(apps){
-        if(!Array.isArray(apps)||!apps.length)return;
-        var pagoIds = Array.from(new Set(apps.map(function(a){return a.pago_id;}).filter(function(x){return x;})));
-        var p1 = apiDelete('cc_pagos_aplicaciones','pedido_id=eq.'+pedId);
-        var p2 = Promise.all(pagoIds.map(function(pid){
-          return apiGet('cc_pagos_aplicaciones','select=id&pago_id=eq.'+pid).then(function(rest){
-            if(!Array.isArray(rest)||!rest.length){
-              return apiDelete('cc_pagos','id=eq.'+pid);
-            }
-          });
-        }));
-        return Promise.all([p1, p2]);
-      }).catch(function(e){console.error('[cancelPed] cc_pagos cleanup',e);}));
-    } else if(items.length){
-      // No tenía cobro: crear registro negativo en ventas (rastro de cancelación)
-      // Usa el vendedor del pedido (no quien cancela) y monto = lo cancelado
-      promises.push(apiPost("ventas",{
-        vendedor_id: ped.vendedor_id || VENDEDOR_ID,
-        producto_id:null,
-        producto_nombre:"CANCELADO #"+(ped.nro_orden||pedId)+": "+items.map(function(it){return it.nombre+" x"+(it.qty||1);}).join(", "),
-        cantidad:1,
-        precio_unitario:-(ped.total||0),
-        segmento:"cancelado",
-        total:-(ped.total||0),
-        periodo:periodo,
-        estado:"cancelada",
-        origen:"vendedor",
-        nro_orden:ped.nro_orden||("CAN-"+pedId),
-        descuento_motivo:"Cancelacion: "+motivo
-      }));
-    }
-
-    if(devolverStock){
-      items.forEach(function(it){
-        var _cid=comboIdDeItem(it);
-        if(_cid){
-          // FIX 2026-05-18: devolver combo según si estaba cobrado o no
-          promises.push(
-            apiGet("combo_items","select=*&es_decan=not.is.true&combo_id=eq."+_cid).then(function(ci){
-              if(!Array.isArray(ci))return;
-              var chain=Promise.resolve();
-              ci.forEach(function(cit){
-                var cant=(cit.cantidad||1)*(it.qty||1);
-                chain=chain.then(function(){
-                  var delta = {stock_actual:+cant};
-                  if(teniaCobro){ delta[colVendido] = -cant; }
-                  else { delta.reserva = -cant; }
-                  return patchStockFresco(cit.producto_id, delta, 'Cancelar combo '+(teniaCobro?'cobrado ':'')+nroOrden);
-                });
-              });
-              return chain;
-            })
-          );
-          return;
-        }
-        if(it.isDecan||it.segmento==='decan'||!_esProductoNumerico(it.producto_id))return;
-        var _cpid=parseInt(it.producto_id,10);var _cqty=it.qty||1;
-        // FIX 2026-05-18: si tenía cobro, devolver desde vendido_X. Si no, desde reserva
-        if(teniaCobro){
-          promises.push(patchStockFresco(_cpid, (function(){var d={stock_actual:+_cqty}; d[colVendido]=-_cqty; return d;})(), 'Cancelar pedido cobrado '+nroOrden));
-        } else {
-          // Verificar reserva real antes de devolver — evita inflar stock si estaba inconsistente
-          promises.push(
-            apiGet("productos","select=id,stock_actual,reserva&id=eq."+_cpid).then(function(rows){
-              var fp=rows&&rows[0];if(!fp)return;
-              var reservaReal=fp.reserva||0;
-              if(reservaReal<=0)return;
-              var devQty=Math.min(_cqty,reservaReal);
-              return patchStockFresco(_cpid,{stock_actual:+devQty,reserva:-devQty},'Cancelar pedido '+nroOrden);
-            })
-          );
-        }
-      });
-    } else {
-      // NO devolver al stock (producto roto/perdido)
-      items.forEach(function(it){
-        var _cid=comboIdDeItem(it);
-        if(_cid){
-          promises.push(
-            apiGet("combo_items","select=*&es_decan=not.is.true&combo_id=eq."+_cid).then(function(ci){
-              if(!Array.isArray(ci))return;
-              var chain=Promise.resolve();
-              ci.forEach(function(cit){
-                var cant=(cit.cantidad||1)*(it.qty||1);
-                chain=chain.then(function(){
-                  // Sacar de reserva O vendido_X SIN devolver al stock_actual
-                  var delta = {};
-                  if(teniaCobro){ delta[colVendido] = -cant; }
-                  else { delta.reserva = -cant; }
-                  return patchStockFresco(cit.producto_id, delta, 'Cancelar combo sin devolver '+nroOrden);
-                });
-              });
-              return chain;
-            })
-          );
-          return;
-        }
-        if(it.isDecan||it.segmento==='decan'||!_esProductoNumerico(it.producto_id))return;
-        var deltaSin = {};
-        if(teniaCobro){ deltaSin[colVendido] = -(it.qty||1); }
-        else { deltaSin.reserva = -(it.qty||1); }
-        promises.push(patchStockFresco(parseInt(it.producto_id,10), deltaSin, 'Cancelar pedido sin devolver '+nroOrden));
-      });
-    }
-
-    // Log
-    promises.push(apiPost('pedidos_estados_log',{
-      pedido_id: pedId,
-      pedido_tabla: 'pedidos_catalogo',
-      estado: 'cancelado',
-      nota: 'Cancelado reservado por '+VENDEDOR_NOMBRE+': '+motivo+' ('+(devolverStock?'stock devuelto':'sin devolver stock')+(teniaCobro?', ventas/CC borrados':'')+')',
-      usuario: VENDEDOR_NOMBRE
-    }).catch(function(){}));
-
-    Promise.all(promises).then(function(){
-      toast(devolverStock?"Cancelado - stock devuelto":"Cancelado - sin devolucion de stock","twarn");
-      loadPedidosWeb();renderCat();
-      if(typeof loadDineroData==='function') loadDineroData();
-    }).catch(function(){if(btn)btn.disabled=false;});
-  });
-}
+// (función confirmarCancelPed eliminada en la auditoría 2026-09-25: no tenía uso y arrastraba errores de stock/ventas)
 
 
 
@@ -14634,7 +14175,22 @@ function _ccjCargar(fecha, cb){
       "&created_at=gte."+encodeURIComponent(d0)+"&created_at=lt."+encodeURIComponent(d1)+"&limit=200").catch(function(){return [];}),
     apiGet("cierres_caja","select=*&vendedor_id=eq."+VENDEDOR_ID+"&order=fecha.desc&limit=14").catch(function(){return [];})
   ]).then(function(d){
-    var ventas=d[0]||[], pagos=d[1]||[], gastos=d[2]||[], rends=d[3]||[], cierres=d[4]||[];
+    // 2026-09-25: las ventas de pedidos cobrados por cuenta corriente ya entran como cc_pagos (hoy o antes):
+    // no se suman otra vez como venta, si no el efectivo esperado duplicaba cada pedido saldado.
+    var vv=d[0]||[]; var nros=[]; vv.forEach(function(v){ if(v.nro_orden&&nros.indexOf(v.nro_orden)<0) nros.push(v.nro_orden); });
+    var pExcl=Promise.resolve({});
+    if(nros.length){
+      pExcl=apiGet("pedidos_catalogo","select=id,nro_orden&nro_orden=in.("+nros.map(function(n){return encodeURIComponent('"'+n+'"');}).join(",")+")&limit=500").then(function(peds){
+        var ids=(peds||[]).map(function(p){return p.id;}); if(!ids.length) return {};
+        return apiGet("cc_pagos_aplicaciones","select=pedido_id&pedido_id=in.("+ids.join(",")+")&limit=2000").then(function(apps){
+          var con={}; (apps||[]).forEach(function(a){ con[a.pedido_id]=1; });
+          var ex={}; (peds||[]).forEach(function(p){ if(con[p.id]) ex[p.nro_orden]=1; }); return ex;
+        });
+      }).catch(function(){ return {}; });
+    }
+    return pExcl.then(function(excl){ d._excl=excl||{}; return d; });
+  }).then(function(d){
+    var ventas=(d[0]||[]).filter(function(v){ return !(v.nro_orden && d._excl[v.nro_orden]); }), pagos=d[1]||[], gastos=d[2]||[], rends=d[3]||[], cierres=d[4]||[];
 
     // ── ventas del día, separadas por cómo cobró ──
     var formas={}; var ventasTotal=0, ventasEfec=0;
@@ -16786,9 +16342,14 @@ function ejecutarTransfer(targetId,targetNombre){
   // (= suma de los items). Antes era bruto y el pedido nunca llegaba a "cobrado".
   var total=itemsData.reduce(function(s,it){return s+(parseFloat(it.total)||0);},0);
   var conReserva=document.getElementById("transferConReserva")&&document.getElementById("transferConReserva").checked;
+  // 2026-09-25: si venimos de editar un pedido, su stock YA está reservado y pasa al nuevo: el pedido
+  // nace con con_reserva=true aunque se haya destildado (antes quedaba "sin reserva" y al cobrarlo
+  // se descontaba del disponible otra vez, con la reserva original trabada para siempre)
+  if(_reservaHeredada) conReserva=true;
   var stockPromises=[];
   var reservasOk=0;
   var reservasTotal=0;
+  var _reservadosTr=[];   // qué se reservó efectivamente (para deshacer si falta alguno)
   var reservaEjecutadaOk=false;  // Declarada en scope de la función para ser accesible en todos los .then() encadenados
   if(conReserva && !_reservaHeredada){
     items.filter(function(i){return !i.isDecan;}).forEach(function(item){
@@ -16805,7 +16366,7 @@ function ejecutarTransfer(targetId,targetNombre){
           if((fp.stock_actual||0)<_tq){toast("Stock insuficiente para: "+_nomMl(item.nombre, _tpid)+" (hay "+(fp.stock_actual||0)+", pediste "+_tq+")","twarn");return;}
           return patchStockFresco(_tpid,{stock_actual:-_tq,reserva:+_tq},"Reserva transfer")
             .then(function(r){
-              if(r!==null)reservasOk++;
+              if(r!==null&&r!==undefined){reservasOk++;_reservadosTr.push({pid:_tpid,q:_tq});}
               else toast("Error reservando: "+_nomMl(item.nombre, _tpid),"terr");
             });
         }).catch(function(e){toast("Error de red: "+_nomMl(item.nombre, _tpid),"terr");})
@@ -16815,6 +16376,12 @@ function ejecutarTransfer(targetId,targetNombre){
   // Retornar la promesa para que _lockBtn pueda esperarla
   // (primero se cancela el pedido original si venimos de una edición — si eso falla, se aborta)
   return _cancelarOrigProm.then(function(){ return Promise.all(stockPromises); }).then(function(){
+    // 2026-09-25: si NO se pudo reservar todo, se deshace lo reservado y se aborta (antes el pedido nacía
+    // con con_reserva=true y productos sin apartar → al cobrar se restaba reserva inexistente y el disponible no bajaba)
+    if(conReserva && !_reservaHeredada && reservasOk!==reservasTotal){
+      return Promise.all(_reservadosTr.map(function(x){ return patchStockFresco(x.pid,{stock_actual:+x.q,reserva:-x.q},"Reserva transfer deshecha"); }))
+        .then(function(){ throw new Error("No se pudo reservar todo el stock: la transferencia no se creó. Revisá las cantidades."); });
+    }
     // reserva_ejecutada=true solo si TODOS los productos se reservaron
     // (si la reserva viene HEREDADA del pedido editado, ya está hecha)
     reservaEjecutadaOk=_reservaHeredada?conReserva:(conReserva&&reservasOk>0&&reservasOk===reservasTotal);
@@ -17743,78 +17310,7 @@ function cpActualizar(){
 
 
 
-function cobrarParcialPedido(pedId){
-  apiGet("pedidos_catalogo","select=*&id=eq."+pedId).then(function(data){
-    if(!Array.isArray(data)||!data.length) return;
-    var ped=data[0];
-    var items=[];
-    try{items=typeof ped.items==="string"?JSON.parse(ped.items):ped.items||[];}catch(ex){}
-    var cobrados=[];
-    try{cobrados=Array.isArray(ped.items_cobrados)?ped.items_cobrados:(ped.items_cobrados?JSON.parse(ped.items_cobrados):[]);}catch(ex){}
-    var cobradoYa=ped.cobrado_parcial||0;
-    var saldo=(ped.total||0)-cobradoYa;
-    window._cpPedItems=items;
-    var mo=document.getElementById("moCobParcial");
-    if(!mo){
-      mo=document.createElement("div");mo.id="moCobParcial";mo.className="mo";
-      mo.innerHTML="<div class='md' style='max-width:500px;width:95%;overflow-y:auto;max-height:90vh'>"+
-        "<div class='md-h'><span>Cobro parcial</span>"+
-        "<button onclick='document.getElementById(\"moCobParcial\").classList.remove(\"open\")' class='xb'>&#10005;</button></div>"+
-        "<div class='md-b' id='moCobParcialBody'></div></div>";
-      document.body.appendChild(mo);
-    }
-    var itemsHtml=items.map(function(it,i){
-      var yaCobrado=cobrados.indexOf(i)>=0;
-      var cobLabel=yaCobrado
-        ?"<span style='font-size:.62rem;font-weight:700;color:var(--green);background:rgba(76,175,128,.12);padding:.1rem .4rem;border-radius:4px'>Cobrado</span>"
-        :"<span style='font-size:.62rem;color:var(--yel);background:rgba(245,166,35,.1);padding:.1rem .4rem;border-radius:4px'>Pendiente</span>";
-      return "<div style='display:flex;justify-content:space-between;align-items:center;padding:.4rem 0;border-bottom:1px solid var(--bd)'>"+
-        "<label style='display:flex;align-items:center;gap:.4rem;flex:1;cursor:"+(yaCobrado?"default":"pointer")+";font-size:.75rem;color:var(--tx)'>"+
-          "<input type='checkbox' class='cpCb' "+(yaCobrado?"checked disabled":"")+
-            " data-idx='"+i+"' data-qty='"+(it.qty||1)+"' data-precio='"+(it.precio||0)+"' data-nombre='"+(it.nombre||"").replace(/'/g,"")+"'>"+
-          " <span style='flex:1'><b>"+_prodMl(it.nombre, _mlDe(it.producto_id))+"</b> <span style='font-size:.68rem;color:var(--tx3)'>x"+(it.qty||1)+"</span></span>"+
-        "</label>"+
-        "<div style='display:flex;align-items:center;gap:.5rem;flex-shrink:0'>"+
-          "<span style='font-size:.75rem;font-weight:600;color:var(--acc)'>"+fmt(it.total||0)+"</span>"+
-          cobLabel+
-        "</div>"+
-      "</div>";
-    }).join("");
-    document.getElementById("moCobParcialBody").innerHTML=
-      "<div style='background:var(--sur3);border-radius:6px;padding:.5rem .7rem;margin-bottom:.6rem'>"+
-        "<div style='display:flex;justify-content:space-between;font-size:.75rem;margin-bottom:.2rem'>"+
-          "<span style='color:var(--tx3)'>Total pedido</span><b>"+fmt(ped.total||0)+"</b></div>"+
-        (cobradoYa>0?"<div style='display:flex;justify-content:space-between;font-size:.75rem;margin-bottom:.2rem'>"+
-          "<span style='color:var(--tx3)'>Ya cobrado</span><b style='color:var(--green)'>"+fmt(cobradoYa)+"</b></div>":"")+
-        (saldo>0?"<div style='display:flex;justify-content:space-between;font-size:.75rem;border-top:1px solid var(--bd);padding-top:.2rem;margin-top:.2rem'>"+
-          "<span style='color:var(--tx3)'>Saldo</span><b style='color:var(--yel)'>"+fmt(saldo)+"</b></div>":"")+
-      "</div>"+
-      "<div style='font-size:.72rem;font-weight:600;color:var(--acc);margin-bottom:.35rem'>Tilda los productos que cobras ahora:</div>"+
-      "<div style='margin-bottom:.6rem'>"+itemsHtml+"</div>"+
-      "<div id='cpResumen' style='background:var(--sur3);border-radius:6px;padding:.5rem;margin-bottom:.5rem;font-size:.75rem'>"+
-        "<div style='color:var(--tx3)'>Selecciona productos para ver el total</div></div>"+
-      "<div class='fg' style='margin-bottom:.5rem'><label style='font-size:.72rem;color:var(--tx3)'>Forma de cobro</label>"+
-        "<select id='cpFormaCobro' class='fi' style='font-size:.75rem;padding:.3rem .5rem'>"+
-          "<option value='efectivo'>&#128181; Efectivo</option>"+
-          "<option value='transferencia'>&#127974; Transferencia</option>"+
-          "<option value='debito'>&#128179; D\u00e9bito</option>"+
-          "<option value='credito'>&#128179; Cr\u00e9dito</option>"+
-          "<option value='mixto'>Mixto</option>"+
-        "</select>"+
-      "</div>"+
-      "<div style='display:flex;gap:.5rem'>"+
-        "<button class='btn btn-green' onclick='cpConfirmar("+pedId+","+cobradoYa+","+ped.total+",window._cpPedItems)' style='flex:1'>Registrar cobro</button>"+
-        "<button class='btn btn-g' onclick='document.getElementById(\"moCobParcial\").classList.remove(\"open\")'>Cancelar</button>"+
-      "</div>";
-    setTimeout(function(){
-      var tot=items.reduce(function(s,it){return s+(it.qty||1);},0);
-      document.querySelectorAll(".cpCb:not([disabled])").forEach(function(cb){
-        cb.addEventListener("change",function(){cpRecalc(tot);});
-      });
-    },50);
-    mo.classList.add("open");
-  });
-}
+// (función cobrarParcialPedido eliminada en la auditoría 2026-09-25: no tenía uso y arrastraba errores de stock/ventas)
 
 
 function cpRecalc(totalUnitsOrig){
@@ -17850,174 +17346,7 @@ function cpRecalc(totalUnitsOrig){
       "<div style='color:var(--cyan)'>Se salda el pedido completo ✓</div>");
 }
 
-function cpConfirmar(pedId,cobradoYa,totalPed,pedItems){
-  pedItems=pedItems||window._cpPedItems||[];
-  var montoCob=0; var idxsCobrados=[]; var nombresCob=[];
-  var formaCobro=(document.getElementById('cpFormaCobro')||{}).value||'efectivo';
-  document.querySelectorAll(".cpCb:checked").forEach(function(cb){
-    var qty=parseInt(cb.dataset.qty)||1;
-    var precio=parseFloat(cb.dataset.precio)||0;
-    montoCob+=precio*qty;
-    idxsCobrados.push(parseInt(cb.dataset.idx));
-    nombresCob.push(cb.dataset.nombre);
-  });
-  if(!montoCob){toast("Seleccioná al menos un producto","twarn");return;}
-  // 🔒 FIX 2026-08-08: doble tap corría TODO el flujo dos veces (ventas, stock y
-  // movimientos duplicados). Lock hasta que termine.
-  if(window._cpConfirmando)return; window._cpConfirmando=true;
-
-  // Merge with already-cobrados — además leer es_cc y cliente_id para CC
-  apiGet("pedidos_catalogo","select=items_cobrados,cobrado_parcial,cobrado_total,es_cc,cliente_id,vendedor_id&id=eq."+pedId).then(function(data){
-    var existing=[];
-    try{
-      var raw=data&&data[0]?data[0].items_cobrados:null;
-      existing=Array.isArray(raw)?raw:(raw?JSON.parse(raw):[]);
-    }catch(ex){}
-    var pedFull = (data && data[0]) || {};
-    var esCC = !!pedFull.es_cc;
-    var clienteId = pedFull.cliente_id;
-    // 🐛 FIX 2026-08-08: filtrar items que YA estaban cobrados (otro dispositivo pudo
-    // cobrarlos mientras el modal estaba abierto) — evita venta y stock dobles.
-    var _dupCp=idxsCobrados.filter(function(i){return existing.indexOf(i)>=0;});
-    if(_dupCp.length){
-      idxsCobrados=idxsCobrados.filter(function(i){return existing.indexOf(i)<0;});
-      montoCob=0;
-      idxsCobrados.forEach(function(idx){ var it=pedItems[idx]; if(it) montoCob+=(parseFloat(it.precio)||0)*(it.qty||1); });
-      if(!idxsCobrados.length){ window._cpConfirmando=false; toast('Esos productos ya fueron cobrados desde otro lado','twarn'); if(typeof loadPedidosWeb==='function')loadPedidosWeb(); return; }
-    }
-
-    var merged=existing.concat(idxsCobrados.filter(function(i){return existing.indexOf(i)<0;}));
-    // 🐛 FIX 2026-08-08: usar el cobrado FRESCO de la BD, no el que quedó congelado al
-    // abrir el modal — si otro dispositivo cobró en el medio, ese cobro se perdía.
-    var _cobradoFresco=Math.max(parseFloat(pedFull.cobrado_parcial)||0, parseFloat(pedFull.cobrado_total)||0, cobradoYa||0);
-    var nuevoCobrado=_cobradoFresco+montoCob;
-    var esSaldado=nuevoCobrado>=totalPed - 0.01;
-    var periodo=document.getElementById("hPeriodo")?document.getElementById("hPeriodo").textContent||"general":"general";
-    var nro="COB-"+Math.floor(100000+Math.random()*900000);
-
-    // FIX 2026-05-18: Procesar items (con manejo de combos)
-    var stockProms=[];
-    idxsCobrados.forEach(function(idx){
-      var it=pedItems[idx];
-      if(!it) return;
-      // Combos: descontar stock de cada producto del combo
-      var _cid=comboIdDeItem(it);
-      if(_cid){
-        stockProms.push(apiGet('combo_items','select=producto_id,cantidad&es_decan=not.is.true&combo_id=eq.'+_cid).then(function(ci){
-          if(!Array.isArray(ci)) return;
-          return Promise.all(ci.filter(function(cit){return cit.producto_id;}).map(function(cit){
-            var cantTotal = (cit.cantidad||1)*(it.qty||1);
-            return patchStockFresco(cit.producto_id, _dV(VENDEDOR_ID,+cantTotal,{reserva:-cantTotal}), 'Cobro parcial combo '+nro);
-          }));
-        }).catch(function(e){console.error('[cp combo]',e);}));
-        // Venta del combo
-        stockProms.push(apiPost("ventas",{
-          vendedor_id:VENDEDOR_ID, producto_id:null, producto_nombre:it.nombre,
-          cantidad:it.qty||1, precio_unitario:it.precio||0, segmento:'combo',
-          total:it.total||0, periodo:periodo, estado:"confirmada",
-          origen:"reserva", nro_orden:nro, forma_cobro:formaCobro
-        }).catch(function(e){console.error('[cp venta combo]',e);}));
-        return;
-      }
-      // Decants: solo venta sin stock
-      if(it.isDecan || !it.producto_id){
-        if(it.isDecan){
-          stockProms.push(apiPost("ventas",{
-            vendedor_id:VENDEDOR_ID, producto_id:null, producto_nombre:it.nombre,
-            cantidad:it.qty||1, precio_unitario:it.precio||0, segmento:'decan',
-            total:it.total||0, periodo:periodo, estado:"confirmada",
-            origen:"reserva", nro_orden:nro, forma_cobro:formaCobro
-          }).catch(function(e){console.error('[cp venta decan]',e);}));
-        }
-        return;
-      }
-      // Producto normal
-      stockProms.push(patchStockFresco(it.producto_id,_dV(VENDEDOR_ID,+(it.qty||1)*(it.cajaCant||1),{reserva:-(it.qty||1)*(it.cajaCant||1)}),'Confirmar pedido '+nro));
-      stockProms.push(apiPost("ventas",{
-        vendedor_id:VENDEDOR_ID,producto_id:it.producto_id,
-        producto_nombre:it.nombre,cantidad:it.qty||1,
-        precio_unitario:it.precio||0,segmento:it.segmento||"x1",
-        total:it.total||0,periodo:periodo,estado:"confirmada",
-        origen:"reserva",nro_orden:nro,forma_cobro:formaCobro
-      }));
-      // FIX 2026-05-18: trazabilidad
-      stockProms.push(apiPost("movimientos_stock",{
-        producto_id: it.producto_id,
-        producto_nombre: it.nombre,
-        tipo: "venta",
-        cantidad: it.qty||1,
-        motivo: "Cobro parcial " + nro,
-        usuario: VENDEDOR_NOMBRE || "vendedor",
-        periodo: periodo
-      }).catch(function(e){console.error('[cp mov_stock]',e);}));
-    });
-
-    // FIX 2026-05-18: Si es CC, también crear cc_pago + aplicar a cuotas
-    var patchPedidoBase = {
-      cobrado_parcial:nuevoCobrado,
-      cobrado_total:nuevoCobrado,
-      items_cobrados:JSON.stringify(merged)
-    };
-    if(esSaldado){
-      patchPedidoBase.estado = "cobrado";
-      patchPedidoBase.confirmado_cobro = true;
-      patchPedidoBase.confirmado_at = new Date().toISOString();
-      patchPedidoBase.periodo = periodoActual;
-    }
-    // Auto-asignar vendedor si falta
-    if(!pedFull.vendedor_id){
-      patchPedidoBase.vendedor_id = VENDEDOR_ID;
-    }
-
-    var allProms = [
-      apiPatch("pedidos_catalogo", patchPedidoBase, "id=eq."+pedId)
-    ].concat(stockProms);
-
-    // CC: registrar pago + aplicar a cuotas
-    if(esCC && clienteId){
-      allProms.push(
-        apiPost('cc_pagos', {
-          cliente_id: clienteId,
-          monto: montoCob,
-          forma_pago: formaCobro,
-          fecha: new Date().toISOString().split('T')[0],
-          vendedor_id: VENDEDOR_ID,
-          registrado_por: VENDEDOR_NOMBRE || ('Vendedor '+VENDEDOR_ID),
-          nota: (esSaldado ? 'Cobro final ' : 'Cobro parcial ') + nro + ' (productos)',
-          saldo_a_favor: 0
-        }).then(function(rowsP){
-          var pago = Array.isArray(rowsP)&&rowsP.length ? rowsP[0] : null;
-          if(pago && pago.id){
-            return _ccAplicarPagoACuotasPedido(pedId, montoCob).then(function(){
-              return apiPost('cc_pagos_aplicaciones', {
-                pago_id: pago.id,
-                pedido_id: pedId,
-                monto_aplicado: montoCob,
-                cubrio_pedido_completo: esSaldado
-              });
-            });
-          }
-        }).catch(function(e){console.error('[cp cc_pago]',e);})
-      );
-    }
-
-    // FIX 2026-05-18: log de estado
-    allProms.push(apiPost('pedidos_estados_log', {
-      pedido_id: pedId,
-      pedido_tabla: 'pedidos_catalogo',
-      estado: esSaldado ? 'cobrado' : 'cobrado_parcial',
-      nota: 'Cobro parcial por ' + VENDEDOR_NOMBRE + ' (' + formaCobro + ', ' + fmt(montoCob) + ')' + (esSaldado ? ' — pedido saldado' : ''),
-      usuario: VENDEDOR_NOMBRE || ('Vendedor ' + VENDEDOR_ID)
-    }).catch(function(e){console.error('[cp log]',e);}));
-
-    Promise.all(allProms).then(function(){
-      window._cpConfirmando=false;
-      toast("Cobro de "+fmt(montoCob)+" al pozo"+(esSaldado?" — Pedido saldado!":""),"tok");
-      document.getElementById("moCobParcial").classList.remove("open");
-      loadPedidosWeb();loadDineroData();
-    }).catch(function(e){window._cpConfirmando=false;toast("Error: "+(e.message||"ver consola"),"terr");console.error(e);});
-  }).catch(function(e){window._cpConfirmando=false;console.error('[cp]',e);toast("Error al leer el pedido","terr");});
-}
+// (función cpConfirmar eliminada en la auditoría 2026-09-25: no tenía uso y arrastraba errores de stock/ventas)
 
 function cerrarMoCancelPed(){var m=document.getElementById('moCancelPed');if(m)m.classList.remove('open');}
 
@@ -22126,64 +21455,10 @@ function _ecEjecutar(){
     apiPatch('pedidos_catalogo', patchPed, 'id=eq.'+pedId)
   ];
 
-  // ─── Descuento de stock + ventas (si corresponde) ───
-  if((debeDescontarStock || debeRegistrarVentas) && Array.isArray(items)){
-    items.forEach(function(it){
-      // Registrar venta (suma a "mi dinero")
-      if(debeRegistrarVentas){
-        proms.push(apiPost('ventas', {
-          vendedor_id: VENDEDOR_ID,
-          producto_id: it.producto_id || null,
-          producto_nombre: it.nombre,
-          cantidad: it.qty || 1,
-          precio_unitario: it.precio || 0,
-          segmento: it.segmento || 'x1',
-          total: it.total || 0,
-          periodo: periodoActual,
-          estado: 'confirmada',
-          origen: 'catalogo',
-          nro_orden: nroOrden,
-          forma_cobro: forma,
-          descuento: 0,
-          descuento_motivo: 'Entrega+cobro en ruta'
-        }).catch(function(e){console.error('[ec ventas]',e);}));
-      }
-
-      // Descontar stock (reserva → vendido_david)
-      if(debeDescontarStock){
-        // Si es combo, descontar cada producto del combo
-        var _cid=comboIdDeItem(it);
-        if(_cid){
-          proms.push(apiGet('combo_items','select=producto_id,cantidad&es_decan=not.is.true&combo_id=eq.'+_cid).then(function(ci){
-            if(!Array.isArray(ci)) return;
-            return Promise.all(ci.filter(function(cit){return cit.producto_id;}).map(function(cit){
-              var cantTotal = (cit.cantidad||1)*(it.qty||1);
-              return patchStockFresco(cit.producto_id,_dV(VENDEDOR_ID,+cantTotal,{reserva:-cantTotal}),'Cobro combo en ruta '+nroOrden);
-            }));
-          }).catch(function(e){console.error('[ec stock combo]',e);}));
-          return;
-        }
-        // Producto normal (no decant, con producto_id numérico)
-        var pid = it.producto_id;
-        if(it.isDecan || !_esProductoNumerico(pid)) return;
-        pid = parseInt(pid,10);
-        proms.push(patchStockFresco(pid,_dV(VENDEDOR_ID,+(it.qty||1)*(it.cajaCant||1),{reserva:-(it.qty||1)*(it.cajaCant||1)}),'Cobro pedido en ruta '+nroOrden)
-          .then(function(r){
-            if(!r && typeof _alertaStock === 'function') _alertaStock('Stock de '+_nomMl(it.nombre, it.producto_id)+' no se actualizó al cobrar '+nroOrden);
-          })
-          .catch(function(e){console.error('[ec stock]',e);}));
-        // Registrar movimiento_stock para trazabilidad
-        proms.push(apiPost('movimientos_stock', {
-          producto_id: pid,
-          producto_nombre: it.nombre,
-          tipo: 'venta',
-          cantidad: it.qty||1,
-          motivo: 'Venta pedido '+nroOrden+' (entrega+cobro en ruta)',
-          usuario: VENDEDOR_NOMBRE || 'vendedor',
-          periodo: periodoActual
-        }).catch(function(e){console.error('[ec mov_stock]',e);}));
-      }
-    });
+  // ─── Ventas + stock por ítem (2026-09-25): un solo camino, idempotente por items_cobrados ───
+  if(debeRegistrarVentas){
+    proms.push(_pedSaldarItems(pedId, { forma: forma, origen: 'catalogo', motivo: 'Venta pedido '+nroOrden+' (entrega+cobro en ruta)' })
+      .catch(function(e){ console.error('[ec ventas]', e); if(typeof _alertaStock === 'function') _alertaStock('No se pudo registrar la venta/stock de '+nroOrden); }));
   }
 
   // 2) Si es CC y hay monto a cobrar → crear cc_pago + aplicar a cuotas
@@ -22220,13 +21495,27 @@ function _ecEjecutar(){
           .catch(function(e){console.error('[cc cuotas a_cuenta]',e);});
       }
       return aplicarProm.then(function(info){
-        cuotasAfectadasInfo = info; // {cuotasPagadas, cuotasParciales, sobraACredito}
-        // Registrar la aplicación (vincular pago al pedido como referencia)
+        cuotasAfectadasInfo = info; // {cuotasPagadas, cuotasParciales, sobraACredito, aplicadoPorPedido}
+        // 2026-09-25: en 'a_cuenta' el FIFO reparte entre los pedidos del cliente → una aplicación por pedido
+        // con lo que le tocó a cada uno (antes se anotaba todo contra el pedido entregado, aunque no fuera ahí)
+        var porPed = (modo === 'a_cuenta' && info && info.aplicadoPorPedido) ? info.aplicadoPorPedido : null;
+        if(porPed && Object.keys(porPed).length){
+          return Promise.all(Object.keys(porPed).map(function(pid){
+            var m = parseFloat(porPed[pid])||0; if(m <= 0) return null;
+            return apiPost('cc_pagos_aplicaciones', { pago_id: pago.id, pedido_id: parseInt(pid,10), monto_aplicado: m,
+              cubrio_pedido_completo: !!(info.pedidosSaldados && info.pedidosSaldados[pid]) });
+          }));
+        }
+        if(modo === 'a_cuenta') return null;   // todo fue a saldo a favor: no hay pedido al que aplicarlo
         return apiPost('cc_pagos_aplicaciones', {
           pago_id: pago.id,
           pedido_id: pedId,
           monto_aplicado: montoCobrar,
           cubrio_pedido_completo: (modo === 'pedido' && esSaldado)
+        }).then(function(){
+          // 2026-09-25: pedido CC saldado en ruta → venta + stock de lo que falte (idempotente; si la
+          // consolidación de cuotas ya lo hizo, no duplica). Antes un CC sin cuotas quedaba sin venta.
+          if(esCC && modo === 'pedido' && esSaldado) return _pedSaldarItems(pedId, { forma: forma, origen: 'catalogo', motivo: 'Venta pedido '+nroOrden+' (entrega+cobro en ruta)' });
         });
       });
     }).catch(function(e){console.error('[belle] cc_pago:',e);});
@@ -22332,6 +21621,7 @@ function _ecAplicarPagoACuentaFIFO(clienteId, monto){
       // 3) Aplicar FIFO y trackear cuánto se aplicó por pedido
       var restante = monto;
       var aplicadoPorPedido = {}; // pedido_id → monto aplicado
+      var pedidosSaldados = {};   // pedido_id → true si quedó saldado con este pago (2026-09-25)
       var promesas = [];
       var cuotasPagadas = [];
       var cuotasParciales = [];
@@ -22366,6 +21656,7 @@ function _ecAplicarPagoACuentaFIFO(clienteId, monto){
         var nuevoCobrado = cobradoAct + aplicadoPorPedido[pid];
         var totalP = parseFloat(p.total) || 0;
         var quedaSaldado = nuevoCobrado >= totalP - 0.01;
+        if(quedaSaldado) pedidosSaldados[pid] = true;
         var patchP = {
           cobrado_total: nuevoCobrado,
           cobrado_parcial: nuevoCobrado
@@ -22388,7 +21679,7 @@ function _ecAplicarPagoACuentaFIFO(clienteId, monto){
       }
 
       return Promise.all(promesas).then(function(){
-        return {cuotasPagadas:cuotasPagadas, cuotasParciales:cuotasParciales, sobraACredito:sobra};
+        return {cuotasPagadas:cuotasPagadas, cuotasParciales:cuotasParciales, sobraACredito:sobra, aplicadoPorPedido:aplicadoPorPedido, pedidosSaldados:pedidosSaldados};
       });
     });
   });
@@ -23718,7 +23009,7 @@ function _rtBorrarDir(id){
 
 <div class="modal-ov" id="moReserva"><div class="modal"><h3 style="color:var(--yel);margin-bottom:.7rem">Reserva detectada</h3><p id="moReservaMsg" style="font-size:.82rem;color:var(--tx2);margin-bottom:1rem"></p><div style="display:flex;flex-direction:column;gap:.5rem"><button class="btn btn-red" style="justify-content:center" onclick="confirmarConReserva(true)">Esta ES la venta reservada</button><button class="btn btn-g" style="justify-content:center" onclick="confirmarConReserva(false)">Venta nueva</button></div></div></div>
 
-<div class="modal-ov" id="moEditPed"><div class="modal" style="max-width:480px"><div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:.9rem"><h3 style="color:var(--acc)">Editar pedido <span id="editPedOrden" style="font-size:.8rem"></span></h3><button class="btn btn-g" onclick="document.getElementById('moEditPed').classList.remove('open')" style="padding:.2rem .5rem">X</button></div><input type="hidden" id="editPedId"><div style="max-height:55vh;overflow-y:auto;margin-bottom:.8rem"><table style="width:100%;border-collapse:collapse"><thead><tr><th style="font-size:.62rem;color:var(--tx3);text-align:left;padding:.3rem .4rem;border-bottom:1px solid var(--bd)">Producto</th><th style="font-size:.62rem;color:var(--tx3);text-align:center;padding:.3rem .4rem;border-bottom:1px solid var(--bd)">Cant</th><th style="font-size:.62rem;color:var(--tx3);text-align:right;padding:.3rem .4rem;border-bottom:1px solid var(--bd)">Subtotal</th><th style="font-size:.62rem;color:var(--tx3);text-align:center;padding:.3rem .4rem;border-bottom:1px solid var(--bd)">Seg.</th><th></th></tr></thead><tbody id="editPedItems"></tbody></table></div><div style="display:flex;justify-content:space-between;align-items:center;padding:.4rem 0;border-top:1px solid var(--bd);margin-bottom:.3rem"><span style="font-size:.78rem;color:var(--tx2)">Subtotal</span><span style="font-size:.9rem;font-weight:600;color:var(--tx)" id="editPedSubtotal">$0</span></div><div style="display:flex;align-items:center;gap:.4rem;margin-bottom:.3rem"><span style="font-size:.75rem;color:var(--tx2);flex-shrink:0">Descuento $</span><input type="number" id="editPedDescuento" min="0" value="0" class="fi" style="width:100px;font-size:.8rem" oninput="recalcEditPed()"><input type="text" id="editPedDescMotivo" class="fi" placeholder="Motivo..." style="flex:1;font-size:.72rem"></div><div style="display:flex;justify-content:space-between;align-items:center;padding:.4rem 0;border-top:1px solid var(--bd);margin-bottom:.8rem"><span style="font-size:.82rem;font-weight:600;color:var(--tx)">Total</span><span style="font-size:.95rem;font-weight:700;color:var(--acc)" id="editPedTotal">$0</span></div><div style="display:flex;gap:.5rem;margin-bottom:.5rem"><button class="btn btn-g" onclick="abrirBuscadorEditPed()" style="flex:1;justify-content:center;color:var(--cyan)">+ Agregar producto</button></div><div style="display:flex;gap:.5rem"><button class="btn btn-g" onclick="document.getElementById('moEditPed').classList.remove('open')" style="flex:1;justify-content:center">Cancelar</button><button class="btn btn-a" onclick="guardarEditPed()" style="flex:1;justify-content:center">Guardar</button></div></div></div>
+<!-- modal moEditPed eliminado (auditoría 2026-09-25: nunca se abría) -->
 
 <div class="modal-ov" id="moTransfer"><div class="modal"><div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:.9rem"><h3 style="color:var(--acc)">Transferir venta</h3><button class="btn btn-g" onclick="document.getElementById('moTransfer').classList.remove('open')" style="padding:.2rem .5rem">X</button></div><p style="font-size:.8rem;color:var(--tx2);margin-bottom:.9rem">Selecciona a quien transferir:</p><div id="transferUserList" style="display:flex;flex-direction:column;gap:.5rem"></div></div></div>
 
@@ -24501,15 +23792,8 @@ function _vcFIFOConfirmarPago(clienteId){
     var pedidosCobrados = []; // los que quedaron completos en este pago
     aplicaciones.forEach(function(a){
       chain = chain.then(function(){
-        // 2a) Registro de aplicación
-        return apiPost("cc_pagos_aplicaciones", {
-          pago_id: pago.id,
-          pedido_id: a.pedido.id,
-          monto_aplicado: a.aplica,
-          cubrio_pedido_completo: a.cubre
-        });
-      }).then(function(){
-        // 2b) Actualizar pedido — RE-LEER cobrado_total de BD para evitar conflictos
+        // 2a+2b (2026-09-25): se relee el pedido ANTES de registrar la aplicación, así la aplicación
+        // queda por lo realmente aplicado (capeado al saldo fresco) y el estado se escribe antes de las cuotas
         return apiGet("pedidos_catalogo","select=id,cobrado_total,total,estado,vendedor_id,transferida_por_id,nro_orden,items&id=eq."+a.pedido.id+"&limit=1").then(function(rows){
           if(!rows||!rows[0]) return null;
           var fresh = rows[0];
@@ -24562,10 +23846,9 @@ function _vcFIFOConfirmarPago(clienteId){
             // si todavía no estaba marcado como parcial, marcarlo
             patch.estado = "cobrado_parcial";
           }
-          // FEAT CC v2 (2026-05-14): aplicar pago a cuotas del pedido (regla ORO)
-          return _ccAplicarPagoACuotasPedido(a.pedido.id, a.aplica).then(function(){
-            return apiPatch("pedidos_catalogo", patch, "id=eq."+a.pedido.id);
-          });
+          return apiPost("cc_pagos_aplicaciones", { pago_id: pago.id, pedido_id: a.pedido.id, monto_aplicado: aplicaReal, cubrio_pedido_completo: quedaCompleto })
+            .then(function(){ return apiPatch("pedidos_catalogo", patch, "id=eq."+a.pedido.id); })
+            .then(function(){ return _ccAplicarPagoACuotasPedido(a.pedido.id, aplicaReal); });
         });
       });
     });
@@ -24584,66 +23867,9 @@ function _vcFIFOConfirmarPago(clienteId){
           // ── PROTECCIÓN CONTRA DOBLE DESCUENTO ──
           return apiGet("ventas","select=id&nro_orden=eq."+encodeURIComponent(nroOrden)+"&limit=1");
         }).then(function(ventasExistentes){
-          if(Array.isArray(ventasExistentes) && ventasExistentes.length){
-            // Ya hay ventas → stock ya descontado y ventas creadas. No tocar nada.
-            return;
-          }
-          return apiGet("pedidos_catalogo","select=items&id=eq."+p.id+"&limit=1").then(function(rowsP){
-            if(!Array.isArray(rowsP)||!rowsP[0]) return;
-            var items = [];
-            try{ items = typeof rowsP[0].items==='string' ? JSON.parse(rowsP[0].items) : (rowsP[0].items||[]); }catch(e){ items = []; }
-            if(!Array.isArray(items)) return;
-            var c2 = Promise.resolve();
-            items.forEach(function(it){
-              c2 = c2.then(function(){
-                // COMBOS: crear venta + descontar reserva→vendido por componente
-                var _cid=comboIdDeItem(it);
-                if(_cid){
-                  return apiPost('ventas',{
-                    vendedor_id:VENDEDOR_ID, producto_id:null, producto_nombre:it.nombre,
-                    cantidad:it.qty||1, precio_unitario:it.precio||0, segmento:'combo',
-                    total:it.total||0, estado:'confirmada', origen:'catalogo',
-                    nro_orden:nroOrden, periodo:periodoActual, forma_cobro:forma
-                  }).then(function(){
-                    return apiGet('combo_items','select=producto_id,cantidad&es_decan=not.is.true&combo_id=eq.'+_cid).then(function(ci){
-                      if(!Array.isArray(ci)) return;
-                      var c3 = Promise.resolve();
-                      ci.filter(function(x){return x.producto_id;}).forEach(function(cit){
-                        var cantTot=(cit.cantidad||1)*(it.qty||1);
-                        c3 = c3.then(function(){
-                          return patchStockFresco(cit.producto_id,_dV(VENDEDOR_ID,+cantTot,{reserva:-cantTot}),'Cobro CC FIFO combo '+nroOrden);
-                        });
-                      });
-                      return c3;
-                    });
-                  });
-                }
-                // DECAN o sin producto_id: solo crear venta (decan), sin tocar stock
-                if(it.isDecan || !it.producto_id){
-                  if(it.isDecan){
-                    return apiPost('ventas',{
-                      vendedor_id:VENDEDOR_ID, producto_id:it.producto_id||null, producto_nombre:it.nombre,
-                      cantidad:it.qty||1, precio_unitario:it.precio||0, segmento:'decan',
-                      total:it.total||0, estado:'confirmada', origen:'catalogo',
-                      nro_orden:nroOrden, periodo:periodoActual, forma_cobro:forma
-                    });
-                  }
-                  return;
-                }
-                // PRODUCTO NORMAL: descontar stock + crear venta
-                return patchStockFresco(it.producto_id,_dV(VENDEDOR_ID,+(it.qty||1)*(it.cajaCant||1),{reserva:-(it.qty||1)*(it.cajaCant||1)}),'Cobro CC FIFO '+nroOrden)
-                  .then(function(){
-                    return apiPost('ventas',{
-                      vendedor_id:VENDEDOR_ID, producto_id:it.producto_id, producto_nombre:it.nombre,
-                      cantidad:it.qty||1, precio_unitario:it.precio||0, segmento:it.segmento||'pi',
-                      total:it.total||0, estado:'confirmada', origen:'catalogo',
-                      nro_orden:nroOrden, periodo:periodoActual, forma_cobro:forma
-                    });
-                  });
-              });
-            });
-            return c2;
-          });
+          // 2026-09-23/25: _pedSaldarItems vende solo lo que falta (items_cobrados); si el pedido ya tenía
+          // ventas de un flujo viejo sin detalle por ítem, no duplica. Un CC sin cuotas también queda con venta.
+          return _pedSaldarItems(p.id, { forma: forma, origen: 'catalogo', motivo: 'Cobro CC FIFO '+nroOrden });
         });
       });
       return stockChain;
