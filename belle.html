@@ -19,7 +19,7 @@
     </div><!DOCTYPE html>
 <html lang="es">
 <head>
-<!-- BELLE_BUILD 20260925-0400 reportes-devengado-vs-caja -->
+<!-- BELLE_BUILD 20260925-0500 reportes-criterio-caja -->
 <meta charset="UTF-8">
 <link rel="icon" type="image/svg+xml" href="favicon.svg">
 <meta name="viewport" content="width=device-width,initial-scale=1">
@@ -38824,13 +38824,16 @@ function _repCaja(apps, ventas, rango, cf){
   });
   function factor(v){ return (v && v.nro_orden && ratio[v.nro_orden]!==undefined) ? ratio[v.nro_orden] : 1; }
   // pagos registrados dentro del rango → "extras" (pseudo-ventas con fecha del pago y costo proporcional)
-  var extras=[], extraMonto=0, extraCosto=0, extraPed={};
+  var extras=[], extraMonto=0, extraCosto=0, extraPed={}, extraDet={};
   if(rango){
     var dK=_repDiaKey(rango.desde), hK=_repDiaKey(rango.hasta);
     Object.keys(porNro).forEach(function(n){
       var o=porNro[n], T=parseFloat(o.ped.total)||0, costoPed=null, seg=null;
       o.apps.forEach(function(a){
+        if(a.fecha<dK){ if(extraDet[n]) extraDet[n].previo+=a.monto; else extraDet[n]={nro:n, monto:0, previo:a.monto, pedTotal:T, saldado:false}; }
         if(a.fecha<dK || a.fecha>=hK) return;
+        if(!extraDet[n]) extraDet[n]={nro:n, monto:0, previo:0, pedTotal:T, saldado:false};
+        extraDet[n].monto+=a.monto; if(a.cubrio) extraDet[n].saldado=true;
         if(costoPed===null){ costoPed=_repCostoPedido(o.ped, cf); seg=_repSegmentoPedido(o.ped); }
         var prop = T>0 ? a.monto/T : 0;
         var e = { _extra:true, created_at:a.fecha+"T15:00:00.000Z", fecha:a.fecha, total:a.monto, _costo:costoPed*prop, cantidad:0,
@@ -38846,6 +38849,7 @@ function _repCaja(apps, ventas, rango, cf){
     costo: function(v, cu){ return v._extra ? (v._costo||0) : (cu||0)*(parseInt(v.cantidad)||0)*factor(v); },
     extras: extras, todo: (ventas||[]).concat(extras),
     extraMonto: extraMonto, extraCosto: extraCosto, extraN: extras.length, extraPedN: Object.keys(extraPed).length,
+    extraDet: Object.keys(extraDet).map(function(n){ return extraDet[n]; }).filter(function(d){ return d.monto>0; }).sort(function(a,b){ return b.monto-a.monto; }),
     // ventas del rango netas: sin las que ya entraron por cc_pagos (factor 0), escaladas las parciales
     ventasNeto: function(){ var out=[]; (ventas||[]).forEach(function(v){ var f=factor(v); if(f<=0) return; if(f<1){ var t=parseFloat(v.total)||0; v=Object.assign({}, v, {total_bruto:t, total:Math.round(t*f), _neto_caja:true}); } out.push(v); }); return out; }
   };
@@ -38887,11 +38891,17 @@ function _repNotaDevengado(info, fmtFn){
   return "<div style='font-size:.62rem;color:var(--acc);margin-top:.3rem;padding-top:.3rem;border-top:1px dashed var(--bd)' title='Facturación = ventas registradas al entregar/saldar (devengado). Cobrado = plata que entró en el período (caja). Son dos bases distintas: no se suman.'>"+partes.join(" · ")+"</div>";
 }
 function _repGlosarioBases(){
-  return "<div style='font-size:.66rem;color:var(--tx3);margin:-.3rem 0 .8rem;line-height:1.4'>📐 <b>Facturación</b> = ventas registradas al entregar o saldar el pedido (devengado) · <b>Cobrado</b> = plata que entró en el período, al contado o por cuenta corriente (caja) · <b>Costo</b> = costo de reposición al dólar de hoy. Facturado y cobrado no se suman entre sí: la diferencia es lo que falta cobrar o lo que ya se había cobrado a cuenta.</div>";
+  return "<div style='font-size:.66rem;color:var(--tx3);margin:-.3rem 0 .8rem;line-height:1.4'>📐 <b>Criterio de caja</b>: la plata cuenta el día que entra, como un cierre de caja. Un pedido cobrado por partes suma cada pago en su fecha (con el costo proporcional de sus productos) y la venta final solo por lo que faltaba; nada se cuenta dos veces. <b>Costo</b> = reposición al dólar de hoy, igual que Stock y precios.</div>";
 }
 function _repNotaCaja(caja, fmtFn){
   if(!caja || !(caja.extraMonto>0)) return "";
-  return "<div style='font-size:.62rem;color:var(--acc);margin-top:.3rem;padding-top:.3rem;border-top:1px dashed var(--bd)' title='Pedidos cobrados por partes: cada pago cuenta el día que entró (con su costo proporcional) y la venta final solo por lo que faltaba. Así no se cuenta dos veces.'>💵 incluye "+fmtFn(caja.extraMonto)+" cobrados en el período de "+caja.extraPedN+" pedido"+(caja.extraPedN===1?"":"s")+" pagado"+(caja.extraPedN===1?"":"s")+" por partes ("+caja.extraN+" pago"+(caja.extraN===1?"":"s")+")</div>";
+  var det=(caja.extraDet||[]).slice(0,4).map(function(d){
+    var t=d.nro+": "+fmtFn(d.monto)+(d.saldado?" (saldó el pedido de "+fmtFn(d.pedTotal):" (pedido de "+fmtFn(d.pedTotal));
+    if(d.previo>0) t+=", "+fmtFn(d.previo)+" ya habían entrado antes a cuenta"; t+=")";
+    return t;
+  });
+  var mas=(caja.extraDet||[]).length>4 ? " · y "+((caja.extraDet||[]).length-4)+" más" : "";
+  return "<div style='font-size:.62rem;color:var(--acc);margin-top:.3rem;padding-top:.3rem;border-top:1px dashed var(--bd);line-height:1.45' title='Criterio de caja: cada pago cuenta el día que entra, con el costo proporcional de los productos del pedido. La venta final cuenta solo por lo que faltaba cobrar. Nada se cuenta dos veces.'>💵 Incluye "+fmtFn(caja.extraMonto)+" cobrados por cuenta corriente ("+caja.extraN+" pago"+(caja.extraN===1?"":"s")+"): "+det.join(" · ")+mas+"</div>";
 }
 
 // ════════════════════════════════════════════════════════════════════
@@ -38998,9 +39008,10 @@ function _repCargarPanorama(){
     var cf = _repCostoFactory(productos, combos);
     var mapMarca={}; productos.forEach(function(p){ mapMarca[p.id]=(p.empresa||"").trim(); });
     // 💵 caja: la plata cuenta el día que entra (pagos a cuenta incluidos, sin contar dos veces al saldar)
-    // 2026-09-25: Panorama es DEVENGADO (ventas al total del pedido, con todo su costo). La caja va aparte, como nota.
-    var cajaInfo = _repCajaInfo(apps, ventas, r);
-    window._repPanoRaw = { ventas:ventas, caja:null, cajaInfo:cajaInfo, costoUnit:cf.costoUnit, prodDe:cf.producto, gastos:gastos, rango:r, mapMarca:mapMarca, cotiz:cf.cotiz };
+    // 2026-09-25: criterio de CAJA (pedido del dueño): la plata cuenta el día que entra, como un cierre de caja.
+    // Cada pago de cuenta corriente entra con el costo proporcional del pedido; la venta final solo por lo que faltaba.
+    var caja = _repCaja(apps, ventas, r, cf);
+    window._repPanoRaw = { ventas:ventas, caja:caja, costoUnit:cf.costoUnit, prodDe:cf.producto, gastos:gastos, rango:r, mapMarca:mapMarca, cotiz:cf.cotiz };
     _repPanoRender();
   }).catch(function(e){
     console.error("[belle] _repCargarPanorama error:", e);
@@ -39071,7 +39082,7 @@ function _repPanoRender(){
 
   // KPIs
   h += "<div style='display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:.6rem;margin-bottom:1rem'>";
-  h += _repPanoKpi("🧾 Facturación", fmt(totIng), "var(--acc)", raw.cajaInfo ? "cobrado en el período: "+fmt(raw.cajaInfo.cobrado)+(raw.cajaInfo.previo>0?" · "+fmt(raw.cajaInfo.previo)+" ya cobrados a cuenta antes":"") : "");
+  h += _repPanoKpi("💵 Cobrado (caja)", fmt(totIng), "var(--acc)", (caja && caja.extraMonto>0) ? "incluye "+fmt(caja.extraMonto)+" de "+caja.extraN+" pago"+(caja.extraN===1?"":"s")+" de cuenta corriente" : "plata que entró en el período");
   h += _repPanoKpi("💎 Ganancia bruta", fmt(totGan), "var(--green)", margen.toFixed(1)+"% margen");
   h += _repPanoKpi("🧾 Costo productos", fmt(totCost), "var(--red)");
   h += _repPanoKpi("💸 Gastos operativos", fmt(totGasto), "#d4589a");
@@ -39276,13 +39287,7 @@ function _repCargarFinanciero(){
       delta: (anterior.totalIngresos>0 ? deltaPct : undefined),
       deltaSub: cmp.etiqueta + " · antes " + fmt(anterior.totalIngresos)
     });
-    var _factDev = parseFloat(cobros.facturado)||0;
-    var _ci = _repCajaInfo(_repCacheApps||[], cobros.ventasBruto||[], _repCalcRango(window._repPeriodo));
-    var _subDev = "ventas registradas al entregar/saldar (devengado)";
-    if(_ci.previo>0) _subDev += " · "+fmt(_ci.previo)+" de esto ya se había cobrado a cuenta antes";
-    if(_ci.noFact>0) _subDev += " · "+fmt(_ci.noFact)+" entraron a cuenta de pedidos aún sin facturar";
-    if(Math.abs(_factDev-totalIngresos)<1) _subDev += " · coincide con lo cobrado";
-    h += _repKPI("🧾 Facturado en el período", fmt(_factDev), { sub: _subDev, color: "var(--tx)" });
+    // (la tarjeta "Facturado" se quitó: todo Reportes usa criterio de caja)
 
     h += _repKPI("📋 Falta cobrar", fmt(parcialFalta), {
       sub: parcialN + " pedido"+(parcialN===1?"":"s")+" cobrado"+(parcialN===1?"":"s")+" parcial / CC · "+enCursoN+" en curso por "+fmt(enCursoTot),
@@ -41036,8 +41041,9 @@ function _repCargarRentabilidad(){
     var cf = _repCostoFactory(productos, combos), cotiz = cf.cotiz;
     function _costoUnitItem(v){ return cf.costoUnit(v); }
     // 💵 caja: la plata cuenta el día que entra (pagos a cuenta incluidos, sin contar dos veces al saldar)
-    // 2026-09-25: Rentabilidad es DEVENGADA (ventas al total, costo completo). Lo cobrado se informa al pie de Facturación.
-    var caja = null, cajaAnt = null, cajaInfo = _repCajaInfo(apps, vActual, r);
+    // 2026-09-25: criterio de CAJA (pedido del dueño): cada pago cuenta el día que entra, con costo proporcional;
+    // la venta final cuenta solo por lo que faltaba. Nada se cuenta dos veces.
+    var caja = _repCaja(apps, vActual, r, cf), cajaAnt = _repCaja(apps, vAnterior, rAnt, cf);
 
     // Helpers para normalizar segmentos (usados también en export Excel)
     // (Las funciones _normalizarSegmento y _labelSegmento están definidas globalmente más abajo)
@@ -41164,9 +41170,9 @@ function _repCargarRentabilidad(){
     h += _repHeaderSeccion("💎 Rentabilidad", "rentabilidad");
     h += _repGlosarioBases();
     h += (function(){
-      var s1=_repSerieTiempo(vActual, r, function(v){return parseFloat(v.total)||0;});
-      var s2=_repSerieTiempo(vActual, r, function(v){return (parseFloat(v.total)||0)-_costoUnitItem(v)*(parseInt(v.cantidad)||0);});
-      return _repBloqueEvol("📈 Evolución de facturación y ganancia","Cómo se movieron dentro del período elegido.", s1.labels, [{nombre:"Facturación",color:"#c9963a",datos:s1.datos},{nombre:"Ganancia",color:"#4caf82",datos:s2.datos}]);
+      var s1=_repSerieTiempo(caja.todo, r, function(v){return caja.fact(v);});
+      var s2=_repSerieTiempo(caja.todo, r, function(v){return caja.fact(v)-caja.costo(v, v._extra?0:_costoUnitItem(v));});
+      return _repBloqueEvol("📈 Evolución de lo cobrado y la ganancia","Cómo se movieron dentro del período elegido.", s1.labels, [{nombre:"Cobrado",color:"#c9963a",datos:s1.datos},{nombre:"Ganancia",color:"#4caf82",datos:s2.datos}]);
     })();
     h += "<div style='font-size:.7rem;color:var(--tx3);margin-bottom:.8rem;padding:.5rem .7rem;background:var(--sur2);border-radius:7px'>📐 Cotización USD usada: <b style='color:var(--acc)'>$"+cotiz+"</b> · Costo = (costo_ind + costo_log) redondeado al u$d superior × cotización, igual que en Stock y precios · decan = 5 ml del frasco + perfumero · combo = sus componentes"+(cmp.enCurso?" · Comparativa: "+cmp.etiqueta+" ("+_repFmtRangoCorto({desde:rAnt.desde,hasta:rAnt.hasta})+")":" · Comparativa: "+_repFmtRangoCorto(rAnt))+"</div>";
     if(m.sinCostoN>0) h += _repAlerta("yel","📋","Hay "+m.sinCostoN+" venta"+(m.sinCostoN===1?"":"s")+" por "+fmt(m.sinCostoFact)+" sin costo cargado","Esos productos no tienen costo en la ficha (o no se pudo identificar el producto), así que su ganancia figura al 100%. Cargales el costo en Stock y Precios.")+"<div style='height:.8rem'></div>";
@@ -41175,11 +41181,11 @@ function _repCargarRentabilidad(){
     h += "<div style='display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:.7rem;margin-bottom:1rem'>";
 
     h += "<div style='background:var(--sur);border:1px solid var(--bd);border-radius:10px;padding:.85rem 1rem'>";
-    h += "<div style='font-size:.66rem;color:var(--tx3);text-transform:uppercase;font-weight:700;letter-spacing:.04em;margin-bottom:.3rem'>💵 Facturación</div>";
+    h += "<div style='font-size:.66rem;color:var(--tx3);text-transform:uppercase;font-weight:700;letter-spacing:.04em;margin-bottom:.3rem'>💵 Cobrado en el período (caja)</div>";
     h += "<div style='font-size:1.4rem;font-weight:800;color:var(--green);line-height:1.1'>"+fmt(m.fact)+"</div>";
-    h += "<div style='font-size:.66rem;color:var(--tx3);margin-top:.15rem'>"+m.unidades+" unidades · "+m.pedidos+" pedidos · ticket "+fmt(Math.round(m.ticketProm))+" por pedido</div>";
+    h += "<div style='font-size:.66rem;color:var(--tx3);margin-top:.15rem'>"+m.unidades+" unidades entregadas · "+m.pedidos+" pedidos · ticket "+fmt(Math.round(m.ticketProm))+" por pedido</div>";
     h += deltaTxt(m.fact, mAnt.fact);
-    h += _repNotaDevengado(cajaInfo, fmt);
+    h += _repNotaCaja(caja, fmt);
     h += "</div>";
 
     h += "<div style='background:var(--sur);border:1px solid var(--bd);border-radius:10px;padding:.85rem 1rem'>";
@@ -41233,7 +41239,7 @@ function _repCargarRentabilidad(){
         "<span style='color:"+color+";font-weight:"+weight+"'>"+fmt(valor)+"</span>"+
         "</div>";
     }
-    h += lineaPL("Facturación bruta", m.fact, {color:"var(--green)", weight:"700", bg:"var(--sur2)"});
+    h += lineaPL("Cobrado en el período (caja)", m.fact, {color:"var(--green)", weight:"700", bg:"var(--sur2)"});
     h += lineaPL("(−) Costo productos vendidos", -m.costo, {color:"var(--red)", indent:true});
     h += lineaPL("= Ganancia BRUTA", m.ganBruta, {color:clrBruta, weight:"700", bg:"rgba(76,175,130,.05)", bord:"1px solid var(--bd)"});
     h += "<div style='padding:.3rem .8rem;font-size:.7rem;color:var(--tx3);background:var(--sur2)'>Margen bruto: <b>"+m.margenBruto.toFixed(1)+"%</b></div>";
