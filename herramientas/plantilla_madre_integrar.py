@@ -1,35 +1,67 @@
-# Genera index-madre.html = index.html + pestaña "Día de la Madre" con el diseño de dia-de-la-madre.html
-import re,sys
+# Integra la plantilla "Día de la Madre" (cinta en zigzag + animaciones) al catálogo real (index.html)
+# como plantilla de campaña: la usa cualquier pestaña cuya campaña tenga plantilla='madre'.
+# El diseño (CSS + escena + viñetas) se toma de dia-de-la-madre.html. Corre una sola vez (idempotente).
+import re,json,sys
 src=open('index.html',encoding='utf-8').read()
+if 'PLANTILLA_MADRE_INTEGRADA' in src: print('ya integrada'); sys.exit(0)
 proto=open('dia-de-la-madre.html',encoding='utf-8').read()
 s=src
 
-# 1) contenedor de la pestaña
+# 1) contenedor
 s=s.replace('<div id="notasPage" style="display:none;padding:.7rem"></div>',
             '<div id="notasPage" style="display:none;padding:.7rem"></div>\n<div id="madrePage" style="display:none;padding:0"></div>',1)
 
-# 2) la pestaña en la barra (antes de Inicio)
-old="  // Inicio\n  html += '<div class=\"tab'+(act==='inicio'?' act':'')+'\" onclick=\\'switchTab(\"inicio\",this)\\'>🏠 Inicio</div>';"
+# 2) vista previa: ?vista=<slug> muestra una pestaña de campaña aunque esté pausada/oculta (para revisarla antes de publicar)
+old="function _tabTieneProductos(t){"
 assert s.count(old)==1
-s=s.replace(old,"  // 💐 Día de la Madre (prueba: campaña con diseño propio)\n  html += '<div class=\"tab tab-madre catTabPulse'+(act==='madre'?' act':'')+'\" onclick=\\'switchTab(\"madre\",this)\\'>💐 Día de la Madre</div>';\n"+old,1)
+s=s.replace(old,"""// 👁 2026-09-25: ?vista=<slug> muestra esa pestaña de campaña aunque la campaña esté pausada u oculta
+window._catVistaPrevia=(function(){ try{ return (new URLSearchParams(location.search).get('vista')||'').trim(); }catch(e){ return ''; } })();
+function _campEsVistaPrevia(c){
+  if(!window._catVistaPrevia||!c) return false;
+  var t=(pestanasCatalogo||[]).find(function(x){ return x.id===c.pestana_id; });
+  return !!(t && t.slug===window._catVistaPrevia);
+}
+"""+old,1)
+n=s.count("window._ofertaCampanias = todasCamps.filter(function(c){return c.activa !== false;});")
+s=s.replace("window._ofertaCampanias = todasCamps.filter(function(c){return c.activa !== false;});","window._ofertaCampanias = todasCamps.filter(function(c){return c.activa !== false || _campEsVistaPrevia(c);});")
+n+=s.count("window._ofertaCampanias = todasCamps.filter(function(c){return c.activa !== false;});  // solo activas para lógica normal")
+s=s.replace("window._ofertaCampanias = todasCamps.filter(function(c){return c.activa !== false;});  // solo activas para lógica normal","window._ofertaCampanias = todasCamps.filter(function(c){return c.activa !== false || _campEsVistaPrevia(c);});  // solo activas (o en vista previa)")
+print('filtros de campañas activas tocados:',n)
+old="  function pestanaDebeOcultarse(t){\n"
+assert s.count(old)==1
+s=s.replace(old,old+"    if(window._catVistaPrevia && t && t.slug===window._catVistaPrevia) return false;  // vista previa\n",1)
+old="function _pestanaOcultaGlobal(t){\n  try{\n"
+assert s.count(old)==1
+s=s.replace(old,old+"    if(window._catVistaPrevia && t && t.slug===window._catVistaPrevia) return false;\n",1)
 
-# 3) switchTab
+# 3) switchTab: pestaña con plantilla → página de plantilla en vez de la lista
 old="  var notasEl=document.getElementById(\"notasPage\");\n"
 assert s.count(old)==1
-s=s.replace(old,old+"  var madreEl=document.getElementById(\"madrePage\");\n  if(tab!==\"madre\"){ if(madreEl)madreEl.style.display=\"none\"; document.body.classList.remove('madre-on'); }\n",1)
+s=s.replace(old,old+"  var madreEl=document.getElementById(\"madrePage\");\n  if(madreEl)madreEl.style.display=\"none\"; document.body.classList.remove('madre-on');\n",1)
 old="  if(tab===\"notas\"){\n    if(listEl)listEl.style.display=\"none\";\n    if(filtersEl)filtersEl.style.display=\"none\";\n    if(contactoEl)contactoEl.style.display=\"none\";\n    if(notasEl){notasEl.style.display=\"block\";loadNotasPage();}\n    return;\n  }\n"
 assert s.count(old)==1
-s=s.replace(old,old+"  if(tab===\"madre\"){\n    if(listEl)listEl.style.display=\"none\";\n    if(filtersEl)filtersEl.style.display=\"none\";\n    if(contactoEl)contactoEl.style.display=\"none\";\n    if(notasEl)notasEl.style.display=\"none\";\n    var _csM=document.getElementById(\"combosSecCat\"); if(_csM){_csM.style.display=\"none\";_csM.innerHTML=\"\";}\n    if(madreEl){madreEl.style.display=\"block\";document.body.classList.add('madre-on');renderMadre();}\n    try{ window.scrollTo({top:0,behavior:'auto'}); }catch(e){}\n    return;\n  }\n",1)
-# destacados / secciones: también se ocultan en la pestaña madre
-n=s.count('tab==="inicio"||tab==="notas"||tab==="contacto"')
-s=s.replace('tab==="inicio"||tab==="notas"||tab==="contacto"','tab==="inicio"||tab==="notas"||tab==="contacto"||tab==="madre"')
-print('condiciones destacados/secciones:',n)
+s=s.replace(old,old+"""  // 💐 Pestaña de campaña con plantilla propia (por ahora: 'madre' = cinta en zigzag con animaciones)
+  var _campPl=_campConPlantilla(tab);
+  if(_campPl){
+    if(listEl)listEl.style.display="none";
+    if(filtersEl)filtersEl.style.display="none";
+    if(contactoEl)contactoEl.style.display="none";
+    if(notasEl)notasEl.style.display="none";
+    if(_destSw){_destSw.style.display="none";_destSw.innerHTML="";}
+    if(_secSw){_secSw.style.display="none";_secSw.innerHTML="";}
+    var _csM=document.getElementById("combosSecCat"); if(_csM){_csM.style.display="none";_csM.innerHTML="";}
+    var _cbM=document.getElementById("campBannerCat"); if(_cbM)_cbM.style.display="none";
+    if(madreEl){madreEl.style.display="block";document.body.classList.add('madre-on');renderMadre(_campPl);}
+    try{ window.scrollTo({top:0,behavior:'auto'}); }catch(e){}
+    return;
+  }
+""",1)
 
-# 4) CSS del prototipo, scopeado a #madrePage
+# 4) CSS del prototipo, scopeado y con clases renombradas (md-) para no chocar con las del catálogo
 css=re.search(r'<style>(.*?)</style>',proto,re.S).group(1)
 def scope(css):
     out=[]; i=0; n=len(css)
-    def find_block_end(j):  # j = índice de '{' ; devuelve índice de su '}'
+    def find_block_end(j):
         d=0
         for k in range(j,n):
             if css[k]=='{': d+=1
@@ -41,14 +73,9 @@ def scope(css):
         j=css.find('{',i)
         if j<0: out.append(css[i:]); break
         head=css[i:j].strip(); k=find_block_end(j); body=css[j+1:k]
-        if head.startswith('@keyframes') or head.startswith('@font-face'):
-            out.append(head+'{'+body+'}\n')
-        elif head.startswith('@media'):
-            out.append(head+'{'+scope(body)+'}\n')
-        elif head.startswith('/*') and '*/' in head and head.endswith('*/'):
-            out.append(head+'\n')
+        if head.startswith('@keyframes') or head.startswith('@font-face'): out.append(head+'{'+body+'}\n')
+        elif head.startswith('@media'): out.append(head+'{'+scope(body)+'}\n')
         else:
-            # quitar comentarios previos al selector
             head=re.sub(r'/\*.*?\*/','',head,flags=re.S).strip()
             if not head: i=k+1; continue
             sels=[]
@@ -58,17 +85,13 @@ def scope(css):
                 elif sel=='*': sels.append('#madrePage *')
                 elif sel.startswith('body.'): sels.append('#madrePage'+sel[4:])
                 elif sel.startswith('body '): sels.append('#madrePage '+sel[5:])
-                elif sel=='a' or sel=='img': sels.append('#madrePage '+sel)
                 else: sels.append('#madrePage '+sel)
             out.append(', '.join(sels)+'{'+body+'}\n')
         i=k+1
     return ''.join(out)
 scoped=scope(css)
-# el bloque .top (barra propia del prototipo) no hace falta, pero no molesta: queda scopeado y sin uso
 extra_css='''
-/* la pestaña en la barra: rosa flúor como una campaña */
-.tabs .tab.tab-madre,#bmTabsSlot .tab.tab-madre{background:linear-gradient(135deg,#FF48B0,#FF6C2F) !important;color:#fff !important;text-shadow:0 1px 2px rgba(0,0,0,.25);border-color:#e23c9a !important}
-.tabs .tab.tab-madre.act,#bmTabsSlot .tab.tab-madre.act{background:linear-gradient(135deg,#3A2B63,#765BA7) !important;color:#fff !important;border-color:#3A2B63 !important}
+/* la pestaña de la campaña con plantilla lleva sus colores desde belle (tab_color_*), como cualquier campaña */
 body.madre-on .lw{overflow:visible !important;padding-top:0 !important;padding-left:0 !important;padding-right:0 !important;max-width:none !important}
 body.madre-on #campBannerCat,body.madre-on #marcasCarrusel,body.madre-on #mcWrapTab{display:none !important}
 #madrePage{background:var(--papel);color:var(--tinta);font-family:"DM Sans",sans-serif;position:relative;overflow:hidden;padding-bottom:1rem}
@@ -77,8 +100,8 @@ body.madre-on #campBannerCat,body.madre-on #marcasCarrusel,body.madre-on #mcWrap
 #madrePage .qty-d{margin-left:.3rem}
 #madrePage .qty-d button{width:26px;height:28px;font-size:.9rem}
 #madrePage .qty-d span{min-width:26px;line-height:28px}
+#madrePage .mini{background:var(--papel);border:2px solid var(--tinta);color:var(--tinta);font:inherit;font-weight:700;font-size:.62rem;letter-spacing:.08em;text-transform:uppercase;padding:.35rem .5rem;cursor:pointer;box-shadow:2px 2px 0 var(--rosa)}
 @media(max-width:760px){
-  /* en el celular la foto alterna de lado y la cinta pasa por detrás de la foto, no del texto */
   #madrePage .fila.der .card{grid-template-columns:minmax(0,1fr) 42%}
   #madrePage .fila.der .card .foto{grid-column:2;grid-row:1/7}
   #madrePage .fila.der .card .marca,#madrePage .fila.der .card .nombre,#madrePage .fila.der .card .chips,#madrePage .fila.der .card .precios,#madrePage .fila.der .card .decan,#madrePage .fila.der .card .acc{grid-column:1}
@@ -87,18 +110,34 @@ body.madre-on #campBannerCat,body.madre-on #marcasCarrusel,body.madre-on #mcWrap
   #madrePage .card .nombre{font-size:1.5rem;overflow-wrap:anywhere}
   #madrePage .vin svg{width:200px}
 }
-#madrePage .mini{background:var(--papel);border:2px solid var(--tinta);color:var(--tinta);font:inherit;font-weight:700;font-size:.62rem;letter-spacing:.08em;text-transform:uppercase;padding:.35rem .5rem;cursor:pointer;box-shadow:2px 2px 0 var(--rosa)}
 '''
-# 5) JS: viñetas + render integrado al catálogo (carrito, precios y logos reales)
 js_v=re.search(r"var CORAZON=.*?\n\];\n",proto,re.S).group(0)
+hero=re.search(r'<!-- ═══════════ PORTADA ═══════════ -->\n(.*?)<div class="cinta-msj"',proto,re.S).group(1)
+cierre=re.search(r'<section class="cierre">(.*?)</section>',proto,re.S).group(1)
+# textos de la portada → marcadores {{...}}
+hero=hero.replace('Especial · 18 de octubre','{{kicker}}').replace('<span class="riso" data-t="Día de la">Día de la</span>','<span class="riso">{{titulo1}}</span>').replace('<em class="riso" data-t="Madre">Madre</em>','<em class="riso">{{titulo2}}</em>')
+hero=re.sub(r'<p class="lead">.*?</p>','<p class="lead">{{lead}}</p>',hero,flags=re.S)
+hero=hero.replace('Regalos con envío hasta el sábado 17','{{fecha}}').replace('<a class="btn" href="#regalos">Ver los regalos ♥</a>','<a class="btn" href="#madreRegalos">{{boton}}</a>')
+assert '{{lead}}' in hero and '{{titulo2}}' in hero and '{{boton}}' in hero and '{{kicker}}' in hero and '{{fecha}}' in hero
+madre_html=hero+'<div class="cinta-msj" aria-hidden="true"><div class="track" id="madreCinta"></div></div>\n'+\
+  '<section class="rio" id="madreRegalos"><div class="fondo" aria-hidden="true"><svg id="madreZig" preserveAspectRatio="none"></svg></div><div id="madreFilas"><div class="cargando">Buscando los regalos…</div></div></section>\n'+\
+  '<section class="cierre">'+cierre.replace('<div class="aviso">Prototipo interno · los botones "Agregar" no cargan pedidos todavía</div>','')+'</section>\n<div class="grano" aria-hidden="true"></div>'
 js=r'''
 // ═══════════════════════════════════════════════════════════════════
-// 💐 PESTAÑA DÍA DE LA MADRE (prueba 2026-09-25): el diseño de dia-de-la-madre.html
-// como pestaña del catálogo: usa los productos ya cargados (allProds), los precios
-// del catálogo (calcP, con ofertas), los logos de marcas y el carrito real.
+// 💐 PLANTILLA DE CAMPAÑA "DÍA DE LA MADRE" (2026-09-25) — PLANTILLA_MADRE_INTEGRADA
+// Una campaña con plantilla='madre' dibuja su pestaña así: portada animada, cinta de mensajes,
+// cinta rosa en zigzag con los productos de la campaña a los costados y viñetas animadas.
+// Usa lo mismo que el resto del catálogo: getTabProds() (productos de la pestaña + campaña),
+// calcP() (precios con ofertas), logos de marcas y el carrito real. Textos: plantilla_textos.
 // ═══════════════════════════════════════════════════════════════════
 '''+js_v+r'''
-var _madreArmado=false, _madreIntentos=0;
+var MADRE_TEXTOS_DEF={kicker:'Especial · 18 de octubre',titulo1:'Día de la',titulo2:'Madre',lead:'Un perfume es un abrazo que se queda todo el día. Las mejores promociones para mamá, con envío gratis en Córdoba.',fecha:'Regalos con envío hasta el sábado 17',boton:'Ver los regalos ♥',msjs:['Envío gratis en Córdoba','Pagás cuando lo recibís','100% originales','Precio VIP llevando 10 o más','Regalos con envío hasta el sábado 17','Combiná las unidades como quieras']};
+var _madreCampId=null;
+function _campConPlantilla(slug){
+  var t=(pestanasCatalogo||[]).find(function(x){ return x.slug===slug; }); if(!t) return null;
+  var c=(window._ofertaCampanias||[]).find(function(x){ return x.pestana_id===t.id; });
+  return (c && c.plantilla==='madre')?c:null;
+}
 function _mEsc(s){ return String(s==null?'':s).replace(/[&<>"']/g,function(c){return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c];}); }
 function _mPartes(nombre){
   var s=String(nombre||''); var marca='', resto=s;
@@ -106,12 +145,16 @@ function _mPartes(nombre){
   var tr=resto.split('|').map(function(x){return x.trim();}).filter(Boolean);
   return {marca:marca, nombre:tr[0]||resto, chips:tr.slice(1)};
 }
+function _madreTextos(camp){
+  var t={}; for(var k in MADRE_TEXTOS_DEF) t[k]=MADRE_TEXTOS_DEF[k];
+  var pt=camp&&camp.plantilla_textos; if(typeof pt==='string'){ try{ pt=JSON.parse(pt); }catch(e){ pt=null; } }
+  if(pt&&typeof pt==='object'){ for(var k2 in pt){ if(pt[k2]!=null && pt[k2]!=='' && !(Array.isArray(pt[k2])&&!pt[k2].length)) t[k2]=pt[k2]; } }
+  if(typeof t.msjs==='string') t.msjs=t.msjs.split('\n').map(function(x){return x.trim();}).filter(Boolean);
+  return t;
+}
 function _madreProductos(){
-  var ids=window.MADRE_IDS||[];
-  var lista=(allProds||[]).filter(function(p){ return ids.length?ids.indexOf(p.id)>=0:(p.genero==='♀️'&&(p.stock_actual||0)>0&&/^http/.test(p.imagen_url||'')); });
-  if(ids.length) lista.sort(function(a,b){ return ids.indexOf(a.id)-ids.indexOf(b.id); });
-  else lista.sort(function(a,b){ return (b.stock_actual||0)-(a.stock_actual||0); });
-  return ids.length?lista:lista.slice(0,10);
+  var lista=(typeof getTabProds==='function'?getTabProds():[])||[];
+  return lista.filter(function(p){ return p.activo!==false && !p.oculto && (p.stock_actual||0)>0 && /^http/.test(p.imagen_url||''); });
 }
 function _madreQty(id,d){ var st=cstate[id]||{qty:0}; st.qty=Math.max(0,(st.qty||0)+d); cstate[id]=st; var s=document.getElementById('mq_'+id); if(s)s.textContent=st.qty; }
 function _madreAgregar(id){ addCart(id); var st=cstate[id]||{qty:0}; var s=document.getElementById('mq_'+id); if(s)s.textContent=st.qty||0; }
@@ -141,7 +184,7 @@ function _madreTarjeta(p){
 }
 function _madreRender(prods){
   var cont=document.getElementById('madreFilas'); if(!cont) return;
-  if(!prods.length){ cont.innerHTML='<div class="cargando">No hay productos para mostrar</div>'; return; }
+  if(!prods.length){ cont.innerHTML='<div class="cargando">Todavía no hay productos en esta campaña</div>'; _madreZig(); return; }
   cont.innerHTML=prods.map(function(p,i){
     return '<div class="fila '+(i%2?'der':'izq')+'">'+_madreTarjeta(p)+'<div class="vin anim" aria-hidden="true">'+VINETAS[i%VINETAS.length]()+'</div></div>';
   }).join('');
@@ -149,12 +192,12 @@ function _madreRender(prods){
 }
 function _madreZig(){
   var rio=document.getElementById('madreRegalos'), svg=document.getElementById('madreZig'); if(!rio||!svg) return;
-  var filas=[].slice.call(rio.querySelectorAll('.fila')); if(!filas.length) return;
+  var filas=[].slice.call(rio.querySelectorAll('.fila')); if(!filas.length){ svg.innerHTML=''; return; }
   var W=rio.clientWidth, H=rio.clientHeight; var r0=rio.getBoundingClientRect();
   var movil=W<760;
   var ancho=movil?W*.46:W*.40;
-  var xI=movil?W*.24:W*.70, xD=movil?W*.76:W*.30;   // en el celular la cinta va detrás de la foto (izquierda en filas izq, derecha en filas der)
-  var centros=filas.map(function(f,i){ var b=f.getBoundingClientRect(); var y=b.top-r0.top+b.height/2; var x=(i%2===0)?xI:xD; return {x:x,y:y}; });
+  var xI=movil?W*.24:W*.70, xD=movil?W*.76:W*.30;
+  var centros=filas.map(function(f,i){ var b=f.getBoundingClientRect(); return {x:(i%2===0)?xI:xD, y:b.top-r0.top+b.height/2}; });
   var pts=[{x:centros[0].x,y:-40}].concat(centros).concat([{x:centros[centros.length-1].x,y:H+40}]);
   function lado(sign){ return pts.map(function(p){ return (p.x+sign*ancho/2).toFixed(1)+','+p.y.toFixed(1); }); }
   function pathDe(puntos){ var d='M'+puntos[0]; for(var i=1;i<puntos.length;i++){ var a=puntos[i-1].split(','), b=puntos[i].split(','); var ax=+a[0],ay=+a[1],bx=+b[0],by=+b[1]; var my=(ay+by)/2; d+=' C'+ax+','+my+' '+bx+','+my+' '+bx+','+by; } return d; }
@@ -168,43 +211,35 @@ function _madreZig(){
 window.addEventListener('resize',function(){ if(document.body.classList.contains('madre-on')){ clearTimeout(window._mrz); window._mrz=setTimeout(_madreZig,120); } });
 function _madreCargar(){
   var prods=_madreProductos();
-  if(!prods.length && _madreIntentos<12){ _madreIntentos++; setTimeout(_madreCargar,700); return; }
-  // los ml no vienen en la carga general del catálogo: se piden solo para estos
   var sinMl=prods.filter(function(p){ return p.ml==null; }).map(function(p){ return p.id; });
   var pMl=sinMl.length?apiGet('productos','select=id,ml&id=in.('+sinMl.join(',')+')').catch(function(){ return []; }):Promise.resolve([]);
   pMl.then(function(rows){ var m={}; (rows||[]).forEach(function(r){ m[r.id]=r.ml; }); prods.forEach(function(p){ if(p.ml==null && m[p.id]!=null) p.ml=m[p.id]; }); _madreRender(prods); });
 }
-function renderMadre(){
+function renderMadre(camp){
   var el=document.getElementById('madrePage'); if(!el) return;
-  if(!_madreArmado){
-    _madreArmado=true;
-    el.innerHTML=MADRE_HTML;
-    var t=document.getElementById('madreCinta'); if(t){ var h=MADRE_MSJS.map(function(m){return '<span>'+_mEsc(m)+'</span>';}).join(''); t.innerHTML=h+h; }
+  var id=camp?camp.id:null;
+  if(_madreCampId!==id || !el.firstChild){
+    _madreCampId=id;
+    var t=_madreTextos(camp);
+    var html=MADRE_HTML;
+    ['kicker','titulo1','titulo2','lead','fecha','boton'].forEach(function(k){ html=html.split('{{'+k+'}}').join(_mEsc(t[k])); });
+    el.innerHTML=html;
+    var ct=document.getElementById('madreCinta'); if(ct){ var h=(t.msjs||[]).map(function(m){return '<span>'+_mEsc(m)+'</span>';}).join(''); ct.innerHTML=h+h; }
   }
   _madreCargar();
 }
-var MADRE_MSJS=["Envío gratis en Córdoba","Pagás cuando lo recibís","100% originales","Precio VIP llevando 10 o más","Regalos con envío hasta el sábado 17","Combiná las unidades como quieras"];
 '''
-# el HTML de la portada + cinta + río + cierre, tomado del prototipo (sin la barra propia)
-hero=re.search(r'<!-- ═══════════ PORTADA ═══════════ -->\n(.*?)<div class="cinta-msj"',proto,re.S).group(1)
-cierre=re.search(r'<section class="cierre">(.*?)</section>',proto,re.S).group(1)
-madre_html=hero+'<div class="cinta-msj" aria-hidden="true"><div class="track" id="madreCinta"></div></div>\n'+\
-  '<section class="rio" id="madreRegalos"><div class="fondo" aria-hidden="true"><svg id="madreZig" preserveAspectRatio="none"></svg></div><div id="madreFilas"><div class="cargando">Buscando los regalos…</div></div></section>\n'+\
-  '<section class="cierre">'+cierre.replace('Prototipo interno · los botones "Agregar" no cargan pedidos todavía','Prueba interna de la pestaña Día de la Madre')+'</section>\n<div class="grano" aria-hidden="true"></div>'
-madre_html=madre_html.replace('<a class="btn" href="#regalos">','<a class="btn" href="#madreRegalos">')
-js+='var MADRE_HTML='+__import__('json').dumps(madre_html,ensure_ascii=False)+';\n'
+js+='var MADRE_HTML='+json.dumps(madre_html,ensure_ascii=False)+';\n'
 CLASES=['card','foto','tapa','marca','logo','nombre','chips','chip','precios','pvip','pmas','decan','acc','qty','qty-d','agregar','fila','vin','rio','fondo','hero','txt','kicker','tit','riso','lead','fecha','btn','sec','escena','cinta-msj','track','cierre','caja','aviso','cargando','grano','hoja','mini','izq','der','rosa','violeta','dm-extra','anim']
 _alt='|'.join(re.escape(c) for c in CLASES)
-# CSS: toda .clase de la lista se renombra (en CSS un punto seguido de nombre siempre es clase)
 css_all=re.sub(r'\.('+_alt+r')(?![\w-])', lambda m:'.md-'+m.group(1), scoped+extra_css)
-# JS/HTML: solo los atributos class="..." (también escapados dentro del JSON) y los selectores usados por el JS
 def _ren_val(val): return re.sub(r'(?<![\w-])('+_alt+r')(?![\w-])', lambda k:'md-'+k.group(1), val)
 js_all=re.sub(r'class=(["\'])(.*?)\1', lambda m:'class='+m.group(1)+_ren_val(m.group(2))+m.group(1), js)
 js_all=re.sub(r'class=\\"(.*?)\\"', lambda m:'class=\\"'+_ren_val(m.group(1))+'\\"', js_all)
 for sel in ['.fila','.vin','.card','.anim']:
     js_all=js_all.replace("'"+sel+"'","'.md-"+sel[1:]+"'").replace('"'+sel+'"','".md-'+sel[1:]+'"')
 bloque='\n<style id="madreCss">\n'+css_all+'</style>\n<script>\n'+js_all+'</script>\n'
-s=s.replace('<!-- BELLE_BUILD 20260925-1630 inicio-movil -->','<!-- BELLE_BUILD 20260925-1900 prueba-dia-de-la-madre -->',1)
 s=s.replace('</body>\n</html>',bloque+'</body>\n</html>',1)
-open('index-madre.html','w',encoding='utf-8').write(s)
-print('index-madre.html listo', len(s))
+s=re.sub(r'<!-- BELLE_BUILD [^>]*-->','<!-- BELLE_BUILD 20260925-2100 plantilla-dia-de-la-madre -->',s,count=1)
+open('index.html','w',encoding='utf-8').write(s)
+print('index.html integrado')
