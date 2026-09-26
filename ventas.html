@@ -3882,6 +3882,31 @@ function _guardarNuevoCliente(){
 }
 
 // ── Ficha del cliente con datos editables y toggle CC ──
+// Bloque de deudas de la ficha: total, y cada pedido o cuota con su monto y su atraso.
+// Avisito "además debe X de otros pedidos" para tarjetas y gestión (conBien: muestra ✅ si no debe nada más)
+function _rgoOtrosHTML(r, pedidoId, conBien){
+  if(!r) return "";
+  var pp=_rgoPartir(r, pedidoId);
+  if(pp.otros.monto<=1 && !r.bloqueado) return conBien?"<span style='color:#5eb478;font-weight:600'>✅ No tiene deuda de otros pedidos</span>":"";
+  var st=_RGO_ESTILO[r.bloqueado?'alto':pp.otros.nivel]||_RGO_ESTILO.info;
+  var t=(r.bloqueado?"🔒 Bloqueado · ":"")+(pp.otros.monto>1?(st.ico+" Debe <b>"+fmt(pp.otros.monto)+"</b> de otro"+(pp.otros.refs.length>1?'s':'')+" pedido"+(pp.otros.refs.length>1?'s':'')+": "+_rgoEsc(_rgoRefsTxt(pp.otros.refs))+(pp.otros.vencidas>0?(" · vencido hace "+pp.otros.diasMax+" días"):"")):"");
+  return "<span onclick='event.stopPropagation();_rgoAbrirDeChip("+r.clienteId+")' style='display:inline-block;background:"+st.bg+";border:1px solid "+st.col+";border-radius:6px;padding:.15rem .45rem;color:"+st.col+";font-weight:700;cursor:pointer;line-height:1.35'>"+t+"</span>";
+}
+function _rgoFichaDeudaHTML(r){
+  if(!r) return "";
+  var lista=(r.todos||r.items||[]);
+  if(r.deuda<=1||!lista.length) return "<div style='background:rgba(94,180,120,.10);border:1px solid rgba(94,180,120,.45);border-radius:8px;padding:.5rem .7rem;color:#5eb478;font-weight:600'>✅ Sin deudas pendientes</div>";
+  var st=_RGO_ESTILO[r.nivel]||_RGO_ESTILO.info;
+  var porPed={}, orden=[];
+  lista.forEach(function(it){ var k=it.pedidoId!=null?('p'+it.pedidoId):('x'+it.ref); if(!porPed[k]){ porPed[k]={ref:String(it.ref||'').split(' · ')[0],monto:0,det:[],dias:0,vencida:false,edad:it.edad||null}; orden.push(k); } var g=porPed[k]; g.monto+=it.monto; g.det.push(it); if(it.vencida){ g.vencida=true; if((it.dias||0)>g.dias)g.dias=it.dias||0; } });
+  var h="<div style='background:"+st.bg+";border:1px solid "+st.col+";border-radius:8px;padding:.55rem .7rem'>";
+  h+="<div style='display:flex;justify-content:space-between;align-items:baseline;gap:.5rem;margin-bottom:.35rem'><div style='font-weight:800;color:"+st.col+"'>"+st.ico+" Debe "+fmt(r.deuda)+"</div><div style='font-size:.64rem;color:var(--tx3)'>"+orden.length+" pedido"+(orden.length>1?'s':'')+(r.vencido>0?(" · "+fmt(r.vencido)+" vencido"):"")+"</div></div>";
+  orden.forEach(function(k){ var g=porPed[k]; var que=g.det.length>1?(g.det.length+" cuotas"):(g.det[0].que||''); var cuando=g.vencida?("<span style='color:"+st.col+";font-weight:700'>vencido hace "+g.dias+(g.dias===1?" día":" días")+"</span>"):(g.edad!=null?("hace "+g.edad+(g.edad===1?" día":" días")):"");
+    h+="<div style='display:flex;justify-content:space-between;gap:.5rem;padding:.2rem 0;border-top:1px solid rgba(0,0,0,.06)'><div style='min-width:0'><b style='color:var(--tx)'>"+_rgoEsc(g.ref)+"</b> <span style='color:var(--tx3);font-size:.66rem'>"+_rgoEsc(que)+(cuando?" · ":"")+"</span>"+cuando+"</div><div style='font-weight:700;color:var(--tx);white-space:nowrap'>"+fmt(Math.round(g.monto))+"</div></div>"; });
+  if(r.bloqueado) h+="<div style='margin-top:.35rem;color:#e05c6e;font-weight:700'>🔒 Bloqueado"+(r.bloqueadoMotivo?(": "+_rgoEsc(r.bloqueadoMotivo)):"")+"</div>";
+  h+="</div>";
+  return h;
+}
 function abrirFichaCliente(clienteId){
   var mo=document.createElement("div");mo.className="mo open";mo.id="_moFichaCliente";
   mo.style.zIndex="9999";
@@ -3909,6 +3934,9 @@ function abrirFichaCliente(clienteId){
     html+="<div style='font-size:1rem;font-weight:600;color:var(--tx)'>"+nomFull+"</div>";
     html+="<div style='font-size:.7rem;color:var(--tx3);margin-top:.15rem'>Creado: "+new Date(c.created_at).toLocaleDateString("es-AR")+"</div>";
     html+="</div>";
+    // 💸 Deudas: qué pedidos/cuotas tiene sin cobrar (se completa aparte)
+    html+="<div id='_fcDeuda' style='margin-bottom:.7rem;font-size:.74rem;color:var(--tx3)'>Revisando deudas…</div>";
+    setTimeout(function(){ try{ _rgoCliente(c.id, function(r){ var d=document.getElementById('_fcDeuda'); if(d) d.innerHTML=_rgoFichaDeudaHTML(r); }); }catch(e){} },0);
     if(!puedeEditar){
       html+="<div style='background:rgba(74,159,216,.1);border:1px solid rgba(74,159,216,.3);border-radius:7px;padding:.5rem .7rem;margin-bottom:.7rem;font-size:.74rem;color:var(--blue)'>👤 Asignado a <b>"+_vendedorNombre(c.vendedor_asignado_id)+"</b>. Solo el admin o el vendedor asignado puede editar.</div>";
     }
@@ -6221,6 +6249,24 @@ function _seleccionarClienteDrawer(id){
   });
 }
 
+// Asigna un cliente al carrito por id, sin buscador ni preguntas (lo usa "editar pedido").
+function _cargarClienteCarrito(id, cb){
+  apiGet("clientes","select=id,nombre,apellido,telefono_principal,cuenta_corriente_habilitada,precio_mayorista&id=eq."+id).then(function(rows){
+    var c=rows&&rows[0]; if(!c){ if(cb)cb(null); return; }
+    _carritoCliente={ id:c.id,nombre:c.nombre,apellido:c.apellido, telefono:c.telefono_principal,
+      cuenta_corriente_habilitada:c.cuenta_corriente_habilitada, precio_mayorista:c.precio_mayorista, es_cc:false };
+    var info=document.getElementById("drawerClienteInfo");
+    if(info)info.innerHTML="<span style='font-weight:600;color:var(--tx)'>"+(c.nombre||"")+" "+(c.apellido||"")+"</span> <span style='color:var(--tx3);font-size:.7rem'>#"+c.id+"</span>";
+    var ccToggle=document.getElementById("drawerCCToggle"); if(ccToggle)ccToggle.style.display=c.cuenta_corriente_habilitada?"":"none";
+    var ccCheck=document.getElementById("drawerEsCC"); if(ccCheck)ccCheck.checked=false;
+    var ccAlert=document.getElementById("drawerCCAlert"); if(ccAlert)ccAlert.style.display="none";
+    // chip de deuda (sin modal: el vendedor está editando, no vendiendo de nuevo)
+    try{ _rgoCliente(c.id, function(r){ _rgoPintarChip(r); }); }catch(_er){}
+    if(typeof renderCat==="function") renderCat();
+    if(cb)cb(c);
+  }).catch(function(e){ console.warn('[cliente carrito]',e); if(cb)cb(null); });
+}
+
 function _desasignarCliente(){
   _carritoCliente=null;
   try{ _rgoLimpiarChip(); }catch(e){}
@@ -7538,6 +7584,8 @@ function loadPedidosWeb(){
           (Array.isArray(cs)?cs:[]).forEach(function(c){ mp[c.id]=((c.nombre||"")+" "+(c.apellido||"")).trim(); vip[c.id]=!!c.precio_mayorista; cc[c.id]=!!c.cuenta_corriente_habilitada; });
           window._pedCliMap=mp; window._appPedCliMap=mp; window._pedCliVip=vip; window._pedCliCC=cc;
           _renderPedidosFiltrados(window._pedFiltroEstado||"ppendientes");
+          // 💸 deudas por cliente (para el aviso "debe de otros pedidos" en cada tarjeta)
+          try{ _rgoClientesLote(_idArrCli, function(){ _renderPedidosFiltrados(window._pedFiltroEstado||"ppendientes"); }); }catch(_eD){}
         }).catch(function(e){console.error("[belle] nombres de cliente:",e);});
       }
     }catch(_eCli){console.error("[belle] nombres de cliente:",_eCli);}
@@ -7938,6 +7986,7 @@ function _gestionarPedido(tipo,id){
       cliBox+='<div style="min-width:0;flex:1"><div style="font-size:.62rem;color:var(--tx3);text-transform:uppercase;font-weight:600">Cliente</div>';
       if(rec.cliente_id){
         cliBox+='<div id="_mgCliNombre" style="font-size:.78rem;color:var(--cyan);font-weight:600">Cargando...</div>';
+        cliBox+='<div id="_mgCliDeuda" style="font-size:.68rem;margin-top:.2rem"></div>';
       } else {
         cliBox+='<div style="font-size:.78rem;color:var(--tx3);font-weight:500">— Sin asignar —</div>';
       }
@@ -8008,6 +8057,8 @@ function _gestionarPedido(tipo,id){
           // Mostrar también el nombre del cliente en el título del pedido
           var _t=document.getElementById('_mgTitle'); if(_t){ _t.textContent=nom+" · "+nroOrden; }
         }).catch(function(e){console.error("[belle] error silencioso:",e);});
+        // 💸 deuda del cliente aparte de este pedido (lo de este pedido ya se ve como saldo)
+        try{ _rgoCliente(rec.cliente_id, function(r){ var d=document.getElementById('_mgCliDeuda'); if(!d)return; d.innerHTML=_rgoOtrosHTML(r, id, true); }); }catch(_ed){}
       }
     }
 
@@ -8354,6 +8405,11 @@ function renderPedCard(ped,cobrado){
     "</div>";
   html+="<div class='ped-fecha'>"+fecha+"</div></div>";
   html+="<div class='ped-total'>"+fmt(ped.total)+"</div></div>";
+  // 💸 si el cliente debe plata de OTROS pedidos, se avisa en la tarjeta (lo de este pedido ya se ve)
+  if(ped.cliente_id!=null && !cobrado && !cancelado && window._pedCliDeuda && window._pedCliDeuda[ped.cliente_id]){
+    var _dh=_rgoOtrosHTML(window._pedCliDeuda[ped.cliente_id], ped.id, false);
+    if(_dh) html+="<div style='font-size:.66rem;margin:-.1rem 0 .45rem'>"+_dh+"</div>";
+  }
   html+="<div style='font-size:.73rem;color:var(--tx2);line-height:1.7;margin-bottom:.6rem'>";
   if(Array.isArray(items))var _cobIdx=[];try{_cobIdx=Array.isArray(ped.items_cobrados)?ped.items_cobrados:(ped.items_cobrados?JSON.parse(ped.items_cobrados):[]);}catch(ex){}
   items.forEach(function(it,_ii){
@@ -9412,6 +9468,11 @@ function editarPedido(pedId){
       }
     });
     updateCartBar();
+    // 2026-09-26: el pedido ya tiene cliente → queda asignado en el carrito (antes el vendedor
+    // tenía que buscarlo de nuevo). El chip de deuda distingue este pedido de otros.
+    window._editandoPedidoClienteId=ped.cliente_id||null;
+    if(ped.cliente_id){ try{ _cargarClienteCarrito(ped.cliente_id); }catch(e){ console.warn('[editar] cliente',e); } }
+    else { try{ _limpiarCarritoCliente(); }catch(e){} }
     // Si estamos en el MODO APP (overlay abierto), pasar a pantalla completa (tool mode)
     // para que se vean el catálogo y el carrito; si no, navegar normal (modo PC).
     var _enApp=false; try{ var _am=document.getElementById('appMobile'); _enApp=!!(_am && _am.style.display==='flex'); }catch(e){}
@@ -10900,10 +10961,13 @@ function _confirmarReservarPedContinuar(){
         }
       });
       return stockLibChain.then(function(){
-        return apiPatch("pedidos_catalogo",{
+        var _patchEd={
           items:JSON.stringify(itemsData),total:total,
           notas:"Cliente: "+cliente+(tel?" | Tel: "+tel:"")+(nota?" | "+nota:"")+(entregaStr?" | Entrega: "+entregaStr:"")
-        },"id=eq."+_editId);
+        };
+        // si el vendedor asignó o cambió el cliente mientras editaba, el pedido lo toma
+        if(_carritoCliente&&_carritoCliente.id&&_carritoCliente.id!==window._editandoPedidoClienteId){ _patchEd.cliente_id=_carritoCliente.id; }
+        return apiPatch("pedidos_catalogo",_patchEd,"id=eq."+_editId);
       });
     });
     window._editandoPedidoId=null;
@@ -13952,13 +14016,13 @@ function _rgoArmar(d, clienteId){
     if(p.cc_fecha_vencimiento){
       var dv=_rgoDias(p.cc_fecha_vencimiento);
       if(dv!=null && dv>0){ vencido+=saldo; vencidas++; if(dv>diasMax)diasMax=dv;
-        items.push({ref:p.nro_orden||('Pedido #'+p.id), monto:saldo, dias:dv, vencida:true, que:que}); return; }
-      items.push({ref:p.nro_orden||('Pedido #'+p.id), monto:saldo, dias:null, que:que}); return;
+        items.push({ref:p.nro_orden||('Pedido #'+p.id), pedidoId:p.id, monto:saldo, dias:dv, vencida:true, que:que}); return; }
+      items.push({ref:p.nro_orden||('Pedido #'+p.id), pedidoId:p.id, monto:saldo, dias:null, que:que}); return;
     }
     var edad=p.created_at?_rgoDias(String(p.created_at).slice(0,10)):null;
     var viejo=(edad!=null && edad>tolerancia);
     if(viejo){ abierto+=saldo; abiertos++; if(edad>diasAbierto)diasAbierto=edad; }
-    items.push({ref:p.nro_orden||('Pedido #'+p.id), monto:saldo, dias:null,
+    items.push({ref:p.nro_orden||('Pedido #'+p.id), pedidoId:p.id, monto:saldo, dias:null,
                 edad:edad, viejo:viejo, que:que});
   });
   // cuotas de cuenta corriente
@@ -13969,7 +14033,7 @@ function _rgoArmar(d, clienteId){
     var dv=c.fecha_vencimiento?_rgoDias(c.fecha_vencimiento):null;
     var p=pedById[c.pedido_id];
     if(dv!=null && dv>0){ vencido+=saldo; vencidas++; if(dv>diasMax)diasMax=dv; }
-    items.push({ref:((p&&p.nro_orden)||('Pedido #'+c.pedido_id))+' · cuota '+(c.nro_cuota||'?')+'/'+(c.total_cuotas||'?'),
+    items.push({ref:((p&&p.nro_orden)||('Pedido #'+c.pedido_id))+' · cuota '+(c.nro_cuota||'?')+'/'+(c.total_cuotas||'?'), pedidoId:c.pedido_id||null,
                 monto:saldo, dias:(dv!=null&&dv>0)?dv:null, vencida:(dv!=null&&dv>0),
                 que:'Cuenta corriente'+((dv!=null&&dv<=0)?(' · vence en '+Math.abs(dv)+' días'):'')});
   });
@@ -13981,12 +14045,13 @@ function _rgoArmar(d, clienteId){
     deuda+=saldo;
     var dv=cu.vencimiento?_rgoDias(cu.vencimiento):null;
     if(dv!=null && dv>0){ vencido+=saldo; vencidas++; if(dv>diasMax)diasMax=dv; }
-    items.push({ref:(f.nro_orden||('Financiación #'+f.id))+' · cuota '+(cu.nro||'?'),
+    items.push({ref:(f.nro_orden||('Financiación #'+f.id))+' · cuota '+(cu.nro||'?'), pedidoId:f.pedido_id||null,
                 monto:saldo, dias:(dv!=null&&dv>0)?dv:null, vencida:(dv!=null&&dv>0),
                 que:'Financiación'+((dv!=null&&dv<=0)?(' · vence en '+Math.abs(dv)+' días'):'')});
   });
 
   items.sort(function(a,b){ return (b.dias||0)-(a.dias||0) || (b.edad||0)-(a.edad||0) || b.monto-a.monto; });
+  var todos=items.slice();
   var limite=parseFloat(cli.limite_credito)||0;
   var pasaLimite=(limite>0 && deuda>limite);
 
@@ -14003,11 +14068,56 @@ function _rgoArmar(d, clienteId){
     nivel:nivel, deuda:Math.round(deuda),
     vencido:Math.round(vencido), vencidas:vencidas, diasMax:diasMax,
     abierto:Math.round(abierto), abiertos:abiertos, diasAbierto:diasAbierto,
-    items:items.slice(0,8),
+    items:items.slice(0,8), todos:todos,
     limite:limite, pasaLimite:pasaLimite, tolerancia:tolerancia,
     bloqueado:!!cli.bloqueado, bloqueadoMotivo:cli.bloqueado_motivo||'',
     plazo:plazo
   };
+}
+// Deuda de un cliente separada entre UN pedido (el que se está mirando/editando) y el resto.
+function _rgoPartir(r, pedidoId){
+  var este={monto:0,n:0,refs:[]}, otros={monto:0,n:0,refs:[],vencidas:0,diasMax:0,viejos:0};
+  if(!r) return {este:este,otros:otros};
+  (r.todos||r.items||[]).forEach(function(it){
+    if(pedidoId!=null && it.pedidoId!=null && Number(it.pedidoId)===Number(pedidoId)){ este.monto+=it.monto; este.n++; if(este.refs.indexOf(it.ref)<0)este.refs.push(it.ref); return; }
+    otros.monto+=it.monto; otros.n++;
+    var base=String(it.ref||'').split(' · ')[0]; if(otros.refs.indexOf(base)<0)otros.refs.push(base);
+    if(it.vencida){ otros.vencidas++; if((it.dias||0)>otros.diasMax)otros.diasMax=it.dias||0; }
+    if(it.viejo)otros.viejos++;
+  });
+  este.monto=Math.round(este.monto); otros.monto=Math.round(otros.monto);
+  otros.nivel=otros.monto<=1?'ok':(otros.vencidas>0?((otros.diasMax>=10||otros.monto>=50000)?'alto':'ojo'):(otros.viejos>0?'ojo':'info'));
+  return {este:este,otros:otros};
+}
+function _rgoRefsTxt(refs, max){ max=max||3; var r=refs.slice(0,max).join(', '); if(refs.length>max) r+=' y '+(refs.length-max)+' más'; return r; }
+// Carga la cuenta de varios clientes de una vez (para las tarjetas de pedidos): 4 consultas en total.
+window._pedCliDeuda=window._pedCliDeuda||{};
+function _rgoClientesLote(ids, cb){
+  ids=(ids||[]).filter(function(x){return x!=null&&x!=='';}); if(!ids.length){ if(cb)cb({}); return; }
+  var enIds='('+ids.join(',')+')';
+  Promise.all([
+    apiGet("pedidos_catalogo","select=id,nro_orden,cliente_id,total,total_con_envio,cobrado_total,estado,created_at,cc_fecha_vencimiento&cliente_id=in."+enIds+"&limit=5000").catch(function(){return [];}),
+    apiGet("cc_cuotas","select=id,pedido_id,nro_cuota,total_cuotas,monto,monto_pagado,recargo_mora,fecha_vencimiento,estado&estado=in.(pendiente,parcial,vencida)&limit=5000").catch(function(){return [];}),
+    apiGet("financiaciones","select=id,pedido_id,nro_orden,estado&estado=eq.activa&limit=3000").catch(function(){return [];}),
+    apiGet("financiacion_cuotas","select=id,financiacion_id,nro,monto,pagada_monto,vencimiento,pagada&pagada=is.false&limit=8000").catch(function(){return [];}),
+    apiGet("clientes","select=id,nombre,apellido,bloqueado,bloqueado_motivo,limite_credito,saldo_cc,cuenta_corriente_habilitada,cc_plazo_dias&id=in."+enIds+"&limit=2000").catch(function(){return [];})
+  ]).then(function(d){
+    var peds=d[0]||[], ccq=d[1]||[], fins=d[2]||[], finq=d[3]||[], clis=d[4]||[];
+    var pedCli={}; peds.forEach(function(p){ pedCli[p.id]=p.cliente_id; });
+    var finCli={}; fins.forEach(function(f){ if(f.pedido_id&&pedCli[f.pedido_id]!=null) finCli[f.id]=pedCli[f.pedido_id]; });
+    var out={};
+    clis.forEach(function(c){
+      var dd={ peds:peds.filter(function(p){return p.cliente_id===c.id;}),
+               ccq:ccq.filter(function(q){return pedCli[q.pedido_id]===c.id;}),
+               fins:fins.filter(function(f){return finCli[f.id]===c.id;}),
+               finq:finq.filter(function(q){return finCli[q.financiacion_id]===c.id;}),
+               cli:c };
+      var r=_rgoArmar(dd, c.id);
+      out[c.id]=r; window._rgoCache[c.id]={t:Date.now(), r:r};
+    });
+    window._pedCliDeuda=out;
+    if(cb)cb(out);
+  }).catch(function(e){ console.warn('[deuda lote]',e); if(cb)cb({}); });
 }
 function _rgoSumar(fechaISO, dias){
   var d=new Date(String(fechaISO)+'T12:00:00'); d.setDate(d.getDate()+dias);
@@ -14123,6 +14233,23 @@ function _rgoVerCobranzas(clienteId){
 function _rgoPintarChip(r){
   var box=document.getElementById('drawerRiesgo'); if(!box)return;
   if(!r || r.nivel==='ok' || r.deuda<=1){ box.style.display='none'; box.innerHTML=''; return; }
+  // Editando un pedido: lo que falta cobrar de ESE pedido no es "deuda", es el pedido que se está armando.
+  if(window._editandoPedidoId){
+    var pp=_rgoPartir(r, window._editandoPedidoId), ord=window._editandoPedidoOrden||('#'+window._editandoPedidoId);
+    var lineas=[];
+    if(pp.este.monto>1) lineas.push("<div>📝 Este pedido ("+_rgoEsc(ord)+"): <b>"+fmt(pp.este.monto)+"</b> sin cobrar</div>");
+    var stE=_RGO_ESTILO.info;
+    if(pp.otros.monto>1){
+      stE=_RGO_ESTILO[pp.otros.nivel]||_RGO_ESTILO.info;
+      lineas.push("<div>"+stE.ico+" Además debe <b>"+fmt(pp.otros.monto)+"</b> de otro"+(pp.otros.refs.length>1?'s':'')+" pedido"+(pp.otros.refs.length>1?'s':'')+": "+_rgoEsc(_rgoRefsTxt(pp.otros.refs))+
+        (pp.otros.vencidas>0?(" · vencido hace "+pp.otros.diasMax+" días"):"")+"</div>");
+    } else if(pp.este.monto>1){ lineas.push("<div style='font-weight:500'>✅ No tiene deuda de otros pedidos</div>"); }
+    if(r.bloqueado){ stE=_RGO_ESTILO.alto; lineas.unshift("<div>🔒 Cliente bloqueado</div>"); }
+    if(!lineas.length){ box.style.display='none'; box.innerHTML=''; return; }
+    box.style.display='';
+    box.innerHTML="<div onclick='_rgoAbrirDeChip("+r.clienteId+")' style='margin-top:.4rem;background:"+stE.bg+";border:1px solid "+stE.col+";border-radius:7px;padding:.35rem .5rem;font-size:.68rem;color:"+stE.col+";font-weight:700;cursor:pointer;line-height:1.4'>"+lineas.join('')+"</div>";
+    return;
+  }
   var st=_RGO_ESTILO[r.nivel]||_RGO_ESTILO.info;
   var txt;
   if(r.bloqueado)txt='Cliente bloqueado';
@@ -14130,6 +14257,8 @@ function _rgoPintarChip(r){
   else if(r.abiertos>0)txt='Debe '+fmt(r.deuda)+' · '+r.abiertos+' pedido'+(r.abiertos>1?'s':'')+' sin cobrar de hace '+r.diasAbierto+' días';
   else if(r.pasaLimite)txt='Debe '+fmt(r.deuda)+' · pasó su límite de '+fmt(r.limite);
   else txt='Tiene '+fmt(r.deuda)+' sin cobrar';
+  var _refsChip=[]; (r.todos||r.items||[]).forEach(function(it){ var b=String(it.ref||'').split(' · ')[0]; if(_refsChip.indexOf(b)<0)_refsChip.push(b); });
+  if(_refsChip.length) txt+=' ('+_rgoRefsTxt(_refsChip)+')';
   box.style.display='';
   box.innerHTML="<div onclick='_rgoAbrirDeChip("+r.clienteId+")' style='margin-top:.4rem;background:"+st.bg+";border:1px solid "+st.col+";border-radius:7px;padding:.35rem .5rem;font-size:.68rem;color:"+st.col+";font-weight:700;cursor:pointer;line-height:1.35'>"+st.ico+" "+_rgoEsc(txt)+" <span style='opacity:.7;font-weight:500'>· ver</span></div>";
 }
