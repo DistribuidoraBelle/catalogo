@@ -1207,6 +1207,36 @@ function comboIdDeItem(it){
   }
   return null;
 }
+// 2026-09-29: componentes de un combo para mover stock. Primero la foto guardada en el ítem del pedido
+// (comboItems: lo que traía el combo cuando se pidió); si el ítem es viejo y no la tiene, se lee combo_items.
+// Devuelve solo frascos (los decants no mueven stock).
+function _comboComponentes(cid, it){
+  var snap=it&&Array.isArray(it.comboItems)?it.comboItems:null;
+  if(snap&&snap.length) return Promise.resolve(snap.filter(function(c){ return c&&c.producto_id&&!c.es_decan; }).map(function(c){ return {producto_id:Number(c.producto_id),cantidad:parseInt(c.cantidad)||1,producto_nombre:c.producto_nombre||''}; }));
+  if(!cid) return Promise.resolve([]);
+  return apiGet('combo_items','select=producto_id,cantidad,producto_nombre&es_decan=not.is.true&combo_id=eq.'+cid).then(function(ci){ return Array.isArray(ci)?ci.filter(function(c){return c.producto_id;}):[]; });
+}
+// Componentes de un combo del carrito (sin esperar): del ítem, o del cache de combos del vendedor
+function _comboCompSync(item){
+  var cid=item&&(item.comboId||comboIdDeItem(item));
+  var arr=(item&&Array.isArray(item.comboItems)&&item.comboItems.length)?item.comboItems:((window._comboCompCache&&cid&&window._comboCompCache[cid])||[]);
+  return arr.filter(function(c){ return c&&c.producto_id&&!c.es_decan; }).map(function(c){ return {producto_id:Number(c.producto_id),cantidad:parseInt(c.cantidad)||1,producto_nombre:c.producto_nombre||''}; });
+}
+// Foto de qué trae el combo para guardarla en el pedido
+function _comboSnapCart(item){
+  var cid=item&&(item.comboId||comboIdDeItem(item));
+  var arr=(item&&Array.isArray(item.comboItems)&&item.comboItems.length)?item.comboItems:((window._comboCompCache&&cid&&window._comboCompCache[cid])||[]);
+  return arr.filter(function(c){return c&&c.producto_id;}).map(function(c){ return {producto_id:Number(c.producto_id),cantidad:parseInt(c.cantidad)||1,producto_nombre:c.producto_nombre||'',es_decan:!!c.es_decan}; });
+}
+// Unidades reales de un ítem del pedido para comisiones: un combo vale sus frascos y sus decants
+function _comboUnidades(it){
+  var q=parseInt(it.qty)||1;
+  if(!(it.isCombo||comboIdDeItem(it))) return {perf:q,dec:0};
+  var arr=Array.isArray(it.comboItems)&&it.comboItems.length?it.comboItems:((window._comboCompCache&&window._comboCompCache[comboIdDeItem(it)])||null);
+  if(!arr||!arr.length) return {perf:q,dec:0};
+  var perf=0,dec=0; arr.forEach(function(c){ var n=(parseInt(c.cantidad)||1)*q; if(c.es_decan)dec+=n; else perf+=n; });
+  return {perf:perf,dec:dec};
+}
 // _esProductoNumerico: true si el item apunta a un producto real (id numérico), no a un combo/decan/placeholder.
 function _esProductoNumerico(pid){
   if(typeof pid==='number')return pid>0;
@@ -2351,7 +2381,17 @@ function calcAlertaPrecio(items){
   var totalOriginal=0;
   var ok=true;
   (items||[]).forEach(function(it){
-    if(it.isDecan||it.isCombo||it.segmento==='decan'||it.segmento==='combo')return;
+    if(it.isDecan||it.segmento==='decan')return;
+    var _cidA=comboIdDeItem(it);
+    if(_cidA||it.isCombo||it.segmento==='combo'){
+      // 2026-09-29: si cambió el precio del combo desde que se reservó, también avisa
+      var _cb=(typeof combosVendedor!=='undefined'&&combosVendedor||[]).find(function(x){return x.id===_cidA;});
+      if(!_cb) return;
+      var _pv=(_cb.precio_oferta&&parseFloat(_cb.precio_oferta)>0&&parseFloat(_cb.precio_oferta)<parseFloat(_cb.precio))?parseFloat(_cb.precio_oferta):parseFloat(_cb.precio)||0;
+      totalOriginal+=(parseFloat(it.precio)||0)*(it.qty||1); totalActual+=_pv*(it.qty||1);
+      if(Math.abs(_pv-(parseFloat(it.precio)||0))>1) ok=false;
+      return;
+    }
     if(!it.producto_id||!it.precio)return;
     var p=prods.find(function(x){return x.id===it.producto_id;});
     if(!p){ok=false;return;}
@@ -3250,7 +3290,7 @@ function renderDrawer(){
           "<span class='ci-seg' style='"+(item.precioManual&&priceUsed===0?"color:var(--blue)":item.precioManual?"color:var(--red)":"")+"'>"+(item.precioManual&&priceUsed===0?"🎁 Bonificado":item.precioManual?"★ Precio especial":segLabel)+(priceUsed>0?" "+fmt(priceUsed)+"/u":"")+"</span>"+
           (desc>0?"<span style='font-size:.66rem;color:var(--red);background:var(--rdim);padding:.1rem .3rem;border-radius:3px'>-"+fmt(desc)+"</span>":"")+
           "<span class='ci-sub'>"+fmt(sub-desc)+"</span>"+
-          "<span class='ci-qty'>"+item.qty+"u</span>"+
+          (item.isCombo?"<span class='ci-qty' style='display:inline-flex;align-items:center;gap:.25rem'><button type='button' onclick='chgQtyCombo(\""+sid+"\",-1)' style='width:20px;height:20px;border:1px solid var(--bd);border-radius:4px;background:var(--sur2);color:var(--tx);cursor:pointer;line-height:1'>−</button>"+item.qty+"u<button type='button' onclick='chgQtyCombo(\""+sid+"\",1)' style='width:20px;height:20px;border:1px solid var(--bd);border-radius:4px;background:var(--sur2);color:var(--tx);cursor:pointer;line-height:1'>+</button></span>":"<span class='ci-qty'>"+item.qty+"u</span>")+
         "</div>"+
       reservaWarn+
       "<div style='display:flex;gap:.5rem;margin:.2rem 0'>"+
@@ -3493,7 +3533,7 @@ function _badgeReservaCombo(comboId,qty){
   if(!comps||!comps.length){
     return '<span title="Combo" style="'+base+';background:var(--cyan);color:#000">C</span>';
   }
-  var todosOk=comps.every(function(it){
+  var todosOk=comps.filter(function(it){return !it.es_decan;}).every(function(it){
     var p=prods.find(function(x){return x.id===it.producto_id;});
     var reserva=p?p.reserva||0:0;
     return reserva>=(it.cantidad||1)*qty;
@@ -5601,14 +5641,16 @@ window._pedSaldarItems = function(pedidoId, opts){
                    periodo:periodo, estado:'confirmada', origen:origenV, nro_orden:nroOrden, forma_cobro:forma,
                    descuento:it.descuento||0, descuento_motivo:it.descuento_motivo||'' };
       if(cid){
-        proms.push(apiGet('combo_items','select=producto_id,cantidad&es_decan=not.is.true&combo_id=eq.'+cid).then(function(ci){
+        proms.push(_comboComponentes(cid, it).then(function(ci){
           if(!Array.isArray(ci)) return;
           return Promise.all(ci.filter(function(c){ return c.producto_id; }).map(function(c){
             var cant = (c.cantidad||1)*qty;
-            return patchStockFresco(c.producto_id, sinReserva ? _dV(vendId,+cant,{stock_actual:-cant}) : _dV(vendId,+cant,{reserva:-cant}), motivo+' (combo)');
+            return patchStockFresco(c.producto_id, sinReserva ? _dV(vendId,+cant,{stock_actual:-cant}) : _dV(vendId,+cant,{reserva:-cant}), motivo+' (combo)').then(function(r){
+              return apiPost('movimientos_stock', { producto_id:c.producto_id, producto_nombre:c.producto_nombre||'', tipo:'venta', cantidad:cant, motivo:motivo+' (combo '+(it.nombre||cid)+')', usuario:usuario, periodo:periodo }).catch(function(){}).then(function(){ return r; });
+            });
           }));
         }).catch(function(e){ console.error('[saldar combo]', e); }));
-        proms.push(apiPost('ventas', Object.assign(base, {producto_id:null, segmento:'combo'})));
+        proms.push(apiPost('ventas', Object.assign(base, {producto_id:null, segmento:'combo', combo_id:cid})));
         return;
       }
       if(esDecan || !_esProductoNumerico(it.producto_id)){
@@ -6373,8 +6415,9 @@ var _MC_ESPECIAL=5000;
 function _mcItemsDe(pedido){ var items=[]; try{ items=typeof pedido.items==='string'?JSON.parse(pedido.items):(pedido.items||[]); }catch(e){ items=[]; } return Array.isArray(items)?items:[]; }
 function _mcCalc(pedido, esMayorista){
   var items=_mcItemsDe(pedido);
-  var totalUn=items.filter(function(it){return !it.isDecan;}).reduce(function(s,it){return s+(it.qty||1);},0);
-  var totalDec=items.filter(function(it){return it.isDecan;}).reduce(function(s,it){return s+(it.qty||1);},0);
+  // 2026-09-29: un combo cuenta por lo que trae (frascos y decants); los bonificados no suman
+  var totalUn=0,totalDec=0;
+  items.forEach(function(it){ if(it.isBonificado)return; if(it.isDecan){ totalDec+=(it.qty||1); return; } var u=_comboUnidades(it); totalUn+=u.perf; totalDec+=u.dec; });
   var comDec=(_comisiones&&_comisiones.decan)||500;
   var especial=pedido.comision_especial===true;
   var comBase, regla;
@@ -7047,6 +7090,14 @@ function confirmarVenta(){
     var p=prods.find(function(x){return x.id===item.id;});
     if(p&&item.qty>(p.stock_actual||0)){toast("Stock insuficiente: "+_prodMl(item.nombre, p.ml),"terr");_confBtnLiberar();return;}
   }
+  // 2026-09-29: los combos también se validan por componente, sumando lo que ya piden los sueltos y otros combos
+  var _reqV={};
+  Object.values(cart).forEach(function(it){
+    if(!it||it.isBonificado||it.isDecan) return;
+    if(it.isCombo){ _comboCompSync(it).forEach(function(c){ _reqV[c.producto_id]=(_reqV[c.producto_id]||0)+c.cantidad*(it.qty||1); }); }
+    else { var _pidV=it.isCosm?it.prodId:it.id; if(_pidV) _reqV[_pidV]=(_reqV[_pidV]||0)+(it.qty||1)*(it.isCosm?(it.cajaCant||1):1); }
+  });
+  for(var _k in _reqV){ var _pp=prods.find(function(x){return x.id===Number(_k);}); if(_pp&&_reqV[_k]>(_pp.stock_actual||0)){ toast("Stock insuficiente: "+_prodMl(_pp.nombre,_pp.ml)+" (hay "+(_pp.stock_actual||0)+", el pedido necesita "+_reqV[_k]+" contando combos)","terr"); _confBtnLiberar(); return; } }
   // Validate group minimums
   // Perfumes normales en el carrito (no decan, no combo, no min_grupo)
   var _perfsNormales=0;
@@ -7221,6 +7272,7 @@ function executeVenta(items,reservaDecs){
           segmento:"combo",precio:item.price,
           total:(item.price*item.qty)-(item.descuento||0),
           isCombo:true,combo_id:item.comboId||null,
+          comboItems:_comboSnapCart(item),
           descuento:item.descuento||0,descuento_motivo:item.descMotivo||""
         };
       }
@@ -7276,41 +7328,24 @@ function executeVenta(items,reservaDecs){
         }catch(_eLog){}
       });
     }
-    // Ajustar stock de combos nuevos y eliminados
-    var combosOrig=origItems.filter(function(o){return o.isCombo&&o.combo_id;}).map(function(o){return o.combo_id;});
-    var combosNuevos=newItemsData.filter(function(n){return n.isCombo&&n.combo_id&&combosOrig.indexOf(n.combo_id)<0;});
-    var combosEliminados=origItems.filter(function(o){return o.isCombo&&o.combo_id&&newItemsData.findIndex(function(n){return n.isCombo&&n.combo_id===o.combo_id;})<0;});
-    combosNuevos.forEach(function(combo){
-      stockProms.push(
-        apiGet("combo_items","select=*&es_decan=not.is.true&combo_id=eq."+combo.combo_id).then(function(ci){
-          if(!Array.isArray(ci))return;
-          var chain=Promise.resolve();
-          ci.forEach(function(it){
-            var cant=(it.cantidad||1)*(combo.qty||1);
-            chain=chain.then(function(){
-              try{var _pn=(prods.find(function(p){return p.id===it.producto_id;})||{}).nombre||it.producto_nombre||null;_logMovStock({pid:it.producto_id,nombre:_pn,tipo:'reserva',cantidad:cant,motivo:'Edición pedido '+(window._editandoPedidoOrden||'')+' - combo nuevo'});}catch(_e){}
-              return patchStockFresco(it.producto_id,{stock_actual:-cant,reserva:+cant},"Editar pedido - combo nuevo");
-            });
+    // 2026-09-29: combos por DELTA de cantidad (antes solo se miraban nuevos/eliminados: 1→2 no reservaba el
+    // segundo y 2→1 dejaba reserva trabada). Se compara por id resuelto (hay pedidos viejos con combo_id como texto).
+    var combosDelta={}, combosRef={};
+    origItems.forEach(function(o){ var cid=comboIdDeItem(o); if(!cid)return; combosDelta[cid]=(combosDelta[cid]||0)-(parseInt(o.qty)||1); if(!combosRef[cid]&&Array.isArray(o.comboItems)&&o.comboItems.length) combosRef[cid]=o; });
+    newItemsData.forEach(function(n){ var cid=comboIdDeItem(n); if(!cid)return; combosDelta[cid]=(combosDelta[cid]||0)+(parseInt(n.qty)||1); if(!combosRef[cid]&&Array.isArray(n.comboItems)&&n.comboItems.length) combosRef[cid]=n; });
+    Object.keys(combosDelta).forEach(function(cidS){
+      var d=combosDelta[cidS]; if(!d)return; var cid=parseInt(cidS,10);
+      stockProms.push(_comboComponentes(cid, combosRef[cidS]).then(function(ci){
+        var chain=Promise.resolve();
+        ci.forEach(function(it){
+          var cant=(it.cantidad||1)*Math.abs(d);
+          chain=chain.then(function(){
+            try{var _pn=(prods.find(function(p){return p.id===it.producto_id;})||{}).nombre||it.producto_nombre||null;_logMovStock({pid:it.producto_id,nombre:_pn,tipo:(d>0?'reserva':'reserva_cancelada'),cantidad:cant,motivo:'Edición pedido '+(window._editandoPedidoOrden||'')+' - combo '+(d>0?'+':'-')+Math.abs(d)});}catch(_e){}
+            return patchStockFresco(it.producto_id, d>0?{stock_actual:-cant,reserva:+cant}:{stock_actual:+cant,reserva:-cant}, d>0?"Editar pedido - combo agregado":"Editar pedido - combo quitado");
           });
-          return chain;
-        })
-      );
-    });
-    combosEliminados.forEach(function(combo){
-      stockProms.push(
-        apiGet("combo_items","select=*&es_decan=not.is.true&combo_id=eq."+combo.combo_id).then(function(ci){
-          if(!Array.isArray(ci))return;
-          var chain=Promise.resolve();
-          ci.forEach(function(it){
-            var cant=(it.cantidad||1)*(combo.qty||1);
-            chain=chain.then(function(){
-              try{var _pn=(prods.find(function(p){return p.id===it.producto_id;})||{}).nombre||it.producto_nombre||null;_logMovStock({pid:it.producto_id,nombre:_pn,tipo:'reserva_cancelada',cantidad:cant,motivo:'Edición pedido '+(window._editandoPedidoOrden||'')+' - combo eliminado'});}catch(_e){}
-              return patchStockFresco(it.producto_id,{stock_actual:+cant,reserva:-cant},"Editar pedido - combo eliminado");
-            });
-          });
-          return chain;
-        })
-      );
+        });
+        return chain;
+      }));
     });
     // Primero ajustar stock, DESPUÉS guardar el pedido
     Promise.all(stockProms).then(function(){
@@ -7370,18 +7405,21 @@ function executeVenta(items,reservaDecs){
       // ── COMBO: register venta + reduce stock of each component ──
       var sub=(item.price*item.qty)-(item.descuento||0);
       promises.push(apiPost("ventas",{
-        vendedor_id:VENDEDOR_ID,producto_id:null,
+        vendedor_id:VENDEDOR_ID,producto_id:null,combo_id:item.comboId||null,
         producto_nombre:item.nombre,cantidad:item.qty,
         precio_unitario:item.price,segmento:"combo",nro_orden:nroOrden,
         total:sub,periodo:periodoActual,nro_orden:nroOrden,estado:"confirmada",
         forma_cobro:getFormaCobro(),origen:"vendedor",descuento:item.descuento||0,
         descuento_motivo:item.descMotivo||""
       }));
-      // Reduce stock for each component x qty of combo sold — siempre BD fresca
-      (item.comboItems||[]).filter(function(ci){return !ci.es_decan;}).forEach(function(ci){
+      // 2026-09-29: el descuento de cada componente se espera (antes quedaba suelto: si fallaba, venta sin stock) y deja movimiento
+      _comboCompSync(item).forEach(function(ci){
         var prodId=ci.producto_id;
         var cantComp=(ci.cantidad||1)*item.qty;
-        patchStockFresco(prodId,_dV(VENDEDOR_ID,+cantComp,{stock_actual:-cantComp}),'Venta combo');
+        promises.push(patchStockFresco(prodId,_dV(VENDEDOR_ID,+cantComp,{stock_actual:-cantComp}),'Venta combo').then(function(r){
+          try{ _logMovStock({pid:prodId,nombre:ci.producto_nombre||((prods.find(function(p){return p.id===prodId;})||{}).nombre),tipo:'venta',cantidad:cantComp,motivo:'Venta combo '+(item.nombre||'')+' — '+nroOrden}); }catch(e){}
+          return r;
+        }));
       });
     } else {
       // ── NORMAL PRODUCT ──
@@ -7530,7 +7568,7 @@ function loadPedidosWeb(){
     // Stock fresco: para que los badges R/! reflejen la reserva real (evita falsos "!")
     apiGet("productos","select=id,stock_actual,reserva&activo=is.true&limit=2000").catch(function(){return [];}),
     // Combos + componentes: para el badge de reserva de combos
-    apiGet("combos","select=id,combo_items(producto_id,cantidad)&activo=is.true").catch(function(){return [];}),
+    apiGet("combos","select=id,combo_items(producto_id,cantidad,producto_nombre,es_decan)&activo=is.true").catch(function(){return [];}),
     // 💳 Financiaciones activas + sus cuotas (sistema de cuotas 2026-08)
     apiGet("financiaciones","select=*,financiacion_cuotas(*)&estado=eq.activa&order=created_at.desc&limit=300").catch(function(){return [];})
   ]).then(function(res){
@@ -8197,12 +8235,15 @@ function _mgConfirmarCobro(){
     // Combo: descontar reserva de cada componente (la venta del combo se registra más abajo, igual que antes)
     if(_cid){
       var comboQty=s.qty||1;
-      proms.push(apiGet('combo_items','select=*&es_decan=not.is.true&combo_id=eq.'+_cid).then(function(ci){
+      proms.push(_comboComponentes(_cid, it).then(function(ci){
         if(!Array.isArray(ci))return;
         return Promise.all(ci.filter(function(cit){return cit.producto_id;}).map(function(cit){
           var cant=(cit.cantidad||1)*comboQty;
           var delta=_sinReserva?_dV(VENDEDOR_ID,+cant,{stock_actual:-cant}):_dV(VENDEDOR_ID,+cant,{reserva:-cant});
-          return patchStockFresco(cit.producto_id,delta,'Cobro combo');
+          return patchStockFresco(cit.producto_id,delta,'Cobro combo').then(function(r){
+            try{ _logMovStock({pid:cit.producto_id,nombre:cit.producto_nombre||null,tipo:'venta',cantidad:cant,motivo:'Venta pedido web — '+nroOrden+' (combo '+(it.nombre||_cid)+')'}); }catch(e){}
+            return r;
+          });
         }));
       }).catch(function(e){console.error("[belle] error silencioso:",e);}));
     }
@@ -8213,7 +8254,8 @@ function _mgConfirmarCobro(){
     proms.push(apiPost('ventas',{
       vendedor_id:VENDEDOR_ID,
       // Decans: producto_id null para evitar que se toque el stock al eliminar
-      producto_id:esDecanItem?null:(it.producto_id||null),
+      producto_id:esDecanItem?null:(esComboItem?null:(it.producto_id||null)),
+      combo_id:_cid||null,
       producto_nombre:it.nombre,
       cantidad:s.qty,
       precio_unitario:it.precio||0,
@@ -8844,12 +8886,12 @@ function _finEntregarStock(ped, finId){
       var _cid=comboIdDeItem(it);
       if(_cid){
         chain=chain.then(function(){
-          return apiGet('combo_items','select=producto_id,cantidad&es_decan=not.is.true&combo_id=eq.'+_cid).then(function(ci){
+          return _comboComponentes(_cid, it).then(function(ci){
             if(!Array.isArray(ci)) return;
             var c3=Promise.resolve();
             ci.filter(function(c){return c.producto_id;}).forEach(function(c){
               var cant=(c.cantidad||1)*(it.qty||1);
-              c3=c3.then(function(){ return patchStockFresco(c.producto_id,_dV(VENDEDOR_ID,+cant,{reserva:-cant}),"Entrega financiada combo "+(ped.nro_orden||'')); });
+              c3=c3.then(function(){ return patchStockFresco(c.producto_id,_dV(VENDEDOR_ID,+cant,{reserva:-cant}),"Entrega financiada combo "+(ped.nro_orden||'')).then(function(r){ try{ _logMovStock({pid:c.producto_id,nombre:c.producto_nombre||null,tipo:'venta',cantidad:cant,motivo:'Entrega financiada '+(ped.nro_orden||'')+' (combo)'}); }catch(e){} return r; }); });
             });
             return c3;
           }).catch(function(e){console.error('[fin combo]',e);});
@@ -9260,7 +9302,10 @@ function _finChequearVencimientos(){
 function cancelarPedidoWeb(pedId,btn){
   bellConfirm("Cancelar pedido? El stock se devuelve al inventario. Si ya estaba cobrado, también se borran las ventas y el pago CC.",function(){
   if(btn)btn.disabled=true;
-  apiGet("pedidos_catalogo","select=*&id=eq."+pedId).then(function(data){
+  Promise.all([apiGet("pedidos_catalogo","select=*&id=eq."+pedId), apiGet("financiaciones","select=id,entregado&pedido_id=eq."+pedId+"&limit=5").catch(function(){return [];})]).then(function(_res){
+    var data=_res[0];
+    // 2026-09-29: si la financiación ya se entregó, el stock está en vendido (no en reserva): se devuelve desde ahí
+    var _finEntregada=(Array.isArray(_res[1])?_res[1]:[]).some(function(f){return f&&f.entregado===true;});
     if(!Array.isArray(data)||!data.length)return;
     var ped=data[0];var items=[];
     // 🐛 FIX 2026-08-08: guard contra doble cancelación (dos dispositivos / UI vieja):
@@ -9294,7 +9339,7 @@ function cancelarPedidoWeb(pedId,btn){
       // (items_cobrados); si el pedido figura cobrado sin detalle, se usa el flag global.
       // 🐛 FIX 2026-09-23: si no hay detalle por ítem, el stock salió de reserva SOLO si el pedido quedó
       // saldado (estado cobrado). Un cobro parcial por monto no mueve stock: sigue en reserva.
-      var _itCobrado=_idxCobrados.length?(_idxCobrados.indexOf(_itIdx)>=0):(ped.estado==='cobrado'||ped.confirmado_cobro===true);
+      var _itCobrado=_finEntregada||(_idxCobrados.length?(_idxCobrados.indexOf(_itIdx)>=0):(ped.estado==='cobrado'||ped.confirmado_cobro===true));
       // Sin reserva y sin cobrar → ese item nunca movió stock: no devolver nada.
       if(_sinReservaCanc && !_itCobrado) return;
       // Combos
@@ -9303,7 +9348,7 @@ function cancelarPedidoWeb(pedId,btn){
         // FIX 2026-06-18: liberar reserva del combo en cualquier estado no-cobrado
         // (antes salteaba entregado/en_reparto sin cobro y dejaba la reserva trabada).
         promises.push(
-          apiGet("combo_items","select=producto_id,cantidad&es_decan=not.is.true&combo_id=eq."+_cid).then(function(ci){
+          _comboComponentes(_cid, it).then(function(ci){
             if(!Array.isArray(ci))return;
             return Promise.all(ci.filter(function(cit){return cit.producto_id;}).map(function(cit){
               var cantTotal=(cit.cantidad||1)*(it.qty||1);
@@ -9460,10 +9505,11 @@ function editarPedido(pedId){
         // preservando isCombo/comboId/comboItems para que NO pierda la reserva.
         var _cid=comboIdDeItem(it)||it.combo_id||it.comboId||null;
         var _ck="combo_"+(_cid||('x'+Math.random().toString(36).slice(2,8)));
-        cart[_ck]={id:_ck,nombre:it.nombre,qty:it.qty||1,seg:"combo",price:it.precio||0,isDecan:false,isCombo:true,comboId:_cid,comboItems:((window._comboCompCache&&_cid&&window._comboCompCache[_cid])||it.comboItems||[])};
+        if(cart[_ck]){ cart[_ck].qty+=(it.qty||1); cart[_ck].descuento=(cart[_ck].descuento||0)+(parseFloat(it.descuento)||0); }
+        else cart[_ck]={id:_ck,nombre:it.nombre,qty:it.qty||1,seg:"combo",price:it.precio||0,isDecan:false,isCombo:true,comboId:_cid,comboItems:((Array.isArray(it.comboItems)&&it.comboItems.length)?it.comboItems:((window._comboCompCache&&_cid&&window._comboCompCache[_cid])||[])),descuento:parseFloat(it.descuento)||0,descMotivo:it.descuento_motivo||""};
       } else {
         var prodId=it.producto_id||it.id;
-        cart[prodId]={id:prodId,nombre:it.nombre,qty:it.qty||1,seg:it.segmento||"pi",price:it.precio||0,isDecan:false,cajaCant:it.cajaCant||1,isCosm:!!it.isCosm,prodId:(it.isCosm?prodId:undefined)};   // 2026-09-25: conserva cajas de cosmética
+        cart[prodId]={id:prodId,nombre:it.nombre,qty:it.qty||1,seg:it.segmento||"pi",price:it.precio||0,isDecan:false,cajaCant:it.cajaCant||1,isCosm:!!it.isCosm,prodId:(it.isCosm?prodId:undefined),descuento:parseFloat(it.descuento)||0,descMotivo:it.descuento_motivo||""};   // 2026-09-25: conserva cajas de cosmética; 2026-09-29: y el descuento
         cstate[prodId]={qty:it.qty||1};
       }
     });
@@ -10920,6 +10966,7 @@ function _confirmarReservarPedContinuar(){
       segmento:"combo",precio:c.price,
       total:(c.price*c.qty)-(c.descuento||0),
       isCombo:true,combo_id:c.comboId||null,
+      comboItems:_comboSnapCart(c),   // 2026-09-29: qué traía el combo al reservarlo
       descuento:c.descuento||0,descuento_motivo:c.descMotivo||""});
   });
   // 🐛 FIX 2026-08-08: las CAJAS de cosmética no se agregaban al pedido — su plata
@@ -11067,20 +11114,24 @@ function _confirmarReservarPedContinuar(){
     // 🐛 FIX 2026-08-08: en modo EDICIÓN los combos se re-reservaban COMPLETOS en cada
     // guardado (doble/triple reserva). Ahora solo se reserva el stock de combos NUEVOS
     // (que no estaban en el pedido original).
-    var combosCart=items.filter(function(i){
-      if(!i.isCombo||!i.comboId)return false;
-      if(!esEdicion)return true;
-      return !_origItemsForDiff.some(function(o){return o.isCombo&&o.combo_id===i.comboId;});
+    // 2026-09-29: en edición se reserva/libera solo la DIFERENCIA de cantidad por combo
+    var combosCart=[];
+    items.forEach(function(i){
+      if(!i.isCombo||!i.comboId)return;
+      var delta=i.qty||1;
+      if(esEdicion){ var _o=_origItemsForDiff.find(function(o){return comboIdDeItem(o)===Number(i.comboId);}); if(_o) delta=(i.qty||1)-(parseInt(_o.qty)||1); }
+      if(delta!==0) combosCart.push({comboId:i.comboId,nombre:i.nombre,qty:delta,item:i});
     });
     combosCart.forEach(function(combo){
       reservaChain=reservaChain.then(function(){
-        return apiGet("combo_items","select=producto_id,cantidad,producto_nombre&es_decan=not.is.true&combo_id=eq."+combo.comboId)
+        return _comboComponentes(combo.comboId, combo.item)
           .then(function(ci){
             if(!Array.isArray(ci))return;
             var chain=Promise.resolve();
             ci.filter(function(it){return it.producto_id;}).forEach(function(it){
               chain=chain.then(function(){
-                var cant=(it.cantidad||1)*(combo.qty||1);
+                var cant=(it.cantidad||1)*Math.abs(combo.qty);
+                if(combo.qty<0) return patchStockFresco(it.producto_id,{stock_actual:+cant,reserva:-cant},'Reserva combo (menos unidades)');
                 return patchStockFresco(it.producto_id,{stock_actual:-cant,reserva:+cant},'Reserva combo')
                   .then(function(){
                     return apiPost("movimientos_stock",{
@@ -11424,12 +11475,32 @@ function togComboDetalle(id){
   el.style.display=el.style.display==="none"?"block":"none";
 }
 
+// cuántos combos entran con el stock libre, descontando lo que ya piden los sueltos y otros combos del carrito
+function _comboMaxVend(c){
+  var key="combo_"+c.id, req={};
+  Object.keys(cart||{}).forEach(function(k){ var it=cart[k]; if(!it||it.isBonificado||it.isDecan||k===key)return;
+    if(it.isCombo){ _comboCompSync(it).forEach(function(x){ req[x.producto_id]=(req[x.producto_id]||0)+x.cantidad*(it.qty||1); }); }
+    else { var pid=it.isCosm?it.prodId:it.id; if(pid) req[pid]=(req[pid]||0)+(it.qty||1)*(it.isCosm?(it.cajaCant||1):1); } });
+  var max=Infinity;
+  (c.combo_items||[]).forEach(function(ci){ if(ci.es_decan||!ci.producto_id)return; var p=prods.find(function(x){return x.id===ci.producto_id;}); var disp=(p?(p.stock_actual||0):0)-(req[ci.producto_id]||0); var cabe=Math.floor(Math.max(0,disp)/(parseInt(ci.cantidad)||1)); if(cabe<max)max=cabe; });
+  return max===Infinity?999:max;
+}
+function chgQtyCombo(key,delta){
+  var it=cart[key]; if(!it||!it.isCombo)return;
+  var nq=(it.qty||1)+delta;
+  if(nq<=0){ rmCart(key); return; }
+  if(delta>0){ var c={id:it.comboId,combo_items:_comboSnapCart(it)}; var max=_comboMaxVend(c); if(nq>max){ toast(max?("Solo hay stock para "+max+" de este combo"):"No hay stock para este combo","twarn"); return; } }
+  it.qty=nq; updateCartBar(); renderDrawer();
+}
 function agregarCombo(comboId){
   var c=combosVendedor.find(function(x){return x.id===comboId;});
   if(!c)return;
   var key="combo_"+comboId;
   // Si tiene oferta válida, usar precio_oferta
   var precioFinal = (c.precio_oferta && parseFloat(c.precio_oferta) > 0 && parseFloat(c.precio_oferta) < parseFloat(c.precio)) ? c.precio_oferta : c.precio;
+  // 2026-09-29: tope de stock al agregar, contando sueltos y otros combos del carrito
+  var _max=_comboMaxVend(c);
+  if(_max<=((cart[key]&&cart[key].qty)||0)){ toast(_max?("Solo hay stock para "+_max+" de este combo"):"No hay stock para este combo","twarn"); return; }
   if(cart[key]){cart[key].qty++;} else {
     cart[key]={
       id:key,nombre:"Combo: "+c.nombre,qty:1,
@@ -16300,7 +16371,7 @@ function _appVerPedidos(){
     // (la PC sí). Con prods vacío o viejo, el chequeo de reserva no encontraba el producto
     // y marcaba "⚠️ Revisar reserva" en pedidos que estaban perfectos (caso WEB-478212).
     apiGet("productos","select=id,stock_actual,reserva&activo=is.true&limit=2000").catch(function(){return [];}),
-    apiGet("combos","select=id,combo_items(producto_id,cantidad)&activo=is.true").catch(function(){return [];})
+    apiGet("combos","select=id,combo_items(producto_id,cantidad,producto_nombre,es_decan)&activo=is.true").catch(function(){return [];})
   ]).then(function(res){
     var a=Array.isArray(res[0])?res[0]:[], b=Array.isArray(res[1])?res[1]:[];
     try{
@@ -16572,10 +16643,16 @@ function ejecutarTransfer(targetId,targetNombre){
     window._editandoPedidoId=null;
     window._editandoPedidoOrden=null;
   }
-  var perfs=items.filter(function(i){return !i.isDecan&&!i.isCosm;});
+  var perfs=items.filter(function(i){return !i.isDecan&&!i.isCosm&&!i.isCombo;});   // 2026-09-29: los combos no cuentan para x3/x10
   var totalUnits=perfs.reduce(function(s,i){return s+i.qty;},0);
   var nroOrden=genOrden();
   var itemsData=items.map(function(item){
+    // 2026-09-29: el combo viaja como combo (antes salía como producto "combo_N" y la transferencia con reserva abortaba)
+    if(item.isCombo){
+      return{producto_id:null,nombre:item.nombre,qty:item.qty,segmento:"combo",precio:item.price,
+        total:(item.price*item.qty)-(item.descuento||0),isCombo:true,combo_id:item.comboId||null,comboItems:_comboSnapCart(item),
+        isDecan:false,cajaCant:1,isCosm:false,descuento:item.descuento||0,descuento_motivo:item.descMotivo||""};
+    }
     var p=prods.find(function(x){return x.id===item.id;});
     var r=p?calcP(p):{pm:0,pe:0,pi:item.price};
     var _pu=p?p.precio_pestana||0:0;
@@ -16624,6 +16701,21 @@ function ejecutarTransfer(targetId,targetNombre){
   if(conReserva && !_reservaHeredada){
     items.filter(function(i){return !i.isDecan;}).forEach(function(item){
       if(!item.id)return;
+      if(item.isCombo){
+        // combo: se reserva cada componente (frascos) por cantidad × unidades
+        stockPromises.push(_comboComponentes(item.comboId, item).then(function(comps){
+          return Promise.all(comps.map(function(c){
+            var q=(c.cantidad||1)*(item.qty||1); reservasTotal++;
+            return apiGet("productos","select=id,stock_actual,reserva&id=eq."+c.producto_id).then(function(rows){
+              var fp=rows&&rows[0];
+              if(!fp){toast("Error: no se encontró el producto del combo","terr");return;}
+              if((fp.stock_actual||0)<q){toast("Stock insuficiente para el combo "+item.nombre+": "+_nomMl(c.producto_nombre, c.producto_id)+" (hay "+(fp.stock_actual||0)+", pide "+q+")","twarn");return;}
+              return patchStockFresco(c.producto_id,{stock_actual:-q,reserva:+q},"Reserva transfer (combo)").then(function(r){ if(r!==null&&r!==undefined){reservasOk++;_reservadosTr.push({pid:c.producto_id,q:q});} else toast("Error reservando el combo","terr"); });
+            });
+          }));
+        }).catch(function(e){toast("Error de red reservando el combo","terr");}));
+        return;
+      }
       var _tpid=item.isCosm?item.prodId:item.id;
       var _tq=item.qty*(item.isCosm?(item.cajaCant||1):1);
       reservasTotal++;
