@@ -413,19 +413,6 @@ function _mw(q,fields){
   var hay=fields.map(function(f){return norm(f||'');}).join(' ');
   return words.every(function(w){return hay.indexOf(w)>=0;});
 }
-function rentColor(pct){
-  if(pct>=40) return{color:'#27ae60',label:'Ideal',icon:'🟢'};
-  if(pct>=30) return{color:'#2ecc71',label:'Muy rentable',icon:'🟢'};
-  if(pct>=25) return{color:'#52b788',label:'Rentable',icon:'🟢'};
-  if(pct>=20) return{color:'#f39c12',label:'Moderado',icon:'🟡'};
-  return{color:'#e74c3c',label:'Bajo',icon:'🔴'};
-}
-function rentBadge(pct){
-  var rc=rentColor(pct);
-  return '<span style="color:'+rc.color+';font-weight:700">'+Math.round(pct)+'%</span> '+
-         '<span style="font-size:.62rem;color:'+rc.color+'">'+rc.label+'</span>';
-}
-
 
 
 function norm(s){
@@ -768,10 +755,6 @@ function _lockBtn(btn, fn, opts){
   }
 }
 
-// Versión por id de botón (cuando solo tenés el id)
-function _lockBtnById(btnId, fn, opts){
-  return _lockBtn(document.getElementById(btnId), fn, opts);
-}
 
 // Wrapper para onclick inline: _lockClick(this, function(){...})
 // Se puede usar directamente en onclick='_lockClick(this, function(){fnReal()})'
@@ -817,7 +800,6 @@ function _gsPedir(tabla, sel, conImatch, conIlike){
     return apiGet(tabla, sel+"&"+conIlike).then(function(r2){ return Array.isArray(r2)?r2:[]; });
   }).catch(function(){ return []; });
 }
-
 
 
 // ── Moverse con el teclado: ↑ ↓ para elegir, Enter para abrir ─────────
@@ -1297,6 +1279,35 @@ function _diffReservaPedido(origItems, newItems){
       var pm=(typeof prods!=='undefined'&&Array.isArray(prods))?prods.find(function(p){return p.id===pid;}):null;
       return {pid:pid, delta:acc[k], nombre:nom[k]||(pm&&pm.nombre)||('Prod #'+pid)};
     });
+  });
+}
+// uuid v4 para el token de idempotencia de la edición (crypto.randomUUID si existe)
+function _uuidV4(){
+  try{ if(window.crypto&&typeof window.crypto.randomUUID==='function') return window.crypto.randomUUID(); }catch(e){}
+  var h='0123456789abcdef', out='';
+  for(var i=0;i<36;i++){ if(i===8||i===13||i===18||i===23)out+='-'; else if(i===14)out+='4'; else if(i===19)out+=h[(Math.random()*4|0)+8]; else out+=h[Math.random()*16|0]; }
+  return out;
+}
+// _pedidoEditarAtomico (2026-10-04): guarda la edición de un pedido en UNA transacción (RPC pedido_editar_atomico):
+// patch del pedido + ajustes de stock + movimientos_stock. p_token repite el mismo uuid en cada reintento: si la
+// base ya lo aplicó devuelve {repetido:true} sin volver a mover stock. diffs = salida de _diffReservaPedido para un
+// pedido RESERVADO (delta>0 aparta, delta<0 libera; los deltas van con signo y la base recorta en 0, igual que
+// ajustar_stock). Devuelve Promise<fila del pedido>; rechaza con Error si la base responde ok:false.
+function _pedidoEditarAtomico(pedId, patch, diffs, token, motivo){
+  var ajustes=(diffs||[]).filter(function(d){return d&&d.pid&&d.delta;}).map(function(d){
+    var n=Math.abs(d.delta);
+    return { pid:d.pid, stock_actual:-d.delta, reserva:+d.delta,
+      mov:{ tipo:(d.delta>0?'reserva':'liberacion'), cantidad:n, motivo:motivo+' ('+(d.delta>0?'+':'-')+n+' u)', usuario:VENDEDOR_NOMBRE||'vendedor', nombre:d.nombre||null } };
+  });
+  return apiPost('rpc/pedido_editar_atomico',{p_pedido_id:pedId, p_patch:patch, p_ajustes:ajustes, p_token:token}).then(function(res){
+    if(!res||!res.ok) throw new Error((res&&res.error)||'pedido_editar_atomico sin respuesta');
+    if(res.repetido) console.warn('[editar] token ya aplicado antes: la base no repitió el ajuste de stock', token);
+    // stock fresco que devuelve la base → copia en memoria (igual que hace patchStockFresco)
+    (Array.isArray(res.stocks)?res.stocks:[]).forEach(function(st){
+      var pm=(typeof prods!=='undefined'&&Array.isArray(prods))?prods.find(function(p){return p.id===Number(st.pid);}):null; if(!pm)return;
+      ['stock_actual','reserva','vendido_david','vendido_facu','en_viaje','reingreso_at'].forEach(function(k){ if(st[k]!==undefined) pm[k]=st[k]; });
+    });
+    return res.pedido||null;
   });
 }
 // Foto de qué trae el combo para guardarla en el pedido
@@ -2323,7 +2334,6 @@ function subirImagenStorage(blob, bucket, onOk, onErr){
 }
 
 
-
 function fmt(n){return n?("$"+Math.round(n).toLocaleString("es-AR",{timeZone:"America/Argentina/Buenos_Aires"})):"-";}
 // 📅 Fecha de HOY en horario argentino (yyyy-mm-dd). toISOString() es UTC: de noche
 // (después de las 21:00) devolvía la fecha de MAÑANA y los pagos/vencimientos se corrían.
@@ -2602,33 +2612,6 @@ function adjDepo(pid,delta){
   });
 }
 
-
-function cambiarDeposito(prodId, delta){
-  var inp=document.getElementById("qd-"+prodId);
-  var current=inp?parseInt(inp.value)||0:0;
-  setDepositoDirecto(prodId, current+delta);
-}
-
-function setDepositoDirecto(prodId, valor){
-  var nuevo=Math.max(0,parseInt(valor)||0);
-  var inp=document.getElementById("qd-"+prodId);
-  if(inp)inp.value=nuevo;
-  // FIX 3 (2026-05-11): leer valor antes para tener stock_antes en el log
-  // 2026-09-12: el depósito es REFERENCIAL — nunca toca stock_actual
-  var pPrev=prods.find(function(x){return x.id===prodId;});
-  var stockAntes=pPrev?(pPrev.deposito_m||0):0;
-  apiPatch("productos",{deposito_m:nuevo},"id=eq."+prodId).then(function(){
-    var p=prods.find(function(x){return x.id===prodId;});
-    if(p)p.deposito_m=nuevo;
-    toast("Deposito actualizado: "+nuevo+"u","tok");
-    var delta=nuevo-stockAntes;
-    _logMovStock({pid:prodId,nombre:(p&&p.nombre)||('Prod #'+prodId),
-      tipo:'deposito_ajuste',cantidad:Math.abs(delta),
-      stockAntes:stockAntes,stockDespues:nuevo,
-      motivo:'Ajuste directo depósito Marcela'});
-    if(nuevo===0)setTimeout(loadQuickPanels,500);
-  });
-}
 
 function buildCatalogo(){
   var pg=document.getElementById("pg-catalogo");
@@ -2920,10 +2903,6 @@ if(r.decan>0&&p.precio_decan!==-1){
     "</div>";
 }
 
-function togNotas(id){
-  var el=document.getElementById("notas-"+id);var btn=el?el.previousElementSibling:null;
-  if(!el)return;el.classList.toggle("open");if(btn)btn.textContent=el.classList.contains("open")?"- Notas":"+ Notas";
-}
 
 function chgDecan(id,delta){
   id=parseInt(id)||id;
@@ -2935,35 +2914,6 @@ function chgDecan(id,delta){
   if(el)el.textContent=nv;
 }
 
-function addCart(id){
-  var st=cstate[id]||{qty:0};
-  if(st.qty===0){toast("Pone una cantidad primero","twarn");return;}
-  var p=prods.find(function(x){return x.id===id;});if(!p)return;
-  var stockMax=p.stock_actual||0;
-  if(st.qty>stockMax){
-    toast("Solo hay "+stockMax+" en stock","twarn");
-    cstate[id].qty=stockMax;
-    var el=document.getElementById("qty-"+id);if(el)el.textContent=stockMax;
-    return;
-  }
-  var r=calcP(p);
-  var ic=cart[id];
-  var totalUnits=getCartTotalUnits()+st.qty-(ic&&!ic.isDecan?ic.qty:0);
-  var _pu=p.precio_pestana||0;
-  // Preserve manual price if already set
-  if(ic&&ic.precioManual){
-    cart[id]={id:id,nombre:p.nombre,qty:st.qty,seg:ic.seg,price:ic.price,isDecan:false,
-      precioManual:true,descuento:ic.descuento||0,descMotivo:ic.descMotivo||""};
-  } else {
-    var seg=_pu>0?'pi':getBestSeg(totalUnits,r);
-    var price=_pu>0?_pu:(r[seg]||r.pi);
-    cart[id]={id:id,nombre:p.nombre,qty:st.qty,seg:seg,price:price,isDecan:false,
-      descuento:(ic&&ic.descuento)||0,descMotivo:(ic&&ic.descMotivo)||""};
-  }
-  updateCartBar();
-  toast("Agregado: "+_prodMl(p.nombre.split(" - ").pop().slice(0,20), p.ml),"tok");
-  renderCat();
-}
 
 // ═══════════════════════════════════════════════════════════
 // VENTA DE COSMÉTICOS — cajas + optimizador + modal (igual catálogo)
@@ -3161,27 +3111,6 @@ function chgQty(id,delta){
   renderCat();
 }
 
-function addToCart(id){
-  var st=cstate[id]||{qty:0};if(st.qty===0){toast("Pone una cantidad primero","twarn");return;}
-  var p=prods.find(function(x){return x.id===id;});if(!p)return;
-  var r=calcP(p);var sa=p.stock_actual||0;var sr=p.reserva||0;
-  // 🐛 FIX 2026-08-21: antes el tope era sa+sr, o sea dejaba vender lo reservado para
-  // otros pedidos. Vendible = stock_actual; se respeta lo que ya está en el carrito
-  // (edición de un pedido cuyas unidades ya están reservadas). Igual que chgQty.
-  var _yaEnCarrito=(cart[id]&&!cart[id].isDecan)?(cart[id].qty||0):0;
-  var _tope=Math.max(sa+_origQtyEnEdicion(id),_yaEnCarrito);   // FIX 2026-09-25: + lo que ya tiene el pedido en edición
-  if(st.qty>_tope){
-    var _msg=_tope>0?("Solo hay "+_tope+" disponible"+(_tope>1?"s":"")):"Sin stock disponible";
-    if(sr>0) _msg+=" ("+sr+" reservada"+(sr>1?"s":"")+" para otros pedidos)";
-    toast(_msg,"terr");
-    return;
-  }
-  var totalUnits=getCartTotalUnits()+st.qty-(cart[id]&&!cart[id].isDecan?cart[id].qty:0);
-  var seg=getBestSeg(totalUnits,r);var price=r[seg]||r.pi;
-  cart[id]={id:id,nombre:p.nombre,qty:st.qty,seg:seg,price:price,isDecan:false};
-  updateCartBar();toast("Agregado: "+fmt(price)+" x "+st.qty,"tok");renderCat();
-}
-
 
 function repriceCart(){
   var totalUnits=getCartTotalUnits();
@@ -3282,7 +3211,7 @@ function closeDrawer(){
   if(window._editandoPedidoId){
     // No preguntar automáticamente — solo limpiar si el carrito está vacío
     if(!Object.keys(cart).length){
-      window._editandoPedidoId=null;window._editandoPedidoOrden=null;
+      window._editandoPedidoId=null;window._editandoPedidoOrden=null;window._editandoPedidoToken=null;
     }
   }
 }
@@ -3525,44 +3454,6 @@ function renderDrawer(){
   if(totalDesc>0)tb+="<div class='tot-row'><span class='tot-lbl' style='color:var(--red)'>Descuentos</span><span style='color:var(--red)'>-"+fmt(totalDesc)+"</span></div>";
   tb+="<div class='tot-row'><span class='tot-lbl'>TOTAL</span><span style='color:var(--green)'>"+fmt(tf)+"</span></div>";
   document.getElementById("totBox").innerHTML=tb;
-}
-
-
-function togPrecioManual(itemId){
-  // Try both string and number keys
-  var key=cart[itemId]?itemId:(cart[parseInt(itemId)]?parseInt(itemId):itemId);
-  if(!cart[key])return;
-  cart[key]._showPM=!cart[key]._showPM;
-  renderDrawer();
-}
-
-function setPrecioManual(itemId,precio){
-  var key=cart[itemId]?itemId:(cart[parseInt(itemId)]?parseInt(itemId):itemId);
-  if(!cart[key])return;
-  cart[key].price=precio;
-  cart[key].precioManual=true;
-  cart[key]._showPM=true;
-  renderDrawer();
-  updateCartBar();
-}
-
-function setPrecioManualInput(itemId){
-  var inp=document.getElementById("pmi-"+itemId);
-  if(!inp||!inp.value)return;
-  var precio=parseInt(inp.value);
-  if(isNaN(precio)||precio<0){toast("Precio invalido","twarn");return;}
-  setPrecioManual(itemId,precio);
-  if(precio===0){var _k=isNaN(itemId)?itemId:parseInt(itemId);if(cart[_k])cart[_k].seg='bonificado';toast("Bonificado","tok");}
-  else{toast("Precio actualizado: $"+precio.toLocaleString("es-AR",{timeZone:"America/Argentina/Buenos_Aires"}),"tok");}
-}
-
-function quitarPrecioManual(itemId){
-  var key=cart[itemId]?itemId:(cart[parseInt(itemId)]?parseInt(itemId):itemId);
-  if(!cart[key])return;
-  cart[key].precioManual=false;
-  cart[key]._showPM=false;
-  renderDrawer();
-  updateCartBar();
 }
 
 
@@ -4339,76 +4230,6 @@ function vcCargarPedido(clienteId, clienteNombre, listaPre){
   });
 }
 
-// Función vieja del modal-pedido — ya no se usa pero la dejo por si algo la invoca
-function _vcCargarPedidoModalViejo(clienteId, clienteNombre, listaPre){
-  var mo=document.createElement("div");mo.className="mo open";mo.id="_moVcPedido";
-  var segKey={minorista:"precio_min_ars",mayorista:"precio_may_ars",mayorista_vip:"precio_may_ars"}[listaPre]||"precio_min_ars";
-  var segLabel={minorista:"Minorista",mayorista:"Mayorista",mayorista_vip:"VIP"}[listaPre]||"Minorista";
-  var _items={};
-  var h="<div class='md' style='max-width:560px;width:95%;max-height:90vh;display:flex;flex-direction:column'>";
-  h+="<div class='mh'><div class='mtt'>Pedido para "+clienteNombre+"</div><button class='btn btn-g xb' onclick='document.getElementById(\"_moVcPedido\").remove()'>✕</button></div>";
-  h+="<div style='padding:.6rem 1rem;border-bottom:1px solid var(--bd);display:flex;gap:.5rem'>";
-  h+="<input type='text' id='_vcPedBusq' placeholder='Buscar producto...' oninput='_vcPedFiltrar()' style='flex:1;padding:.4rem .6rem;border:1px solid var(--bd);border-radius:6px;font-size:.82rem;background:var(--sur2);color:var(--tx)'>";
-  h+="<span style='font-size:.68rem;color:var(--tx3);align-self:center'>"+segLabel+"</span>";
-  h+="</div>";
-  h+="<div id='_vcPedLista' style='flex:1;overflow-y:auto;padding:.5rem 1rem'></div>";
-  h+="<div style='padding:.8rem 1rem;border-top:1px solid var(--bd);display:flex;gap:.5rem;align-items:center;flex-wrap:wrap'>";
-  h+="<div style='flex:1;min-width:120px'><div style='font-size:.68rem;color:var(--tx3)'>Total</div><div id='_vcPedTotal' style='font-size:1.1rem;font-weight:700;color:var(--acc)'>$0</div></div>";
-  h+="<button class='btn btn-a' style='font-size:.78rem' onclick='_lockClick(this,function(){return _vcConfirmarPedido("+clienteId+",\""+clienteNombre.replace(/"/g,"'")+"\",\"reservar\");})'>📋 Reservar</button>";
-  h+="<button class='btn btn-green' style='font-size:.78rem' onclick='_lockClick(this,function(){return _vcConfirmarPedido("+clienteId+",\""+clienteNombre.replace(/"/g,"'")+"\",\"cobrar\");})'>💰 Cobrar al toque</button>";
-  h+="</div></div>";
-  mo.innerHTML=h;
-  document.body.appendChild(mo);
-  mo.addEventListener("click",function(e){if(e.target===mo)mo.remove();});
-  // Cargar productos
-  mo._items={};mo._segKey=segKey;mo._clienteId=clienteId;mo._clienteNombre=clienteNombre;
-  _vcPedRender("");
-}
-
-function _vcPedFiltrar(){
-  var q=(document.getElementById("_vcPedBusq")||{value:""}).value;
-  _vcPedRender(q);
-}
-
-function _vcPedRender(q){
-  var el=document.getElementById("_vcPedLista");if(!el)return;
-  var mo=document.getElementById("_moVcPedido");if(!mo)return;
-  var segKey=mo._segKey||"precio_min_ars";
-  var ql=q.toLowerCase();
-  var lista=(prods||[]).filter(function(p){
-    if(!p.activo||!(p[segKey]))return false;
-    if(ql&&!p.nombre.toLowerCase().includes(ql)&&!(p.empresa||"").toLowerCase().includes(ql))return false;
-    return true;
-  }).slice(0,80);
-  if(!lista.length){el.innerHTML="<div class='empty'>Sin resultados</div>";return;}
-  el.innerHTML=lista.map(function(p){
-    var nombre=p.nombre||""; var nc=nombre.indexOf(" - ")>-1?nombre.split(" - ").slice(1).join(" - ").split("|")[0].trim():nombre;
-    var qty=mo._items[p.id]||0;
-    return "<div style='display:flex;align-items:center;gap:.5rem;padding:.4rem 0;border-bottom:1px solid var(--bd)'>"+
-      "<div style='flex:1;min-width:0'><div style='font-size:.8rem;font-weight:500'>"+_prodMl(nc, p.ml)+"</div><div style='font-size:.65rem;color:var(--tx3)'>"+( p.empresa||"")+"</div></div>"+
-      "<div style='font-size:.78rem;font-weight:600;color:var(--acc);white-space:nowrap'>"+fmt(p[segKey])+"</div>"+
-      "<div style='display:flex;align-items:center;gap:.2rem;flex-shrink:0'>"+
-        "<button onclick='_vcPedChg("+p.id+",-1)' style='width:22px;height:22px;border:1px solid var(--bd);border-radius:4px;background:transparent;cursor:pointer;font-size:.9rem;display:flex;align-items:center;justify-content:center'>−</button>"+
-        "<span id='_vqn-"+p.id+"' style='width:24px;text-align:center;font-size:.8rem;font-weight:600'>"+( qty||0)+"</span>"+
-        "<button onclick='_vcPedChg("+p.id+",1)' style='width:22px;height:22px;border:1px solid var(--bd);border-radius:4px;background:transparent;cursor:pointer;font-size:.9rem;display:flex;align-items:center;justify-content:center'>+</button>"+
-      "</div></div>";
-  }).join("");
-}
-
-function _vcPedChg(pid,delta){
-  var mo=document.getElementById("_moVcPedido");if(!mo)return;
-  mo._items[pid]=Math.max(0,(mo._items[pid]||0)+delta);
-  if(mo._items[pid]===0)delete mo._items[pid];
-  var el=document.getElementById("_vqn-"+pid);if(el)el.textContent=mo._items[pid]||0;
-  // Recalcular total
-  var segKey=mo._segKey||"precio_min_ars";
-  var total=0;
-  Object.keys(mo._items).forEach(function(id){
-    var p=(prods||[]).find(function(x){return x.id==id;});
-    if(p)total+=(p[segKey]||0)*mo._items[id];
-  });
-  var tel=document.getElementById("_vcPedTotal");if(tel)tel.textContent=fmt(total);
-}
 
 // Bugs 1, 2, 3: reescritura completa
 // - Migra de pedidos_clientes (en desuso) a pedidos_catalogo con cliente_id
@@ -4697,45 +4518,6 @@ function vcVerHistorial(clienteId, clienteNombre){
 // Replicación de las funciones del admin para mantener consistencia (regla ORO).
 // ════════════════════════════════════════════════════════════════════════════
 
-function _ccGetModalidad(cli){
-  if(!cli || !cli.cuenta_corriente_habilitada) return null;
-  return cli.cc_modalidad || 'cuotas';
-}
-
-function _ccCalcularVencimiento(cli, fechaPedido){
-  if(!cli) return null;
-  var d = fechaPedido ? new Date(fechaPedido) : new Date();
-  d.setHours(0,0,0,0);
-  var modalidad = _ccGetModalidad(cli);
-  if(modalidad === 'resumen'){
-    var diaCierre = parseInt(cli.cc_dia_cierre) || 25;
-    var diaVenc = parseInt(cli.cc_dia_vencimiento) || 10;
-    var hoy = new Date(d);
-    if(hoy.getDate() <= diaCierre){
-      hoy.setMonth(hoy.getMonth() + 1);
-    } else {
-      hoy.setMonth(hoy.getMonth() + 2);
-    }
-    hoy.setDate(diaVenc);
-    return hoy.toISOString().slice(0,10);
-  } else {
-    var plazo = parseInt(cli.cc_plazo_dias) || 30;
-    d.setDate(d.getDate() + plazo);
-    return d.toISOString().slice(0,10);
-  }
-}
-
-function _ccCalcularCiclo(cli, fechaPedido){
-  if(!cli || _ccGetModalidad(cli) !== 'resumen') return null;
-  var d = fechaPedido ? new Date(fechaPedido) : new Date();
-  var diaCierre = parseInt(cli.cc_dia_cierre) || 25;
-  if(d.getDate() > diaCierre){
-    d.setMonth(d.getMonth() + 1);
-  }
-  var yyyy = d.getFullYear();
-  var mm = String(d.getMonth()+1).padStart(2,'0');
-  return yyyy+'-'+mm;
-}
 
 function _ccDiasHasta(fechaVenc){
   if(!fechaVenc) return null;
@@ -6284,7 +6066,6 @@ function _quitarClienteDelModal(){
 }
 
 
-
 function _buscarClienteDrawer(){
   var q=(document.getElementById("_busqCli")||{value:""}).value.trim();
   var el=document.getElementById("_busqCliResultados");
@@ -6540,15 +6321,6 @@ function _mcCalc(pedido, esMayorista){
 // ¿El cliente del pedido paga precio mayorista? (CC o VIP). Cache por cliente_id para las tarjetas.
 window._mcCliMay=window._mcCliMay||{};
 function _mcEsMayoristaSync(pedido){ if(pedido.es_cc===true)return true; if(pedido.cliente_id!=null&&window._mcCliMay[pedido.cliente_id]!=null)return window._mcCliMay[pedido.cliente_id]; return false; }
-function _mcEsMayorista(pedido){
-  if(pedido.es_cc===true)return Promise.resolve(true);
-  if(!pedido.cliente_id)return Promise.resolve(false);
-  if(window._mcCliMay[pedido.cliente_id]!=null)return Promise.resolve(window._mcCliMay[pedido.cliente_id]);
-  return apiGet('clientes','select=cuenta_corriente_habilitada,precio_mayorista&id=eq.'+pedido.cliente_id+'&limit=1').then(function(rows){
-    var c=Array.isArray(rows)&&rows[0]?rows[0]:null; var esMay=!!(c&&(c.cuenta_corriente_habilitada||c.precio_mayorista));
-    window._mcCliMay[pedido.cliente_id]=esMay; return esMay;
-  }).catch(function(){ return false; });
-}
 // Tira violeta en la tarjeta del pedido: monto de comisión + botón de comisión especial
 function _mcStripHTML(ped, cobrado, cancelado){
   if(ped.transferida_por_id!==3)return "";
@@ -7379,27 +7151,17 @@ function executeVenta(items,reservaDecs){
     // Usar items originales guardados en memoria al abrir la edición
     // NO leer de BD — podrían haber cambiado si hubo ediciones anteriores
     var origItems=window._editandoPedidoOrigItems||[];
-    // 2026-10-04: diff de reserva con la regla única (_diffReservaPedido): unidades reales (cajas) y combos
-    // expandidos a sus frascos. Se aplica en SECUENCIA para que los ajustes no se pisen.
-    var _diffProm=_diffReservaPedido(origItems,newItemsData).then(function(diffs){
-      var chain=Promise.resolve();
-      diffs.forEach(function(d){
-        chain=chain.then(function(){
-          return patchStockFresco(d.pid,{stock_actual:-d.delta,reserva:+d.delta},'Editar pedido diff').then(function(r){
-            try{ _logMovStock({pid:d.pid,nombre:d.nombre,tipo:(d.delta>0?'reserva':'reserva_cancelada'),cantidad:Math.abs(d.delta),motivo:'Edición pedido '+(window._editandoPedidoOrden||'')+' ('+(d.delta>0?'+':'')+d.delta+' u)'}); }catch(_eLog){}
-            return r;
-          });
-        });
-      });
-      return chain;
-    });
-    // Primero ajustar stock, DESPUÉS guardar el pedido. El modo edición se limpia SOLO si el guardado salió
-    // bien (en el then de éxito): si falla, el reintento sigue editando el mismo pedido y no crea uno nuevo.
-    _diffProm.then(function(){
-      return apiPatch("pedidos_catalogo",{items:JSON.stringify(newItemsData),total:Math.max(0,newTotal),dedicatoria:_rgVDedic()||null},"id=eq."+pedId);
+    // 2026-10-04: diff de reserva con la regla única (_diffReservaPedido) y guardado ATÓMICO: pedido + stock +
+    // movimientos en una sola transacción (pedido_editar_atomico). El token nace al abrir la edición y se reutiliza
+    // en cada reintento, así un clic repetido no vuelve a mover stock. El modo edición se limpia SOLO si salió bien
+    // (en el then de éxito): si falla, el reintento sigue editando el mismo pedido y no crea uno nuevo.
+    var _tokenEd=window._editandoPedidoToken||(window._editandoPedidoToken=_uuidV4());
+    _diffReservaPedido(origItems,newItemsData).then(function(diffs){
+      return _pedidoEditarAtomico(pedId,{items:JSON.stringify(newItemsData),total:Math.max(0,newTotal),dedicatoria:_rgVDedic()||null},diffs,_tokenEd,'Edición pedido '+(window._editandoPedidoOrden||''));
     }).then(function(){
+      // Lo que sigue queda FUERA de la transacción (solo log de auditoría, no toca stock ni el pedido)
       _logEdicionPedido(pedId, window._editandoPedidoOrden, origItems, newItemsData, window._editandoPedidoTotal, Math.max(0,newTotal));
-      window._editandoPedidoId=null;window._editandoPedidoOrden=null;window._editandoPedidoOrigItems=null;window._editandoPedidoTotal=null;
+      window._editandoPedidoId=null;window._editandoPedidoOrden=null;window._editandoPedidoOrigItems=null;window._editandoPedidoTotal=null;window._editandoPedidoToken=null;
       cart={};cstate={};decanState={};reservaDecisions={};
       updateCartBar();closeDrawer();renderCat();
       toast("Pedido actualizado ✅","tok");
@@ -9521,6 +9283,7 @@ function _cancelarPedidoWebEjecutar(pedId){
 function cancelarEdicionPedido(){
   window._editandoPedidoId=null;
   window._editandoPedidoOrden=null;
+  window._editandoPedidoToken=null;
   cart={};cstate={};decanState={};
   updateCartBar();
   closeDrawer();
@@ -9554,6 +9317,7 @@ function editarPedido(pedId){
     cart={};cstate={};decanState={};
     window._editandoPedidoId=pedId;
     window._editandoPedidoOrden=ped.nro_orden||("#"+pedId);
+    window._editandoPedidoToken=_uuidV4();   // 2026-10-04: idempotencia del guardado (se reusa en cada reintento)
     // Guardar items originales en memoria — NO volver a leer de BD al confirmar
     window._editandoPedidoOrigItems=JSON.parse(JSON.stringify(items));
     window._editandoPedidoTotal=parseFloat(ped.total)||0;
@@ -9651,100 +9415,25 @@ function recalcEditPed(){
 // cancelarTransf eliminada — sistema legacy
 
 
-
 // editarTransf eliminada — sistema legacy
-
 
 
 // eliminarTransf eliminada — sistema legacy
 
 
-
-
 // loadTransferidas eliminada — pestaña obsoleta tras unificación
-
-
-function editarVentaDeposito(ventaId){
-  // Load single venta - find nro_orden then load all of the group
-  apiGet("ventas","select=*&id=eq."+ventaId+"&limit=1").then(function(data){
-    if(!Array.isArray(data)||!data.length){toast("Venta no encontrada","err");return;}
-    var nroOrden=data[0].nro_orden;
-    // If has nro_orden, load all ventas of that group
-    var q2=nroOrden
-      ?"select=*&nro_orden=eq."+encodeURIComponent(nroOrden)+"&estado=eq.pendiente_aprobacion&origen=eq.deposito"
-      :"select=*&id=eq."+ventaId;
-    return apiGet("ventas",q2).then(function(rows){
-      _cargarGrupoEnCarrito(Array.isArray(rows)?rows:[data[0]], nroOrden);
-    });
-  }).catch(function(e){toast("Error: "+e.message,"err");});
-}
-
-function editarGrupoDeposito(ids){
-  // Load first item to get nro_orden, then load all
-  apiGet("ventas","select=*&id=eq."+ids[0]).then(function(data){
-    if(!Array.isArray(data)||!data.length)return;
-    var nroOrden=data[0].nro_orden;
-    var q=nroOrden
-      ?"select=*&nro_orden=eq."+encodeURIComponent(nroOrden)+"&estado=eq.pendiente_aprobacion&origen=eq.deposito"
-      :"select=*&id=in.("+ids.join(",")+")";
-    return apiGet("ventas",q).then(function(rows){
-      _cargarGrupoEnCarrito(Array.isArray(rows)?rows:data, nroOrden);
-    });
-  }).catch(function(e){toast("Error: "+e.message,"err");});
-}
-
-function _cargarGrupoEnCarrito(ventas, nroOrden){
-  cart={};cstate={};decanState={};
-  var ids=ventas.map(function(v){return v.id;});
-  window._pendingDepositoIds=ids;
-  window._pendingDepositoOrden=nroOrden;
-
-  ventas.forEach(function(v){
-    if(v.segmento==="decan"){
-      // Decan item
-      var prodId=v.producto_id;
-      var key="decan_"+prodId;
-      cart[key]={
-        id:key,nombre:v.producto_nombre,qty:v.cantidad,
-        seg:"decan",price:v.precio_unitario,
-        isDecan:true,prodId:prodId
-      };
-      decanState[prodId]=(decanState[prodId]||0)+v.cantidad;
-    } else {
-      // Any other product: perfume, combo, kit, whatever
-      var prodId=v.producto_id||v.id;
-      var key=String(prodId);
-      cart[key]={
-        id:prodId,nombre:v.producto_nombre,qty:v.cantidad,
-        seg:v.segmento==="minorista"?"pi":v.segmento==="mayorista"?"pm":"pe",
-        price:v.precio_unitario,isDecan:false
-      };
-      cstate[prodId]={qty:v.cantidad};
-    }
-  });
-
-  updateCartBar();
-  navTo("catalogo",document.querySelector(".tab"));
-  setTimeout(function(){openDrawer();},300);
-  toast("Pedido cargado en carrito — editá y confirmá normalmente","ok");
-}
 
 
 // aprobarDepDeposito eliminada — flujo deposito legacy
 
 
-
 // rechazarDepDeposito eliminada — sistema legacy
-
 
 
 // renderEnviadaCard eliminada — sistema legacy
 
 
-
 // renderTransfCard eliminada — sistema legacy
-
-
 
 
 // confirmarTransf eliminada — sistema legacy
@@ -10782,19 +10471,6 @@ function _cpConfirmar(){
 
 // RENDICION
 
-function fmtRendInput(el){
-  var raw=el.value;
-  // Keep cursor friendly - only format on valid input
-  // Remove everything except digits and comma
-  var clean=raw.replace(/[^0-9,]/g,'');
-  // Split on comma for decimals
-  var parts=clean.split(',');
-  var intPart=parts[0].replace(/\./g,'');  // remove any dots from integer part
-  var decPart=parts.length>1?','+parts[1].replace(/,/g,'').slice(0,2):'';
-  // Add dots every 3 digits from right
-  var formatted=intPart.replace(/\B(?=(\d{3})+(?!\d))/g,'.');
-  el.value=formatted+decPart;
-}
 
 function parseRendMonto(val){
   if(!val)return 0;
@@ -10860,16 +10536,7 @@ function addRendicion(){
 // RECLAMO - select from ventas
 
 
-
-
-
-
 // RESERVAS
-
-
-
-
-
 
 
 // (función confirmarPedReservado eliminada en la auditoría 2026-09-25: no tenía uso y arrastraba errores de stock/ventas)
@@ -10879,15 +10546,7 @@ function addRendicion(){
 // (función cancelarPedReservado eliminada en la auditoría 2026-09-25: no tenía uso y arrastraba errores de stock/ventas)
 
 
-
 // (función confirmarCancelPed eliminada en la auditoría 2026-09-25: no tenía uso y arrastraba errores de stock/ventas)
-
-
-
-
-
-
-
 
 
 function abrirReservarPed(){
@@ -11042,7 +10701,6 @@ function _confirmarReservarPedContinuar(){
   // Si estamos editando un pedido existente, actualizar en lugar de crear
   var _editId=window._editandoPedidoId;
   var _ordenEd=window._editandoPedidoOrden||(_editId?('#'+_editId):'');
-  var _diffsEd=[];   // modo edición: [{pid,delta,nombre}] que devuelve _diffReservaPedido (regla única)
   var savePromise;
   if(_editId){
     // EDITAR — leer ítems originales ANTES de actualizar para hacer diff de stock
@@ -11056,26 +10714,16 @@ function _confirmarReservarPedContinuar(){
       if(!_orig.length && Array.isArray(window._editandoPedidoOrigItems)) _orig=window._editandoPedidoOrigItems;
       return _diffReservaPedido(_orig, itemsData);
     }).then(function(diffs){
-      _diffsEd=diffs;
-      // Liberar primero lo que se quitó o redujo (delta<0); lo que aumenta se reserva después de guardar
-      var stockLibChain=Promise.resolve();
-      diffs.filter(function(d){return d.delta<0;}).forEach(function(d){
-        stockLibChain=stockLibChain.then(function(){
-          return patchStockFresco(d.pid,{stock_actual:-d.delta,reserva:+d.delta},'Editar reserva - liberación').then(function(r){
-            try{ _logMovStock({pid:d.pid,nombre:d.nombre,tipo:'reserva_cancelada',cantidad:-d.delta,motivo:'Edición reserva '+_ordenEd+' ('+d.delta+' u)'}); }catch(_e){}
-            return r;
-          });
-        });
-      });
-      return stockLibChain;
-    }).then(function(){
       var _patchEd={
         items:JSON.stringify(itemsData),total:total,
         notas:"Cliente: "+cliente+(tel?" | Tel: "+tel:"")+(nota?" | "+nota:"")+(entregaStr?" | Entrega: "+entregaStr:"")
       };
       // si el vendedor asignó o cambió el cliente mientras editaba, el pedido lo toma
       if(_carritoCliente&&_carritoCliente.id&&_carritoCliente.id!==window._editandoPedidoClienteId){ _patchEd.cliente_id=_carritoCliente.id; }
-      return apiPatch("pedidos_catalogo",_patchEd,"id=eq."+_editId);
+      // 2026-10-04: guardado ATÓMICO (pedido + liberaciones + reservas + movimientos en una transacción). El token
+      // nace al abrir la edición y se repite en cada reintento para que la base no mueva stock dos veces.
+      var _tokenEd=window._editandoPedidoToken||(window._editandoPedidoToken=_uuidV4());
+      return _pedidoEditarAtomico(_editId,_patchEd,diffs,_tokenEd,'Edición reserva '+_ordenEd);
     });
     // 2026-10-04: el modo edición se limpia recién cuando el guardado salió bien (más abajo). Antes se limpiaba
     // acá, en seco: si el PATCH fallaba, el siguiente clic creaba un pedido NUEVO duplicado.
@@ -11117,23 +10765,13 @@ function _confirmarReservarPedContinuar(){
   savePromise.then(function(){
     if(_editId){
       // Guardado OK → recién ahora se sale del modo edición
-      window._editandoPedidoId=null;window._editandoPedidoOrden=null;window._editandoPedidoOrigItems=null;window._editandoPedidoTotal=null;
+      window._editandoPedidoId=null;window._editandoPedidoOrden=null;window._editandoPedidoOrigItems=null;window._editandoPedidoTotal=null;window._editandoPedidoToken=null;
     }
     // Reservar en SECUENCIA para evitar que requests simultáneos se pisen
     var reservaChain=Promise.resolve();
     var _motivoRes="Reserva pedido "+(_editId?_ordenEd+" (edición)":nroOrden);
     if(_editId){
-      // Edición: solo lo que aumentó o es nuevo (combos y cajas ya expandidos a unidades por _diffReservaPedido)
-      _diffsEd.filter(function(d){return d.delta>0;}).forEach(function(d){
-        reservaChain=reservaChain.then(function(){
-          return patchStockFresco(d.pid,{stock_actual:-d.delta,reserva:+d.delta},'Reserva pedido (edición)').then(function(){
-            return apiPost("movimientos_stock",{
-              producto_id:d.pid,producto_nombre:d.nombre,tipo:"reserva",cantidad:d.delta,motivo:_motivoRes,
-              usuario:VENDEDOR_NOMBRE||"vendedor",periodo:periodoActual
-            }).catch(function(e){console.error("[belle] error silencioso:",e);});
-          });
-        });
-      });
+      // Edición: el stock ya se apartó/liberó dentro de la transacción de pedido_editar_atomico, nada que hacer acá
     } else {
       // Pedido nuevo: reservar perfumes (los bonificados también: el regalo sale del stock al entregarse)
       perfs.forEach(function(item){
@@ -11564,19 +11202,6 @@ function agregarCombo(comboId){
 var PAGES=["clientes-vend","catalogo","pedidos-web","avisos","rutas","transferidas","historial","movimientos","cobranzas","agenda","dinero","deposito","gastos","rendicion","reclamo","reservas","pedidos-prov","devoluciones","calculadora","cotizaciones"];
 
 // ── PEDIDOS PROVEEDOR (David) ─────────────────────────────────────────
-
-
-
-
-
-
-
-
-
-
-
-
-
 
 
 // ═══════════════════════════════════════════════════════════════════════
@@ -12727,33 +12352,6 @@ function confirmarControlDavid(){
 }
 
 
-
-var _autoRefreshInterval=null;
-function startAutoRefresh(){
-  if(_autoRefreshInterval)clearInterval(_autoRefreshInterval);
-  _autoRefreshInterval=setInterval(function(){
-    var activePage=null;
-    PAGES.forEach(function(p){
-      var d=document.getElementById("pg-"+p);
-      if(d&&d.style.display!=="none")activePage=p;
-    });
-    if(activePage==="pedidos-prov")loadPedidosProveedorDavid();
-    else if(activePage==="pedidos-web")loadPedidosWeb();
-    else if(activePage==="catalogo"){
-      // Refresh stock numbers silently
-      apiGet("productos","select=id,stock_actual,en_viaje&activo=is.true&limit=2000").then(function(d){
-        if(!Array.isArray(d))return;
-        d.forEach(function(p){
-          var existing=prods.find(function(x){return x.id===p.id;});
-          if(existing){existing.stock_actual=p.stock_actual;existing.en_viaje=p.en_viaje;}
-        });
-        renderCat();
-      });
-    }
-  },60000); // every 60 seconds
-}
-
-
 // ═══════════════════════════════════════════════════════════
 // SISTEMA DE DEVOLUCIONES
 // ═══════════════════════════════════════════════════════════
@@ -13087,14 +12685,6 @@ function _dvEnviar(){
     toast('Devolución enviada al admin ✅','tok');
     loadDevoluciones();
   }).catch(function(e){toast('Error: '+(e&&e.message||e),'terr');});
-}
-function verPestana(pg){
-  var tabs=document.querySelectorAll('.tab');
-  var tabEl=null;
-  tabs.forEach(function(t){
-    if(t.getAttribute('onclick')&&t.getAttribute('onclick').indexOf("'"+pg+"'")>-1)tabEl=t;
-  });
-  navTo(pg,tabEl);
 }
 
 function navTo(pg,el){
@@ -13449,8 +13039,6 @@ window.addEventListener('popstate', function(){
   }
 });
 function _appMobileToggle(){ var o=document.getElementById('appMobile'); if(o && o.style.display==='flex') _appMobileClose(); else _appMobileOpen(); }
-function _appIr(page){ _appMobileClose(true); if(typeof navTo==='function') navTo(page); }
-function _appAccion(fn){ _appMobileClose(true); try{ if(typeof window[fn]==='function') window[fn](); }catch(e){} }
 // ── TANDA 3 — Modo herramienta: abre la pantalla real a pantalla completa DENTRO de
 //    la app, sin el header ni las solapas de escritorio (eso es lo que se siente "modo PC"),
 //    con una barra limpia "← Volver". Reusa el 100% de la funcionalidad existente.
@@ -14048,7 +13636,6 @@ function _vcbzBadgeHome(){
 }
 
 
-
 // ══════════════════════════════════════════════════════════════════════
 // ⚠️ AVISO DE RIESGO AL CARGARLE UN PEDIDO A UN CLIENTE
 // No bloquea nada: le muestra al vendedor lo que el cliente ya debe y
@@ -14232,10 +13819,6 @@ function _rgoClientesLote(ids, cb){
     window._pedCliDeuda=out;
     if(cb)cb(out);
   }).catch(function(e){ console.warn('[deuda lote]',e); if(cb)cb({}); });
-}
-function _rgoSumar(fechaISO, dias){
-  var d=new Date(String(fechaISO)+'T12:00:00'); d.setDate(d.getDate()+dias);
-  return d.toISOString().slice(0,10);
 }
 
 // ── el cartelito de aviso (no bloquea: decide el vendedor) ────────────
@@ -14823,12 +14406,6 @@ function _ccjMontar(destino){
     window._ccj._dest=destino;
     _ccjRender(destino);
   });
-}
-// aviso en el botón de Mi dinero de la app: si el día de ayer quedó sin cerrar
-function _ccjPendiente(cb){
-  apiGet('cierres_caja','select=fecha&vendedor_id=eq.'+VENDEDOR_ID+'&fecha=eq.'+_ccjMas(_ccjHoy(),-1)+'&limit=1')
-    .then(function(r){ if(cb)cb(!(Array.isArray(r)&&r.length)); })
-    .catch(function(){ if(cb)cb(false); });
 }
 
 
@@ -16674,6 +16251,7 @@ function ejecutarTransfer(targetId,targetNombre){
       .catch(function(e){ console.error('[transfer] no se pudo cancelar el original:',e); throw new Error('No se pudo cancelar el pedido original — transferencia abortada para no duplicarlo'); });
     window._editandoPedidoId=null;
     window._editandoPedidoOrden=null;
+    window._editandoPedidoToken=null;
   }
   var totalUnits=_totalUnidadesSeg(items);   // 2026-09-29: los combos no cuentan para x3/x10; 2026-10-04: los bonificados tampoco
   var nroOrden=genOrden();
@@ -16823,59 +16401,12 @@ function ejecutarTransfer(targetId,targetNombre){
 
 // -- OVERRIDE executeVenta to include forma_cobro and nro_orden --------
 
-function abrirBuscadorEditPed(){
-  var mo=document.getElementById('moBuscadorEditPed');
-  if(!mo){
-    mo=document.createElement('div');
-    mo.id='moBuscadorEditPed';
-    mo.style.cssText='position:fixed;inset:0;z-index:9999;display:flex;align-items:center;justify-content:center;background:rgba(0,0,0,.55)';
-    var inner=document.createElement('div');
-    inner.style.cssText='background:var(--sur);border:1px solid var(--bd2);border-radius:14px;width:min(480px,95vw);max-height:80vh;display:flex;flex-direction:column;box-shadow:0 8px 40px rgba(0,0,0,.5)';
-    inner.innerHTML=
-      "<div style='display:flex;align-items:center;justify-content:space-between;padding:.8rem 1rem;border-bottom:1px solid var(--bd)'>"+
-        "<div style='font-weight:700;font-size:.85rem;color:var(--tx)'>&#10133; Agregar producto</div>"+
-        "<button id='bepCloseBtn' style='background:transparent;border:none;color:var(--tx3);font-size:1.1rem;cursor:pointer;padding:.1rem .4rem;border-radius:4px'>&#10005;</button>"+
-      "</div>"+
-      "<div style='padding:.6rem .8rem;border-bottom:1px solid var(--bd)'>"+
-        "<div style='display:flex;gap:.35rem;margin-bottom:.5rem'>"+
-          "<button id='bepTabPerf' style='flex:1;padding:.3rem;border-radius:6px;border:1px solid var(--acc);background:var(--acc);color:#000;font-size:.72rem;font-weight:600;cursor:pointer'>&#127826; Perfumes</button>"+
-          "<button id='bepTabDec' style='flex:1;padding:.3rem;border-radius:6px;border:1px solid var(--bd2);background:transparent;color:var(--tx3);font-size:.72rem;cursor:pointer'>&#128167; Decants</button>"+
-        "</div>"+
-        "<div style='position:relative'>"+
-          "<span style='position:absolute;left:.6rem;top:50%;transform:translateY(-50%);color:var(--tx3);pointer-events:none;font-size:.85rem'>&#128269;</span>"+
-          "<input type='text' id='bepSearch' placeholder='Buscar por nombre o marca...' autocomplete='off' style='width:100%;box-sizing:border-box;padding:.42rem .7rem .42rem 2rem;background:var(--sur3);border:1px solid var(--bd);border-radius:8px;color:var(--tx);font-size:.78rem'>"+
-        "</div>"+
-      "</div>"+
-      "<div id='bepList' style='flex:1;overflow-y:auto;padding:.3rem .4rem'></div>";
-    mo.appendChild(inner);
-    document.body.appendChild(mo);
-    // Bind events after DOM insertion
-    mo.addEventListener('click',function(e){if(e.target===mo)cerrarMoBuscador();});
-    document.getElementById('bepCloseBtn').addEventListener('click',cerrarMoBuscador);
-    document.getElementById('bepTabPerf').addEventListener('click',function(){bepSetTab('perf');});
-    document.getElementById('bepTabDec').addEventListener('click',function(){bepSetTab('dec');});
-    document.getElementById('bepSearch').addEventListener('input',filtrarBepProds);
-  }
-  window._bepTab='perf';
-  mo.style.display='flex';
-  document.getElementById('bepSearch').value='';
-  bepSetTab('perf');
-  setTimeout(function(){var el=document.getElementById('bepSearch');if(el)el.focus();},150);
-}
 
 function cerrarMoBuscador(){
   var mo=document.getElementById('moBuscadorEditPed');
   if(mo) mo.style.display='none';
 }
 
-function bepSetTab(tab){
-  window._bepTab=tab;
-  var tP=document.getElementById('bepTabPerf');
-  var tD=document.getElementById('bepTabDec');
-  if(tP){tP.style.background=tab==='perf'?'var(--acc)':'transparent';tP.style.color=tab==='perf'?'#000':'var(--tx3)';tP.style.borderColor=tab==='perf'?'var(--acc)':'var(--bd2)';}
-  if(tD){tD.style.background=tab==='dec'?'var(--acc)':'transparent';tD.style.color=tab==='dec'?'#000':'var(--tx3)';tD.style.borderColor=tab==='dec'?'var(--acc)':'var(--bd2)';}
-  filtrarBepProds();
-}
 
 function filtrarBepProds(){
   var q=(document.getElementById('bepSearch').value||'').toLowerCase();
@@ -17065,102 +16596,11 @@ function loadDepositoMarcela(){
 // ═══════════════════════════════════════════════════════════════════════
 // REMITO DE ENTREGA PDF
 // ═══════════════════════════════════════════════════════════════════════
-function generarRemitoPDF(items, clienteNombre, nroOrden){
-  var w=window.open('','_blank');
-  if(!w){alert('Permiti popups para generar el remito');return;}
-  var fecha=new Date().toLocaleDateString('es-AR',{timeZone:"America/Argentina/Buenos_Aires"});
-  var nro=nroOrden||('REM-'+Date.now().toString().slice(-6));
-  var filas=items.map(function(it){
-    return '<tr>'+
-      '<td style="padding:8px;border:1px solid #ccc;font-size:12px">'+_nomMl(it.nombre, it.producto_id)+'</td>'+
-      '<td style="padding:8px;border:1px solid #ccc;text-align:center;font-size:12px">'+it.qty+'</td>'+
-      '<td style="padding:8px;border:1px solid #ccc;width:80px">&nbsp;</td>'+
-    '</tr>';
-  }).join('');
-  // Duplicate: two copies per page
-  function copyHtml(copia){
-    return '<div style="width:100%;margin-bottom:'+( copia===1?'40px':'0')+'">'+
-      '<div style="display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:12px">'+
-        '<div>'+
-          '<div style="font-size:18px;font-weight:700;color:#b8860b">Distribuidora Belle</div>'+
-          '<div style="font-size:11px;color:#666;margin-top:2px">REMITO DE ENTREGA &mdash; Copia '+(copia===1?'CLIENTE':'VENDEDOR')+'</div>'+
-        '</div>'+
-        '<div style="text-align:right;font-size:11px;color:#555">'+
-          '<div><b>N&deg;:</b> '+nro+'</div>'+
-          '<div><b>Fecha:</b> '+fecha+'</div>'+
-          (clienteNombre?'<div><b>Cliente:</b> '+clienteNombre+'</div>':'')+
-        '</div>'+
-      '</div>'+
-      '<table style="width:100%;border-collapse:collapse;margin-bottom:16px">'+
-        '<thead><tr>'+
-          '<th style="padding:8px;border:1px solid #aaa;background:#f5f5f5;text-align:left;font-size:11px">Producto</th>'+
-          '<th style="padding:8px;border:1px solid #aaa;background:#f5f5f5;text-align:center;font-size:11px;width:60px">Cant.</th>'+
-          '<th style="padding:8px;border:1px solid #aaa;background:#f5f5f5;text-align:center;font-size:11px;width:80px">Entregado \u2714</th>'+
-        '</tr></thead>'+
-        '<tbody>'+filas+'</tbody>'+
-      '</table>'+
-      '<div style="display:flex;gap:20px;margin-top:8px">'+
-        '<div style="flex:1">'+
-          '<div style="font-size:10px;color:#888;margin-bottom:4px">Observaciones:</div>'+
-          '<div style="border:1px solid #ccc;height:40px;border-radius:3px"></div>'+
-        '</div>'+
-        '<div style="width:200px">'+
-          '<div style="border:1px solid #333;padding:10px;border-radius:4px">'+
-            '<div style="font-size:9px;color:#666;text-align:center;margin-bottom:30px">Firma conforme</div>'+
-            '<div style="border-top:1px solid #333;margin-bottom:4px"></div>'+
-            '<div style="font-size:9px;color:#555">Aclaraci\u00f3n: ___________________</div>'+
-            '<div style="font-size:9px;color:#555;margin-top:4px">DNI: _______________________</div>'+
-          '</div>'+
-        '</div>'+
-      '</div>'+
-    '</div>';
-  }
-  w.document.write(
-    '<html><head><meta charset="UTF-8"><title>Remito '+nro+'</title>'+
-    '<style>*{box-sizing:border-box}body{font-family:Arial,sans-serif;padding:20px;margin:0}'+
-    '.page-break{border-top:2px dashed #ccc;margin:20px 0;padding-top:20px}'+
-    '@media print{.page-break{border-top:2px dashed #ccc;page-break-before:always;margin:0;padding-top:20px}}'+
-    '</style></head><body>'+
-    copyHtml(1)+
-    '<div class="page-break"></div>'+
-    copyHtml(2)+
-    '</body></html>');
-  w.document.close();
-  setTimeout(function(){w.print();},400);
-}
-
-
-function remitoPorVenta(nombre, qty, nroOrden){
-  generarRemitoPDF([{nombre:decodeURIComponent(nombre),qty:qty}],'',nroOrden);
-}
-function remitoCarritoActual(clienteNombre){
-  var items=Object.values(cart||{}).filter(function(i){return !i.isDecan&&!i.isCombo&&!i.isCosm;}).map(function(i){return{nombre:_prodMl(i.nombre, _mlDe(i.producto_id||i.id||i.prodId)),qty:i.qty};});
-  if(!items.length){toast('Carrito vacío','twarn');return;}
-  generarRemitoPDF(items,clienteNombre||'');
-}
 
 
 // ─── NOTIFICACIONES VENDEDOR ─────────────────────────────────────────
 var _vNotifData=[], _vNotifOpen=false, _vNotifInterval=null;
 
-function vNotifInit(){
-  cargarVNotifs();
-  _vNotifInterval=setInterval(cargarVNotifs,45000);
-}
-function cargarVNotifs(){
-  var VNOMBRE=['','david','facu','marcela'];
-  var myName=VNOMBRE[VENDEDOR_ID]||'todos';
-  api('GET','notificaciones',null,
-    'destinatario=in.('+myName+',todos)&order=created_at.desc&limit=40'
-  ).then(function(data){
-    if(!Array.isArray(data))return;
-    _vNotifData=data;
-    var unread=data.filter(function(n){return !n.leida;}).length;
-    var b=document.getElementById('vNotifBadge');
-    if(b){b.style.display=unread>0?'flex':'none';b.textContent=unread>9?'9+':unread;}
-    if(_vNotifOpen)renderVNotifs();
-  }).catch(function(e){console.error("[belle] error silencioso:",e);});
-}
 function toggleVNotif(){_vNotifOpen?cerrarVNotif():abrirVNotif();}
 function abrirVNotif(){
   _vNotifOpen=true;
@@ -17197,75 +16637,10 @@ function renderVNotifs(){
     '</div>';
   }).join('');
 }
-function marcarVNotifsLeidas(){
-  var VNOMBRE=['','david','facu','marcela'];
-  var myName=VNOMBRE[VENDEDOR_ID]||'todos';
-  api('PATCH','notificaciones',{leida:true},'destinatario=in.('+myName+',todos)&leida=is.false').then(function(){
-    _vNotifData.forEach(function(n){n.leida=true;});
-    var b=document.getElementById('vNotifBadge');if(b)b.style.display='none';
-    renderVNotifs();
-  });
-}
 
 // ─── DASHBOARD VENDEDOR ───────────────────────────────────────────────
-function loadDashboardVendedor(){
-  var pg=document.getElementById('pg-catalogo');
-  if(!pg) return;
-  var existing=document.getElementById('vendedor-dashboard');
-  if(existing) existing.remove();
-  var dash=document.createElement('div');
-  dash.id='vendedor-dashboard';
-  dash.style.cssText='padding:.7rem .9rem .2rem';
-  var hoy=(function(){var d=new Date();d.setHours(d.getHours()-3);return d.toISOString().slice(0,10);})();
-  var mesInicio=hoy.slice(0,8)+'01';
-  var mesFin=new Date(new Date(mesInicio).setMonth(new Date(mesInicio).getMonth()+1)).toISOString().slice(0,10);
-  Promise.all([
-    api('GET','ventas',null,'vendedor_id=eq.'+VENDEDOR_ID+'&estado=eq.confirmada&created_at=gte.'+hoy+'T00:00:00&select=total,cantidad'),
-    api('GET','ventas',null,'vendedor_id=eq.'+VENDEDOR_ID+'&estado=eq.confirmada&created_at=gte.'+mesInicio+'&created_at=lt.'+mesFin+'&select=total,cantidad'),
-    api('GET','gastos_vendedor',null,'vendedor_id=eq.'+VENDEDOR_ID+'&created_at=gte.'+mesInicio+'&select=monto,aprobado'),
-    api('GET','metas_venta',null,'vendedor_id=eq.'+VENDEDOR_ID+'&activa=is.true&select=*')
-  ]).then(function(res){
-    var vHoy=Array.isArray(res[0])?res[0]:[];
-    var vMes=Array.isArray(res[1])?res[1]:[];
-    var gMes=Array.isArray(res[2])?res[2]:[];
-    var metas=Array.isArray(res[3])?res[3]:[];
-    var tHoy=vHoy.reduce(function(s,v){return s+(v.total||0);},0);
-    var uHoy=vHoy.reduce(function(s,v){return s+(v.cantidad||0);},0);
-    var tMes=vMes.reduce(function(s,v){return s+(v.total||0);},0);
-    var uMes=vMes.reduce(function(s,v){return s+(v.cantidad||0);},0);
-    var gTot=gMes.filter(function(g){return g.aprobado;}).reduce(function(s,g){return s+(g.monto||0);},0);
-    dash.innerHTML=
-      '<div class="dash-grid">'+
-        '<div class="dash-card"><div class="dash-lbl">Hoy</div><div class="dash-val" style="color:#4caf76">'+fmt(tHoy)+'</div><div class="dash-sub">'+uHoy+' u.</div></div>'+
-        '<div class="dash-card"><div class="dash-lbl">Este mes</div><div class="dash-val" style="color:#f5a623">'+fmt(tMes)+'</div><div class="dash-sub">'+uMes+' u.</div></div>'+
-        '<div class="dash-card"><div class="dash-lbl">Gastos mes</div><div class="dash-val" style="color:#e74c3c">'+fmt(gTot)+'</div></div>'+
-        '<div class="dash-card"><div class="dash-lbl">Neto mes</div><div class="dash-val" style="color:'+(tMes-gTot>=0?'#4caf76':'#e74c3c')+'">'+fmt(tMes-gTot)+'</div></div>'+
-      '</div>'+
-      (metas.length?
-        '<div style="margin-bottom:.6rem">'+
-        metas.map(function(m){
-          var pct=m.objetivo_valor>0?Math.min(100,Math.round((m.progreso_actual||0)/m.objetivo_valor*100)):0;
-          var col=pct>=100?'#4caf76':pct>=60?'#f5a623':'#f0c040';
-          return '<div style="background:rgba(255,255,255,.04);border-radius:6px;padding:.4rem .6rem;margin-bottom:.3rem">'+
-            '<div style="display:flex;justify-content:space-between;font-size:.7rem;margin-bottom:.2rem">'+
-              '<span style="color:#e0e4ff">'+m.descripcion+'</span>'+
-              '<span style="color:'+col+';font-weight:700">'+pct+'%</span>'+
-            '</div>'+
-            '<div class="meta-bar-wrap"><div class="meta-bar" style="width:'+pct+'%;background:'+col+'"></div></div>'+
-            (m.premio?'<div style="font-size:.6rem;color:#4caf76">Premio: '+m.premio+'</div>':'')+
-          '</div>';
-        }).join('')+
-        '</div>'
-      :'');
-    pg.insertBefore(dash,pg.firstChild);
-  }).catch(function(e){console.error("[belle] error silencioso:",e);});
-}
 
 // ─── FOTO EN CARRITO ──────────────────────────────────────────────────
-function getProductPhoto(id){
-  var p=prods.find(function(x){return x.id===id;});
-  return p&&p.imagen_url?p.imagen_url:'';
-}
 
 var _calcPrecioSel = 0;
 
@@ -17595,142 +16970,12 @@ function enGuardar(){
   }).catch(function(){toast("Error al guardar","terr");});
 }
 
-function concretarEncargo(id){
-  if(!confirm("Concretar encargo? El saldo se suma a tu dinero."))return;
-  apiGet("encargos","select=*&id=eq."+id).then(function(data){
-    if(!Array.isArray(data)||!data.length)return;
-    var e=data[0];
-    // 🐛 FIX 2026-08-08: guard de estado — antes se podía concretar dos veces (o
-    // concretar uno ya caído) y cada vez se sumaba una venta por el saldo completo.
-    if(e.estado!=='pendiente'){toast('Ese encargo ya está '+(e.estado||'procesado'),'twarn');loadPedidosWeb();return;}
-    // 🐛 FIX 2026-08-08: el saldo REAL descuenta los cobros parciales (la columna
-    // saldo de la BD nunca se actualizaba al cobrar parcial → se cobraba dos veces).
-    var saldoReal=Math.max(0,(parseFloat(e.total)||0)-(parseFloat(e.sena)||0)-(parseFloat(e.cobrado_parcial)||0));
-    var periodo=document.getElementById("hPeriodo")?document.getElementById("hPeriodo").textContent||"general":"general";
-    var promesas=[apiPatch("encargos",{estado:"concretado",concretado_at:new Date().toISOString(),saldo:0},"id=eq."+id)];
-    if(saldoReal>0)promesas.push(apiPost("ventas",{
-      vendedor_id:VENDEDOR_ID,producto_id:null,producto_nombre:"Encargo: "+e.producto_nombre,
-      cantidad:e.cantidad||1,precio_unitario:saldoReal,segmento:"encargo",
-      total:saldoReal,periodo:periodo,estado:"confirmada",origen:"encargo",nro_orden:"ENC-"+id
-    }));
-    Promise.all(promesas).then(function(){toast("Concretado - "+fmt(saldoReal)+" al pozo","tok");loadPedidosWeb();loadDineroData();});
-  });
-}
-
-function caerEncargo(id){
-  // FIX 2026-05-18 BUG #15: avisar explícitamente que la seña queda en la empresa
-  apiGet("encargos","select=*&id=eq."+id).then(function(data){
-    if(!Array.isArray(data)||!data.length)return;
-    var e=data[0];
-    var sena = parseFloat(e.sena) || 0;
-    var cobradoParcial = parseFloat(e.cobrado_parcial) || 0;
-    var totalCobrado = sena + cobradoParcial;
-    // Construir mensaje de confirmación según si tenía seña/cobros
-    var msg = "¿Marcar este encargo como CAÍDO?\n\n";
-    msg += "📦 Producto: " + _nomMl(e.producto_nombre || "?", e.producto_id) + "\n";
-    msg += "👤 Cliente: " + (e.cliente_nombre || "sin datos") + "\n";
-    msg += "💰 Total del encargo: " + fmt(e.total || 0) + "\n";
-    if(totalCobrado > 0){
-      msg += "\n⚠️ ATENCIÓN — El cliente ya pagó " + fmt(totalCobrado);
-      if(sena > 0) msg += "\n  • Seña: " + fmt(sena);
-      if(cobradoParcial > 0) msg += "\n  • Cobros parciales: " + fmt(cobradoParcial);
-      msg += "\n\n💼 Esa plata QUEDA EN LA EMPRESA (cliente la pierde).";
-      msg += "\nSi querés devolverla, hacelo por fuera del sistema.";
-    }
-    msg += "\n\n¿Confirmar caída del encargo?";
-    if(!confirm(msg))return;
-    apiPatch("encargos",{estado:"caido",caido_at:new Date().toISOString()},"id=eq."+id).then(function(){
-      apiPost("cotizaciones",{
-        vendedor_id:VENDEDOR_ID,producto_nombre:e.producto_nombre,marca:e.marca||"",
-        descripcion:"ENCARGO CAIDO - "+e.cantidad+" unidades sin retirar. Cliente: "+(e.cliente_nombre||"sin datos")+(totalCobrado>0?". Cliente había pagado "+fmt(totalCobrado)+" (queda a favor empresa)":""),
-        precio_sugerido:e.precio_unitario||0,
-        notas:"Stock: "+e.cantidad+" unidades disponibles."+(totalCobrado>0?" Total cobrado quedó en empresa: "+fmt(totalCobrado):""),
-        estado:"incidencia"
-      ,nro_operacion:'COT-'+Math.floor(10000+Math.random()*90000)}).then(function(){
-        toast("Encargo marcado caído"+(totalCobrado>0?" — "+fmt(totalCobrado)+" quedó en empresa":""),"twarn");
-        loadPedidosWeb();
-      });
-    });
-  });
-}
-
-function cobrarParcialEncargo(id){
-  apiGet("encargos","select=*&id=eq."+id).then(function(data){
-    if(!Array.isArray(data)||!data.length)return;
-    var e=data[0];
-    // 🐛 FIX 2026-08-08: solo se cobran encargos pendientes (antes se podía cobrar
-    // parcial sobre uno concretado o caído) y el monto debe ser POSITIVO (antes
-    // "-500" pasaba las validaciones y generaba una venta negativa).
-    if(e.estado!=='pendiente'){toast('Ese encargo ya está '+(e.estado||'procesado'),'twarn');return;}
-    var cobrado=(e.cobrado_parcial||0)+(e.sena||0);
-    var saldo=(e.total||0)-cobrado;
-    var monto=parseFloat(prompt("Cobrar encargo: "+_nomMl(e.producto_nombre, e.producto_id)+"\nSaldo pendiente: "+fmt(saldo)+"\n\nMonto a cobrar:"))||0;
-    if(!(monto>0))return;
-    if(monto>saldo){toast("El monto supera el saldo","twarn");return;}
-    var periodo=document.getElementById("hPeriodo")?document.getElementById("hPeriodo").textContent||"general":"general";
-    Promise.all([
-      apiPatch("encargos",{cobrado_parcial:(e.cobrado_parcial||0)+monto},"id=eq."+id),
-      apiPost("ventas",{vendedor_id:VENDEDOR_ID,producto_id:null,producto_nombre:"Cobro encargo: "+e.producto_nombre,
-        cantidad:1,precio_unitario:monto,segmento:"encargo_parcial",total:monto,
-        periodo:periodo,estado:"confirmada",origen:"encargo",nro_orden:"ENC-"+id})
-    ]).then(function(){toast("Cobro de "+fmt(monto)+" al pozo","tok");loadPedidosWeb();loadDineroData();});
-  });
-}
-
-
-
-
-
-
-
-function cpActualizar(){
-  var sum=0;document.querySelectorAll(".cpCb:checked").forEach(function(cb){sum+=parseFloat(cb.dataset.total)||0;});
-  var libre=parseFloat((document.getElementById("cpMonto")||{}).value)||0;
-  var total=sum>0?sum:libre;
-  var el=document.getElementById("cpTotal");if(el)el.textContent=total>0?"A cobrar: "+fmt(total):"";
-}
-
-
 
 // (función cobrarParcialPedido eliminada en la auditoría 2026-09-25: no tenía uso y arrastraba errores de stock/ventas)
 
 
-function cpRecalc(totalUnitsOrig){
-  var unidadesCob=0; var montoCob=0; var montoRest=0;
-  var todosCbs=document.querySelectorAll(".cpCb");
-  todosCbs.forEach(function(cb){
-    var qty=parseInt(cb.dataset.qty)||1;
-    var precio=parseFloat(cb.dataset.precio)||0;
-    if(cb.checked){
-      unidadesCob+=qty;
-      montoCob+=precio*qty;
-    } else if(!cb.disabled){
-      montoRest+=precio*qty;
-    }
-  });
-  var unidadesRest=totalUnitsOrig-unidadesCob;
-  var el=document.getElementById("cpResumen");
-  if(!el) return;
-  if(unidadesCob===0){
-    el.innerHTML="<div style='color:var(--tx3)'>Seleccioná productos para ver el total</div>";
-    return;
-  }
-  el.innerHTML=
-    "<div style='display:flex;justify-content:space-between;margin-bottom:.25rem'>"+
-      "<span style='font-weight:600'>Cobrás ahora ("+unidadesCob+" u.)</span>"+
-      "<span style='font-weight:700;color:var(--green)'>"+fmt(montoCob)+"</span>"+
-    "</div>"+
-    (unidadesRest>0?
-      "<div style='display:flex;justify-content:space-between;color:var(--yel)'>"+
-        "<span>Quedan pendientes ("+unidadesRest+" u.) — precio del pedido original</span>"+
-        "<span style='font-weight:600'>"+fmt(montoRest)+"</span>"+
-      "</div>":
-      "<div style='color:var(--cyan)'>Se salda el pedido completo ✓</div>");
-}
-
 // (función cpConfirmar eliminada en la auditoría 2026-09-25: no tenía uso y arrastraba errores de stock/ventas)
 
-function cerrarMoCancelPed(){var m=document.getElementById('moCancelPed');if(m)m.classList.remove('open');}
 
 function reciboPedidoPDF(pedId){
   apiGet("pedidos_catalogo","select=*&id=eq."+pedId).then(function(data){
@@ -17841,51 +17086,10 @@ function reciboPedidoPDF(pedId){
   });
 }
 
-function recalcCartPrices(){
-  // Recalculate all cart items prices based on total units (x1/x3/x10 logic)
-  var totalUnits=getCartTotalUnits();
-  Object.keys(cart).forEach(function(id){
-    var item=cart[id];
-    if(item.isDecan)return;
-    var p=prods.find(function(x){return x.id===parseInt(id);});
-    if(!p)return;
-    var r=calcP(p);
-    var seg=getBestSeg(totalUnits,r);
-    var price=r[seg]||r.pi;
-    item.seg=seg;item.price=price;
-    item.total=price*item.qty;
-  });
-  updateCartBar();
-}
-
 
 var _calcHistorial = [];
 var _CALC_MAX_HIST = 5;
 
-function calcGuardarEnHistorial(){
-  var nombre=(document.getElementById('cNombre')||{}).value||'';
-  if(!nombre) return;
-  var costo=parseFloat((document.getElementById('cCosto')||{}).value)||0;
-  if(!costo) return;
-  var entry={
-    nombre:nombre,
-    marca:(document.getElementById('cMarca')||{}).value||'',
-    costo:costo,
-    log:parseFloat((document.getElementById('cLog')||{}).value)||_calcCostoLog,
-    cotiz:parseFloat((document.getElementById('cCotiz')||{}).value)||cotizActual,
-    ganMay:parseFloat((document.getElementById('cGanMay')||{}).value)||0,
-    ganMed:parseFloat((document.getElementById('cGanMed')||{}).value)||0,
-    refML:parseFloat((document.getElementById('cRefML')||{}).value)||0,
-    ganPct:parseFloat((document.getElementById('cGanPct')||{}).value)||0,
-    ts:Date.now()
-  };
-  _calcHistorial=_calcHistorial.filter(function(h){return h.nombre.toLowerCase()!==nombre.toLowerCase();});
-  _calcHistorial.unshift(entry);
-  if(_calcHistorial.length>_CALC_MAX_HIST) _calcHistorial.pop();
-  try{ localStorage.setItem('bellecalc_hist',JSON.stringify(_calcHistorial)); }catch(e){}
-  calcRenderHistorial();
-  toast("Guardado en historial","tok");
-}
 
 function calcCargarHistorial(){
   try{
@@ -18659,32 +17863,6 @@ function _checkCobroAlert(){
   }).catch(function(e){console.error("[belle] error silencioso:",e);});
 }
 
-
-function _loadObjetivosVendedor(){
-  var el=document.getElementById("objetivosVendedorWidget");
-  if(!el)return;
-  apiGet("objetivos_vendedor","select=*&vendedor_id=eq."+VENDEDOR_ID+"&activo=is.true&order=created_at.desc&limit=10").then(function(data){
-    if(!Array.isArray(data)||!data.length){el.style.display="none";return;}
-    el.style.display="block";
-    var ahora=new Date().toISOString().slice(0,7);
-    var activos=data.filter(function(o){return !o.periodo||o.periodo>=ahora;});
-    if(!activos.length){el.style.display="none";return;}
-    el.innerHTML="<div style='font-size:.7rem;font-weight:700;color:var(--tx);margin-bottom:.5rem'>🎯 Mis objetivos del mes</div>"
-      +activos.map(function(o){
-        var pct=o.meta>0?Math.min(100,Math.round((o.progreso||0)/o.meta*100)):0;
-        var col=pct>=100?"var(--green)":pct>=50?"var(--acc)":"var(--blue)";
-        return"<div style='margin-bottom:.5rem'>"
-          +"<div style='display:flex;justify-content:space-between;font-size:.68rem;margin-bottom:.2rem'>"
-          +"<span style='color:var(--tx)'>"+o.descripcion+"</span>"
-          +"<span style='color:"+col+";font-weight:700'>"+pct+"%</span></div>"
-          +"<div style='background:var(--sur2);border-radius:4px;height:7px'>"
-          +"<div style='background:"+col+";width:"+pct+"%;height:100%;border-radius:4px;transition:width .5s'></div></div>"
-          +(o.premio&&pct>=100?"<div style='font-size:.6rem;color:var(--green);margin-top:.15rem'>🏆 "+o.premio+"</div>":"")
-          +(o.premio&&pct<100?"<div style='font-size:.58rem;color:var(--tx3);margin-top:.1rem'>Premio: "+o.premio+"</div>":"")
-          +"</div>";
-      }).join("");
-  }).catch(function(){el.style.display="none";});
-}
 
 // ════════════════════════════════════════════════════════════════════
 // FASE B Sub-bloque 8 — RUTAS (Maps + Distance Matrix + Directions)
@@ -19858,168 +19036,6 @@ function _rtGpsObtener(){
 }
 
 // ── PASO 1: seleccionar pedidos ─────────────────────────────────────
-function _rtRenderPaso1Pedidos(){
-  // Si hay borrador activo, mostrar SOLO los pedidos del borrador (con o sin dirección)
-  // Si no hay borrador activo, mostrar todos los pedidos disponibles del vendedor
-  var enBorrador = !!_rt.borradorActivo;
-  var br = enBorrador ? (_rt.borradores||[]).find(function(x){return x.id===_rt.borradorActivo;}) : null;
-  var disp;
-  if(enBorrador && br){
-    var ids = br.pedidos_ids || [];
-    disp = (_rt.pedidosTodos||[]).filter(function(p){return ids.indexOf(p.id)>=0;});
-  } else {
-    disp = _rt.pedidosDisponibles;
-  }
-
-  if(!disp.length){
-    if(enBorrador){
-      return "<div class='empty' style='padding:2.5rem 1rem;text-align:center'>"+
-        "<div style='font-size:2.5rem;margin-bottom:.5rem;opacity:.5'>📝</div>"+
-        "<div style='font-weight:600;font-size:.9rem;color:var(--tx);margin-bottom:.3rem'>Borrador vacío</div>"+
-        "<div style='font-size:.78rem;color:var(--tx3);max-width:380px;margin:0 auto'>Andá a la pestaña <b>Pedidos</b> y tocá 🚚 en cualquier pedido para sumarlo a este borrador. También podés usar el buscador de arriba.</div>"+
-        "</div>";
-    }
-    return "<div class='empty' style='padding:2.5rem 1rem;text-align:center'>"+
-      "<div style='font-size:2.5rem;margin-bottom:.5rem;opacity:.5'>📭</div>"+
-      "<div style='font-weight:600;font-size:.9rem;color:var(--tx);margin-bottom:.3rem'>No hay pedidos para repartir</div>"+
-      "<div style='font-size:.78rem;color:var(--tx3);max-width:380px;margin:0 auto'>Acá aparecen tus pedidos confirmados que aún no fueron despachados.</div>"+
-      "</div>";
-  }
-
-  // Separar los que se pueden incluir en la ruta (con dirección) vs los que no
-  // Un pedido tiene dirección si: a) tiene direccion_entrega_id (ref a clientes_direcciones)
-  //                            o b) tiene direccion_entrega_lat/lng (dirección directa del pedido)
-  var tieneDirFn = function(p){
-    return !!(p.direccion_entrega_id || (p.direccion_entrega_lat && p.direccion_entrega_lng));
-  };
-  var conDir = disp.filter(tieneDirFn);
-  var sinDir = disp.filter(function(p){return !tieneDirFn(p);});
-
-  var h = "";
-  if(enBorrador){
-    h += "<div style='font-size:.78rem;color:var(--tx2);margin-bottom:.6rem'>Pedidos del borrador <b>'"+(br?br.nombre:"")+"'</b>:</div>";
-  } else {
-    h += "<div style='font-size:.78rem;color:var(--tx2);margin-bottom:.6rem'>Marcá los pedidos que vas a repartir hoy:</div>";
-  }
-
-  // Lista de pedidos con dirección (seleccionables si NO está en modo borrador, automático si SÍ)
-  if(conDir.length){
-    h += "<div style='display:flex;flex-direction:column;gap:.5rem;margin-bottom:1rem'>";
-    conDir.forEach(function(p){
-      // En modo borrador, todos los pedidos del borrador están "seleccionados" automáticamente
-      var sel = enBorrador ? true : (_rt.pedidosSeleccionados.indexOf(p.id) >= 0);
-      var modoIcon = p.modo_entrega === "correo" ? "📦" : "🚚";
-      h += "<div style='display:flex;align-items:flex-start;gap:.55rem;background:"+(sel?"rgba(196,150,90,.07)":"var(--sur)")+";border:1px solid "+(sel?"var(--acc)":"var(--bd)")+";border-radius:8px;padding:.7rem .8rem;transition:border-color .15s'>";
-      if(enBorrador){
-        // En borrador: ícono + botón quitar
-        h += "<div style='font-size:1.1rem;flex-shrink:0;color:var(--green);margin-top:.05rem'>✓</div>";
-      } else {
-        h += "<input type='checkbox' "+(sel?"checked":"")+" onchange='_rtToggleSel("+p.id+",this.checked)' style='width:18px;height:18px;cursor:pointer;flex-shrink:0;margin-top:.15rem;accent-color:var(--acc)'>";
-      }
-      h += "<div style='flex:1;min-width:0'>";
-      h += "<div style='display:flex;justify-content:space-between;align-items:flex-start;gap:.5rem;margin-bottom:.2rem'>";
-      h += "<div style='font-size:.84rem;font-weight:600;color:var(--tx)'>"+modoIcon+" "+(p.nro_orden||"#"+p.id)+"</div>";
-      h += "<div style='font-size:.85rem;font-weight:700;color:var(--acc);flex-shrink:0'>"+fmt(p.total||0)+"</div>";
-      h += "</div>";
-      // Cliente: si tiene, se carga después; si no, mostrar "entrega directa"
-      if(p.cliente_id){
-        h += "<div id='_rtCli"+p.id+"' style='font-size:.72rem;color:var(--tx3)'>Cargando cliente...</div>";
-      } else {
-        h += "<div style='font-size:.7rem;color:var(--tx3);font-style:italic'>📦 Entrega directa (sin cliente)</div>";
-      }
-      // Dirección: si viene de clientes_direcciones, cargar; si es directa del pedido, usarla
-      if(p.direccion_entrega_id){
-        h += "<div id='_rtDir"+p.id+"' style='font-size:.7rem;color:var(--tx2);margin-top:.15rem'>Cargando dirección...</div>";
-      } else if(p.direccion_entrega_texto){
-        var dirTxt = p.direccion_entrega_texto;
-        if(p.direccion_entrega_referencias) dirTxt += " ("+p.direccion_entrega_referencias+")";
-        h += "<div style='font-size:.7rem;color:var(--tx2);margin-top:.15rem'>📍 "+dirTxt+"</div>";
-      }
-      if(p.distancia_km) h += "<div style='font-size:.65rem;color:var(--tx3);margin-top:.2rem'>📏 "+p.distancia_km+" km del depósito</div>";
-      if(enBorrador){
-        h += "<div style='margin-top:.4rem;display:flex;gap:.3rem;flex-wrap:wrap'>";
-        if(!p.cliente_id){
-          h += "<button class='btn btn-g' onclick='_rtAsignarClienteAPedido("+p.id+")' style='font-size:.65rem;padding:.2rem .5rem' title='Asociar a un cliente'>👤 Asignar cliente</button>";
-        }
-        h += "<button class='btn btn-g' onclick='_rbAsignarDirA("+p.id+")' style='font-size:.65rem;padding:.2rem .5rem' title='Cambiar dirección'>📍 Cambiar dirección</button>";
-        h += "<button class='btn btn-red' onclick='_rbQuitarPedidoDeBorrador("+p.id+")' style='font-size:.65rem;padding:.2rem .5rem;margin-left:auto' title='Quitar del borrador'>🗑 Quitar</button>";
-        h += "</div>";
-      }
-      h += "</div>";
-      h += "</div>";
-    });
-    h += "</div>";
-  }
-
-  // Pedidos sin cliente o sin dirección
-  if(sinDir.length){
-    h += "<div style='background:rgba(240,180,41,.1);border:1px solid var(--yel);border-radius:8px;padding:.55rem .8rem;margin:1rem 0 .6rem;font-size:.74rem;color:var(--tx)'>";
-    h += "⚠ <b>"+sinDir.length+" pedido"+(sinDir.length===1?"":"s")+" con datos faltantes.</b> "+
-      (enBorrador
-        ? "Asigná cliente o dirección a cada uno. Si los dejás así, al confirmar la ruta quedarán pausados (no entran al Maps)."
-        : "Asignales un cliente con domicilio para incluirlos en la ruta.");
-    h += "</div>";
-    h += "<div style='display:flex;flex-direction:column;gap:.5rem;margin-bottom:1rem'>";
-    sinDir.forEach(function(p){
-      var faltaCliente = !p.cliente_id;
-      // Falta dirección si no tiene direccion_entrega_id NI coordenadas directas
-      var latPropio = parseFloat(p.direccion_entrega_lat);
-      var faltaDir = !p.direccion_entrega_id && !(latPropio && !isNaN(latPropio) && p.direccion_entrega_lng);
-      h += "<div style='background:var(--sur);border:1px dashed var(--yel);border-radius:7px;padding:.6rem .75rem;font-size:.78rem'>";
-      // Header
-      h += "<div style='display:flex;justify-content:space-between;align-items:flex-start;gap:.5rem;flex-wrap:wrap;margin-bottom:.3rem'>";
-      h += "<div style='font-size:.84rem;font-weight:600;color:var(--tx)'>🚚 "+(p.nro_orden||"#"+p.id)+"</div>";
-      h += "<div style='font-size:.85rem;font-weight:700;color:var(--acc);flex-shrink:0'>"+fmt(p.total||0)+"</div>";
-      h += "</div>";
-
-      // Avisos
-      h += "<div style='display:flex;flex-direction:column;gap:.15rem;margin-bottom:.4rem'>";
-      if(faltaCliente){
-        h += "<div style='font-size:.7rem;color:var(--yel)'>⚠ Falta asignar cliente</div>";
-      } else {
-        // Mostrar cliente asignado
-        h += "<div id='_rtCli"+p.id+"' style='font-size:.72rem;color:var(--tx3)'>Cargando cliente...</div>";
-      }
-      if(faltaDir){
-        h += "<div style='font-size:.7rem;color:var(--yel)'>⚠ Falta asignar dirección</div>";
-      }
-      h += "</div>";
-
-      // Botones
-      h += "<div style='display:flex;gap:.3rem;flex-wrap:wrap'>";
-      if(faltaCliente){
-        h += "<button class='btn btn-a' onclick='_rtAsignarClienteAPedido("+p.id+")' style='font-size:.68rem;padding:.3rem .55rem'>👤 Asignar cliente</button>";
-      }
-      h += "<button class='btn btn-a' onclick='_rbAsignarDirA("+p.id+")' style='font-size:.68rem;padding:.3rem .55rem'>📍 Asignar dirección</button>";
-      if(enBorrador){
-        h += "<button class='btn btn-red' onclick='_rbQuitarPedidoDeBorrador("+p.id+")' style='font-size:.65rem;padding:.3rem .5rem;margin-left:auto' title='Quitar del borrador'>🗑 Quitar</button>";
-      }
-      h += "</div>";
-      h += "</div>";
-    });
-    h += "</div>";
-  }
-
-  // Resumen y botón siguiente
-  var totSel = enBorrador ? conDir.length : _rt.pedidosSeleccionados.length;
-  h += "<div style='position:sticky;bottom:0;background:var(--bg-card,var(--sur));border:1px solid var(--bd);border-radius:8px;padding:.7rem .9rem;display:flex;justify-content:space-between;align-items:center;gap:.5rem;flex-wrap:wrap;box-shadow:0 -4px 12px rgba(0,0,0,.05)'>";
-  if(enBorrador){
-    h += "<div style='font-size:.82rem'><b>"+conDir.length+"</b> con dirección"+(sinDir.length?" · <span style='color:var(--yel)'>"+sinDir.length+" pendiente"+(sinDir.length===1?"":"s")+"</span>":"")+"</div>";
-  } else {
-    h += "<div style='font-size:.82rem'><b>"+totSel+"</b> pedido"+(totSel===1?"":"s")+" seleccionado"+(totSel===1?"":"s")+"</div>";
-  }
-  h += "<button class='btn btn-a' "+(totSel===0?"disabled style='opacity:.5;cursor:not-allowed'":"")+" onclick='_rtIrAPaso(2)'>Siguiente: Punto de partida →</button>";
-  h += "</div>";
-
-  // Cargar nombres de clientes y direcciones después del render — solo para los que tienen
-  setTimeout(function(){
-    conDir.forEach(function(p){_rtCargarDetallePedido(p);});
-    // También para los con cliente pero sin dirección
-    sinDir.forEach(function(p){if(p.cliente_id) _rtCargarDetallePedido(p);});
-  }, 50);
-
-  return h;
-}
 
 function _rtCargarDetallePedido(p){
   // Cliente
@@ -20071,77 +19087,8 @@ function _rtCargarDetallePedido(p){
   }
 }
 
-function _rtToggleSel(pedId, checked){
-  if(checked){
-    if(_rt.pedidosSeleccionados.indexOf(pedId)<0) _rt.pedidosSeleccionados.push(pedId);
-  } else {
-    _rt.pedidosSeleccionados = _rt.pedidosSeleccionados.filter(function(x){return x!==pedId;});
-  }
-  // Si hay borrador activo, sincronizar con BD (fire-and-forget)
-  if(_rt.borradorActivo){
-    _rbSincronizarBorrador().catch(function(){});
-  }
-  _rtRenderSubTab();
-}
-
-function _rtIrAPaso(n){
-  if(n===2 && _rt.pedidosSeleccionados.length===0){toast("Seleccioná al menos un pedido","twarn");return;}
-  if(n===3 && !_rt.puntoPartida){toast("Elegí un punto de partida","twarn");return;}
-  _rt.paso = n;
-  _rtRenderSubTab();
-}
 
 // ── PASO 2: punto de partida ─────────────────────────────────────────
-function _rtRenderPaso2Partida(){
-  var h = "";
-  h += "<div style='font-size:.78rem;color:var(--tx2);margin-bottom:.7rem'>Elegí desde dónde vas a salir:</div>";
-  h += "<div style='display:flex;flex-direction:column;gap:.5rem;margin-bottom:1rem'>";
-
-  // Opción A: Ubicación actual del navegador (GPS)
-  var actSel = _rt.puntoPartida && _rt.puntoPartida.tipo === "actual";
-  h += "<button onclick='_rtUsarUbicacionActual()' style='display:flex;align-items:center;gap:.7rem;background:"+(actSel?"rgba(196,150,90,.07)":"var(--sur)")+";border:1px solid "+(actSel?"var(--acc)":"var(--bd)")+";border-radius:8px;padding:.75rem .85rem;cursor:pointer;text-align:left;font-family:inherit;color:var(--tx)'>";
-  h += "<div style='font-size:1.4rem'>📡</div>";
-  h += "<div style='flex:1'>";
-  h += "<div style='font-size:.85rem;font-weight:600'>Usar mi ubicación actual</div>";
-  h += "<div style='font-size:.7rem;color:var(--tx3);margin-top:.15rem'>"+(actSel?"✓ "+_rt.puntoPartida.label:"El navegador te va a pedir permiso de GPS")+"</div>";
-  h += "</div>";
-  h += "</button>";
-
-  // Opción B: Mis direcciones guardadas
-  if(_rt.vendedorDirs.length){
-    h += "<div style='font-size:.66rem;color:var(--tx3);text-transform:uppercase;font-weight:600;margin-top:.4rem'>O usar una dirección guardada</div>";
-    _rt.vendedorDirs.forEach(function(d){
-      var sel = _rt.puntoPartida && _rt.puntoPartida.tipo === "guardada" && _rt.puntoPartida.id === d.id;
-      h += "<button onclick='_rtUsarDireccionGuardada("+d.id+")' style='display:flex;align-items:center;gap:.7rem;background:"+(sel?"rgba(196,150,90,.07)":"var(--sur)")+";border:1px solid "+(sel?"var(--acc)":"var(--bd)")+";border-radius:8px;padding:.7rem .85rem;cursor:pointer;text-align:left;font-family:inherit;color:var(--tx)'>";
-      h += "<div style='font-size:1.4rem'>📍</div>";
-      h += "<div style='flex:1;min-width:0'>";
-      h += "<div style='font-size:.85rem;font-weight:600'>"+(_escNomJS?_escNomJS(d.etiqueta):d.etiqueta)+(d.predeterminada?" <span style=\"font-size:.6rem;color:var(--acc);background:rgba(196,150,90,.15);padding:.05rem .35rem;border-radius:4px;margin-left:.3rem\">PREDETERMINADA</span>":"")+"</div>";
-      h += "<div style='font-size:.7rem;color:var(--tx3);margin-top:.15rem;overflow:hidden;text-overflow:ellipsis;white-space:nowrap'>"+(d.direccion_completa||"")+"</div>";
-      h += "</div>";
-      h += "</button>";
-    });
-  }
-
-  // Opción C: Buscar otra dirección
-  h += "<div style='font-size:.66rem;color:var(--tx3);text-transform:uppercase;font-weight:600;margin-top:.4rem'>O buscar otra dirección</div>";
-  h += "<button onclick='_rtAbrirBuscarPartida()' style='display:flex;align-items:center;gap:.7rem;background:transparent;border:1px dashed var(--bd);border-radius:8px;padding:.75rem .85rem;cursor:pointer;text-align:left;font-family:inherit;color:var(--tx2)'>";
-  h += "<div style='font-size:1.4rem'>🔍</div>";
-  h += "<div style='flex:1'><div style='font-size:.82rem'>Buscar dirección en Google Maps</div></div>";
-  h += "</button>";
-
-  // Botón guardar como dirección personal
-  h += "<button onclick='_rtSubTab(\"misdir\")' style='background:transparent;border:none;color:var(--acc);font-size:.72rem;cursor:pointer;text-decoration:underline;padding:.3rem;margin-top:.3rem;text-align:left'>Gestionar mis direcciones guardadas →</button>";
-
-  h += "</div>";
-
-  // Footer con botones nav
-  h += "<div style='position:sticky;bottom:0;background:var(--bg-card,var(--sur));border:1px solid var(--bd);border-radius:8px;padding:.7rem .9rem;display:flex;justify-content:space-between;align-items:center;gap:.5rem'>";
-  h += "<button class='btn btn-g' onclick='_rtIrAPaso(1)'>← Atrás</button>";
-  h += "<button class='btn btn-a' "+(!_rt.puntoPartida?"disabled style='opacity:.5;cursor:not-allowed'":"")+" onclick='_rtIrAPaso(3)'>Siguiente: Calcular ruta →</button>";
-  h += "</div>";
-
-  return h;
-}
 
 function _rtUsarUbicacionActual(){
   if(!navigator.geolocation){toast("Tu navegador no soporta geolocalización","terr");return;}
@@ -20176,74 +19123,8 @@ function _rtUsarDireccionGuardada(id){
   _rtRenderSubTab();
 }
 
-function _rtAbrirBuscarPartida(){
-  if(!window.google || !window.google.maps){toast("Google Maps cargando, esperá un momento","twarn");return;}
-  var mo = document.createElement("div");mo.className="mo open";mo.id="_rtMoBuscarPartida";
-  mo.style.zIndex="99999";
-  var h = "<div class='md' style='max-width:480px;width:95%;max-height:80vh;display:flex;flex-direction:column'>";
-  h += "<div class='mh'><div class='mtt'>Buscar punto de partida</div>";
-  h += "<button class='btn btn-g xb' onclick='document.getElementById(\"_rtMoBuscarPartida\").remove()'>✕</button></div>";
-  h += "<div class='mb' style='display:flex;flex-direction:column;gap:.6rem'>";
-  h += "<div style='display:flex;gap:.4rem'>";
-  h += "<input type='text' id='_rtBuscarPartidaInp' placeholder='Calle número, ciudad...' style='flex:1;padding:.5rem .7rem;border:1px solid var(--bd);border-radius:7px;font-size:.85rem;background:var(--sur2);color:var(--tx);font-family:inherit' onkeydown='if(event.key===&quot;Enter&quot;){event.preventDefault();_rtBuscarPartidaGo();}'>";
-  h += "<button class='btn btn-a' onclick='_rtBuscarPartidaGo()'>Buscar</button>";
-  h += "</div>";
-  h += "<div id='_rtBuscarPartidaResult'></div>";
-  h += "</div>";
-  h += "</div>";
-  mo.innerHTML = h;
-  document.body.appendChild(mo);
-  setTimeout(function(){var i=document.getElementById("_rtBuscarPartidaInp");if(i)i.focus();},100);
-}
-
-function _rtBuscarPartidaGo(){
-  var inp = document.getElementById("_rtBuscarPartidaInp");
-  var q = (inp&&inp.value||"").trim();
-  if(!q){toast("Escribí una dirección","twarn");return;}
-  var res = document.getElementById("_rtBuscarPartidaResult");
-  if(res) res.innerHTML = "<div class='loading'><div class='spin'></div></div>";
-  if(!_rt.geocoder) _rt.geocoder = new google.maps.Geocoder();
-  _rt.geocoder.geocode({address:q, region:"AR"}, function(results, status){
-    if(status==="OK" && results && results[0]){
-      var r = results[0];
-      _rt.puntoPartida = {
-        tipo:"buscada",
-        lat: r.geometry.location.lat(),
-        lng: r.geometry.location.lng(),
-        label: r.formatted_address
-      };
-      _rtPersistirPuntosAlBorrador();
-      _rtMarcarRutaModificada("Cambiaste el punto de inicio");
-      var mo = document.getElementById("_rtMoBuscarPartida");if(mo)mo.remove();
-      toast("Punto de partida fijado","tok");
-      _rtRenderSubTab();
-    } else if(status==="ZERO_RESULTS"){
-      if(res) res.innerHTML = "<div style='color:var(--yel);text-align:center;padding:.8rem;font-size:.78rem'>Sin resultados. Probá con más detalles.</div>";
-    } else {
-      if(res) res.innerHTML = "<div style='color:var(--red);text-align:center;padding:.8rem;font-size:.78rem'>Error: "+status+"</div>";
-    }
-  });
-}
 
 // ── PASO 3: ruta calculada en mapa + reordenable ─────────────────────
-function _rtRenderPaso3Confirmar(){
-  var h = "";
-  h += "<div style='font-size:.78rem;color:var(--tx2);margin-bottom:.6rem'>Punto de partida: <b style='color:var(--tx)'>"+(_rt.puntoPartida?_rt.puntoPartida.label:"—")+"</b></div>";
-  // Mapa
-  h += "<div id='_rtMapa' style='width:100%;height:340px;border-radius:9px;border:1px solid var(--bd);background:var(--sur2);margin-bottom:.7rem'></div>";
-  // Resumen
-  h += "<div id='_rtResumen' style='background:var(--sur);border:1px solid var(--bd);border-radius:8px;padding:.6rem .8rem;margin-bottom:.7rem;font-size:.78rem'>Calculando ruta óptima...</div>";
-  // Lista reordenable
-  h += "<div style='font-size:.7rem;color:var(--tx3);text-transform:uppercase;font-weight:600;margin-bottom:.4rem'>Orden de entrega <span style='font-weight:400;text-transform:none;color:var(--tx3)'>(arrastrá ↕ para reordenar)</span></div>";
-  h += "<div id='_rtListaOrden' style='display:flex;flex-direction:column;gap:.4rem;margin-bottom:1rem'></div>";
-
-  // Botones
-  h += "<div style='position:sticky;bottom:0;background:var(--bg-card,var(--sur));border:1px solid var(--bd);border-radius:8px;padding:.7rem .9rem;display:flex;justify-content:space-between;align-items:center;gap:.5rem;flex-wrap:wrap'>";
-  h += "<button class='btn btn-g' onclick='_rtIrAPaso(2)'>← Atrás</button>";
-  h += "<button class='btn btn-a' style='background:#5a8a4a;border-color:#5a8a4a' onclick='_rtConfirmarRuta()'>✅ Confirmar ruta y empezar reparto</button>";
-  h += "</div>";
-  return h;
-}
 
 function _rtInicializarMapaRuta(){
   var mapEl = document.getElementById("_rtMapa");
@@ -22417,13 +21298,6 @@ function _rbRegenerarMaps(){
   });
 }
 
-// Agregar más pedidos al borrador desde la vista en reparto
-function _rbAgregarMasPedidosAlBorrador(){
-  // Cambiar a vista de armar ruta con el borrador activo
-  var br = (_rt.borradores||[]).find(function(x){return x.id===_rt.borradorActivo;});
-  if(!br) return;
-  toast("Volvé a la pestaña Pedidos y tocá 🚚 en el pedido que querés agregar","tok");
-}
 
 // Verificar si todos los pedidos están entregados/cancelados → auto-completar
 function _rbVerificarAutoCompletar(){
@@ -22841,33 +21715,6 @@ function _rbQuitarPedidoDeBorrador(pedId){
   });
 }
 
-// Sincronizar pedidosSeleccionados → borrador en BD (cuando se modifica al armar ruta)
-function _rbSincronizarBorrador(){
-  if(!_rt.borradorActivo) return Promise.resolve();
-  var ids = (_rt.pedidosSeleccionados||[]).slice();
-  // También sincronizar pedidos_estados: agregar nuevos como 'activo', quitar los que ya no están
-  var br = (_rt.borradores||[]).find(function(x){return x.id===_rt.borradorActivo;});
-  var estadosActuales = (br && Array.isArray(br.pedidos_estados)) ? br.pedidos_estados.slice() : [];
-  // Mantener entradas para pedidos que siguen, agregar nuevos como 'activo'
-  var nuevosEstados = ids.map(function(id){
-    var existente = estadosActuales.find(function(e){return e.id===id;});
-    return existente || {id:id, estado:'activo'};
-  });
-  return apiPatch("rutas_borradores",{pedidos_ids:ids, pedidos_estados:nuevosEstados},"id=eq."+_rt.borradorActivo).then(function(){
-    if(br){br.pedidos_ids = ids; br.pedidos_estados = nuevosEstados;}
-  }).catch(function(e){
-    console.error("[belle] sincronizar borrador:",e);
-  });
-}
-
-// Lee el estado actual de un pedido dentro del borrador activo
-function _rbEstadoPedido(pedId){
-  if(!_rt.borradorActivo) return null;
-  var br = (_rt.borradores||[]).find(function(x){return x.id===_rt.borradorActivo;});
-  if(!br || !Array.isArray(br.pedidos_estados)) return null;
-  var entrada = br.pedidos_estados.find(function(e){return e.id===pedId;});
-  return entrada ? entrada.estado : null;
-}
 
 // Cambia el estado de un pedido en el borrador activo (en BD + memoria)
 // estados: 'activo' | 'entregado' | 'cancelado' | 'pausado'
@@ -22899,11 +21746,6 @@ function _rbActualizarEstadoPedido(pedId, nuevoEstado, extras){
   });
 }
 
-// Lista de pedidos en el borrador filtrados por estado
-function _rbPedidosPorEstado(borrador, estado){
-  if(!borrador || !Array.isArray(borrador.pedidos_estados)) return [];
-  return borrador.pedidos_estados.filter(function(e){return e.estado===estado;});
-}
 
 // ¿Quedan pedidos por entregar (activos o pausados) en el borrador?
 function _rbBorradorTieneActivos(borrador){
@@ -23486,106 +22328,6 @@ function _rtBorrarDir(id){
 </div>
 
 
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 <!-- Notification Panel -->
 <div id="vNotifOverlay" onclick="cerrarVNotif()" style="display:none;position:fixed;inset:0;z-index:9998;background:rgba(0,0,0,.3)"></div>
 <div id="vNotifPanel" style="display:none;position:fixed;top:54px;right:8px;width:320px;max-height:420px;background:var(--sur);border:1px solid var(--bd);border-radius:12px;z-index:9999;box-shadow:0 8px 32px rgba(0,0,0,.28);overflow:hidden;flex-direction:column">
@@ -23640,16 +22382,6 @@ function _notifToggleSound(){
   toast(window._notifSoundEnabled ? '🔔 Sonido activado' : '🔕 Sonido silenciado', 'tok');
 }
 
-function _notifPedirPermiso(){
-  if('Notification' in window){
-    Notification.requestPermission().then(function(perm){
-      toast(perm === 'granted' ? '✅ Notificaciones activadas' : 'Permiso no concedido',
-            perm === 'granted' ? 'tok' : 'twarn');
-    });
-  } else {
-    toast('Tu navegador no soporta notificaciones','twarn');
-  }
-}
 
 function _notifPlaySound(){
   if(!window._notifSoundEnabled) return;
@@ -25448,69 +24180,7 @@ function _borrarComCobranzaV(id, clienteId){
 }
 
 // ───────── APLICAR MORA (vendedor) ─────────
-function abrirAplicarMoraCuotaV(cuotaId, clienteId, montoCuotaActual, diasAtraso, moraCalculada){
-  var mo = document.createElement('div');
-  mo.className = 'modal-ov open';
-  mo.id = '_moAplMoraV';
-  mo.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,.6);z-index:9999999;display:flex;align-items:center;justify-content:center;padding:1rem';
-  mo.innerHTML = "<div class='modal' style='max-width:480px;width:95%'>"+
-    "<div style='display:flex;justify-content:space-between;align-items:center;margin-bottom:.7rem'>"+
-    "<h3 style='color:var(--yel);font-size:.9rem;margin:0'>⚖️ Aplicar mora a cuota</h3>"+
-    "<button class='btn btn-g' onclick='document.getElementById(\"_moAplMoraV\").remove()' style='padding:.2rem .5rem'>X</button></div>"+
-    "<div style='display:flex;flex-direction:column;gap:.6rem'>"+
-      "<div style='background:rgba(232,160,40,.08);border:1px solid var(--yel);border-radius:7px;padding:.55rem .7rem;font-size:.74rem;color:var(--tx2)'>"+
-        "<div style='margin-bottom:.25rem'><b>Días de atraso:</b> "+diasAtraso+"</div>"+
-        "<div style='margin-bottom:.25rem'><b>Monto cuota actual:</b> "+fmt(montoCuotaActual)+"</div>"+
-        "<div><b>Mora calculada:</b> <span style='color:var(--yel);font-weight:700'>"+fmt(moraCalculada)+"</span></div>"+
-      "</div>"+
-      "<div><label style='font-size:.65rem;color:var(--tx3);text-transform:uppercase;font-weight:600'>Monto a aplicar ($)</label>"+
-      "<input type='number' id='_aplMoraMontoV' value='"+Math.round(moraCalculada*100)/100+"' min='0' step='0.01' style='width:100%;padding:.5rem .7rem;border:1px solid var(--bd);border-radius:6px;font-size:.95rem;font-weight:700;background:var(--sur2);color:var(--tx);margin-top:.2rem'>"+
-      "<div style='font-size:.6rem;color:var(--tx3);margin-top:.1rem'>Podés ajustar el monto si querés cobrar menos</div></div>"+
-      "<div><label style='font-size:.65rem;color:var(--tx3);text-transform:uppercase;font-weight:600'>Motivo / observación</label>"+
-      "<input type='text' id='_aplMoraMotivoV' placeholder='Ej: cliente no respondió WhatsApp por 5 días' style='width:100%;padding:.5rem .7rem;border:1px solid var(--bd);border-radius:6px;font-size:.82rem;background:var(--sur2);color:var(--tx);margin-top:.2rem'></div>"+
-      "<div style='display:flex;gap:.4rem;justify-content:flex-end;padding-top:.3rem'>"+
-        "<button class='btn btn-g' onclick='document.getElementById(\"_moAplMoraV\").remove()'>Cancelar</button>"+
-        "<button class='btn btn-a' style='background:var(--yel)' onclick='_confirmarAplicarMoraV("+cuotaId+","+clienteId+","+diasAtraso+")'>⚖️ Aplicar mora</button>"+
-      "</div></div></div>";
-  document.body.appendChild(mo);
-}
 
-function _confirmarAplicarMoraV(cuotaId, clienteId, diasAtraso){
-  var monto = parseFloat((document.getElementById('_aplMoraMontoV')||{value:0}).value) || 0;
-  var motivo = ((document.getElementById('_aplMoraMotivoV')||{value:''}).value||'').trim();
-  if(monto <= 0){ toast('Monto inválido','twarn'); return; }
-  if(!confirm('Aplicar mora de '+fmt(monto)+' a esta cuota?'))return;
-
-  apiGet('cc_cuotas','select=monto,monto_pagado&id=eq.'+cuotaId+'&limit=1').then(function(rows){
-    var cuota = rows && rows[0];
-    if(!cuota){throw new Error('Cuota no encontrada');}
-    var montoAntes = parseFloat(cuota.monto)||0;
-    var montoDespues = montoAntes + monto;
-    return apiGet('clientes','select=cc_tasa_mora_pct&id=eq.'+clienteId+'&limit=1').then(function(rc){
-      var tasa = (rc && rc[0]) ? parseFloat(rc[0].cc_tasa_mora_pct)||0 : 0;
-      return apiPost('cc_aplicaciones_mora', {
-        cuota_id: cuotaId,
-        cliente_id: clienteId,
-        monto_mora: monto,
-        dias_atraso: diasAtraso,
-        tasa_aplicada: tasa,
-        monto_cuota_antes: montoAntes,
-        monto_cuota_despues: montoDespues,
-        motivo: motivo || null,
-        aplicado_por: VENDEDOR_NOMBRE
-      });
-    }).then(function(){
-      return apiPatch('cc_cuotas', {monto: montoDespues}, 'id=eq.'+cuotaId);
-    });
-  }).then(function(){
-    toast('Mora aplicada: '+fmt(monto)+' ✅','tok');
-    var m = document.getElementById('_moAplMoraV'); if(m) m.remove();
-    if(typeof _morosRenderV === 'function' && document.getElementById('_moMorosidadV')) _morosRenderV();
-  }).catch(function(e){
-    console.error('[apl mora v]',e);
-    toast('Error: '+(e.message||'tabla cc_aplicaciones_mora puede no existir'),'terr');
-  });
-}
 
 function abrirHistorialMorasV(clienteId, clienteNombre){
   var mo = document.createElement('div');
