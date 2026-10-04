@@ -11005,123 +11005,17 @@ function _catRenderCuotasCliente(pedidosActivos){
 // Usado cuando el cliente envía un pedido con forma_pago='cuenta_corriente'
 // Replica la lógica de admin/ventas pero en el catálogo (acceso público con anon key)
 function _catGenerarCuotasCliente(pedidoId, clienteId, planId, totalPedido){
-  if(!pedidoId || !clienteId || !planId){
+  // Auditoría 2026-10-04: las cuotas las arma la base (RPC cc_generar_cuotas_web) con el
+  // total real del pedido y el plan del cliente, en una sola transacción e idempotente.
+  // Antes el navegador calculaba montos y fechas e insertaba las cuotas una por una.
+  if(!pedidoId || !planId){
     return Promise.reject(new Error('Datos incompletos para generar cuotas'));
   }
-  // FIX 2026-05-16: guard de idempotencia — chequear si ya hay cuotas creadas para este pedido
-  // Si las hay, abortar y reportar (previene duplicación por reintentos/doble-click)
-  return apiGet('cc_cuotas','select=id&pedido_id=eq.'+pedidoId+'&limit=1').then(function(yaHay){
-    if(Array.isArray(yaHay) && yaHay.length){
-      console.warn('[catalogo cc] cuotas ya existían para pedido '+pedidoId+' — saltando creación');
-      return { cuotas: 0, ya_existian: true };
-    }
-    return Promise.all([
-      apiGet('clientes','select=*&id=eq.'+clienteId+'&limit=1'),
-      apiGet('cc_planes_cliente','select=*&id=eq.'+planId+'&limit=1')
-    ]).then(function(res){
-      var cli = (res[0] && res[0][0]) || null;
-      var plan = (res[1] && res[1][0]) || null;
-      if(!cli || !plan){ throw new Error('Cliente o plan no encontrado'); }
-
-      var nroCuotas = parseInt(plan.nro_cuotas);
-      var recargoPct = parseFloat(plan.recargo_pct) || 0;
-      var totalConRecargo = totalPedido * (1 + recargoPct/100);
-      var modo = cli.cc_modo_cuotas || 'iguales';
-      var entregaPct = parseFloat(cli.cc_entrega_inicial_pct) || 0;
-      var diasGracia = 3;
-
-      // 1) Calcular montos
-      var montos = [];
-      if(modo === 'entrega_inicial' && nroCuotas > 1 && entregaPct > 0){
-        var primera = Math.round(totalConRecargo * (entregaPct/100) * 100) / 100;
-        var restoTotal = totalConRecargo - primera;
-        var resto = Math.floor((restoTotal / (nroCuotas - 1)) * 100) / 100;
-        montos.push(primera);
-        for(var i = 1; i < nroCuotas - 1; i++) montos.push(resto);
-        if(nroCuotas > 1){
-          var ultima = totalConRecargo - primera - (resto * (nroCuotas - 2));
-          montos.push(Math.round(ultima*100)/100);
-        }
-      } else {
-        var base = Math.floor((totalConRecargo / nroCuotas) * 100) / 100;
-        for(var j = 0; j < nroCuotas - 1; j++) montos.push(base);
-        montos.push(Math.round((totalConRecargo - base * (nroCuotas - 1)) * 100) / 100);
-      }
-
-      // 2) Calcular fechas
-      var fechas = [];
-      var primeraFecha = _catCcProximaFecha(cli, new Date());
-      var salto = _catCcSalto(cli);
-      for(var k = 0; k < nroCuotas; k++){
-        var f = new Date(primeraFecha);
-        f.setDate(f.getDate() + (k * salto));
-        fechas.push(f.toISOString().slice(0,10));
-      }
-
-      // 3) FIX 2026-05-16: crear cuotas EN SERIE (no paralelo) para poder hacer rollback si una falla
-      // Antes: Promise.all paralelo → si una falla quedaban cuotas parciales sin manera de detectarlo
-      var cuotasCreadas = [];
-      var chain = Promise.resolve();
-      for(var i2 = 0; i2 < nroCuotas; i2++){
-        (function(idx){
-          chain = chain.then(function(){
-            return apiPost('cc_cuotas', {
-              pedido_id: pedidoId,
-              nro_cuota: idx + 1,
-              total_cuotas: nroCuotas,
-              monto: montos[idx],
-              fecha_vencimiento: fechas[idx],
-              estado: 'pendiente',
-              dias_gracia: diasGracia,
-              porcentaje: nroCuotas > 0 ? Math.round((montos[idx] / totalConRecargo) * 10000) / 100 : null
-            }).then(function(rowsCu){
-              // Guardar ID para posible rollback
-              if(Array.isArray(rowsCu) && rowsCu[0] && rowsCu[0].id){
-                cuotasCreadas.push(rowsCu[0].id);
-              }
-            });
-          });
-        })(i2);
-      }
-
-      return chain.then(function(){
-        // 4) Solo si TODAS las cuotas se crearon, actualizar el pedido
-        var fechaVencFinal = fechas[fechas.length - 1];
-        var _ccTot = (recargoPct > 0) ? (Math.round(totalConRecargo * 100) / 100) : null;
-        var _ccTok = (typeof _sbToken==='function')?_sbToken():null;
-        return fetch(SB_URL+"/rest/v1/rpc/cc_aplicar_plan_pedido",{
-          method:"POST",
-          headers:{"Content-Type":"application/json","apikey":SB_KEY,"Authorization":"Bearer "+(_ccTok||SB_KEY)},
-          body:JSON.stringify({
-            p_pedido_id: pedidoId,
-            p_cc_plan_id: planId,
-            p_recargo_pct: recargoPct,
-            p_total_sin_recargo: totalPedido,
-            p_nro_cuotas: nroCuotas,
-            p_fecha_venc: fechaVencFinal,
-            p_total: _ccTot,
-            p_total_con_envio: _ccTot
-          })
-        }).then(function(r){ if(!r.ok){ return r.text().then(function(t){ throw new Error('HTTP '+r.status+': '+t.slice(0,120)); }); } return r.json().catch(function(){return null;}); });
-      }).then(function(){
-        console.log('[catalogo cc] '+nroCuotas+' cuotas generadas para pedido '+pedidoId);
-        return { cuotas: montos.length, totalConRecargo: totalConRecargo };
-      }).catch(function(err){
-        // ROLLBACK: si algo falló a mitad de camino, eliminar las cuotas creadas
-        console.error('[catalogo cc] error generando cuotas — haciendo rollback de '+cuotasCreadas.length+' cuotas:', err);
-        if(cuotasCreadas.length > 0){
-          var rollbackProms = cuotasCreadas.map(function(cuId){
-            return apiDelete('cc_cuotas','id=eq.'+cuId).catch(function(e){
-              console.error('[rollback] no se pudo eliminar cuota '+cuId, e);
-            });
-          });
-          return Promise.all(rollbackProms).then(function(){
-            throw err; // re-lanzar el error original
-          });
-        }
-        throw err;
-      });
-    });
+  return apiPost('rpc/cc_generar_cuotas_web',{p_pedido_id:pedidoId, p_plan_id:planId}).then(function(res){
+    if(!res || !res.ok){ throw new Error((res && res.error) || 'No se pudieron generar las cuotas'); }
+    if(res.ya_existian){ console.warn('[catalogo cc] cuotas ya existían para pedido '+pedidoId); return { cuotas:0, ya_existian:true }; }
+    console.log('[catalogo cc] '+res.cuotas+' cuotas generadas para pedido '+pedidoId);
+    return { cuotas:res.cuotas, totalConRecargo:res.totalConRecargo };
   });
 }
 
