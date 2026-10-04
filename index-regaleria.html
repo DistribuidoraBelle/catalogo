@@ -1,7 +1,7 @@
 <!DOCTYPE html>
 <html lang="es">
 <head>
-<!-- BELLE_BUILD 20261004-0300 catalogo-liviano -->
+<!-- BELLE_BUILD 20261004-0500 pedido-atomico -->
 <meta charset="UTF-8">
 <link rel="icon" type="image/svg+xml" href="favicon.svg">
 <meta name="viewport" content="width=device-width,initial-scale=1.0">
@@ -8753,7 +8753,8 @@ function addCart(id){
       etiqueta:r.oferta_etiqueta||'',
       precio_aplicado:price,
       multi_paga:r.multi_paga||null,
-      multi_lleva:r.multi_lleva||null
+      multi_lleva:r.multi_lleva||null,
+      ts:Date.now()   // auditoría 2026-10-04: el precio de oferta guardado vence a las 48 h
     };
   }
   cart[id]={id:id,nombre:p.nombre,qty:st.qty,seg:seg,precio:price,
@@ -9072,6 +9073,12 @@ function recomputarBonificados(){
   });
 }
 
+// Oferta guardada en el carrito: vale 48 h desde que se agregó (antes no vencía nunca).
+function _ofertaSnapVigente(item){
+  if(!item || !item.oferta || !item.oferta.precio_aplicado) return false;
+  var ts=item.oferta.ts; if(!ts) return true; // carritos viejos sin sello: se respetan
+  return (Date.now()-ts) < 48*3600*1000;
+}
 function renderDrawer(){
   recomputarBonificados();
   var items=Object.values(cart);var db=document.getElementById("db");
@@ -9164,7 +9171,7 @@ function renderDrawer(){
       // ── Snapshot de oferta ──
       // Si al agregar al carrito el cliente tenía una oferta vigente, respetamos
       // ese precio aunque la oferta haya vencido (decisión de Ger).
-      if(item.oferta && item.oferta.precio_aplicado){
+      if(_ofertaSnapVigente(item)){
         price = item.oferta.precio_aplicado;
         seg   = item.seg || 'pi';
         segLabel = '🔥 ' + (item.oferta.etiqueta || 'oferta');
@@ -9191,6 +9198,8 @@ function renderDrawer(){
           sub=price*item.qty;total+=sub;
           var segLabels={pm:"precio x10",pe:"precio x3",pi:"precio unitario"};segLabel=segLabels[seg];
           if(seg!==item.seg){upgrades.push(_nomMl(item.nombre, item.prodId||item.id));if(cart[item.id]){cart[item.id].seg=seg;cart[item.id].precio=price;}}
+          // auditoría 2026-10-04: si cambió el precio (cotización, lista) sin cambiar el segmento, el carrito también se actualiza
+          else if(cart[item.id] && price>0 && cart[item.id].precio!==price){ cart[item.id].precio=price; }
         }
       }
     }
@@ -9857,7 +9866,7 @@ function _catCobCalcSubtotal(){
       total += (item.precio||0) * (item.qty||1);
     } else if(item.isDecan){
       total += (item.precio||0) * (item.qty||1);
-    } else if(item.oferta && item.oferta.precio_aplicado){
+    } else if(_ofertaSnapVigente(item)){
       // Oferta snapshot: respetar siempre el precio que vio el cliente al agregar
       total += (item.oferta.precio_aplicado||0) * (item.qty||1);
     } else {
@@ -11929,12 +11938,76 @@ function _sendWAOriginal(){
   var _planElegido = _esCCCheckout ? (window._catCCPlanElegido || null) : null;
 
   // Guardar pedido con todos los items
+  // Auditoría 2026-10-04: el pedido y la reserva de stock se hacen en UNA transacción en la base
+  // (RPC crear_pedido_web). Si falta stock de algo no se crea nada y se avisa qué falta; antes el
+  // pedido quedaba creado con reservas a medias. La base además rechaza perfumes por debajo del
+  // precio mayorista sin oferta y totales que no cierran (los precios ya no se confían al navegador).
   var _crearPedidoBelle=function(){
-  apiPost("pedidos_catalogo",pedidoData).then(function(rows){
+  // Qué hay que apartar: perfumes, componentes de combos, cosméticos por unidades y regalos
+  var todosIds=[];
+  allCartItems.forEach(function(item){
+    if(item.isDecan)return;
+    if(item.isBonificado){
+      // El regalo consume stock del producto regalado → reservarlo.
+      if(item.prodId){
+        var _grf=allProds.find(function(p){return p.id===item.prodId;});
+        todosIds.push({id:item.prodId,qty:item.qty||1,nombre:(_grf&&_grf.nombre)||item.nombre||('Prod #'+item.prodId)});
+      }
+      return;
+    }
+    if(item.isCombo){
+      var comboRef=combosPublicos.find(function(c){return c.id===item.comboId;});
+      if(comboRef&&comboRef.combo_items){
+        comboRef.combo_items.forEach(function(ci){
+          if(ci.producto_id&&!ci.es_decan){
+            // FIX 2 (2026-05-11): pasar nombre para logging del movimiento
+            var prodRef2=allProds.find(function(p){return p.id===ci.producto_id;});
+            todosIds.push({id:ci.producto_id,qty:(ci.cantidad||1)*(item.qty||1),nombre:(prodRef2&&prodRef2.nombre)||('Prod #'+ci.producto_id)+' (combo)'});
+          }
+        });
+      }
+    } else if(item.isCosm){
+      // Cosmético por caja: reservar UNIDADES reales (caja × cantidad de cajas)
+      var cpid=item.prodId;
+      if(cpid){
+        var cRef=allProds.find(function(p){return p.id===cpid;});
+        todosIds.push({id:cpid,qty:(item.cajaCant||1)*(item.qty||1),nombre:(cRef&&cRef.nombre)||item.nombre||('Prod #'+cpid)});
+      }
+    } else {
+      var pid=parseInt(item.id);
+      if(pid){
+        var prodRef=allProds.find(function(p){return p.id===pid;});
+        todosIds.push({id:pid,qty:item.qty||1,nombre:(prodRef&&prodRef.nombre)||item.nombre||('Prod #'+pid)});
+      }
+    }
+  });
+  var qtxProd={};
+  var qtxNombre={};
+  todosIds.forEach(function(x){
+    qtxProd[x.id]=(qtxProd[x.id]||0)+x.qty;
+    if(x.nombre)qtxNombre[x.id]=x.nombre;
+  });
+  var _reservas=Object.keys(qtxProd).map(function(pid){ return {id:parseInt(pid), qty:qtxProd[pid], nombre:qtxNombre[pid]||('Prod #'+pid)}; });
+  apiPost("rpc/crear_pedido_web",{p_pedido:pedidoData, p_reservas:_reservas}).then(function(res){
+    if(!res || !res.ok){
+      if(res && res.motivo==='sin_stock'){
+        var _fallasM=(res.faltantes||[]).map(function(f){ return {pid:f.pid, nombre:f.nombre||('Prod #'+f.pid), qty:f.qty, disp:f.disp}; });
+        try{
+          _avisoSinStockModal(_fallasM,{
+            icono:'📦',
+            titulo:'Falta stock para tu pedido',
+            intro:'Tu pedido '+nroOrden+' no se envió porque estos productos no tienen stock suficiente:',
+            nota:'Ajustá las cantidades y volvé a intentar.'
+          });
+        }catch(eN){ console.warn('[belle-cat] aviso sin stock:',eN); }
+        _logAct('pedido_web_sin_stock', {nro_orden:nroOrden, faltantes:_fallasM}, {exito:false, error_msg:'sin stock'});
+        var eSS=new Error('__sin_stock__'); eSS.silencioso=true; throw eSS;
+      }
+      var eP=new Error((res && (res.error||res.message)) || 'Pedido no registrado'); eP.mensajeUsuario=(res && res.error) || null; throw eP;
+    }
+    var pedCreado = res.pedido;
+    if(!pedCreado || !pedCreado.id){ throw new Error("Pedido no registrado: sin respuesta de la base"); }
     // FEAT CC v2 (2026-05-14): si es CC y hay plan, generar cuotas automáticamente
-    var pedCreado = Array.isArray(rows) && rows.length ? rows[0] : null;
-    // FIX 2026-09-23: sin fila creada no hay pedido → cortar acá (nada de reservar stock ni vaciar el carrito)
-    if(!pedCreado || !pedCreado.id){ throw new Error("Pedido no registrado: "+((rows && (rows.message||rows.hint||rows.details))||"sin respuesta de la base")); }
     if(_esCCCheckout && pedCreado && pedCreado.id && _planElegido){
       // Generar cuotas con el plan elegido por el cliente
       _catGenerarCuotasCliente(pedCreado.id, ctx.cliente_id, _planElegido, total + (ctx.costo_envio||0)).catch(function(e){
@@ -11944,82 +12017,7 @@ function _sendWAOriginal(){
     window._sendingOrder=false;
     var waBtn=document.getElementById('waBtn');
     if(waBtn){waBtn.disabled=false;waBtn.style.opacity='';}
-    // Reservar stock — usar _reservarProducto que lee BD fresca, con reintento
-    var todosIds=[];
-    allCartItems.forEach(function(item){
-      if(item.isDecan)return;
-      if(item.isBonificado){
-        // El regalo consume stock del producto regalado → reservarlo.
-        if(item.prodId){
-          var _grf=allProds.find(function(p){return p.id===item.prodId;});
-          todosIds.push({id:item.prodId,qty:item.qty||1,nombre:(_grf&&_grf.nombre)||item.nombre||('Prod #'+item.prodId)});
-        }
-        return;
-      }
-      if(item.isCombo){
-        var comboRef=combosPublicos.find(function(c){return c.id===item.comboId;});
-        if(comboRef&&comboRef.combo_items){
-          comboRef.combo_items.forEach(function(ci){
-            if(ci.producto_id&&!ci.es_decan){
-              // FIX 2 (2026-05-11): pasar nombre para logging del movimiento
-              var prodRef2=allProds.find(function(p){return p.id===ci.producto_id;});
-              todosIds.push({id:ci.producto_id,qty:(ci.cantidad||1)*(item.qty||1),nombre:(prodRef2&&prodRef2.nombre)||('Prod #'+ci.producto_id)+' (combo)'});
-            }
-          });
-        }
-      } else if(item.isCosm){
-        // Cosmético por caja: reservar UNIDADES reales (caja × cantidad de cajas)
-        var cpid=item.prodId;
-        if(cpid){
-          var cRef=allProds.find(function(p){return p.id===cpid;});
-          todosIds.push({id:cpid,qty:(item.cajaCant||1)*(item.qty||1),nombre:(cRef&&cRef.nombre)||item.nombre||('Prod #'+cpid)});
-        }
-      } else {
-        var pid=parseInt(item.id);
-        if(pid){
-          var prodRef=allProds.find(function(p){return p.id===pid;});
-          todosIds.push({id:pid,qty:item.qty||1,nombre:(prodRef&&prodRef.nombre)||item.nombre||('Prod #'+pid)});
-        }
-      }
-    });
-    var qtxProd={};
-    var qtxNombre={};
-    todosIds.forEach(function(x){
-      qtxProd[x.id]=(qtxProd[x.id]||0)+x.qty;
-      if(x.nombre)qtxNombre[x.id]=x.nombre;
-    });
-    // Recolectar promesas para detectar fallas y loggear (importante para no quedar con
-    // pedidos sin stock reservado).
-    // FIX 2 (2026-05-11): pasar nombre y nro_orden a _reservarProducto para registro en movimientos_stock
-    var reservasPromesas = Object.keys(qtxProd).map(function(pid){
-      return _reservarProducto(parseInt(pid), qtxProd[pid], 0, qtxNombre[pid], nroOrden).then(function(res){
-        return Object.assign({pid:pid, qty:qtxProd[pid]}, res || {});
-      });
-    });
-    Promise.all(reservasPromesas).then(function(resultados){
-      var fallidas = resultados.filter(function(r){return !r.ok;});
-      if(fallidas.length){
-        // Algunas reservas fallaron — loggear para que el admin pueda revisar manualmente.
-        console.error('[belle-cat] Reservas fallidas:', fallidas);
-        _logAct('reservas_fallidas_pedido_web', {
-          nro_orden: nroOrden,
-          cant_fallidas: fallidas.length,
-          cant_total: resultados.length,
-          fallidas: fallidas.map(function(f){return {pid:f.pid, qty:f.qty, error:f.error};})
-        }, {exito:false, error_msg:'Reservas no pudieron aplicarse: '+fallidas.length+'/'+resultados.length});
-        // 🆕 2026-08: avisar EN PANTALLA con un modal (caso raro de carrera: el pedido ya se creó
-        // pero algún renglón no se pudo apartar). El vendedor además lo ve con "!" en su app.
-        try{
-          var _fallasM=fallidas.map(function(f){ return {pid:f.pid, nombre:qtxNombre[f.pid]||('Prod #'+f.pid), qty:f.qty, disp:null}; });
-          _avisoSinStockModal(_fallasM,{
-            icono:'📦',
-            titulo:'Atención: falta stock en tu pedido',
-            intro:'Tu pedido '+nroOrden+' se envió, pero estos productos quedaron sin stock para apartar:',
-            nota:'Un vendedor lo va a revisar con vos.'
-          });
-        }catch(eN){ console.warn('[belle-cat] aviso reservas fallidas:',eN); }
-      }
-    });
+    // (el stock ya quedó reservado dentro de la misma transacción que creó el pedido)
     // FIX: window.open y vaciado del carrito DENTRO del .then() — solo si el pedido se guardó
     var urlWA = "https://wa.me/"+waNumber+"?text="+encodeURIComponent(msg);
     // Intentar abrir WhatsApp. Si el navegador bloquea (mobile Safari especialmente lo hace
@@ -12078,10 +12076,17 @@ function _sendWAOriginal(){
     window._sendingOrder=false;
     var waBtn=document.getElementById('waBtn');
     if(waBtn){waBtn.disabled=false;waBtn.style.opacity='';}
+    if(e && e.silencioso){
+      // sin stock: ya se mostró el modal con el detalle, el carrito queda como estaba
+      try { window.dispatchEvent(new CustomEvent('belle:pedido-enviado', {detail:{exito:false, error:'sin stock'}})); } catch(ev){}
+      return;
+    }
     // Detectar si es error de columna inexistente (SQL no ejecutado)
     var errMsg = (e && e.message) || String(e);
     var msgUsuario;
-    if(/column\s|does not exist|undefined column/i.test(errMsg)){
+    if(e && e.mensajeUsuario){
+      msgUsuario = e.mensajeUsuario;
+    } else if(/column\s|does not exist|undefined column/i.test(errMsg)){
       msgUsuario = 'Hay una actualización pendiente del sistema. Por favor coordiná tu pedido por WhatsApp directamente.';
       console.error('[belle-cat] Error de columna BD — admin debe ejecutar cobros_envios.sql:', errMsg);
     } else if(/network|fetch|failed/i.test(errMsg)){
