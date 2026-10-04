@@ -1040,8 +1040,28 @@ function _sbAuth(){
   return _sbAuthClient;
 }
 
+// 2026-10-04: sesión vencida → volver a la pantalla de login UNA sola vez (varias escrituras en
+// paralelo no deben apilar toasts ni cerrar sesión repetidas veces). El carrito se conserva para
+// que, al volver a entrar, el vendedor pueda seguir donde estaba.
+var _sesionIniciada=false, _sesionVencidaAvisada=false;
+function _sesionVencida(){
+  _authToken=null;
+  if(_sesionVencidaAvisada) return;
+  _sesionVencidaAvisada=true;
+  try{var _c=_sbAuth(); if(_c)_c.auth.signOut();}catch(_e){}
+  var _ls=document.getElementById("loginScreen"); if(_ls)_ls.style.display="flex";
+  var _ap=document.getElementById("app"); if(_ap)_ap.style.display="none";
+  try{ if(typeof toast==="function") toast("Sesión vencida, volvé a iniciar sesión","terr",6000); }catch(_e2){}
+}
 function api(method,table,data,filters){
   var url=SB_URL+"/rest/v1/"+table+(filters?"?"+filters:"");
+  var esEscritura=(method==="POST"||method==="PATCH"||method==="DELETE"||method==="PUT");
+  // 2026-10-04: una ESCRITURA sin token de sesión (la sesión se perdió después de haber entrado) no debe
+  // salir con la clave anónima: se rechaza y se vuelve al login. Las lecturas conservan el fallback.
+  if(esEscritura && !_authToken && _sesionIniciada){
+    _sesionVencida();
+    return Promise.reject(new Error("Sesión vencida, volvé a iniciar sesión"));
+  }
   var h={"Content-Type":"application/json","apikey":SB_KEY,"Authorization":"Bearer "+(_authToken||SB_KEY)};
   if(method==="POST"||method==="PATCH")h["Prefer"]="return=representation";
   return fetch(url,{method:method,headers:h,body:data?JSON.stringify(data):undefined})
@@ -1050,10 +1070,7 @@ function api(method,table,data,filters){
       return r.json().then(function(json){
         if(!r.ok){
           if(r.status===401 && _authToken){
-            _authToken=null;
-            try{var _c=_sbAuth(); if(_c)_c.auth.signOut();}catch(_e){}
-            var _ls=document.getElementById("loginScreen"); if(_ls)_ls.style.display="flex";
-            var _ap=document.getElementById("app"); if(_ap)_ap.style.display="none";
+            _sesionVencida();
           }
           // Fix #1: extraer mensaje útil del error y propagarlo SOLO para mutaciones
           var msg=(json&&(json.message||json.error||json.hint))||('HTTP '+r.status);
@@ -1133,30 +1150,26 @@ function patchStockFresco(prodId, delta, motivo){
   var pid = parseInt(prodId,10); if(!pid) return Promise.resolve();
   // 2026-09-25: ajuste ATÓMICO en la base (ajustar_stock hace el read-modify-write con lock de fila).
   // Antes dos cobros/reservas simultáneos del mismo producto se pisaban (última escritura gana).
+  // 2026-10-04: se sacó el fallback leer-y-pisar (no atómico) y el catch que "resolvía OK" después de un
+  // error: ahora si el RPC falla la promesa se RECHAZA con el id del producto, para que el flujo que
+  // llamó lo muestre y no siga como si el stock se hubiera movido.
   function sincronizar(res){
     var pm=(typeof prods!=='undefined'&&Array.isArray(prods)?prods:[]).find(function(p){return p.id===pid;});
     if(pm && res){
       ['stock_actual','reserva','vendido_david','vendido_facu','en_viaje','reingreso_at'].forEach(function(k){ if(res[k]!==undefined) pm[k]=res[k]; });
     }
   }
-  function viejo(){
-    return apiGet('productos','select=id,stock_actual,reserva,en_viaje,vendido_david,vendido_facu&id=eq.'+pid).then(function(rows){
-      var r=rows&&rows[0]; if(!r) return;
-      var patch={};
-      ['stock_actual','reserva','en_viaje','vendido_david','vendido_facu'].forEach(function(k){ if(delta[k]!==undefined) patch[k]=Math.max(0,(r[k]||0)+delta[k]); });
-      if(delta.stock_actual>0&&(r.stock_actual||0)===0&&patch.stock_actual>0) patch.reingreso_at=new Date().toISOString();
-      sincronizar(patch);
-      return apiPatch('productos',patch,'id=eq.'+pid);
-    });
+  function fallo(detalle){
+    var err=new Error('No se pudo ajustar el stock del producto #'+pid+(motivo?' ('+motivo+')':'')+(detalle?': '+detalle:''));
+    err.pid=pid; err.delta=delta;
+    console.error('[stock] ajustar_stock falló', pid, delta, detalle);
+    return Promise.reject(err);
   }
   return apiPost('rpc/ajustar_stock',{ p_pid:pid, p_stock:delta.stock_actual||0, p_reserva:delta.reserva||0, p_vd:delta.vendido_david||0, p_vf:delta.vendido_facu||0, p_en_viaje:delta.en_viaje||0 })
     .then(function(res){
       if(res && res.ok){ sincronizar(res); return res; }
-      console.warn('[stock] ajustar_stock no disponible, se usa el método viejo:', res && res.error);
-      return viejo();
-    })
-    .catch(function(e){ console.warn('[stock] ajustar_stock falló, se usa el método viejo:', e); return viejo(); })
-    .catch(function(e){ console.error('patchStockFresco error:',e); });
+      return fallo((res && res.error) || 'respuesta inválida');
+    }, function(e){ return fallo(e && e.message ? e.message : String(e)); });
 }
 
 // 🆕 2026-08 ANTI-SOBREVENTA VENDEDOR: revalida stock FRESCO de la BD antes de crear un pedido
@@ -1184,6 +1197,29 @@ function _verifStockFrescoPedido(items){
     });
     return faltas;
   }).catch(function(e){ console.warn("[verif stock fresco]",e); return null; });
+}
+// 2026-10-04: al EDITAR un pedido se valida contra stock FRESCO solo lo que se AGREGA (delta>0, ya con combos
+// expandidos a sus frascos): lo que ya estaba reservado no necesita stock libre. diffs: salida de _diffReservaPedido.
+// Devuelve Promise<faltas> ([] = OK) o null si falló la red (mismo criterio que _verifStockFrescoPedido).
+function _verifStockDeltaEdicion(diffs){
+  var pos=(diffs||[]).filter(function(d){return d.delta>0;});
+  if(!pos.length)return Promise.resolve([]);
+  return apiGet("productos","select=id,nombre,stock_actual&id=in.("+pos.map(function(d){return d.pid;}).join(",")+")").then(function(rows){
+    var m={};(Array.isArray(rows)?rows:[]).forEach(function(p){m[p.id]=p;});
+    var faltas=[];
+    pos.forEach(function(d){
+      var p=m[d.pid], disp=p?(p.stock_actual||0):0;
+      if(d.delta>disp)faltas.push({nombre:(p&&p.nombre)||d.nombre||("Prod #"+d.pid), pid:d.pid, pedido:d.delta, disp:disp});
+    });
+    return faltas;
+  }).catch(function(e){ console.warn("[verif stock edición]",e); return null; });
+}
+// Ítems del carrito en formato de pedido, solo con lo que importa para el stock (para el diff de una edición)
+function _cartItemsParaStock(){
+  return Object.values(cart).map(function(it){
+    if(it.isCombo) return {isCombo:true,combo_id:it.comboId||null,qty:it.qty||1,comboItems:_comboSnapCart(it),nombre:it.nombre};
+    return {producto_id:(it.isDecan||it.isCosm||it.isBonificado)?(it.prodId||null):it.id,qty:it.qty||1,cajaCant:it.cajaCant||1,isDecan:!!it.isDecan,nombre:it.nombre};
+  });
 }
 function _msgFaltasStock(faltas){
   return "⚠️ SIN STOCK suficiente:\n\n"+faltas.map(function(f){
@@ -1221,6 +1257,47 @@ function _comboCompSync(item){
   var cid=item&&(item.comboId||comboIdDeItem(item));
   var arr=(item&&Array.isArray(item.comboItems)&&item.comboItems.length)?item.comboItems:((window._comboCompCache&&cid&&window._comboCompCache[cid])||[]);
   return arr.filter(function(c){ return c&&c.producto_id&&!c.es_decan; }).map(function(c){ return {producto_id:Number(c.producto_id),cantidad:parseInt(c.cantidad)||1,producto_nombre:c.producto_nombre||''}; });
+}
+// _diffReservaPedido (2026-10-04): ÚNICA fuente del diff de reserva al editar un pedido (la usan la edición
+// desde "Guardar cambios" y la edición desde "Reservar"; antes cada una tenía su propia copia y no coincidían:
+// una multiplicaba por cajaCant y la otra no, una liberaba cajas reducidas y la otra no).
+// origItems / newItems: ítems en formato de pedido ({producto_id, qty, cajaCant, isDecan, combo_id/isCombo, comboItems}).
+// Devuelve Promise<[{pid, delta, nombre}]> con delta en UNIDADES REALES (qty × cajaCant), combos expandidos a
+// sus frascos (los decants no mueven stock). delta>0 = reservar más, delta<0 = liberar. Sin ceros.
+function _diffReservaPedido(origItems, newItems){
+  var acc={}, nom={}, combos={}, combosRef={};
+  function sumar(it, signo){
+    if(!it||it.isDecan||it.segmento==='decan')return;
+    var cid=comboIdDeItem(it);
+    if(cid){
+      combos[cid]=(combos[cid]||0)+signo*(parseInt(it.qty)||1);
+      if(!combosRef[cid]&&Array.isArray(it.comboItems)&&it.comboItems.length)combosRef[cid]=it;   // foto de componentes
+      return;
+    }
+    if(it.isCombo||it.segmento==='combo')return;   // combo sin id resoluble: no se puede mover stock
+    var pid=parseInt(it.producto_id,10); if(!pid||isNaN(pid))return;
+    acc[pid]=(acc[pid]||0)+signo*(parseInt(it.qty)||1)*(parseInt(it.cajaCant)||1);
+    if(it.nombre&&!nom[pid])nom[pid]=it.nombre;
+  }
+  (origItems||[]).forEach(function(o){sumar(o,-1);});
+  (newItems||[]).forEach(function(n){sumar(n,+1);});
+  var proms=Object.keys(combos).map(function(cidS){
+    var d=combos[cidS]; if(!d)return Promise.resolve();
+    return _comboComponentes(parseInt(cidS,10), combosRef[cidS]).then(function(ci){
+      (Array.isArray(ci)?ci:[]).forEach(function(c){
+        var pid=Number(c.producto_id); if(!pid)return;
+        acc[pid]=(acc[pid]||0)+d*(parseInt(c.cantidad)||1);
+        if(c.producto_nombre&&!nom[pid])nom[pid]=c.producto_nombre;
+      });
+    });
+  });
+  return Promise.all(proms).then(function(){
+    return Object.keys(acc).filter(function(k){return acc[k]!==0;}).map(function(k){
+      var pid=parseInt(k,10);
+      var pm=(typeof prods!=='undefined'&&Array.isArray(prods))?prods.find(function(p){return p.id===pid;}):null;
+      return {pid:pid, delta:acc[k], nombre:nom[k]||(pm&&pm.nombre)||('Prod #'+pid)};
+    });
+  });
 }
 // Foto de qué trae el combo para guardarla en el pedido
 function _comboSnapCart(item){
@@ -1306,6 +1383,7 @@ function _vendedorNombre(vid){
 function _entrarStaff(perfil){
   VENDEDOR_ID = perfil.vendedor_id || 1;
   VENDEDOR_NOMBRE = perfil.nombre || "Staff";
+  _sesionIniciada=true; _sesionVencidaAvisada=false;   // a partir de acá, escribir sin token = sesión vencida
   document.getElementById("loginScreen").style.display="none";
   document.getElementById("app").style.display="block";
   var hu=document.getElementById("hUser"); if(hu)hu.textContent=VENDEDOR_NOMBRE;
@@ -1390,6 +1468,9 @@ function _appInstalarApp(){
 function doLogout(){
   try{ var c=_sbAuth(); if(c) c.auth.signOut(); }catch(e){}
   _authToken=null;
+  _sesionIniciada=false;
+  // 2026-10-04: el timer de alertas de depósito se corta al salir (antes quedaba vivo y se duplicaba en cada login)
+  if(window._depTimer){ clearInterval(window._depTimer); window._depTimer=null; }
   cart={};cstate={};decanState={};
   document.getElementById("loginScreen").style.display="flex";
   document.getElementById("app").style.display="none";
@@ -1402,7 +1483,11 @@ function initApp(){
   try{ localStorage.setItem('belle_admin_mode','1'); }catch(e){}
   loadConfig();loadProds();checkDots();
   _mlCargar(); // índice de ML (incluye inactivos) para mostrar mililitros en todos lados
-  setTimeout(_depAlertasBadge,3500); setInterval(_depAlertasBadge,10*60*1000); // alertas de venta en depósito
+  // alertas de venta en depósito — un solo timer por sesión (se limpia antes de crear otro y en doLogout)
+  if(window._depTimer){ clearInterval(window._depTimer); }
+  setTimeout(_depAlertasBadge,3500); window._depTimer=setInterval(_depAlertasBadge,10*60*1000);
+  // realtime: si el sondeo inicial ya se rindió (login tardío), se arranca desde acá (initRealtime es idempotente)
+  setTimeout(function(){ try{ if(typeof initRealtime==='function') initRealtime(); }catch(e){} }, 5000);
 }
 
 function loadConfig(){
@@ -2019,17 +2104,23 @@ function _pushUrlPara(lp, lid, lurl){
   if((lp==='url'||lp==='whatsapp') && lurl) return lurl;
   return './index.html';
 }
+// 2026-10-04: único punto de salida del push del servidor. Sin token de sesión NO se manda (antes salía
+// con la clave anónima). Devuelve Promise<respuesta|null> (null = salteado o falló): sigue siendo best-effort.
+function _enviarPush(payload){
+  if(!_authToken){ console.warn('[push] sin sesión, no se envía'); return Promise.resolve(null); }
+  try{
+    return fetch(SB_URL+"/functions/v1/send-push",{
+      method:"POST",
+      headers:{"Content-Type":"application/json","apikey":SB_KEY,"Authorization":"Bearer "+_authToken},
+      body:JSON.stringify(payload)
+    }).then(function(r){ return r.json().catch(function(){return null;}); }).catch(function(){ return null; });
+  }catch(e){ return Promise.resolve(null); }
+}
 function _dispararPushNotif(ids, titulo, mensaje, image, urlDestino){
   if(!ids||!ids.length)return;
-  try{
-    fetch(SB_URL+"/functions/v1/send-push",{
-      method:"POST",
-      headers:{"Content-Type":"application/json","apikey":SB_KEY,"Authorization":"Bearer "+(_authToken||SB_KEY)},
-      body:JSON.stringify({titulo:titulo, mensaje:mensaje, image:(image||null), url:(urlDestino||"./index.html"), cliente_ids:ids})
-    }).then(function(r){ return r.json().catch(function(){return null;}); }).then(function(res){
-      if(res && typeof res.sent==='number' && res.sent>0 && typeof toast==='function') toast("📲 Push enviado a "+res.sent+" dispositivo(s)","tok");
-    }).catch(function(){ /* emisor aún no desplegado: silencioso */ });
-  }catch(e){}
+  _enviarPush({titulo:titulo, mensaje:mensaje, image:(image||null), url:(urlDestino||"./index.html"), cliente_ids:ids}).then(function(res){
+    if(res && typeof res.sent==='number' && res.sent>0 && typeof toast==='function') toast("📲 Push enviado a "+res.sent+" dispositivo(s)","tok");
+  });
 }
 function loadNotifHistorial(){
   var box=document.getElementById('notifHistBox'); if(!box)return;
@@ -2307,6 +2398,14 @@ function aplicarOferta(r,oferta,esCC){
   return out;
 }
 
+// Precio automático del decant a partir del precio unitario, con la config dinámica (_configDecans).
+// 2026-10-04: única fórmula (la calculadora de cotizaciones la tenía copiada a mano con 10% + $3000 fijos).
+function _precioDecanAuto(pi){
+  var _cdc = window._configDecans || {precio_decan_pct:0.10, precio_decan_fijo:3000};
+  var _pct = parseFloat(_cdc.precio_decan_pct)||0.10;
+  var _fij = parseInt(_cdc.precio_decan_fijo)||3000;
+  return pi>0?(Math.ceil(pi*_pct/1000)*1000+_fij):0;
+}
 function calcP(p){
   var ci=p.costo_ind||0, cl=p.costo_log||0;
   // MULTIPLO.SUPERIOR al entero (igual que Google Sheet)
@@ -2323,10 +2422,7 @@ function calcP(p){
   var rM=pm>0&&ct>0?((pm-ct*cotiz)/pm*100):0;
   var rE=pe>0&&ct>0?((pe-ct*cotiz)/pe*100):0;
   // FEAT (2026-05-11): precio_decan auto usa config dinámica
-  var _cdcV = window._configDecans || {precio_decan_pct:0.10, precio_decan_fijo:3000};
-  var _pctV = parseFloat(_cdcV.precio_decan_pct)||0.10;
-  var _fijV = parseInt(_cdcV.precio_decan_fijo)||3000;
-  var decan=p.precio_decan>0?p.precio_decan:(pi>0?(Math.ceil(pi*_pctV/1000)*1000+_fijV):0);
+  var decan=p.precio_decan>0?p.precio_decan:_precioDecanAuto(pi);
   var r={ct:ct,pm:pm,pe:pe,pi:pi,rM:rM,rE:rE,decan:decan};
   // ── INTEGRACIÓN CON OFERTAS ──
   if(typeof ofertaParaProducto==='function'){
@@ -2404,7 +2500,13 @@ function calcAlertaPrecio(items){
 // 🐛 FIX 2026-08-08: ahora excluye también combos y cajas de cosmética — igual que
 // renderDrawer y confirmarVenta. Antes el catálogo iluminaba "x10" contando combos
 // pero el drawer cobraba x3 → el vendedor cantaba un precio y se cobraba otro.
-function getCartTotalUnits(){return Object.values(cart).filter(function(i){return !i.isDecan && !i.isBonificado && !i.isCombo && !i.isCosm;}).reduce(function(s,i){return s+i.qty;},0);}
+// Unidades que cuentan para los umbrales x3/x10: perfumes sueltos. Decants, combos, cajas y BONIFICADOS quedan
+// afuera: regalar un frasco no debe abaratar el resto del pedido (criterio del presupuesto, que es lo que ve el
+// cliente). 2026-10-04: una sola definición para el carrito, la venta, la edición, la reserva y el presupuesto.
+function _totalUnidadesSeg(items){
+  return (items||[]).filter(function(i){return i&&!i.isDecan&&!i.isBonificado&&!i.isCombo&&!i.isCosm;}).reduce(function(s,i){return s+(parseInt(i.qty)||0);},0);
+}
+function getCartTotalUnits(){return _totalUnidadesSeg(Object.values(cart));}
 
 // Helper: detecta si el cliente del carrito tiene CC habilitada o precio mayorista
 // (usado para forzar precio mayorista en getBestSeg sin tocar 20 invocaciones)
@@ -2425,6 +2527,28 @@ function _segPorPrecio(item, r, segCalc){
   var pc=r[segCalc]||r.pi; if(pc && Math.abs(pr-pc)<=1) return segCalc||'pi';
   return 'especial';
 }
+// _calcLineaPrecio (2026-10-04): ÚNICA regla de precio/segmento por línea de perfume. La comparten la venta
+// (confirmarVenta), la edición (executeVenta), la reserva (confirmarReservarPed), la transferencia y el
+// presupuesto; antes cada flujo tenía su copia y el presupuesto podía no coincidir con el pedido.
+// · totalUnits: unidades que cuentan para x3/x10 (ver _totalUnidadesSeg; los bonificados NO suman).
+// · p: producto en memoria (null si no está → se respeta el precio del carrito).
+// Devuelve {seg, price, label}. seg: 'bonificado' | 'especial' | 'pi' | 'pe' | 'pm'.
+function _calcLineaPrecio(item, totalUnits, p){
+  var pr=parseFloat(item.price)||0;
+  if(item.isBonificado||pr===0) return {seg:"bonificado",price:0,label:"Bonificado"};   // precio 0 = regalo (igual que el carrito)
+  if(item.precioManual) return {seg:"especial",price:pr,label:"Precio especial"+(item.descMotivo?" ("+item.descMotivo+")":"")};
+  var _pu=p?(p.precio_pestana||0):0;
+  if(_pu>0) return {seg:"pi",price:_pu,label:"Precio único"};
+  if(!p) return {seg:(item.seg==="pm"||item.seg==="pe")?item.seg:"pi",price:pr,label:_segPrecioLabel(item.seg)};
+  var r=calcP(p);
+  var segCalc=getBestSeg(totalUnits,r);
+  var precioCalc=r[segCalc]||r.pi;
+  var sp=_segPorPrecio(item,r,segCalc);
+  if(sp!==segCalc && sp!=='especial') return {seg:sp,price:pr,label:_segPrecioLabel(sp)};   // x10/x3/x1 real del producto (ej. VIP/CC)
+  if(Math.abs(pr-precioCalc)>1) return {seg:"especial",price:pr,label:"Precio especial"};
+  return {seg:segCalc,price:precioCalc,label:_segPrecioLabel(segCalc)};
+}
+function _segPrecioLabel(s){ return s==="pm"?"x10 Mayor":s==="pe"?"x3 Medio":"x1 Unitario"; }
 function getBestSeg(total,r){
   // Cliente con CC habilitada → SIEMPRE precio mayorista (x10), sin importar la cantidad.
   // Solo aplica si el producto realmente tiene precio mayorista calculable (r.pm).
@@ -5634,7 +5758,7 @@ window._pedSaldarItems = function(pedidoId, opts){
               return apiPost('movimientos_stock', { producto_id:c.producto_id, producto_nombre:c.producto_nombre||'', tipo:'venta', cantidad:cant, motivo:motivo+' (combo '+(it.nombre||cid)+')', usuario:usuario, periodo:periodo }).catch(function(){}).then(function(){ return r; });
             });
           }));
-        }).catch(function(e){ console.error('[saldar combo]', e); }));
+        }).catch(function(e){ console.error('[saldar combo]', e); throw e; }));   // 2026-10-04: el fallo de stock corta el cobro
         proms.push(apiPost('ventas', Object.assign(base, {producto_id:null, segmento:'combo', combo_id:cid})));
         return;
       }
@@ -6526,8 +6650,9 @@ function _crearComisionMarcelaSiAplica(pedido){
 
 // Tomar un pedido sin asignar → vendedor_id = mío + log
 function tomarPedido(pedId){
-  if(!confirm("Tomar este pedido y asignártelo? Solo vos podrás gestionarlo después."))return;
-  apiGet("pedidos_catalogo","select=id,vendedor_id,nro_orden&id=eq."+pedId+"&limit=1").then(function(rows){
+  if(!confirm("Tomar este pedido y asignártelo? Solo vos podrás gestionarlo después."))return Promise.resolve();
+  // 2026-10-04: devuelve la promesa para que _lockClick bloquee el doble clic del botón
+  return apiGet("pedidos_catalogo","select=id,vendedor_id,nro_orden&id=eq."+pedId+"&limit=1").then(function(rows){
     var p=rows&&rows[0];
     if(!p){toast("Pedido no encontrado","terr");return;}
     if(p.vendedor_id&&p.vendedor_id!==VENDEDOR_ID){
@@ -7055,9 +7180,21 @@ function confirmarVenta(){
   function _confBtnLiberar(){ if(_confBtn){_confBtn.disabled=false;_confBtn.textContent="Registrar venta";} }
 
   var _rgMinMsg=_rgVMinBloquea(); if(_rgMinMsg){ toast(_rgMinMsg,"twarn"); _confBtnLiberar(); return; }
-  // ── MODO EDICIÓN: guardar directo sin validaciones de venta ────────
+  // ── MODO EDICIÓN: validar stock FRESCO del delta y guardar ────────
   if(window._editandoPedidoId){
-    executeVenta(items,{});
+    // 2026-10-04: antes se guardaba sin ninguna validación de stock. Se valida solo lo que se AGREGA respecto
+    // del pedido original (combos expandidos a sus frascos); lo que ya estaba reservado no necesita stock libre.
+    _diffReservaPedido(window._editandoPedidoOrigItems||[], _cartItemsParaStock())
+      .then(_verifStockDeltaEdicion)
+      .then(function(faltas){
+        if(faltas&&faltas.length){
+          var f=faltas[0];
+          toast("Stock insuficiente: "+_nomMl(f.nombre,f.pid)+" (hay "+f.disp+", el cambio necesita "+f.pedido+")","terr",6000);
+          _confBtnLiberar(); return;
+        }
+        executeVenta(items,{});
+      })
+      .catch(function(e){ console.error("[editar] verificación de stock:",e); toast("No se pudo verificar el stock: "+((e&&e.message)||"probá de nuevo"),"terr"); _confBtnLiberar(); });
     return;
   }
   // ── 🆕 2026-08-08: venta con CLIENTE asignado → preguntar cómo se cobra ──
@@ -7128,44 +7265,18 @@ function confirmarVenta(){
       'Si lleva únicamente Decans, no cumple el mínimo configurado.';
     toast(_msgV,"twarn");_confBtnLiberar();return;
   }
-  // Respetar precios del carrito — si el precio difiere del calculado, es especial
-  var totalUnidadesFinales=items.filter(function(i){return !i.isDecan&&!i.isCombo&&!i.isCosm;}).reduce(function(s,i){return s+i.qty;},0);
+  // Precio/segmento por línea: regla única en _calcLineaPrecio (2026-10-04). Los bonificados no cuentan para x3/x10.
+  var totalUnidadesFinales=_totalUnidadesSeg(items);
   items.forEach(function(item){
     if(item.isDecan||item.isCombo)return;
     if(item.isCosm){item.seg=item.cajaLabel||("Caja x"+(item.cajaCant||1));item.total=(item.price*item.qty)-(item.descuento||0);return;}
     var p=prods.find(function(x){return x.id===item.id;});
-    if(!p)return;
-    if(item.precioManual){
-      item.seg="especial";
-      item.total=(item.price*item.qty)-(item.descuento||0);
-      return;
-    }
-    var _pu=p.precio_pestana||0;
-    if(_pu>0){
-      // Precio único configurado: respetar siempre
-      item.price=_pu;
-      item.seg="pi";
-      item.total=(_pu*item.qty)-(item.descuento||0);
-      return;
-    }
-    var r=calcP(p);
-    var segFinal=getBestSeg(totalUnidadesFinales,r);
-    var precioCalculado=r[segFinal]||r.pi;
-    var precioEnCart=item.price;
-    var _segPr=_segPorPrecio(item,r,segFinal);
-    if(_segPr!==segFinal && _segPr!=='especial'){ // el precio del carrito es x10/x3/x1 del producto (ej. VIP/CC): ese segmento
-      item.seg=_segPr; item.total=(precioEnCart*item.qty)-(item.descuento||0);
-    } else if(Math.abs(precioEnCart-precioCalculado)>1){
-      // Precio cambiado a mano → especial
-      item.seg="especial";
-      item.total=(precioEnCart*item.qty)-(item.descuento||0);
-      // Marcar como especial para que quede claro en el registro
-      if(!item.descMotivo)item.descMotivo="Precio especial acordado";
-    } else {
-      item.seg=segFinal;
-      item.price=precioCalculado;
-      item.total=(precioCalculado*item.qty)-(item.descuento||0);
-    }
+    if(!p&&!item.isBonificado)return;
+    var lp=_calcLineaPrecio(item,totalUnidadesFinales,p||null);
+    item.seg=lp.seg; item.price=lp.price;
+    item.total=lp.seg==="bonificado"?0:(lp.price*item.qty)-(item.descuento||0);
+    // Precio cambiado a mano sin motivo → que quede claro en el registro
+    if(lp.seg==="especial"&&!item.precioManual&&!item.descMotivo)item.descMotivo="Precio especial acordado";
   });
   // Check reservas
   // Incluir decans del cart en el check de reservas si tienen producto_id
@@ -7221,35 +7332,17 @@ function executeVenta(items,reservaDecs){
     });
     var combosCart=Object.values(cart).filter(function(i){return i.isCombo;});
     var allItems=items.filter(function(i){return !i.isCombo;}).concat(decans).concat(combosCart);
-    var totalUnidadesF=items.filter(function(i){return !i.isDecan&&!i.isCombo&&!i.isCosm&&!i.isBonificado;}).reduce(function(s,i){return s+i.qty;},0);
-    // Respetar precios del carrito — si el precio difiere del calculado, es especial
+    var totalUnidadesF=_totalUnidadesSeg(allItems);
+    // Precio/segmento por línea: regla única en _calcLineaPrecio (2026-10-04), la misma que la venta y el presupuesto
     allItems.forEach(function(item){
       if(item.isDecan||item.isCombo)return;
       if(item.isBonificado){item.seg="bonificado";item.price=0;item.total=0;return;}
       if(item.isCosm){item.seg=item.cajaLabel||("Caja x"+(item.cajaCant||1));item.total=(item.price*item.qty)-(item.descuento||0);return;}
-      var p=prods.find(function(x){return x.id===item.id;});if(!p)return;
-      if(item.precioManual||item.price===0){item.seg=item.price===0?"bonificado":"especial";item.total=(item.price*item.qty)-(item.descuento||0);return;}
-      var _pu=p.precio_pestana||0;
-      // Solo aplicar precio_pestana si el item no tiene precio especial ya asignado
-      if(_pu>0&&item.seg!=="especial"){
-        // Verificar si el precio actual difiere del pestana — si difiere, es especial
-        if(Math.abs(item.price-_pu)>1){item.seg="especial";item.total=(item.price*item.qty)-(item.descuento||0);return;}
-        item.price=_pu;item.seg="pi";item.total=(_pu*item.qty)-(item.descuento||0);return;
-      }
-      var r=calcP(p);
-      var segFinal=getBestSeg(totalUnidadesF,r);
-      var precioCalc=r[segFinal]||r.pi;
-      var _segPr2=_segPorPrecio(item,r,segFinal);
-      if(_segPr2!==segFinal && _segPr2!=='especial'){
-        item.seg=_segPr2; item.total=(item.price*item.qty)-(item.descuento||0);
-      } else if(Math.abs(item.price-precioCalc)>1){
-        item.seg="especial";
-        item.total=(item.price*item.qty)-(item.descuento||0);
-        if(!item.descMotivo)item.descMotivo="Precio especial acordado";
-      } else {
-        item.seg=segFinal;item.price=precioCalc;
-        item.total=(precioCalc*item.qty)-(item.descuento||0);
-      }
+      var p=prods.find(function(x){return x.id===item.id;});
+      var lp=_calcLineaPrecio(item,totalUnidadesF,p||null);
+      item.seg=lp.seg;item.price=lp.price;
+      item.total=lp.seg==="bonificado"?0:(lp.price*item.qty)-(item.descuento||0);
+      if(lp.seg==="especial"&&!item.precioManual&&!item.descMotivo)item.descMotivo="Precio especial acordado";
     });
     var newItemsData=allItems.map(function(item){
       if(item.isCombo){
@@ -7286,55 +7379,23 @@ function executeVenta(items,reservaDecs){
     // Usar items originales guardados en memoria al abrir la edición
     // NO leer de BD — podrían haber cambiado si hubo ediciones anteriores
     var origItems=window._editandoPedidoOrigItems||[];
-    var todosIds=[];
-    origItems.forEach(function(o){if(!o.isDecan&&o.producto_id&&todosIds.indexOf(o.producto_id)<0)todosIds.push(o.producto_id);});
-    newItemsData.forEach(function(n){if(!n.isDecan&&n.producto_id&&todosIds.indexOf(n.producto_id)<0)todosIds.push(n.producto_id);});
-    var stockProms=[];
-    // Ajustar stock productos individuales — patchStockFresco lee BD fresca internamente
-    if(todosIds.length){
-      var diffMap={};
-      origItems.forEach(function(o){
-        if(!o.isDecan&&o.producto_id){
-          diffMap[o.producto_id]=(diffMap[o.producto_id]||0)-(o.qty||1)*(parseInt(o.cajaCant)||1);   // 2026-09-25: unidades reales (cajas)
-        }
-      });
-      newItemsData.forEach(function(n){
-        if(!n.isDecan&&n.producto_id){
-          diffMap[n.producto_id]=(diffMap[n.producto_id]||0)+(n.qty||1)*(parseInt(n.cajaCant)||1);
-        }
-      });
-      Object.keys(diffMap).forEach(function(pidStr){
-        var diff=diffMap[pidStr];
-        if(diff===0)return;
-        var pid=parseInt(pidStr);
-        stockProms.push(patchStockFresco(pid,{stock_actual:-diff,reserva:+diff},'Editar pedido diff'));
-        try{
-          var _pn=(prods.find(function(p){return p.id===pid;})||{}).nombre||null;
-          _logMovStock({pid:pid,nombre:_pn,tipo:(diff>0?'reserva':'reserva_cancelada'),cantidad:Math.abs(diff),motivo:'Edición pedido '+(window._editandoPedidoOrden||'')+' ('+(diff>0?'+':'')+diff+' u)'});
-        }catch(_eLog){}
-      });
-    }
-    // 2026-09-29: combos por DELTA de cantidad (antes solo se miraban nuevos/eliminados: 1→2 no reservaba el
-    // segundo y 2→1 dejaba reserva trabada). Se compara por id resuelto (hay pedidos viejos con combo_id como texto).
-    var combosDelta={}, combosRef={};
-    origItems.forEach(function(o){ var cid=comboIdDeItem(o); if(!cid)return; combosDelta[cid]=(combosDelta[cid]||0)-(parseInt(o.qty)||1); if(!combosRef[cid]&&Array.isArray(o.comboItems)&&o.comboItems.length) combosRef[cid]=o; });
-    newItemsData.forEach(function(n){ var cid=comboIdDeItem(n); if(!cid)return; combosDelta[cid]=(combosDelta[cid]||0)+(parseInt(n.qty)||1); if(!combosRef[cid]&&Array.isArray(n.comboItems)&&n.comboItems.length) combosRef[cid]=n; });
-    Object.keys(combosDelta).forEach(function(cidS){
-      var d=combosDelta[cidS]; if(!d)return; var cid=parseInt(cidS,10);
-      stockProms.push(_comboComponentes(cid, combosRef[cidS]).then(function(ci){
-        var chain=Promise.resolve();
-        ci.forEach(function(it){
-          var cant=(it.cantidad||1)*Math.abs(d);
-          chain=chain.then(function(){
-            try{var _pn=(prods.find(function(p){return p.id===it.producto_id;})||{}).nombre||it.producto_nombre||null;_logMovStock({pid:it.producto_id,nombre:_pn,tipo:(d>0?'reserva':'reserva_cancelada'),cantidad:cant,motivo:'Edición pedido '+(window._editandoPedidoOrden||'')+' - combo '+(d>0?'+':'-')+Math.abs(d)});}catch(_e){}
-            return patchStockFresco(it.producto_id, d>0?{stock_actual:-cant,reserva:+cant}:{stock_actual:+cant,reserva:-cant}, d>0?"Editar pedido - combo agregado":"Editar pedido - combo quitado");
+    // 2026-10-04: diff de reserva con la regla única (_diffReservaPedido): unidades reales (cajas) y combos
+    // expandidos a sus frascos. Se aplica en SECUENCIA para que los ajustes no se pisen.
+    var _diffProm=_diffReservaPedido(origItems,newItemsData).then(function(diffs){
+      var chain=Promise.resolve();
+      diffs.forEach(function(d){
+        chain=chain.then(function(){
+          return patchStockFresco(d.pid,{stock_actual:-d.delta,reserva:+d.delta},'Editar pedido diff').then(function(r){
+            try{ _logMovStock({pid:d.pid,nombre:d.nombre,tipo:(d.delta>0?'reserva':'reserva_cancelada'),cantidad:Math.abs(d.delta),motivo:'Edición pedido '+(window._editandoPedidoOrden||'')+' ('+(d.delta>0?'+':'')+d.delta+' u)'}); }catch(_eLog){}
+            return r;
           });
         });
-        return chain;
-      }));
+      });
+      return chain;
     });
-    // Primero ajustar stock, DESPUÉS guardar el pedido
-    Promise.all(stockProms).then(function(){
+    // Primero ajustar stock, DESPUÉS guardar el pedido. El modo edición se limpia SOLO si el guardado salió
+    // bien (en el then de éxito): si falla, el reintento sigue editando el mismo pedido y no crea uno nuevo.
+    _diffProm.then(function(){
       return apiPatch("pedidos_catalogo",{items:JSON.stringify(newItemsData),total:Math.max(0,newTotal),dedicatoria:_rgVDedic()||null},"id=eq."+pedId);
     }).then(function(){
       _logEdicionPedido(pedId, window._editandoPedidoOrden, origItems, newItemsData, window._editandoPedidoTotal, Math.max(0,newTotal));
@@ -7984,7 +8045,7 @@ function _gestionarPedido(tipo,id){
         asigBox+='<div style="display:flex;justify-content:space-between;align-items:center;gap:.5rem;flex-wrap:wrap">';
         asigBox+='<div><div style="font-size:.62rem;color:var(--tx3);text-transform:uppercase;font-weight:600">Vendedor</div>';
         asigBox+='<div style="font-size:.78rem;color:var(--yel);font-weight:600">⚠ Sin asignar</div></div>';
-        asigBox+='<button class="btn btn-a" style="padding:.4rem .8rem;font-size:.74rem" onclick="tomarPedido('+id+')">✋ Tomar pedido</button>';
+        asigBox+='<button class="btn btn-a" style="padding:.4rem .8rem;font-size:.74rem" onclick="_lockClick(this,function(){return tomarPedido('+id+');})">✋ Tomar pedido</button>';
         asigBox+='</div>';
       } else if(rec.vendedor_id===VENDEDOR_ID){
         asigBox+='<div style="display:flex;justify-content:space-between;align-items:center;gap:.5rem;flex-wrap:wrap">';
@@ -8232,7 +8293,7 @@ function _mgConfirmarCobro(){
             return r;
           });
         }));
-      }).catch(function(e){console.error("[belle] error silencioso:",e);}));
+      }).catch(function(e){console.error("[cobro combo] stock:",e); throw e;}));   // 2026-10-04: el fallo de stock corta el cobro
     }
     if(pid&&!esDecanItem&&!esComboItem&&_esProductoNumerico(pid)){
       var deltaIt=_sinReserva?_dV(VENDEDOR_ID,+unidades,{stock_actual:-unidades}):_dV(VENDEDOR_ID,+unidades,{reserva:-unidades});
@@ -8882,7 +8943,7 @@ function _finEntregarStock(ped, finId){
               c3=c3.then(function(){ return patchStockFresco(c.producto_id,_dV(VENDEDOR_ID,+cant,{reserva:-cant}),"Entrega financiada combo "+(ped.nro_orden||'')).then(function(r){ try{ _logMovStock({pid:c.producto_id,nombre:c.producto_nombre||null,tipo:'venta',cantidad:cant,motivo:'Entrega financiada '+(ped.nro_orden||'')+' (combo)'}); }catch(e){} return r; }); });
             });
             return c3;
-          }).catch(function(e){console.error('[fin combo]',e);});
+          }).catch(function(e){console.error('[fin combo]',e); throw e;});   // 2026-10-04: el fallo de stock corta la entrega
         });
         return;
       }
@@ -9289,16 +9350,23 @@ function _finChequearVencimientos(){
 
 function cancelarPedidoWeb(pedId,btn){
   bellConfirm("Cancelar pedido? El stock se devuelve al inventario. Si ya estaba cobrado, también se borran las ventas y el pago CC.",function(){
-  if(btn)btn.disabled=true;
-  Promise.all([apiGet("pedidos_catalogo","select=*&id=eq."+pedId), apiGet("financiaciones","select=id,entregado&pedido_id=eq."+pedId+"&limit=5").catch(function(){return [];})]).then(function(_res){
+  // 2026-10-04: _lockBtn bloquea el doble clic y re-habilita el botón al terminar o al fallar
+  // (antes quedaba deshabilitado para siempre si algo fallaba)
+  return _lockBtn(btn, function(){ return _cancelarPedidoWebEjecutar(pedId); }, {texto:"Cancelando...", timeout:30000});
+  });
+}
+function _cancelarPedidoWebEjecutar(pedId){
+  return Promise.all([apiGet("pedidos_catalogo","select=*&id=eq."+pedId), apiGet("financiaciones","select=id,entregado&pedido_id=eq."+pedId+"&limit=5").catch(function(){return [];})]).then(function(_res){
     var data=_res[0];
     // 2026-09-29: si la financiación ya se entregó, el stock está en vendido (no en reserva): se devuelve desde ahí
     var _finEntregada=(Array.isArray(_res[1])?_res[1]:[]).some(function(f){return f&&f.entregado===true;});
-    if(!Array.isArray(data)||!data.length)return;
+    if(!Array.isArray(data)||!data.length){ toast("Pedido no encontrado","terr"); return; }
     var ped=data[0];var items=[];
+    // 2026-10-04: un vendedor no puede cancelar el pedido reservado por otro
+    if(ped.vendedor_id && ped.vendedor_id!==VENDEDOR_ID){ toast("Este pedido lo reservó otro vendedor","twarn"); return; }
     // 🐛 FIX 2026-08-08: guard contra doble cancelación (dos dispositivos / UI vieja):
     // si ya está cancelado, no devolver stock de nuevo.
-    if(ped.estado==='cancelado'){ toast('Ese pedido ya estaba cancelado','twarn'); if(btn)btn.disabled=false; loadPedidosWeb(); return; }
+    if(ped.estado==='cancelado'){ toast('Ese pedido ya estaba cancelado','twarn'); loadPedidosWeb(); return; }
     try{items=typeof ped.items==="string"?JSON.parse(ped.items):ped.items;}catch(ex){}
     var nroOrden = ped.nro_orden || ("WEB-"+pedId);
     // FIX 2026-05-18 BUG #6: detectar si tenía cobro (parcial o total)
@@ -9438,13 +9506,17 @@ function cancelarPedidoWeb(pedId,btn){
       usuario: VENDEDOR_NOMBRE
     }).catch(function(){}));
 
-    Promise.all(promises).then(function(){
+    return Promise.all(promises).then(function(){
       if(ped.cliente_id)_logEstadoPedidoV(pedId,'cancelado','Pedido cancelado');
       toast("Pedido cancelado — stock devuelto"+(teniaCobro?" + ventas/CC limpiados":""),"twarn");
       loadPedidosWeb();renderCat();
       if(typeof loadDineroData==='function') loadDineroData();
-    }).catch(function(){if(btn)btn.disabled=false;});
-  });  });
+    });
+  }).catch(function(e){
+    console.error("[cancelar pedido]",e);
+    toast("Error al cancelar: "+((e&&e.message)||"ver consola")+" — revisá el pedido en la lista","terr",8000);
+    loadPedidosWeb();
+  });
 }
 function cancelarEdicionPedido(){
   window._editandoPedidoId=null;
@@ -9461,6 +9533,8 @@ function editarPedido(pedId){
   apiGet("pedidos_catalogo","select=*&id=eq."+pedId).then(function(data){
     if(!Array.isArray(data)||!data.length)return;
     var ped=data[0];
+    // 2026-10-04: un vendedor no puede editar el pedido reservado por otro
+    if(ped.vendedor_id && ped.vendedor_id!==VENDEDOR_ID){ toast("Este pedido lo reservó otro vendedor","twarn"); return; }
     // FIX 2026-05-18 BUG #9: bloquear edición de pedidos cobrados/cobrados parciales
     // Solo admin puede editar pedidos que ya tuvieron movimiento de dinero/stock.
     // Si quiere modificar, el vendedor debe pedirle al admin, o cancelar y rehacer.
@@ -10894,13 +10968,18 @@ function confirmarReservarPed(){
 function _confirmarReservarPedContinuar(){
   // 🆕 2026-08 anti-sobreventa: stock FRESCO antes de reservar; avisa qué falta y deja elegir.
   if(!window._resStockOk){
-    _verifStockFrescoPedido(Object.values(cart)).then(function(faltas){
+    // 2026-10-04: editando un pedido se verifica solo el DELTA (lo que ya está reservado no necesita stock libre)
+    var _verifProm=window._editandoPedidoId
+      ? _diffReservaPedido(window._editandoPedidoOrigItems||[], _cartItemsParaStock()).then(_verifStockDeltaEdicion)
+      : _verifStockFrescoPedido(Object.values(cart));
+    _verifProm.then(function(faltas){
       if(faltas && faltas.length && !confirm(_msgFaltasStock(faltas))){
+        window._reservandoPed=false;
         toast("Reserva cancelada — ajustá las cantidades","twarn"); return;
       }
       window._resStockOk=true;
       try{ _confirmarReservarPedContinuar(); } finally { window._resStockOk=false; }
-    });
+    }).catch(function(e){ window._reservandoPed=false; console.error("[reservar] verificación de stock:",e); toast("No se pudo verificar el stock, probá de nuevo","terr"); });
     return;
   }
   var cliente=document.getElementById("resClienteNombre").value.trim();
@@ -10911,34 +10990,20 @@ function _confirmarReservarPedContinuar(){
   var entregaStr=entregaFecha?(entregaFecha+(entregaHora?" "+entregaHora:"")):"" ;
   var items=Object.values(cart);
   var perfs=items.filter(function(i){return !i.isDecan&&!i.isCombo&&!i.isCosm;});
-  var totalUnits=perfs.reduce(function(s,i){return s+i.qty;},0);
+  var totalUnits=_totalUnidadesSeg(perfs);   // los bonificados no cuentan para x3/x10
   var nroOrden=genOrden();
   var itemsData=perfs.map(function(item){
     var p=prods.find(function(x){return x.id===item.id;});
-    var r=p?calcP(p):{pm:0,pe:0,pi:item.price};
-    var _pu=p?p.precio_pestana||0:0;
-    var seg,price;
-    if(item.precioManual){
-      seg="especial"; price=item.price;
-    } else if(_pu>0){
-      seg="pi"; price=_pu;
-    } else {
-      var segCalc=getBestSeg(totalUnits,r);
-      var precioCalc=r[segCalc]||r.pi;
-      var _sp=_segPorPrecio(item,r,segCalc);
-      if(_sp!==segCalc && _sp!=='especial'){
-        seg=_sp; price=item.price; // x10/x3/x1 real del producto (ej. VIP/CC)
-      } else if(Math.abs(item.price-precioCalc)>1){
-        seg="especial"; price=item.price;
-      } else {
-        seg=segCalc; price=precioCalc;
-      }
-    }
-    return{producto_id:item.id,nombre:item.nombre,qty:item.qty,
+    // Precio/segmento por línea: regla única en _calcLineaPrecio (2026-10-04), la misma que la venta y el presupuesto
+    var lp=_calcLineaPrecio(item,totalUnits,p||null);
+    var seg=lp.seg, price=lp.price;
+    var fila={producto_id:item.isBonificado?(item.prodId||null):item.id,nombre:item.nombre,qty:item.qty,
       segmento:seg,precio:price,
-      total:(price*item.qty)-(item.descuento||0),
+      total:seg==="bonificado"?0:(price*item.qty)-(item.descuento||0),
       descuento:item.descuento||0,
       descuento_motivo:item.descMotivo||""};
+    if(item.isBonificado)fila.isBonificado=true;   // regalo por compra: el id del carrito es "bonif_…", el producto va en prodId
+    return fila;
   });
   // Agregar decans al pedido — se muestran en gestión pero no afectan stock
   var decans=items.filter(function(i){return i.isDecan;});
@@ -10976,39 +11041,44 @@ function _confirmarReservarPedContinuar(){
   var total=itemsData.reduce(function(s,it){return s+(parseFloat(it.total)||0);},0);
   // Si estamos editando un pedido existente, actualizar en lugar de crear
   var _editId=window._editandoPedidoId;
-  var _origItemsForDiff=[]; // se llenará en modo edición para diff de reserva
+  var _ordenEd=window._editandoPedidoOrden||(_editId?('#'+_editId):'');
+  var _diffsEd=[];   // modo edición: [{pid,delta,nombre}] que devuelve _diffReservaPedido (regla única)
   var savePromise;
   if(_editId){
     // EDITAR — leer ítems originales ANTES de actualizar para hacer diff de stock
     savePromise=apiGet("pedidos_catalogo","select=items&id=eq."+_editId).then(function(origData){
       // FIX 2026-09-23: items puede venir como array jsonb (no siempre string) — JSON.parse(array) tiraba y
       // el diff quedaba vacío → se volvía a reservar TODO el pedido (doble reserva)
-      try{ var _oi=((origData||[])[0]||{}).items; _origItemsForDiff=(typeof _oi==='string')?JSON.parse(_oi||"[]"):(Array.isArray(_oi)?_oi:[]); if(typeof _origItemsForDiff==='string')_origItemsForDiff=JSON.parse(_origItemsForDiff); if(!Array.isArray(_origItemsForDiff))_origItemsForDiff=[]; }catch(e){ _origItemsForDiff=[]; }
-      // Liberar stock de ítems que se quitaron o redujeron
+      var _orig=[];
+      try{ var _oi=((origData||[])[0]||{}).items; _orig=(typeof _oi==='string')?JSON.parse(_oi||"[]"):(Array.isArray(_oi)?_oi:[]); if(typeof _orig==='string')_orig=JSON.parse(_orig); if(!Array.isArray(_orig))_orig=[]; }catch(e){ _orig=[]; }
+      // 2026-10-04: si la lectura falló, se usa la foto tomada al abrir la edición (antes un fallo acá
+      // terminaba reservando TODO el pedido otra vez)
+      if(!_orig.length && Array.isArray(window._editandoPedidoOrigItems)) _orig=window._editandoPedidoOrigItems;
+      return _diffReservaPedido(_orig, itemsData);
+    }).then(function(diffs){
+      _diffsEd=diffs;
+      // Liberar primero lo que se quitó o redujo (delta<0); lo que aumenta se reserva después de guardar
       var stockLibChain=Promise.resolve();
-      _origItemsForDiff.filter(function(o){return o.producto_id&&!o.isDecan&&!o.isCombo;}).forEach(function(o){
-        var newIt=itemsData.find(function(n){return n.producto_id===o.producto_id&&!n.isDecan&&!n.isCombo;});
-        var origQty=o.qty||1;
-        var newQty=newIt?newIt.qty||1:0;
-        var diff=newQty-origQty; // negativo = se sacó/redujo → hay que liberar
-        if(diff<0){
-          stockLibChain=stockLibChain.then(function(){
-            return patchStockFresco(o.producto_id,{stock_actual:Math.abs(diff),reserva:-Math.abs(diff)},'Editar reserva - liberación');
+      diffs.filter(function(d){return d.delta<0;}).forEach(function(d){
+        stockLibChain=stockLibChain.then(function(){
+          return patchStockFresco(d.pid,{stock_actual:-d.delta,reserva:+d.delta},'Editar reserva - liberación').then(function(r){
+            try{ _logMovStock({pid:d.pid,nombre:d.nombre,tipo:'reserva_cancelada',cantidad:-d.delta,motivo:'Edición reserva '+_ordenEd+' ('+d.delta+' u)'}); }catch(_e){}
+            return r;
           });
-        }
+        });
       });
-      return stockLibChain.then(function(){
-        var _patchEd={
-          items:JSON.stringify(itemsData),total:total,
-          notas:"Cliente: "+cliente+(tel?" | Tel: "+tel:"")+(nota?" | "+nota:"")+(entregaStr?" | Entrega: "+entregaStr:"")
-        };
-        // si el vendedor asignó o cambió el cliente mientras editaba, el pedido lo toma
-        if(_carritoCliente&&_carritoCliente.id&&_carritoCliente.id!==window._editandoPedidoClienteId){ _patchEd.cliente_id=_carritoCliente.id; }
-        return apiPatch("pedidos_catalogo",_patchEd,"id=eq."+_editId);
-      });
+      return stockLibChain;
+    }).then(function(){
+      var _patchEd={
+        items:JSON.stringify(itemsData),total:total,
+        notas:"Cliente: "+cliente+(tel?" | Tel: "+tel:"")+(nota?" | "+nota:"")+(entregaStr?" | Entrega: "+entregaStr:"")
+      };
+      // si el vendedor asignó o cambió el cliente mientras editaba, el pedido lo toma
+      if(_carritoCliente&&_carritoCliente.id&&_carritoCliente.id!==window._editandoPedidoClienteId){ _patchEd.cliente_id=_carritoCliente.id; }
+      return apiPatch("pedidos_catalogo",_patchEd,"id=eq."+_editId);
     });
-    window._editandoPedidoId=null;
-    window._editandoPedidoOrden=null;
+    // 2026-10-04: el modo edición se limpia recién cuando el guardado salió bien (más abajo). Antes se limpiaba
+    // acá, en seco: si el PATCH fallaba, el siguiente clic creaba un pedido NUEVO duplicado.
   } else {
     // NUEVO pedido
     // Bug 9 fix: si hay cliente registrado asignado al carrito, vincularlo
@@ -11045,103 +11115,96 @@ function _confirmarReservarPedContinuar(){
     });
   }
   savePromise.then(function(){
+    if(_editId){
+      // Guardado OK → recién ahora se sale del modo edición
+      window._editandoPedidoId=null;window._editandoPedidoOrden=null;window._editandoPedidoOrigItems=null;window._editandoPedidoTotal=null;
+    }
     // Reservar en SECUENCIA para evitar que requests simultáneos se pisen
     var reservaChain=Promise.resolve();
-    // En modo edición: solo reservar ítems nuevos o con cantidad aumentada
-    var esEdicion=_origItemsForDiff.length>0;
-    var perfsAReservar=perfs.filter(function(item){
-      if(!esEdicion)return true; // nuevo pedido: reservar todo
-      var origIt=_origItemsForDiff.find(function(o){return o.producto_id===item.id&&!o.isDecan&&!o.isCombo;});
-      var origQty=origIt?origIt.qty||1:0;
-      return item.qty>origQty; // solo si la cantidad aumentó o es nuevo
-    }).map(function(item){
-      if(!esEdicion)return{id:item.id,nombre:item.nombre,qty:item.qty};
-      var origIt=_origItemsForDiff.find(function(o){return o.producto_id===item.id&&!o.isDecan&&!o.isCombo;});
-      var origQty=origIt?origIt.qty||1:0;
-      return{id:item.id,nombre:item.nombre,qty:item.qty-origQty}; // solo la diferencia
-    });
-    // Reservar perfumes y decans
-    perfsAReservar.forEach(function(item){
-      reservaChain=reservaChain.then(function(){
-        var p=prods.find(function(x){return x.id===item.id;});
-        var stockAntes=p?p.stock_actual||0:0;
-        var nuevoStockCalc=Math.max(0,stockAntes-item.qty);
-        return patchStockFresco(item.id,{stock_actual:-item.qty,reserva:+item.qty},'Reserva pedido')
-          .then(function(){
+    var _motivoRes="Reserva pedido "+(_editId?_ordenEd+" (edición)":nroOrden);
+    if(_editId){
+      // Edición: solo lo que aumentó o es nuevo (combos y cajas ya expandidos a unidades por _diffReservaPedido)
+      _diffsEd.filter(function(d){return d.delta>0;}).forEach(function(d){
+        reservaChain=reservaChain.then(function(){
+          return patchStockFresco(d.pid,{stock_actual:-d.delta,reserva:+d.delta},'Reserva pedido (edición)').then(function(){
             return apiPost("movimientos_stock",{
-              producto_id:item.id,producto_nombre:item.nombre,tipo:"reserva",
-              cantidad:item.qty,stock_antes:stockAntes,stock_despues:nuevoStockCalc,
-              motivo:"Reserva pedido "+nroOrden,
-              usuario:VENDEDOR_NOMBRE||"vendedor",periodo:periodoActual
-            });
-          });
-      });
-    });
-    // 🐛 FIX 2026-08-08: reservar también el stock de las CAJAS de cosmética
-    // (unidades = qty × cajaCant) — antes ni se reservaba ni quedaba rastro.
-    var cosmsAReservar=cosms.filter(function(cs){
-      if(!cs.prodId)return false;
-      if(!esEdicion)return true;
-      var o=_origItemsForDiff.find(function(x){return x.isCosm&&x.producto_id===cs.prodId;});
-      return (cs.qty||1)>(o?(o.qty||1):0);
-    });
-    cosmsAReservar.forEach(function(cs){
-      reservaChain=reservaChain.then(function(){
-        var _oQty=0;
-        if(esEdicion){ var o=_origItemsForDiff.find(function(x){return x.isCosm&&x.producto_id===cs.prodId;}); _oQty=o?(o.qty||1):0; }
-        var unid=((cs.qty||1)-_oQty)*(cs.cajaCant||1);
-        if(unid<=0)return;
-        return patchStockFresco(cs.prodId,{stock_actual:-unid,reserva:+unid},'Reserva cosmética')
-          .then(function(){
-            return apiPost("movimientos_stock",{
-              producto_id:cs.prodId,producto_nombre:cs.nombre,tipo:"reserva",
-              cantidad:unid,motivo:"Reserva pedido "+nroOrden+" (cajas)",
+              producto_id:d.pid,producto_nombre:d.nombre,tipo:"reserva",cantidad:d.delta,motivo:_motivoRes,
               usuario:VENDEDOR_NOMBRE||"vendedor",periodo:periodoActual
             }).catch(function(e){console.error("[belle] error silencioso:",e);});
           });
+        });
       });
-    });
-    // Reservar productos dentro de cada combo — siempre leer de BD
-    // 🐛 FIX 2026-08-08: en modo EDICIÓN los combos se re-reservaban COMPLETOS en cada
-    // guardado (doble/triple reserva). Ahora solo se reserva el stock de combos NUEVOS
-    // (que no estaban en el pedido original).
-    // 2026-09-29: en edición se reserva/libera solo la DIFERENCIA de cantidad por combo
-    var combosCart=[];
-    items.forEach(function(i){
-      if(!i.isCombo||!i.comboId)return;
-      var delta=i.qty||1;
-      if(esEdicion){ var _o=_origItemsForDiff.find(function(o){return comboIdDeItem(o)===Number(i.comboId);}); if(_o) delta=(i.qty||1)-(parseInt(_o.qty)||1); }
-      if(delta!==0) combosCart.push({comboId:i.comboId,nombre:i.nombre,qty:delta,item:i});
-    });
-    combosCart.forEach(function(combo){
-      reservaChain=reservaChain.then(function(){
-        return _comboComponentes(combo.comboId, combo.item)
-          .then(function(ci){
-            if(!Array.isArray(ci))return;
-            var chain=Promise.resolve();
-            ci.filter(function(it){return it.producto_id;}).forEach(function(it){
-              chain=chain.then(function(){
-                var cant=(it.cantidad||1)*Math.abs(combo.qty);
-                if(combo.qty<0) return patchStockFresco(it.producto_id,{stock_actual:+cant,reserva:-cant},'Reserva combo (menos unidades)');
-                return patchStockFresco(it.producto_id,{stock_actual:-cant,reserva:+cant},'Reserva combo')
-                  .then(function(){
-                    return apiPost("movimientos_stock",{
-                      producto_id:it.producto_id,producto_nombre:it.producto_nombre||"",tipo:"reserva",
-                      cantidad:cant,motivo:"Reserva combo "+combo.nombre+" en "+nroOrden,
-                      usuario:VENDEDOR_NOMBRE||"vendedor",periodo:periodoActual
-                    }).catch(function(e){console.error("[belle] error silencioso:",e);});
-                  });
-              });
+    } else {
+      // Pedido nuevo: reservar perfumes (los bonificados también: el regalo sale del stock al entregarse)
+      perfs.forEach(function(item){
+        var pid=item.isBonificado?item.prodId:item.id;
+        if(!pid)return;
+        reservaChain=reservaChain.then(function(){
+          var p=prods.find(function(x){return x.id===pid;});
+          var stockAntes=p?p.stock_actual||0:0;
+          var nuevoStockCalc=Math.max(0,stockAntes-item.qty);
+          return patchStockFresco(pid,{stock_actual:-item.qty,reserva:+item.qty},'Reserva pedido')
+            .then(function(){
+              return apiPost("movimientos_stock",{
+                producto_id:pid,producto_nombre:item.nombre,tipo:"reserva",
+                cantidad:item.qty,stock_antes:stockAntes,stock_despues:nuevoStockCalc,
+                motivo:_motivoRes,
+                usuario:VENDEDOR_NOMBRE||"vendedor",periodo:periodoActual
+              }).catch(function(e){console.error("[belle] error silencioso:",e);});
             });
-            return chain;
-          });
+        });
       });
-    });
+      // 🐛 FIX 2026-08-08: reservar también el stock de las CAJAS de cosmética
+      // (unidades = qty × cajaCant) — antes ni se reservaba ni quedaba rastro.
+      cosms.forEach(function(cs){
+        if(!cs.prodId)return;
+        reservaChain=reservaChain.then(function(){
+          var unid=(cs.qty||1)*(cs.cajaCant||1);
+          if(unid<=0)return;
+          return patchStockFresco(cs.prodId,{stock_actual:-unid,reserva:+unid},'Reserva cosmética')
+            .then(function(){
+              return apiPost("movimientos_stock",{
+                producto_id:cs.prodId,producto_nombre:cs.nombre,tipo:"reserva",
+                cantidad:unid,motivo:_motivoRes+" (cajas)",
+                usuario:VENDEDOR_NOMBRE||"vendedor",periodo:periodoActual
+              }).catch(function(e){console.error("[belle] error silencioso:",e);});
+            });
+        });
+      });
+      // Reservar productos dentro de cada combo (foto del carrito o combo_items)
+      items.forEach(function(combo){
+        if(!combo.isCombo||!combo.comboId)return;
+        reservaChain=reservaChain.then(function(){
+          return _comboComponentes(combo.comboId, combo)
+            .then(function(ci){
+              if(!Array.isArray(ci))return;
+              var chain=Promise.resolve();
+              ci.filter(function(it){return it.producto_id;}).forEach(function(it){
+                chain=chain.then(function(){
+                  var cant=(it.cantidad||1)*(combo.qty||1);
+                  return patchStockFresco(it.producto_id,{stock_actual:-cant,reserva:+cant},'Reserva combo')
+                    .then(function(){
+                      return apiPost("movimientos_stock",{
+                        producto_id:it.producto_id,producto_nombre:it.producto_nombre||"",tipo:"reserva",
+                        cantidad:cant,motivo:"Reserva combo "+combo.nombre+" en "+nroOrden,
+                        usuario:VENDEDOR_NOMBRE||"vendedor",periodo:periodoActual
+                      }).catch(function(e){console.error("[belle] error silencioso:",e);});
+                    });
+                });
+              });
+              return chain;
+            });
+        });
+      });
+    }
     document.getElementById("moReservarPed").classList.remove("open");
     cart={};cstate={};decanState={};
     updateCartBar();closeDrawer();renderCat();
-    window._reservandoPed=false;
-    toast("Pedido reservado para "+cliente+" - "+nroOrden,"tok");
+    // 2026-10-04: el aviso de "reservado" sale recién cuando el stock quedó apartado. Antes la cadena de reserva
+    // no se esperaba: si fallaba, el pedido igual figuraba reservado y nadie se enteraba.
+    return reservaChain.then(function(){
+      window._reservandoPed=false;
+      toast(_editId?("Pedido "+_ordenEd+" actualizado ✅"):("Pedido reservado para "+cliente+" - "+nroOrden),"tok");
 
     // Bug 9 fix: si hay cliente registrado, log + CC + actualizar último_pedido
     if(_carritoCliente&&_carritoCliente.id&&!_editId){
@@ -11160,16 +11223,20 @@ function _confirmarReservarPedContinuar(){
     }
 
     loadPedidosWeb();
-  }).catch(function(){window._reservandoPed=false;toast("Error al reservar","terr");});
+    }, function(e){
+      window._reservandoPed=false;
+      console.error("[reservar] stock:",e);
+      toast("⚠️ El pedido se guardó pero NO se pudo apartar todo el stock: "+((e&&e.message)||"ver consola")+". Revisalo en Pedidos.","terr",8000);
+      loadPedidosWeb();
+    });
+  }).catch(function(e){window._reservandoPed=false;console.error("[reservar]",e);toast("Error al reservar: "+((e&&e.message)||"ver consola"),"terr");});
 }
 
 // ── PRESUPUESTO ──────────────────────────────────────────────────────
 function getPresupuestoData(){
   var items=Object.values(cart);
   if(!items.length)return null;
-  var perfs=items.filter(function(i){return !i.isDecan&&!i.isCosm&&!i.isCombo&&!i.isBonificado;});   // 2026-09-30: cajas, combos y regalería no cuentan para x3/x10
-  var decans=items.filter(function(i){return i.isDecan;});
-  var totalUnits=perfs.reduce(function(s,i){return s+i.qty;},0);
+  var totalUnits=_totalUnidadesSeg(items);   // 2026-09-30: cajas, combos y regalería no cuentan para x3/x10 (bonificados tampoco)
   var lineas=[];var subtotal=0;
   items.forEach(function(item){
     var p=prods.find(function(x){return x.id===(item.isDecan?item.prodId:item.id);});
@@ -11180,25 +11247,11 @@ function getPresupuestoData(){
       segLabel=item.price===0?"Bonificado":"Decan 5ml";
     } else if(item.isCosm||item.isCombo){
       precio=item.price; segLabel=item.isRegalo?((item.cajaCant||1)>1?"Pack x"+item.cajaCant:"Regalería"):(item.isCombo?"Combo":(item.cajaLabel||"Caja"));
-    } else if(item.precioManual||item.price===0){
-      precio=item.price;
-      segLabel=item.price===0?"Bonificado":("Precio especial"+(item.descMotivo?" ("+item.descMotivo+")":""));
     } else {
-      var _pu=p?p.precio_pestana||0:0;
-      if(_pu>0){
-        precio=_pu;segLabel="Precio único";
-      } else {
-        var seg=getBestSeg(totalUnits,r);
-        var precioCalc=r[seg]||r.pi;
-        // Si el precio en cart difiere del calculado → tratar como especial
-        if(Math.abs(item.price-precioCalc)>1){
-          precio=item.price;
-          segLabel="Precio especial";
-        } else {
-          precio=precioCalc;
-          segLabel=seg==="pm"?"x10 Mayor":seg==="pe"?"x3 Medio":"x1 Unitario";
-        }
-      }
+      // 2026-10-04: misma regla que el pedido (_calcLineaPrecio) — antes el presupuesto tenía su propia copia
+      // y podía mostrar "Precio especial" donde el pedido registraba x10 (VIP/CC)
+      var lp=_calcLineaPrecio(item,totalUnits,p||null);
+      precio=lp.price; segLabel=lp.label;
     }
     var desc=item.descuento||0;
     var sub=precio*item.qty-desc;
@@ -12665,7 +12718,7 @@ function confirmarControlDavid(){
       // con producto_id, y si nunca se sumó acá, robaba en_viaje de otros pedidos.
       var faltanteMacheado = noLlego && !!d.prodId;
       if((ahoraMacheado || faltanteMacheado) && antesNoTenia && prodIdGuardar){
-        patchStockFresco(prodIdGuardar, {en_viaje: +cantPed}, 'Control sube en_viaje ('+(faltanteMacheado?'pendiente→faltante macheado':'pendiente→macheado')+')').catch(function(){});
+        patchStockFresco(prodIdGuardar, {en_viaje: +cantPed}, 'Control sube en_viaje ('+(faltanteMacheado?'pendiente→faltante macheado':'pendiente→macheado')+')').catch(function(e){ console.error('[control en_viaje]',e); toast('⚠️ No se pudo actualizar "en viaje" del producto #'+prodIdGuardar,'terr'); });
       }
       _avanzar();
     }).catch(function(){clearTimeout(_st);_avanzar();});
@@ -13458,13 +13511,9 @@ function _probarNotiV(){
     toast("Notificación de prueba enviada 🔔","tok");
   }catch(e){ toast("Prueba enviada 🔔","tok"); }
   // 2) Además probamos el envío REAL desde el servidor (el que llega aunque la app esté cerrada).
-  fetch(SB_URL+"/functions/v1/send-push",{
-    method:"POST",
-    headers:{"Content-Type":"application/json","apikey":SB_KEY,"Authorization":"Bearer "+(_authToken||SB_KEY)},
-    body:JSON.stringify({titulo:"🔔 Prueba Belle (servidor)",mensaje:"Esta llega aunque la app esté cerrada.",vendedor_ids:[VENDEDOR_ID],url:"./ventas.html?app=1"})
-  }).then(function(r){return r.json().catch(function(){return null;});}).then(function(res){
+  _enviarPush({titulo:"🔔 Prueba Belle (servidor)",mensaje:"Esta llega aunque la app esté cerrada.",vendedor_ids:[VENDEDOR_ID],url:"./ventas.html?app=1"}).then(function(res){
     if(res&&res.sent>0) toast("Push del servidor OK ✓ ("+res.sent+")","tok");
-  }).catch(function(){});
+  });
 }
 // ══════════════════════════════════════════════════════════════════════
 // 🔔 AVISO PROPIO (2026-08-27): deja el registro en MI campanita, sin push
@@ -15979,13 +16028,7 @@ function _agNotificar(vendIds, titulo, mensaje){
     apiPost('notificaciones_staff',{rol:'vendedor',vendedor_id:v,tipo:'agenda',titulo:titulo,mensaje:mensaje})
       .catch(function(e){ console.warn('[agenda noti]',e); });
   });
-  try{
-    fetch(SB_URL+"/functions/v1/send-push",{
-      method:"POST",
-      headers:{"Content-Type":"application/json","apikey":SB_KEY,"Authorization":"Bearer "+(_authToken||SB_KEY)},
-      body:JSON.stringify({titulo:titulo,mensaje:mensaje,vendedor_ids:vendIds,url:"./ventas.html?app=1"})
-    }).catch(function(){});
-  }catch(e){}
+  _enviarPush({titulo:titulo,mensaje:mensaje,vendedor_ids:vendIds,url:"./ventas.html?app=1"});
 }
 
 // Botón 📣 del post-it: mandarle esta nota a otro vendedor
@@ -16088,13 +16131,7 @@ function _agChequearRecordatorios(){
       }catch(e){}
       // 2) campanita + push del servidor (llega aunque esté cerrada)
       _avisoPropio('agenda', titulo, msj, r.id);
-      try{
-        fetch(SB_URL+"/functions/v1/send-push",{
-          method:"POST",
-          headers:{"Content-Type":"application/json","apikey":SB_KEY,"Authorization":"Bearer "+(_authToken||SB_KEY)},
-          body:JSON.stringify({titulo:titulo,mensaje:msj,vendedor_ids:[VENDEDOR_ID],url:"./ventas.html?app=1"})
-        }).catch(function(){});
-      }catch(e){}
+      _enviarPush({titulo:titulo,mensaje:msj,vendedor_ids:[VENDEDOR_ID],url:"./ventas.html?app=1"});
       ya['e'+r.id]=hoy; cambio=true;
       if(mio)aStamp.push(r.id);
       try{ if(typeof _appNotisBadge==='function')_appNotisBadge(); }catch(e){}
@@ -16638,8 +16675,7 @@ function ejecutarTransfer(targetId,targetNombre){
     window._editandoPedidoId=null;
     window._editandoPedidoOrden=null;
   }
-  var perfs=items.filter(function(i){return !i.isDecan&&!i.isCosm&&!i.isCombo;});   // 2026-09-29: los combos no cuentan para x3/x10
-  var totalUnits=perfs.reduce(function(s,i){return s+i.qty;},0);
+  var totalUnits=_totalUnidadesSeg(items);   // 2026-09-29: los combos no cuentan para x3/x10; 2026-10-04: los bonificados tampoco
   var nroOrden=genOrden();
   var itemsData=items.map(function(item){
     // 2026-09-29: el combo viaja como combo (antes salía como producto "combo_N" y la transferencia con reserva abortaba)
@@ -16649,28 +16685,15 @@ function ejecutarTransfer(targetId,targetNombre){
         isDecan:false,cajaCant:1,isCosm:false,descuento:item.descuento||0,descuento_motivo:item.descMotivo||""};
     }
     var p=prods.find(function(x){return x.id===item.id;});
-    var r=p?calcP(p):{pm:0,pe:0,pi:item.price};
-    var _pu=p?p.precio_pestana||0:0;
     var seg,price;
     if(item.isCosm){
       seg=item.cajaLabel||("Caja x"+(item.cajaCant||1)); price=item.price;
     } else if(item.isDecan){
       seg="decan"; price=item.price;
-    } else if(item.precioManual){
-      seg="especial"; price=item.price;
-    } else if(_pu>0){
-      seg="pi"; price=_pu;
     } else {
-      var segCalc=getBestSeg(totalUnits,r);
-      var precioCalc=r[segCalc]||r.pi;
-      var _sp=_segPorPrecio(item,r,segCalc);
-      if(_sp!==segCalc && _sp!=='especial'){
-        seg=_sp; price=item.price; // x10/x3/x1 real del producto (ej. VIP/CC)
-      } else if(Math.abs(item.price-precioCalc)>1){
-        seg="especial"; price=item.price;
-      } else {
-        seg=segCalc; price=precioCalc;
-      }
+      // Precio/segmento por línea: regla única en _calcLineaPrecio (2026-10-04)
+      var lp=_calcLineaPrecio(item,totalUnits,p||null);
+      seg=lp.seg; price=lp.price;
     }
     return{producto_id:(item.isDecan||item.isCosm)?(item.prodId||null):item.id,
       nombre:item.nombre,qty:item.qty,segmento:seg,precio:price,
@@ -17378,7 +17401,8 @@ function calcActualizar() {
   var pMed  = Math.round((ct + ganMay + ganMed) * cotiz / 100) * 100;
   var pML   = refML > 0 ? refML : 0;
   var pMin  = pML > 0 ? Math.round((pML + pMed) / 2 / 100) * 100 : pMed;
-  var pDec  = pMin > 0 ? (Math.ceil(pMin * 0.1 / 1000) * 1000 + 3000) : 0;
+  var pDec  = _precioDecanAuto(pMin);   // misma fórmula (y config) que calcP
+
   var pMan  = ganPct > 0 ? Math.round(ctARS * (1 + ganPct / 100) / 100) * 100 : 0;
   var rMay  = pMay > 0 && ctARS > 0 ? Math.round((pMay - ctARS) / pMay * 100) : 0;
   var rMed  = pMed > 0 && ctARS > 0 ? Math.round((pMed - ctARS) / pMed * 100) : 0;
@@ -18074,7 +18098,7 @@ function cGuardarCotizacion(cb){
     pMay=ct>0?Math.round((ct+ganMay)*cotiz/100)*100:0;
     pMed=ct>0?Math.round((ct+ganMay+ganMed)*cotiz/100)*100:0;
     pMin=refML>0?Math.round((refML+pMed)/2/100)*100:(pMed||pMay);
-    pDec=pMin>0?Math.ceil(pMin*0.1/1000)*1000+3000:0;
+    pDec=_precioDecanAuto(pMin);   // misma fórmula (y config) que calcP
     pMin=_calcPrecioSel||pMin||Math.round((costo+log)*cotiz*1.3/100)*100;
   }
   apiPost('cotizaciones',{
@@ -22043,12 +22067,24 @@ function _ecAplicarPagoACuentaFIFO(clienteId, monto){
   });
 }
 
+// _ccSumarSaldo (2026-10-04): suma (o resta) saldo_cc del cliente de forma ATÓMICA en la base (RPC
+// sumar_saldo_cc). Antes era GET + PATCH: dos pagos a la vez se pisaban. Devuelve Promise<saldo nuevo>
+// y refresca el saldo en las copias en memoria (carrito, lista de clientes del modo app).
+function _ccSumarSaldo(clienteId, delta){
+  var cid=parseInt(clienteId,10); if(!cid) return Promise.reject(new Error('cliente inválido'));
+  return apiPost('rpc/sumar_saldo_cc',{p_cliente_id:cid, p_delta:delta}).then(function(res){
+    if(!res || !res.ok) throw new Error((res&&res.error)||'sumar_saldo_cc sin respuesta');
+    var nuevo=parseFloat(res.saldo_cc)||0;
+    try{
+      if(typeof _carritoCliente!=='undefined' && _carritoCliente && _carritoCliente.id===cid) _carritoCliente.saldo_cc=nuevo;
+      (window._appCliData||[]).forEach(function(c){ if(c && c.id===cid) c.saldo_cc=nuevo; });
+    }catch(e){}
+    return nuevo;
+  });
+}
 // Helper: sumar saldo a favor del cliente
 function _ecGuardarSaldoAFavor(clienteId, monto){
-  return apiGet('clientes','select=saldo_cc&id=eq.'+clienteId+'&limit=1').then(function(rows){
-    var act = (rows && rows[0] && parseFloat(rows[0].saldo_cc)) || 0;
-    return apiPatch('clientes',{saldo_cc: act + monto},'id=eq.'+clienteId);
-  }).catch(function(e){console.error('[ec saldo favor]',e);});
+  return _ccSumarSaldo(clienteId, monto).catch(function(e){console.error('[ec saldo favor]',e); toast('⚠️ No se pudo registrar el saldo a favor: '+((e&&e.message)||''),'terr');});
 }
 
 // Helper: detectar qué cuotas se pagaron por completo (modo 'pedido')
@@ -23757,11 +23793,15 @@ function initRealtime() {
 
 // Iniciar cuando los productos ya están cargados
 document.addEventListener('DOMContentLoaded', function() {
+  // 2026-10-04: si nadie inicia sesión, el sondeo se corta a los 5 minutos (600 × 500 ms) en vez de quedar para siempre
+  var _rtIntentos = 0;
   var _rtCheck = setInterval(function() {
     if (window.supabase && prods && prods.length) {
       clearInterval(_rtCheck);
       initRealtime();
+      return;
     }
+    if (++_rtIntentos >= 600) clearInterval(_rtCheck);
   }, 500);
 });
 
@@ -24271,13 +24311,9 @@ function _vcFIFOConfirmarPago(clienteId){
     // Paso 4: actualizar saldo_cc del cliente con el saldo a favor (si lo hay)
     // saldo_a_favor > 0 → sumar al saldo_cc del cliente
     if(saldoFavor > 0.01){
+      // 2026-10-04: suma atómica en la base (antes GET + PATCH, se pisaba con otro pago simultáneo)
       chain = chain.then(function(){
-        return apiGet("clientes","select=saldo_cc&id=eq."+clienteId+"&limit=1");
-      }).then(function(rows){
-        if(!rows||!rows[0]) return null;
-        var actual = parseFloat(rows[0].saldo_cc)||0;
-        var nuevo = actual + saldoFavor;
-        return apiPatch("clientes", {saldo_cc: nuevo}, "id=eq."+clienteId);
+        return _ccSumarSaldo(clienteId, saldoFavor);   // el saldo nuevo ya queda en memoria; el modal CC se reabre con datos frescos
       });
     }
 
