@@ -577,20 +577,32 @@ function _sbAuth(){
   return _sbAuthClient;
 }
 
+// 2026-10-07: sesión vencida → volver al login UNA sola vez (portado de ventas.html).
+var _sesionIniciada=false, _sesionVencidaAvisada=false;
+function _sesionVencida(){
+  _authToken=null;
+  if(_sesionVencidaAvisada) return;
+  _sesionVencidaAvisada=true;
+  try{var _c=_sbAuth(); if(_c)_c.auth.signOut();}catch(_e){}
+  var _ls=document.getElementById("loginScreen"); if(_ls)_ls.style.display="flex";
+  var _ap=document.getElementById("app"); if(_ap)_ap.style.display="none";
+  try{ if(typeof toast==="function") toast("Sesión vencida, volvé a iniciar sesión","terr"); }catch(_e2){}
+}
 function api(method,table,data,filters){
   var url=SB_URL+"/rest/v1/"+table+(filters?"?"+filters:"");
+  var esEscritura=(method==="POST"||method==="PATCH"||method==="DELETE"||method==="PUT");
+  // 2026-10-07: una ESCRITURA sin token de sesión no debe salir con la clave anónima (portado de Ventas).
+  if(esEscritura && !_authToken && _sesionIniciada){
+    _sesionVencida();
+    return Promise.reject(new Error("Sesión vencida, volvé a iniciar sesión"));
+  }
   var h={"Content-Type":"application/json","apikey":SB_KEY,"Authorization":"Bearer "+(_authToken||SB_KEY)};
   if(method==="POST"||method==="PATCH")h["Prefer"]="return=representation";
   return fetch(url,{method:method,headers:h,body:data?JSON.stringify(data):undefined})
     .then(function(r){
       if(r.status===204)return null;
       if(!r.ok){
-        if(r.status===401 && _authToken){
-          _authToken=null;
-          try{var _c=_sbAuth(); if(_c)_c.auth.signOut();}catch(_e){}
-          var _ls=document.getElementById("loginScreen"); if(_ls)_ls.style.display="flex";
-          var _ap=document.getElementById("app"); if(_ap)_ap.style.display="none";
-        }
+        if(r.status===401 && _authToken) _sesionVencida();
         return r.json().then(function(e){
           console.error("API error",method,table,r.status,e);
           throw new Error((e&&e.message)||("HTTP "+r.status));
@@ -600,6 +612,18 @@ function api(method,table,data,filters){
     })
     .catch(function(e){console.error("API err",method,table,e);throw e;});
 }
+// 2026-10-07: cualquier promesa rechazada sin catch se muestra como cartel (portado de Belle/Ventas).
+// Antes un error de base quedaba solo en consola y la operación parecía hecha.
+var _ultimoToastRechazo=0;
+window.addEventListener('unhandledrejection',function(ev){
+  var e=ev&&ev.reason;
+  var msg=(e&&e.message)||(typeof e==='string'?e:'Error inesperado');
+  console.error('[promesa sin catch]',e);
+  var ahora=Date.now();
+  if(ahora-_ultimoToastRechazo<3000) return;
+  _ultimoToastRechazo=ahora;
+  try{ toast('Falló una operación: '+msg,'terr'); }catch(_e){}
+});
 
 
 function apiGet(t,f){return api("GET",t,null,f);}
@@ -632,36 +656,27 @@ function _dV(v, qty, base){ base=base||{}; base[(parseInt(v)===2)?"vendido_facu"
 //   {reserva: +1}       → suma 1 a reserva
 // ═══════════════════════════════════════════════════════════
 function patchStockFresco(prodId, delta, motivo){
-  return apiGet('productos','select=id,stock_actual,reserva,vendido_david&id=eq.'+prodId)
-  .then(function(rows){
-    var r=rows&&rows[0];
-    if(!r)return;
-    var patch={};
-    if(delta.stock_actual!==undefined){
-      patch.stock_actual=Math.max(0,(r.stock_actual||0)+delta.stock_actual);
+  delta = delta || {};
+  var pid = parseInt(prodId,10); if(!pid) return Promise.resolve();
+  // 2026-10-07: ajuste ATÓMICO en la base (ajustar_stock hace el read-modify-write con lock de fila),
+  // portado de Ventas. Antes se leía y se pisaba el stock en dos pasos y un error se tragaba en silencio.
+  function sincronizar(res){
+    var pm=(typeof prods!=='undefined'&&Array.isArray(prods)?prods:[]).find(function(p){return p.id===pid;});
+    if(pm && res){
+      ['stock_actual','reserva','vendido_david','vendido_facu','en_viaje','reingreso_at'].forEach(function(k){ if(res[k]!==undefined) pm[k]=res[k]; });
     }
-    if(delta.reserva!==undefined){
-      patch.reserva=Math.max(0,(r.reserva||0)+delta.reserva);
-    }
-    if(delta.vendido_david!==undefined){
-      patch.vendido_david=Math.max(0,(r.vendido_david||0)+delta.vendido_david);
-    }
-    // Sincronizar prods en memoria
-    var pm=prods.find(function(p){return p.id===prodId;});
-    if(pm){
-      if(patch.stock_actual!==undefined)pm.stock_actual=patch.stock_actual;
-      if(patch.reserva!==undefined)pm.reserva=patch.reserva;
-      if(patch.vendido_david!==undefined)pm.vendido_david=patch.vendido_david;
-    }
-    // Auto-detectar RE-INGRESO: stock pasa de 0 a positivo
-    if(delta.stock_actual>0&&(r.stock_actual||0)===0&&patch.stock_actual>0){
-      patch.reingreso_at=new Date().toISOString();
-      if(pm)pm.reingreso_at=patch.reingreso_at;
-    }
-    return apiPatch('productos',patch,'id=eq.'+prodId);
-  }).catch(function(e){
-    console.error('patchStockFresco error:',e);
-  });
+  }
+  function fallo(detalle){
+    var err=new Error('No se pudo ajustar el stock del producto #'+pid+(motivo?' ('+motivo+')':'')+(detalle?': '+detalle:''));
+    err.pid=pid; err.delta=delta;
+    console.error('[stock] ajustar_stock falló', pid, delta, detalle);
+    return Promise.reject(err);
+  }
+  return apiPost('rpc/ajustar_stock',{ p_pid:pid, p_stock:delta.stock_actual||0, p_reserva:delta.reserva||0, p_vd:delta.vendido_david||0, p_vf:delta.vendido_facu||0, p_en_viaje:delta.en_viaje||0 })
+    .then(function(res){
+      if(res && res.ok){ sincronizar(res); return res; }
+      return fallo((res && res.error) || 'respuesta inválida');
+    }, function(e){ return fallo(e && e.message ? e.message : String(e)); });
 }
 
 // comboIdDeItem (2026-06-03 auditoría stock): resuelve el combo_id de un item de pedido, sea cual sea su formato.
@@ -732,6 +747,7 @@ var esDeposito=false;
 var _comisiones={perfume:2000,decan:500,minorista:5000};
 
 function _entrarStaff(perfil){
+  _sesionIniciada=true; _sesionVencidaAvisada=false;
   VENDEDOR_ID = perfil.vendedor_id || 3;
   VENDEDOR_NOMBRE = perfil.nombre || "Staff";
   esDeposito = (perfil.rol==="deposito");
@@ -4414,13 +4430,17 @@ function marcTransferirCarrito(){
 
   // Use ventas_transferidas table (same as David→Facu transfers)
   var itemsData=allItems.map(function(it){
-    var seg=it.isDecan?"decan":(it.seg==="pi"?"minorista":it.seg==="pm"?"mayorista":"mediano");
-    return {
+    // 2026-10-07: un precio cambiado a mano viaja como "especial" (antes iba con el segmento de la
+    // cantidad y Belle lo mostraba como x1/x3/x10 con un precio que no coincidía).
+    var seg=it.isDecan?"decan":(it.precioManual?((parseFloat(it.price)||0)===0?"BONIFICADO":"especial"):(it.seg==="pi"?"minorista":it.seg==="pm"?"mayorista":"mediano"));
+    var _it={
       producto_id:it.isDecan?(it.prodId||null):(it.id||null),
       nombre:it.nombre,qty:it.qty,
       segmento:seg,precio:it.price,
       total:it.price*it.qty,isDecan:it.isDecan||false
     };
+    if(it.precioManual){ _it.precioManual=true; if(it.descMotivo) _it.descMotivo=it.descMotivo; }
+    return _it;
   });
 
   // If con reserva: discount stock now
