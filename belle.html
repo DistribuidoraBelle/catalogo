@@ -17538,33 +17538,54 @@ function verResultadosCampania(id, btn){
 // (de la primera fecha_desde a la última fecha_hasta de sus ofertas), por cualquier canal.
 // Se compara contra el período anterior de la misma duración.
 // ═══════════════════════════════════════════════════════════════════
+// 2026-10-08: cada publicación/activación queda en campanias_log (accion 'publicada'); las estadísticas
+// arrancan desde la última publicación, no desde la fecha "desde" de la oferta.
+function _campLogPublicada(id,nombre){
+  if(!id) return Promise.resolve();
+  return apiPost('campanias_log',{campania_id:id, campania:nombre||'', accion:'publicada', detalle:'Campaña publicada (las estadísticas se cuentan desde acá).', disparado_por:'admin'}).catch(function(e){ console.warn('[campanias_log publicada]',e); });
+}
 function campEstadisticasAbrir(id){
   var old=document.getElementById('moCampStats'); if(old) old.remove();
   var mo=document.createElement('div'); mo.id='moCampStats'; mo.className='mo'; mo.style.zIndex='2147483000';
-  mo.innerHTML="<div class='md' style='max-width:980px'><div class='mh' style='display:flex;align-items:center;justify-content:space-between;padding:.8rem 1rem;border-bottom:1px solid var(--bd)'><div style='font-weight:700'>📊 Estadísticas de la campaña</div><button class='btn btn-g' onclick='document.getElementById(\"moCampStats\").remove()' style='padding:.25rem .6rem'>✕</button></div><div class='mb' id='campStatsBody'><div class='loading'><div class='spin'></div>Calculando…</div></div></div>";
+  mo.innerHTML="<div class='md' style='max-width:980px'><div class='mh' style='display:flex;align-items:center;justify-content:space-between;gap:.5rem;flex-wrap:wrap;padding:.8rem 1rem;border-bottom:1px solid var(--bd)'><div style='font-weight:700'>📊 Estadísticas de la campaña</div>"+
+    "<div style='display:flex;align-items:center;gap:.35rem;font-size:.68rem;color:var(--tx3)'>Desde <input type='date' id='campStatsDesde' class='fi' style='width:auto;padding:.2rem .35rem;font-size:.7rem'> hasta <input type='date' id='campStatsHasta' class='fi' style='width:auto;padding:.2rem .35rem;font-size:.7rem'> <button class='btn btn-g' style='padding:.2rem .5rem;font-size:.68rem' onclick='_campStatsRecalcular(\""+id+"\")'>Recalcular</button> <button class='btn btn-g' onclick='document.getElementById(\"moCampStats\").remove()' style='padding:.25rem .6rem'>✕</button></div></div><div class='mb' id='campStatsBody'><div class='loading'><div class='spin'></div>Calculando…</div></div></div>";
   mo.onclick=function(e){ if(e.target===mo) mo.remove(); };
   document.body.appendChild(mo); mo.classList.add('open');
   _campStatsCargar(id).then(function(h){ var b=document.getElementById('campStatsBody'); if(b) b.innerHTML=h; })
     .catch(function(e){ var b=document.getElementById('campStatsBody'); if(b) b.innerHTML="<div class='empty'>No se pudieron calcular: "+_ofEsc((e&&e.message)||e)+"</div>"; });
 }
-function _campStatsCargar(id){
+function _campStatsRecalcular(id){
+  var d=(document.getElementById('campStatsDesde')||{}).value, h=(document.getElementById('campStatsHasta')||{}).value;
+  var rango={}; if(d) rango.desde=new Date(d+'T00:00:00-03:00'); if(h) rango.hasta=new Date(h+'T23:59:59-03:00');
+  var b=document.getElementById('campStatsBody'); if(b) b.innerHTML="<div class='loading'><div class='spin'></div>Calculando…</div>";
+  _campStatsCargar(id,rango).then(function(html){ if(b) b.innerHTML=html; }).catch(function(e){ if(b) b.innerHTML="<div class='empty'>No se pudieron calcular: "+_ofEsc((e&&e.message)||e)+"</div>"; });
+}
+function _campStatsCargar(id,rango){
+  rango=rango||{};
   var TZ={timeZone:'America/Argentina/Buenos_Aires'};
   return Promise.all([
     apiGet('ofertas_campanias','select=id,nombre,created_at&id=eq.'+id),
     apiGet('ofertas','select=fecha_desde,fecha_hasta,tipo,activa&campania_id=eq.'+id),
     apiGet('ofertas_campania_productos','select=producto_id&campania_id=eq.'+id),
-    apiGet('combos','select=id,nombre,precio&campania_id=eq.'+id)
+    apiGet('combos','select=id,nombre,precio&campania_id=eq.'+id),
+    apiGet('campanias_log','select=created_at&campania_id=eq.'+id+'&accion=eq.publicada&order=created_at.desc&limit=1').catch(function(){ return []; })
   ]).then(function(r){
     var camp=(r[0]&&r[0][0])||{nombre:'Campaña'}; var ofs=r[1]||[]; var pids={}; (r[2]||[]).forEach(function(x){ pids[x.producto_id]=1; });
     var combos=r[3]||[]; var cids={}; combos.forEach(function(c){ cids[c.id]=c; });
     var dIni=null,dFin=null; ofs.forEach(function(o){ if(o.fecha_desde&&(!dIni||new Date(o.fecha_desde)<dIni)) dIni=new Date(o.fecha_desde); if(o.fecha_hasta&&(!dFin||new Date(o.fecha_hasta)>dFin)) dFin=new Date(o.fecha_hasta); });
     if(!dIni) dIni=new Date(camp.created_at||Date.now()); if(!dFin) dFin=new Date();
+    // desde la última publicación (si es posterior al "desde" de la oferta), salvo que se elija otro rango
+    var pub=(r[4]&&r[4][0]&&r[4][0].created_at)?new Date(r[4][0].created_at):null;
+    var desdePub=!!(pub && pub>dIni && !rango.desde);
+    if(desdePub) dIni=pub;
+    if(rango.desde) dIni=rango.desde; if(rango.hasta) dFin=rango.hasta;
+    camp._desdePub=desdePub; camp._pub=pub;
     var ahora=new Date(); var finEfectivo=dFin<ahora?dFin:ahora;
     var durMs=dFin-dIni; var prevIni=new Date(dIni.getTime()-durMs), prevFin=dIni;
     var qV='select=vendedor_id,producto_id,producto_nombre,cantidad,total,created_at,segmento,origen,nro_orden,combo_id,precio_unitario&estado=in.(confirmada,completada,pagada)&order=created_at.asc';
     return Promise.all([
       apiGetAll('ventas',qV+'&created_at=gte.'+prevIni.toISOString()+'&created_at=lte.'+dFin.toISOString()),
-      Promise.resolve({camp:camp,pids:pids,combos:combos,cids:cids,dIni:dIni,dFin:dFin,finEfectivo:finEfectivo,prevIni:prevIni,prevFin:prevFin,durMs:durMs,TZ:TZ})
+      Promise.resolve({camp:camp,pids:pids,combos:combos,cids:cids,dIni:dIni,dFin:dFin,finEfectivo:finEfectivo,prevIni:prevIni,prevFin:prevFin,durMs:durMs,TZ:TZ,rango:rango})
     ]);
   }).then(function(r){
     var V=r[0]||[], C=r[1];
@@ -17598,7 +17619,9 @@ function _campStatsHTML(C,vc,vprev,vtodas,peds,clis){
   var diasTot=Math.max(1,Math.round(C.durMs/864e5)), diasPas=Math.max(1,Math.min(diasTot,Math.round((C.finEfectivo-C.dIni)/864e5)+1));
   var pct=function(a,b){ return b>0?Math.round((a-b)/b*100):null; };
   var delta=function(a,b){ var p=pct(a,b); if(p===null) return "<span style='color:var(--tx3)'>sin base previa</span>"; return "<span style='color:"+(p>=0?'#9ee2b8':'#e88')+"'>"+(p>=0?'▲ +':'▼ ')+p+"% vs período anterior</span>"; };
-  var h="<div style='font-size:.72rem;color:var(--tx3);margin-bottom:.6rem'>"+_ofEsc(C.camp.nombre)+" · vigencia "+fd(C.dIni)+" al "+fd(C.dFin)+" · día "+diasPas+" de "+diasTot+" · comparado con "+fd(C.prevIni)+" al "+fd(C.prevFin)+"</div>";
+  var fdh=function(d){ return new Date(d).toLocaleString('es-AR',Object.assign({day:'2-digit',month:'2-digit',hour:'2-digit',minute:'2-digit'},TZ)); };
+  var h="<div style='font-size:.72rem;color:var(--tx3);margin-bottom:.6rem'>"+_ofEsc(C.camp.nombre)+" · "+(C.camp._desdePub?"desde que se publicó el <b>"+fdh(C.dIni)+"</b>":"del "+fd(C.dIni))+" al "+fd(C.dFin)+" · día "+diasPas+" de "+diasTot+" · comparado con "+fd(C.prevIni)+" al "+fd(C.prevFin)+"</div>";
+  try{ var _i=document.getElementById('campStatsDesde'), _f=document.getElementById('campStatsHasta'); var _iso=function(d){ return new Date(d).toLocaleDateString('en-CA',TZ); }; if(_i&&!_i.value) _i.value=_iso(C.dIni); if(_f&&!_f.value) _f.value=_iso(C.dFin); }catch(e){}
   h+="<div style='display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:.5rem;margin-bottom:.9rem'>";
   h+=_repPanoKpi("💰 Facturado", fmt(fact), "#9ee2b8", delta(fact,factPrev));
   h+=_repPanoKpi("📦 Unidades", unid, "var(--tx)", delta(unid,unidPrev));
@@ -17935,8 +17958,10 @@ function _campExtender(id, dias){
   var txt=fin.toLocaleString('es-AR',{day:'2-digit',month:'2-digit',hour:'2-digit',minute:'2-digit'});
   bellConfirm('¿Estirar "'+((c&&c.nombre)||'la campaña')+'" '+dias+' día'+(dias===1?'':'s')+' más?\n\nNueva fecha de fin: '+txt, function(){
   var ops=[apiPatch('ofertas',{fecha_hasta:fin.toISOString(),activa:true,updated_at:new Date().toISOString()},'id=eq.'+of.id)];
-  if(c && c.activa===false) ops.push(apiPatch('ofertas_campanias',{activa:true},'id=eq.'+id));
+  var _reactiva=(c && c.activa===false);
+  if(_reactiva) ops.push(apiPatch('ofertas_campanias',{activa:true},'id=eq.'+id));
   Promise.all(ops).then(function(){
+    if(_reactiva) _campLogPublicada(id,(c&&c.nombre)||'');
     toast('⏳ Ahora termina el '+txt,'tok');
     // Que la pestaña se vuelva a prender sin esperar a que pase el cron.
     return apiPost('rpc/fn_campanias_mantenimiento',{p_origen:'a mano'}).catch(function(){});
@@ -19671,6 +19696,7 @@ function toggleCampaniaActiva(id, activar){
     promesas.push(apiPatch('pestanas_catalogo', {activa: activar}, 'id=eq.'+c.pestana_id));
   }
   Promise.all(promesas).then(function(){
+    if(activar) _campLogPublicada(id,(c&&c.nombre)||'');
     toast(activar ? 'Campaña activada (pestaña visible)' : 'Campaña pausada (pestaña oculta)','tok');
     loadOfertasAdmin();
   }).catch(function(e){ toast('Error: '+e.message,'terr'); });
@@ -56797,7 +56823,7 @@ function campEditorAbrir(id, paso){
   var vals=(camp && window._ofertasCampaniaProductosVal && window._ofertasCampaniaProductosVal[camp.id])||{};
   var ids=(camp && window._ofertasCampaniaProductos && window._ofertasCampaniaProductos[camp.id])||[];
   var pr={}; ids.forEach(function(pid){ var d=vals[pid]||{}; pr[pid]=_ceDatoDesde(d); });
-  CE={id:camp?camp.id:null, camp:camp||{}, oferta:of||{}, pestana_id:camp?camp.pestana_id:null, nuevaPestana:!camp,
+  CE={_activaInicial:!!(camp&&camp.activa), id:camp?camp.id:null, camp:camp||{}, oferta:of||{}, pestana_id:camp?camp.pestana_id:null, nuevaPestana:!camp,
       tipo:(of&&of.tipo)||'x10_sin_minimo', multi_lleva:(of&&of.multi_lleva)||3, multi_paga:(of&&of.multi_paga)||2,
       prods:pr, prodsOrig:JSON.parse(JSON.stringify(pr)), paso:paso||'datos', q:'', combos:[], cf:null, sucio:false};
   var ov=document.getElementById('campEd'); if(!ov){ ov=document.createElement('div'); ov.id='campEd'; document.body.appendChild(ov); }
@@ -57359,6 +57385,7 @@ function campEditorGuardar(){
     });
   }).then(function(){
     CE.sucio=false; CE.prodsOrig=JSON.parse(JSON.stringify(CE.prods));
+    try{ if(CE && CE.id && !CE._activaInicial && CE.camp && CE.camp.activa!==false){ _campLogPublicada(CE.id, CE.camp.nombre||''); CE._activaInicial=true; } }catch(e){}
     toast('💾 Campaña guardada','tok');
     if(typeof loadOfertasAdmin==='function') loadOfertasAdmin();
     setTimeout(function(){ if(CE){ var cc=(window._campaniasData||[]).find(function(x){ return x.id===CE.id; }); if(cc) CE.camp=cc; _ceRender(); _ceCargarCombos(); } },700);
