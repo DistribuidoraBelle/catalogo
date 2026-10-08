@@ -1267,16 +1267,18 @@ body{
 .wa-tilde{color:#53bdeb;font-size:.75rem}
 .wa-quien{font-size:.63rem;color:var(--wa-verde);font-weight:600;margin-bottom:2px}
 
-/* ── Las notas de voz del cliente ── */
-.wa-audio{display:flex;align-items:center;gap:8px;margin:2px 0 4px}
-.wa-audio-play{flex:none;width:30px;height:30px;border-radius:50%;border:none;cursor:pointer;
-  background:var(--wa-verde,#00a884);color:#0b141a;font-size:.8rem;line-height:1;
-  display:flex;align-items:center;justify-content:center;padding:0}
-.wa-audio-play:hover{filter:brightness(1.1)}
-.wa-audio-play:disabled{opacity:.5;cursor:default}
-.wa-audio-lbl{font-size:.72rem;color:rgba(233,237,239,.6)}
-.wa-audio audio{height:32px;max-width:100%;flex:1;min-width:0}
-.wa-audio-err{font-size:.7rem;color:#f7b955}
+/* ── Lo que manda el cliente: notas de voz, fotos y videos ── */
+.wa-media{margin:2px 0 4px}
+.wa-media audio{height:32px;width:100%;min-width:180px;display:block}
+.wa-media video{max-width:100%;max-height:320px;border-radius:6px;display:block;background:#000}
+.wa-media-foto{max-width:100%;max-height:320px;border-radius:6px;display:block;cursor:zoom-in}
+.wa-media-cargando,.wa-media-err{font-size:.72rem;color:rgba(233,237,239,.55);
+  display:flex;align-items:center;gap:6px;padding:3px 0}
+.wa-media-err{color:#f7b955}
+/* La foto en grande, al tocarla */
+.wa-lupa{position:fixed;inset:0;z-index:4000;background:rgba(0,0,0,.92);display:flex;
+  align-items:center;justify-content:center;padding:18px;cursor:zoom-out}
+.wa-lupa img{max-width:100%;max-height:100%;border-radius:6px}
 
 /* ── La barra de escribir ── */
 .wa-escribir{flex:none;background:var(--wa-panel);padding:8px 16px;display:flex;align-items:flex-end;
@@ -41844,7 +41846,7 @@ function _waCargar(mostrarCarga){
   _waEstado.cargando=true;
 
   return Promise.all([
-    apiGet("wa_mensajes","select=id,telefono,rol,texto,creado_en,por_humano,audio_archivo&order=id.desc&limit=800"),
+    apiGet("wa_mensajes","select=id,telefono,rol,texto,creado_en,por_humano,media_archivo,media_tipo&order=id.desc&limit=800"),
     apiGet("wa_conversaciones","select=telefono,bot_activo").catch(function(){return [];})
   ]).then(function(res){
     var msgs=(res[0]||[]).slice().reverse();   // de la base vienen del más nuevo al más viejo
@@ -41993,13 +41995,13 @@ function _waPintarMsgs(){
     var dia=_waDia(m.creado_en);
     if(dia&&dia!==diaAnt){ h+='<div class="wa-dia"><span>'+_waEsc(dia)+'</span></div>'; diaAnt=dia; }
     var mio=m.rol==="assistant";
-    // Nota de voz: botón que trae la URL firmada y la reproduce. El texto que
-    // queda abajo es la transcripción, que es lo que leyó Belle.
+    // Lo que mandó el cliente. El hueco se pinta ahora y el archivo entra
+    // cuando llegan las URLs firmadas (_waMedios), que se piden todas juntas.
     var audio="";
-    if(m.audio_archivo){
-      audio='<div class="wa-audio" id="waAu'+m.id+'">'+
-        '<button class="wa-audio-play" onclick="_waOirAudio('+m.id+',this)" title="Escuchar">&#9654;</button>'+
-        '<span class="wa-audio-lbl">Nota de voz</span></div>';
+    if(m.media_archivo){
+      audio='<div class="wa-media" id="waMe'+m.id+'" data-arch="'+_waEsc(m.media_archivo)+
+        '" data-tipo="'+_waEsc(m.media_tipo||"")+'">'+
+        '<div class="wa-media-cargando">'+_waMediaIcono(m.media_tipo)+' Cargando…</div></div>';
     }
     h+='<div class="wa-fila '+(mio?"mio":"suyo")+'"><div class="wa-burb">'+
        (m.por_humano?'<div class="wa-quien">Vos</div>':'')+
@@ -42015,33 +42017,79 @@ function _waPintarMsgs(){
   cont.setAttribute("data-tel",tel);
   cont.setAttribute("data-ult",String(ultimo));
   cont.scrollTop=cont.scrollHeight;
+  _waPintarMedios(cont);
 }
 
-/**
- * Escuchar una nota de voz. El bucket es privado —es la voz de un cliente— así
- * que la URL la firma la Edge Function después de chequear la sesión del panel.
- * Se pide al tocar play y no al pintar la lista: así no se firman treinta URLs
- * que nadie va a escuchar.
- */
-function _waOirAudio(id, boton){
-  var msg=null;
-  for(var i=0;i<_waEstado.msgs.length;i++){ if(_waEstado.msgs[i].id===id){ msg=_waEstado.msgs[i]; break; } }
-  var caja=document.getElementById("waAu"+id);
-  if(!msg||!msg.audio_archivo||!caja)return;
+function _waMediaIcono(tipo){
+  if(tipo==="foto")return "&#128247;";
+  if(tipo==="video")return "&#127909;";
+  return "&#127908;";
+}
 
-  boton.disabled=true; boton.innerHTML="&#8943;";
-  fetch(SB_URL+"/functions/v1/belle-whatsapp/audio?archivo="+encodeURIComponent(msg.audio_archivo),{
-    headers:{"Authorization":"Bearer "+(_authToken||SB_KEY)}
+/* ═══ Lo que mandó el cliente ════════════════════════════════════════════
+ * El bucket es privado —son la voz y las fotos de un cliente, no la foto de un
+ * frasco— así que las URLs las firma la Edge Function después de chequear la
+ * sesión del panel. Se piden TODAS las del chat de una sola vez: una llamada
+ * por foto serían diez viajes para pintar la misma pantalla.
+ *
+ * Y se guardan 30 días: lo más viejo ya no está, y ahí se dice, en vez de
+ * dejar un reproductor roto. */
+function _waPintarMedios(cont){
+  var cajas=cont.querySelectorAll(".wa-media[data-arch]");
+  if(!cajas.length)return;
+
+  var archivos=[],porArchivo={};
+  for(var i=0;i<cajas.length;i++){
+    var a=cajas[i].getAttribute("data-arch");
+    if(!a)continue;
+    if(!porArchivo[a]){ porArchivo[a]=[]; archivos.push(a); }
+    porArchivo[a].push(cajas[i]);
+  }
+
+  fetch(SB_URL+"/functions/v1/belle-whatsapp/medios",{
+    method:"POST",
+    headers:{"Authorization":"Bearer "+(_authToken||SB_KEY),"Content-Type":"application/json"},
+    body:JSON.stringify({archivos:archivos})
   }).then(function(r){return r.json();}).then(function(d){
-    if(!d.url)throw new Error(d.error||"no se pudo abrir el audio");
-    // El reproductor reemplaza al botón: queda con barra, volumen y descarga.
-    caja.innerHTML='<audio controls autoplay preload="metadata" src="'+_waEsc(d.url)+'"></audio>';
+    if(d.error)throw new Error(d.error);
+    var urls=d.urls||{};
+    archivos.forEach(function(arch){
+      var url=urls[arch];
+      porArchivo[arch].forEach(function(caja){
+        var tipo=caja.getAttribute("data-tipo");
+        if(!url){
+          caja.innerHTML='<div class="wa-media-err">'+_waMediaIcono(tipo)+
+            ' Ya no está guardado (se borran a los '+(d.dias||30)+' días)</div>';
+          return;
+        }
+        if(tipo==="foto"){
+          caja.innerHTML='<img class="wa-media-foto" src="'+_waEsc(url)+
+            '" alt="Foto del cliente" onclick="_waLupa(this.src)" loading="lazy">';
+        } else if(tipo==="video"){
+          caja.innerHTML='<video controls preload="metadata" src="'+_waEsc(url)+'"></video>';
+        } else {
+          caja.innerHTML='<audio controls preload="metadata" src="'+_waEsc(url)+'"></audio>';
+        }
+      });
+    });
   }).catch(function(e){
-    boton.disabled=false; boton.innerHTML="&#9654;";
-    var err=caja.querySelector(".wa-audio-err");
-    if(!err){ err=document.createElement("span"); err.className="wa-audio-err"; caja.appendChild(err); }
-    err.textContent=e.message||String(e);
+    for(var i=0;i<cajas.length;i++){
+      cajas[i].innerHTML='<div class="wa-media-err">No se pudo abrir: '+
+        _waEsc(e.message||String(e))+'</div>';
+    }
   });
+}
+
+/** La foto en grande. Se cierra tocando en cualquier lado o con Escape. */
+function _waLupa(src){
+  var lupa=document.createElement("div");
+  lupa.className="wa-lupa";
+  lupa.innerHTML='<img src="'+_waEsc(src)+'" alt="">';
+  function cerrar(){ lupa.remove(); document.removeEventListener("keydown",tecla); }
+  function tecla(e){ if(e.key==="Escape")cerrar(); }
+  lupa.onclick=cerrar;
+  document.addEventListener("keydown",tecla);
+  document.body.appendChild(lupa);
 }
 
 function _waPintarBoton(){
