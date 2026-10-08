@@ -17531,6 +17531,127 @@ function verResultadosCampania(id, btn){
   });
 }
 
+
+// ═══════════════════════════════════════════════════════════════════
+// 📊 ESTADÍSTICAS DE CAMPAÑA (2026-10-08) — modal con KPIs, gráficos y tabla.
+// Criterio: ventas confirmadas de productos (y combos) de la campaña dentro de su vigencia
+// (de la primera fecha_desde a la última fecha_hasta de sus ofertas), por cualquier canal.
+// Se compara contra el período anterior de la misma duración.
+// ═══════════════════════════════════════════════════════════════════
+function campEstadisticasAbrir(id){
+  var old=document.getElementById('moCampStats'); if(old) old.remove();
+  var mo=document.createElement('div'); mo.id='moCampStats'; mo.className='mo'; mo.style.zIndex='2147483000';
+  mo.innerHTML="<div class='md' style='max-width:980px'><div class='mh' style='display:flex;align-items:center;justify-content:space-between;padding:.8rem 1rem;border-bottom:1px solid var(--bd)'><div style='font-weight:700'>📊 Estadísticas de la campaña</div><button class='btn btn-g' onclick='document.getElementById(\"moCampStats\").remove()' style='padding:.25rem .6rem'>✕</button></div><div class='mb' id='campStatsBody'><div class='loading'><div class='spin'></div>Calculando…</div></div></div>";
+  mo.onclick=function(e){ if(e.target===mo) mo.remove(); };
+  document.body.appendChild(mo); mo.classList.add('open');
+  _campStatsCargar(id).then(function(h){ var b=document.getElementById('campStatsBody'); if(b) b.innerHTML=h; })
+    .catch(function(e){ var b=document.getElementById('campStatsBody'); if(b) b.innerHTML="<div class='empty'>No se pudieron calcular: "+_ofEsc((e&&e.message)||e)+"</div>"; });
+}
+function _campStatsCargar(id){
+  var TZ={timeZone:'America/Argentina/Buenos_Aires'};
+  return Promise.all([
+    apiGet('ofertas_campanias','select=id,nombre,created_at&id=eq.'+id),
+    apiGet('ofertas','select=fecha_desde,fecha_hasta,tipo,activa&campania_id=eq.'+id),
+    apiGet('ofertas_campania_productos','select=producto_id&campania_id=eq.'+id),
+    apiGet('combos','select=id,nombre,precio&campania_id=eq.'+id)
+  ]).then(function(r){
+    var camp=(r[0]&&r[0][0])||{nombre:'Campaña'}; var ofs=r[1]||[]; var pids={}; (r[2]||[]).forEach(function(x){ pids[x.producto_id]=1; });
+    var combos=r[3]||[]; var cids={}; combos.forEach(function(c){ cids[c.id]=c; });
+    var dIni=null,dFin=null; ofs.forEach(function(o){ if(o.fecha_desde&&(!dIni||new Date(o.fecha_desde)<dIni)) dIni=new Date(o.fecha_desde); if(o.fecha_hasta&&(!dFin||new Date(o.fecha_hasta)>dFin)) dFin=new Date(o.fecha_hasta); });
+    if(!dIni) dIni=new Date(camp.created_at||Date.now()); if(!dFin) dFin=new Date();
+    var ahora=new Date(); var finEfectivo=dFin<ahora?dFin:ahora;
+    var durMs=dFin-dIni; var prevIni=new Date(dIni.getTime()-durMs), prevFin=dIni;
+    var qV='select=vendedor_id,producto_id,producto_nombre,cantidad,total,created_at,segmento,origen,nro_orden,combo_id,precio_unitario&estado=in.(confirmada,completada,pagada)&order=created_at.asc';
+    return Promise.all([
+      apiGetAll('ventas',qV+'&created_at=gte.'+prevIni.toISOString()+'&created_at=lte.'+dFin.toISOString()),
+      Promise.resolve({camp:camp,pids:pids,combos:combos,cids:cids,dIni:dIni,dFin:dFin,finEfectivo:finEfectivo,prevIni:prevIni,prevFin:prevFin,durMs:durMs,TZ:TZ})
+    ]);
+  }).then(function(r){
+    var V=r[0]||[], C=r[1];
+    var esCamp=function(v){ return (v.producto_id&&C.pids[v.producto_id]) || (v.combo_id&&C.cids[v.combo_id]); };
+    var enVig=function(v){ var t=new Date(v.created_at); return t>=C.dIni&&t<=C.dFin; };
+    var enPrev=function(v){ var t=new Date(v.created_at); return t>=C.prevIni&&t<C.prevFin; };
+    var vc=V.filter(function(v){ return esCamp(v)&&enVig(v); });
+    var vprev=V.filter(function(v){ return esCamp(v)&&enPrev(v); });
+    var vtodas=V.filter(enVig);
+    var nros={}; vc.forEach(function(v){ if(v.nro_orden) nros[v.nro_orden]=1; });
+    var nrosArr=Object.keys(nros);
+    var qP=nrosArr.length?apiGetAll('pedidos_catalogo','select=nro_orden,cliente_id,es_cc,origen,transferida_por_id,vendedor_id,total,cliente_nombre&nro_orden=in.('+nrosArr.map(function(n){return '"'+n+'"';}).join(',')+')'):Promise.resolve([]);
+    return qP.then(function(peds){
+      peds=peds||[]; var cliIds={}; peds.forEach(function(p){ if(p.cliente_id) cliIds[p.cliente_id]=1; });
+      var qC=Object.keys(cliIds).length?apiGet('clientes','select=id,nombre,apellido,cuenta_corriente_habilitada,precio_mayorista&id=in.('+Object.keys(cliIds).join(',')+')'):Promise.resolve([]);
+      return qC.then(function(clis){ return _campStatsHTML(C,vc,vprev,vtodas,peds,clis||[]); });
+    });
+  });
+}
+function _campStatsHTML(C,vc,vprev,vtodas,peds,clis){
+  var TZ=C.TZ; var sum=function(a,f){ return a.reduce(function(s,x){ return s+(f(x)||0); },0); };
+  var fd=function(d){ return new Date(d).toLocaleDateString('es-AR',Object.assign({day:'2-digit',month:'2-digit'},TZ)); };
+  var dia=function(d){ return new Date(d).toLocaleDateString('es-AR',Object.assign({day:'2-digit',month:'2-digit'},TZ)); };
+  var pedMap={}; peds.forEach(function(p){ pedMap[p.nro_orden]=p; });
+  var cliMap={}; clis.forEach(function(c){ cliMap[c.id]=c; });
+  var fact=sum(vc,function(v){return +v.total;}), unid=sum(vc,function(v){return +v.cantidad;});
+  var pedidos={}; vc.forEach(function(v){ pedidos[v.nro_orden||('s'+v.created_at)]=1; }); var nPed=Object.keys(pedidos).length;
+  var factPrev=sum(vprev,function(v){return +v.total;}), unidPrev=sum(vprev,function(v){return +v.cantidad;});
+  var factTodo=sum(vtodas,function(v){return +v.total;});
+  var clientes={}; vc.forEach(function(v){ var p=pedMap[v.nro_orden]; if(p&&p.cliente_id) clientes[p.cliente_id]=1; }); var nCli=Object.keys(clientes).length;
+  var diasTot=Math.max(1,Math.round(C.durMs/864e5)), diasPas=Math.max(1,Math.min(diasTot,Math.round((C.finEfectivo-C.dIni)/864e5)+1));
+  var pct=function(a,b){ return b>0?Math.round((a-b)/b*100):null; };
+  var delta=function(a,b){ var p=pct(a,b); if(p===null) return "<span style='color:var(--tx3)'>sin base previa</span>"; return "<span style='color:"+(p>=0?'#9ee2b8':'#e88')+"'>"+(p>=0?'▲ +':'▼ ')+p+"% vs período anterior</span>"; };
+  var h="<div style='font-size:.72rem;color:var(--tx3);margin-bottom:.6rem'>"+_ofEsc(C.camp.nombre)+" · vigencia "+fd(C.dIni)+" al "+fd(C.dFin)+" · día "+diasPas+" de "+diasTot+" · comparado con "+fd(C.prevIni)+" al "+fd(C.prevFin)+"</div>";
+  h+="<div style='display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:.5rem;margin-bottom:.9rem'>";
+  h+=_repPanoKpi("💰 Facturado", fmt(fact), "#9ee2b8", delta(fact,factPrev));
+  h+=_repPanoKpi("📦 Unidades", unid, "var(--tx)", delta(unid,unidPrev));
+  h+=_repPanoKpi("🧾 Pedidos", nPed, "var(--tx)", nCli+" cliente"+(nCli===1?'':'s')+" distinto"+(nCli===1?'':'s'));
+  h+=_repPanoKpi("🎯 Ticket promedio", nPed?fmt(Math.round(fact/nPed)):"-", "#9a8fd4", nPed?(Math.round(unid/nPed*10)/10)+" unid. por pedido":"");
+  h+=_repPanoKpi("📈 Peso en las ventas", factTodo?Math.round(fact/factTodo*100)+"%":"-", "#e8c089", "de "+fmt(factTodo)+" vendidos en el período");
+  h+=_repPanoKpi("📅 Ritmo", fmt(Math.round(fact/diasPas))+"/día", "var(--tx)", "proyección "+fmt(Math.round(fact/diasPas*diasTot))+" al cierre");
+  h+="</div>";
+  // ── ventas por día
+  var porDia={}; var d0=new Date(C.dIni); for(var i=0;i<diasTot;i++){ var dd=new Date(d0.getTime()+i*864e5); porDia[dia(dd)]={f:0,u:0,k:i}; }
+  vc.forEach(function(v){ var k=dia(v.created_at); if(!porDia[k]) porDia[k]={f:0,u:0,k:99}; porDia[k].f+=+v.total; porDia[k].u+=+v.cantidad; });
+  var dias=Object.keys(porDia).sort(function(a,b){ return porDia[a].k-porDia[b].k; });
+  var maxF=Math.max(1,Math.max.apply(null,dias.map(function(k){return porDia[k].f;})));
+  var W=Math.max(320,dias.length*26), H=150;
+  var svg="<svg viewBox='0 0 "+W+" "+(H+28)+"' style='width:100%;max-width:"+(W*1.6)+"px;height:auto'>";
+  dias.forEach(function(k,i){ var d=porDia[k]; var bh=Math.round(d.f/maxF*(H-20)); var x=i*26+4; var hoy=(dia(new Date())===k);
+    svg+="<rect x='"+x+"' y='"+(H-bh)+"' width='18' height='"+bh+"' rx='3' fill='"+(hoy?'#e8c089':'#5b8dee')+"'><title>"+k+": "+fmt(d.f)+" · "+d.u+" u.</title></rect>";
+    if(d.u>0) svg+="<text x='"+(x+9)+"' y='"+(H-bh-4)+"' text-anchor='middle' font-size='8' fill='var(--tx2)'>"+d.u+"</text>";
+    svg+="<text x='"+(x+9)+"' y='"+(H+12)+"' text-anchor='middle' font-size='7' fill='var(--tx3)'>"+k.slice(0,5)+"</text>"; });
+  svg+="</svg>";
+  h+="<div class='tbl-wrap' style='padding:.7rem .9rem;margin-bottom:.9rem'><div style='font-size:.7rem;font-weight:700;color:var(--tx2);margin-bottom:.4rem'>📅 Facturado por día <span style='font-weight:400;color:var(--tx3)'>(el número es unidades · hoy en dorado)</span></div><div style='overflow-x:auto'>"+svg+"</div></div>";
+  // ── donas: tramo, canal, tipo de cliente
+  var tramo={}; vc.forEach(function(v){ var s=String(v.segmento||'').toLowerCase(); var k=(s==='pm'||s==='x10'||s==='mayorista')?'x10 (VIP/10+)':(s==='pe'||s==='x3'||s==='mediano')?'x3':(s==='pi'||s==='x1'||s==='minorista')?'Precio lista':(s==='decan')?'Decant':(s==='combo')?'Combo':(s==='especial'||s==='bonificado')?'Especial':'Precio único/otro'; tramo[k]=(tramo[k]||0)+(+v.total); });
+  var canal={}; vc.forEach(function(v){ var p=pedMap[v.nro_orden]; var k=!p?'Venta directa':(p.transferida_por_id===3?'Marcela (depósito)':(p.origen==='transferencia')?'Transferencia':(!p.vendedor_id||p.origen==='catalogo'||/^WEB/.test(v.nro_orden||''))?'Web (catálogo)':'Vendedor'); canal[k]=(canal[k]||0)+(+v.total); });
+  var tipoCli={}; vc.forEach(function(v){ var p=pedMap[v.nro_orden]; var c=p&&cliMap[p.cliente_id]; var k=(p&&(p.es_cc||(c&&(c.cuenta_corriente_habilitada||c.precio_mayorista))))?'VIP / cuenta corriente':'Cliente común'; tipoCli[k]=(tipoCli[k]||0)+(+v.total); });
+  var pal=['#5b8dee','#9ee2b8','#e8c089','#e88','#9a8fd4','#7ec8d4','#d4a0d8'];
+  var dona=function(tit,obj){ var items=Object.keys(obj).map(function(k,i){ return {label:k,valor:obj[k],color:pal[i%pal.length]}; }).sort(function(a,b){return b.valor-a.valor;}); return "<div class='tbl-wrap' style='padding:.7rem .9rem'><div style='font-size:.7rem;font-weight:700;color:var(--tx2);margin-bottom:.4rem'>"+tit+"</div><div style='display:flex;gap:.8rem;align-items:center;flex-wrap:wrap'>"+_repChartDona(items,130)+"</div></div>"; };
+  h+="<div style='display:grid;grid-template-columns:repeat(auto-fit,minmax(270px,1fr));gap:.6rem;margin-bottom:.9rem'>"+dona("💲 Por tramo de precio",tramo)+dona("🛒 Por canal",canal)+dona("👤 Por tipo de cliente",tipoCli)+"</div>";
+  // ── top productos
+  var porProd={}; vc.forEach(function(v){ var k=v.combo_id?('c'+v.combo_id):('p'+v.producto_id); if(!porProd[k]) porProd[k]={nombre:v.combo_id?('🎁 '+((C.cids[v.combo_id]||{}).nombre||v.producto_nombre)):v.producto_nombre,u:0,f:0,pid:v.producto_id,combo:!!v.combo_id}; porProd[k].u+=+v.cantidad; porProd[k].f+=+v.total; });
+  var lista=Object.keys(porProd).map(function(k){ return porProd[k]; }).sort(function(a,b){ return b.f-a.f; });
+  var maxP=Math.max(1,(lista[0]||{f:1}).f);
+  var stockDe=function(pid){ var p=(prods||[]).find(function(x){return x.id===pid;}); return p?(p.stock_actual||0):null; };
+  var sinVenta=Object.keys(C.pids).filter(function(pid){ return !porProd['p'+pid]; }).length;
+  h+="<div class='tbl-wrap' style='padding:.7rem .9rem;margin-bottom:.9rem'><div style='font-size:.7rem;font-weight:700;color:var(--tx2);margin-bottom:.5rem'>🏆 Productos de la campaña <span style='font-weight:400;color:var(--tx3)'>("+lista.length+" con ventas · "+sinVenta+" sin ventas todavía)</span></div>";
+  if(!lista.length) h+="<div class='empty'>Todavía no hay ventas de esta campaña.</div>";
+  lista.slice(0,15).forEach(function(it){ var st=it.combo?null:stockDe(it.pid); h+="<div style='display:grid;grid-template-columns:minmax(120px,1.4fr) 3fr auto;gap:.5rem;align-items:center;font-size:.7rem;padding:.2rem 0'><div style='white-space:nowrap;overflow:hidden;text-overflow:ellipsis' title='"+_ofEsc(it.nombre)+"'>"+_ofEsc(it.nombre)+"</div><div style='background:var(--sur2);border-radius:4px;height:12px;overflow:hidden'><div style='width:"+Math.max(2,Math.round(it.f/maxP*100))+"%;height:100%;background:linear-gradient(90deg,#5b8dee,#9ee2b8)'></div></div><div style='text-align:right;white-space:nowrap'><b>"+fmt(it.f)+"</b> · "+it.u+" u."+(st!==null?" · <span style='color:"+(st<=2?'#e88':'var(--tx3)')+"'>stock "+st+"</span>":"")+"</div></div>"; });
+  if(lista.length>15) h+="<div style='font-size:.62rem;color:var(--tx3);margin-top:.3rem'>… y "+(lista.length-15)+" más (están en el CSV)</div>";
+  h+="</div>";
+  // ── últimos pedidos
+  var ult={}; vc.slice().reverse().forEach(function(v){ var k=v.nro_orden||('s'+v.created_at); if(!ult[k]) ult[k]={nro:v.nro_orden||'-',fecha:v.created_at,f:0,u:0,cli:(pedMap[v.nro_orden]||{}).cliente_nombre||''}; ult[k].f+=+v.total; ult[k].u+=+v.cantidad; });
+  var ultArr=Object.keys(ult).map(function(k){return ult[k];}).slice(0,8);
+  if(ultArr.length){ h+="<div class='tbl-wrap' style='padding:.7rem .9rem;margin-bottom:.9rem'><div style='font-size:.7rem;font-weight:700;color:var(--tx2);margin-bottom:.4rem'>🕒 Últimos pedidos con productos de la campaña</div>"+ultArr.map(function(u){ return "<div style='display:flex;justify-content:space-between;gap:.5rem;font-size:.68rem;padding:.18rem 0;border-bottom:1px solid var(--bd)'><span>"+_ofEsc(u.nro)+" <span style='color:var(--tx3)'>· "+new Date(u.fecha).toLocaleString('es-AR',Object.assign({day:'2-digit',month:'2-digit',hour:'2-digit',minute:'2-digit'},TZ))+(u.cli?" · "+_ofEsc(u.cli):"")+"</span></span><b>"+fmt(u.f)+" · "+u.u+" u.</b></div>"; }).join('')+"</div>"; }
+  // ── CSV
+  window._campStatsCsv=[["producto","unidades","facturado","stock_actual"]].concat(lista.map(function(it){ return [it.nombre,it.u,it.f,it.combo?'':stockDe(it.pid)]; }));
+  h+="<div style='display:flex;gap:.5rem;justify-content:flex-end'><button class='btn btn-g' onclick='_campStatsCsvDescargar()' style='font-size:.7rem'>⬇️ Descargar CSV</button></div>";
+  return h;
+}
+function _campStatsCsvDescargar(){
+  var rows=window._campStatsCsv||[]; var csv=rows.map(function(r){ return r.map(function(c){ return '"'+String(c==null?'':c).replace(/"/g,'""')+'"'; }).join(';'); }).join('\n');
+  var a=document.createElement('a'); a.href='data:text/csv;charset=utf-8,﻿'+encodeURIComponent(csv); a.download='estadisticas-campania.csv'; document.body.appendChild(a); a.click(); a.remove();
+}
+
 // Duplicar campaña (Ola 3): clona vía RPC (copia pausada, sin fechas ni pestaña).
 function duplicarCampania(id){
   var c=(window._campaniasData||[]).find(function(x){return x.id===id;});
@@ -17896,7 +18017,7 @@ function renderCampaniasGrid(){
         (c.abrir_pestana_al_entrar?'<span style="color:#5b8dee">🚪 Abre al entrar</span>':'')+
       '</div>'+
       // Resultados (Ola 2): botón que carga las ventas de la campaña en su vigencia
-      '<div id="ofRes_'+c.id+'" style="margin-bottom:.5rem"><button class="btn btn-g" onclick="verResultadosCampania(\''+c.id+'\',this)" style="font-size:.7rem;width:100%">📊 Ver resultados</button></div>'+
+      '<div id="ofRes_'+c.id+'" style="margin-bottom:.5rem"><button class="btn btn-g" onclick="campEstadisticasAbrir(\''+c.id+'\')" style="font-size:.7rem;width:100%">📊 Estadísticas de la campaña</button></div>'+
       // Alertas (Ola 1)
       (_alertas.length ? '<div style="background:rgba(255,180,80,.08);border:1px solid rgba(255,180,80,.3);border-radius:6px;padding:.4rem .55rem;margin-bottom:.5rem;font-size:.63rem;color:#e8c089;line-height:1.55">'+_alertas.map(function(a){return '⚠ '+_ofEsc(a);}).join('<br>')+'</div>' : '')+
       // Acciones
