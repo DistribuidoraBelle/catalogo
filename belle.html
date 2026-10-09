@@ -1252,6 +1252,11 @@ select.sel{height:36px;border-radius:10px}
 /* la fila vieja de alertas (sin cobrar / sin stock / última unidad) ya está en las tarjetas de arriba */
 #dashAlertas{display:none!important}
 
+
+/* Ganancias: margen real por tramo */
+.v2-sc .pie.tramos{margin-top:.5rem;background:rgba(255,255,255,.025);border:1px solid rgba(255,255,255,.06);border-radius:11px;padding:.45rem .55rem}
+.v2-sc .pie.tramos em{display:block;font-style:normal;font-size:.56rem;letter-spacing:.14em;text-transform:uppercase;color:var(--acc);font-weight:700;margin-bottom:.3rem;padding-bottom:.25rem;border-bottom:1px solid rgba(228,185,108,.2)}
+.v2-sc .pie.tramos .kv span small{font-size:.56rem;color:var(--tx3)}
 </style>
 </head>
 <body data-v="1775272576">
@@ -1767,6 +1772,7 @@ select.sel{height:36px;border-radius:10px}
         </div>
       </div>
       <div class="pie" id="v2GanMeses"></div>
+      <div class="pie tramos" id="v2GanTramos"></div>
     </div>
   </div>
 
@@ -57836,12 +57842,14 @@ function _dashV2Load(){
     apiGet('clientes','select=id,created_at,cuenta_corriente_habilitada,bloqueado,estado&limit=5000').catch(function(){return [];}),
     apiGet('ofertas_campanias','select=id,nombre,activa&activa=is.true').catch(function(){return [];}),
     apiGet('ofertas','select=id,campania_id,fecha_desde,fecha_hasta,activa,tipo&activa=is.true&campania_id=not.is.null').catch(function(){return [];}),
-    apiGet('productos','select=id,nombre,empresa,stock_actual,reserva,en_viaje,costo_ars,costo_ind,costo_log,precio_may_ars,tipo,cat,cat_catalogo&activo=is.true&limit=5000').catch(function(){return [];}),
+    apiGet('productos','select=id,nombre,empresa,stock_actual,reserva,en_viaje,costo_ars,costo_ind,costo_log,precio_may_ars,tipo,cat,cat_catalogo,ml&activo=is.true&limit=5000').catch(function(){return [];}),
     apiGet('vendedores','select=id,nombre,rol,activo').catch(function(){return [];}),
     apiGet('gastos_vendedor','select=monto,created_at&aprobado=eq.true&created_at=gte.'+d60+'T03:00:00&limit=5000').catch(function(){return [];}),
-    apiGet('movimientos_stock','select=producto_id,tipo,cantidad,stock_despues,created_at&created_at=gte.'+_v2Fecha(hoy,-8)+'T03:00:00&limit=5000').catch(function(){return [];})
+    apiGet('movimientos_stock','select=producto_id,tipo,cantidad,stock_despues,created_at&created_at=gte.'+_v2Fecha(hoy,-8)+'T03:00:00&limit=5000').catch(function(){return [];}),
+    // 2026-10-10: los combos se costean por sus componentes (antes entraban a costo cero)
+    apiGet('combos','select=id,combo_items(producto_id,cantidad,es_decan)&limit=1000').catch(function(){return [];})
   ]).then(function(r){
-    var D={V:r[0]||[],P:r[1]||[],CU:r[2]||[],CL:r[3]||[],CA:r[4]||[],OF:r[5]||[],PR:r[6]||[],VE:r[7]||[],GA:r[8]||[],MV:r[9]||[],hoy:hoy};
+    var D={V:r[0]||[],P:r[1]||[],CU:r[2]||[],CL:r[3]||[],CA:r[4]||[],OF:r[5]||[],PR:r[6]||[],VE:r[7]||[],GA:r[8]||[],MV:r[9]||[],CO:r[10]||[],hoy:hoy};
     try{ _dashV2Strip(D); }catch(e){ console.warn('[dashV2 tira]',e); }
     try{ _dashV2Render(D); }
     catch(e){ console.warn('[dashV2]',e); cont.innerHTML="<div class='empty'>No se pudo armar el pulso del negocio: "+_v2Esc(e.message)+"</div>"; }
@@ -57940,6 +57948,16 @@ function _dashV2Strip(D){
   var hoy=D.hoy, prodMap={}; D.PR.forEach(function(p){ prodMap[p.id]=p; });
   var cot=(typeof cotizActual!=='undefined'&&cotizActual>0)?cotizActual:(parseFloat((document.getElementById('cotizInput')||{}).value)||1500);
   var costoDe=function(p){ if(!p) return 0; return (+p.costo_ars>0)?+p.costo_ars:((+p.costo_ind||0)+(+p.costo_log||0))*cot; };
+  // costo de un combo = suma de sus componentes (un decant = la parte proporcional de 5 ml del frasco)
+  var comboCosto={}; (D.CO||[]).forEach(function(c){ var t=0; (c.combo_items||[]).forEach(function(i){ var p=prodMap[i.producto_id]; if(!p) return; var cu=costoDe(p); if(i.es_decan) cu=cu*5/((+p.ml)||100); t+=cu*(parseInt(i.cantidad)||1); }); comboCosto[c.id]=t; });
+  var costoVenta=function(v){
+    var n=(+v.cantidad||1);
+    if(v.combo_id) return (comboCosto[v.combo_id]||0)*n;
+    var p=prodMap[v.producto_id]; if(!p) return 0;
+    if(v.segmento==='decan') return costoDe(p)*5/((+p.ml)||100)*n;
+    return costoDe(p)*n;
+  };
+  window._v2CostoVenta=costoVenta;
   var ds=_v2DiaSem(hoy), lun=_v2Fecha(hoy,-((ds+6)%7)), m1=hoy.slice(0,8)+'01';
   var en=function(d,a,b){ return d>=a&&d<=b; };
   var V=D.V.map(function(v){ v._d=v._d||_v2Dia(v.created_at); return v; });
@@ -57947,7 +57965,7 @@ function _dashV2Strip(D){
   var per=function(a,b){
     var vs=V.filter(function(v){ return en(v._d,a,b); });
     var vend=_v2Sum(vs,function(v){return v.total;});
-    var costo=_v2Sum(vs,function(v){ var p=prodMap[v.producto_id]; return p?costoDe(p)*(+v.cantidad||1):0; });
+    var costo=_v2Sum(vs,costoVenta);
     var gas=0; for(var d in gastos){ if(en(d,a,b)) gas+=gastos[d]; }
     var perf=vs.filter(function(v){ return v.segmento!=='decan'; });
     return {vs:vs,vend:vend,bruta:vend-costo,neta:vend-costo-gas,rent:vend>0?Math.round((vend-costo)/vend*100):0,ops:perf.length,
@@ -57980,6 +57998,13 @@ function _dashV2Strip(D){
   var pm=new Date(m1+'T12:00:00'); pm.setMonth(pm.getMonth()-1); var m0=pm.toISOString().slice(0,8)+'01'; var A=per(m0,_v2Fecha(m1,-1));
   var box=document.getElementById('v2GanMeses'); if(box){ var nomMes=function(iso){ return new Date(iso+'T12:00:00').toLocaleDateString('es-AR',{month:'long'}); };
     box.innerHTML="<div class='kv'><span>"+_v2Esc(nomMes(m1))+" (va)</span><b>"+_v2Fmt(M.vend)+" <small>vendido</small></b></div><div class='kv'><span>"+_v2Esc(nomMes(m0))+" completo</span><b>"+_v2Fmt(A.vend)+" <small>· neta "+_v2Fmt(A.neta)+" · "+A.rent+"%</small></b></div><div class='kv'><span>Mes vs mes</span><b>"+_v2Delta(M.vend,A.vend,'')+"</b></div>"; }
+  // margen REAL por tramo (30 días): lo vendido de verdad en cada tramo, su ganancia y la rentabilidad
+  var tb=document.getElementById('v2GanTramos'); if(tb){
+    var d30=_v2Fecha(hoy,-29), T={}, orden=['x10 / VIP','x3','Lista','Decans','Combos','Otros'];
+    V.filter(function(v){ return v._d>=d30; }).forEach(function(v){ var k=v.combo_id?'Combos':(v.segmento==='pm'?'x10 / VIP':(v.segmento==='pe'?'x3':(v.segmento==='pi'?'Lista':(v.segmento==='decan'?'Decans':'Otros')))); var o=T[k]||(T[k]={v:0,c:0,u:0}); o.v+=+v.total||0; o.c+=costoVenta(v); o.u+=+v.cantidad||1; });
+    var filas=orden.filter(function(k){ return T[k]&&T[k].v>0; });
+    tb.innerHTML="<em>Margen real por tramo · 30 días</em>"+(filas.length?filas.map(function(k){ var o=T[k], g=o.v-o.c, r=o.v>0?Math.round(g/o.v*100):0; return "<div class='kv'><span>"+k+" <small>"+o.u+" u.</small></span><b><span class='"+(g>=0?'sv-green':'sv-red')+"'>"+_v2Fmt(g)+"</span> <small>de "+_v2Fmt(o.v)+" · </small><span class='sv-blue'>"+r+"%</span></b></div>"; }).join(''):"<div class='kv'><span>Sin ventas en 30 días</span></div>");
+  }
 }
 
 // ═══════════════════════════════════════════════════════════════════════
