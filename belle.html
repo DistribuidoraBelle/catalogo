@@ -2,7 +2,7 @@
 <html lang="es">
 <head>
 <script>try{if(localStorage.getItem("belle_tema")==="claro")document.documentElement.setAttribute("data-theme","light");}catch(e){}</script>
-<!-- BELLE_BUILD 20261010-0700 modo-claro -->
+<!-- BELLE_BUILD 20261010-0800 sinc-vivo -->
 <meta charset="UTF-8">
 <link rel="icon" type="image/svg+xml" href="favicon.svg">
 <meta name="viewport" content="width=device-width,initial-scale=1">
@@ -38901,6 +38901,33 @@ function _repResumenRango(rango){
     var T=_repTotales(raw); T.raw=raw; return T;
   });
 }
+// Varios rangos con UNA consulta: trae el rango que los cubre a todos y filtra por fecha en memoria.
+// Da exactamente lo mismo que llamar _repResumenRango por cada uno (mismos filtros, misma cuenta).
+function _repResumenRangos(rangos){
+  var ks=Object.keys(rangos); if(!ks.length) return Promise.resolve({});
+  var desde=null,hasta=null; ks.forEach(function(k){ var r=rangos[k]; if(!desde||r.desde<desde) desde=r.desde; if(!hasta||r.hasta>hasta) hasta=r.hasta; });
+  var estadosV="estado=in.(confirmada,archivada_periodo)";
+  return Promise.all([
+    apiGetAll("ventas","select=id,vendedor_id,producto_id,producto_nombre,cantidad,total,segmento,created_at,origen,nro_orden,combo_id&"+estadosV+"&created_at=gte."+desde.toISOString()+"&created_at=lt."+hasta.toISOString()+"&limit=20000").catch(function(){return [];}),
+    (Array.isArray(prods) && prods.length) ? Promise.resolve(prods) : apiGetAll("productos","select=id,nombre,empresa,ml,costo_ind,costo_log,costo_ars,cat_catalogo&limit=5000").catch(function(){return [];}),
+    apiGet("combos","select=id,nombre,combo_items(producto_id,cantidad,es_decan)&limit=2000").catch(function(){return [];}),
+    apiGetAll("gastos_vendedor","select=monto,created_at&aprobado=is.true"+_gxQ()+"&created_at=gte."+desde.toISOString()+"&created_at=lt."+hasta.toISOString()+"&limit=5000").catch(function(){return [];}),
+    _repObtenerAplicaciones()
+  ]).then(function(data){
+    var ventasT=data[0]||[], productos=data[1]||[], combos=data[2]||[], gastosT=data[3]||[], apps=data[4]||[];
+    var cf=_repCostoFactory(productos, combos);
+    var out={};
+    ks.forEach(function(k){
+      var r=rangos[k], d=r.desde.getTime(), h=r.hasta.getTime();
+      var en=function(x){ var t=new Date(x.created_at).getTime(); return t>=d&&t<h; };
+      var ventas=ventasT.filter(en), gastos=gastosT.filter(en);
+      var caja=_repCaja(apps, ventas, r, cf);
+      var raw={ ventas:ventas, caja:caja, costoUnit:cf.costoUnit, prodDe:cf.producto, gastos:gastos, rango:r, cotiz:cf.cotiz };
+      var T=_repTotales(raw); T.raw=raw; out[k]=T;
+    });
+    return out;
+  });
+}
 // ════════════════════════════════════════════════════════════════════
 // REPORTES › STOCK (2026-10-10): foto de hoy del stock + evolución 90 días.
 // Los valores $ (costo, x1, x3, x10) viven acá y ya no en el dashboard.
@@ -58385,7 +58412,10 @@ function _dashV2Rango(dias){ var h=new Date(); h.setHours(0,0,0,0); var d=new Da
 function _dashV2Rep(rango){ return (typeof _repResumenRango==='function')?_repResumenRango(rango):Promise.reject(new Error('sin reportes')); }
 function _dashV2RepPeriodos(){
   var ks=['hoy','ayer','semana','semanaPasada','mes','mesPasado'];
-  return Promise.all(ks.map(function(k){ return _dashV2Rep(_repCalcRango(k)).catch(function(){ return null; }); })).then(function(rs){ var o={}; ks.forEach(function(k,i){ o[k]=rs[i]; }); return o; });
+  var rangos={}; ks.forEach(function(k){ rangos[k]=_repCalcRango(k); });
+  // 2026-10-10: una sola consulta para los 6 períodos (mismo cálculo que _repResumenRango, filtrado por fecha acá)
+  if(typeof _repResumenRangos==='function') return _repResumenRangos(rangos).catch(function(){ return {}; });
+  return Promise.all(ks.map(function(k){ return _dashV2Rep(rangos[k]).catch(function(){ return null; }); })).then(function(rs){ var o={}; ks.forEach(function(k,i){ o[k]=rs[i]; }); return o; });
 }
 // Las líneas de venta con el criterio de caja: total = lo que entró de verdad, _costo = costo proporcional
 function _dashV2VentasCaja(R){
@@ -58789,6 +58819,68 @@ function _dashV2Strip(D){
   window._temaToggle=function(){ var t=leer()==='claro'?'oscuro':'claro'; try{ localStorage.setItem(K,t); }catch(e){} aplicar(t); try{ toast(t==='claro'?'☀️ Modo claro':'🌙 Modo oscuro'); }catch(e){} };
   window._temaActual=leer;
   aplicar(leer());
+})();
+
+</script>
+<script id="sincjs">
+window._SINC_CFG={
+  paginaActual:function(){ var p=Array.prototype.find.call(document.querySelectorAll('.page'),function(x){ return x.style.display==='block'; }); return p?p.id.replace(/^page-/,''):null; },
+  activo:function(){ var a=document.getElementById('app'); return !!(a&&a.style.display!=='none'); },
+  excluir:['rpc/datos_version','rpc/fn_pedidos_de_cliente','notificaciones','notif_campanias','campanias_log','cobranza_comunicaciones','actividad_log'],
+  invalidar:function(){ try{ _repCacheApps=null; _repCacheCobros=null; _repCacheVendedores=null; _repCacheClientes=null; _repCacheProductos=null; }catch(e){} },
+  paginas:{
+    dashboard:function(){ loadDashboard(); },
+    stock:function(){ // silencioso: actualiza números sin pisar la tabla con "Cargando…"
+      apiGetAll("productos","select=id,stock_actual,reserva,en_viaje,deposito_m,vendido_david,vendido_facu,costo_ind,costo_log,costo_ars,precio_may_ars,precio_med_ars,precio_min_ars,activo,oculto,updated_at&activo=is.true&limit=5000").then(function(d){ if(!Array.isArray(d)||!Array.isArray(prods)) return; var m={}; d.forEach(function(x){ m[x.id]=x; }); var cambio=false; prods.forEach(function(p){ var n=m[p.id]; if(!n) return; for(var k in n){ if(p[k]!==n[k]){ p[k]=n[k]; cambio=true; } } }); if(cambio&&typeof renderStock==='function') renderStock(); }); },
+    pedidos:'loadPedidos', cobranzas:'_cbzCargar', vendedores:'loadVendedores', 'historial-ventas':'loadHistorialVentas',
+    reportes:function(){ if(typeof _repRenderTab==='function') _repRenderTab(); },
+    movimientos:'loadMovimientos','avisos-stock':'loadAvisosStock','auditoria-stock':'loadAuditoriaStock', reclamos:'loadReclamos', registros:'loadRegistros',
+    combos:'loadCombos', ofertas:'loadOfertasAdmin', periodos:'loadPeriodos', actividad:'loadActividad', cobros:'loadCobros', clientes:'loadClientes', cuentas:'loadCuentas',
+    'pedidos-proveedor':'loadPedidosProveedor','pendientes-catalogo':'loadPendientesCatalogo', incidencias:'loadIncidencias', deposito:'loadDeposito','deposito-marcela':'loadDepositoMarcela',
+    reservas:'loadReservasAdmin', rendicion:'loadRendicion', cotizaciones:'loadCotizacionesAdmin'
+  }
+};
+(function(){
+  // ═══ SINCRONIZACIÓN EN VIVO (2026-10-10) ═══
+  // 1) Después de cualquier escritura (POST/PATCH/DELETE/RPC) la pantalla actual se vuelve a cargar sola.
+  // 2) Cada 30 s (y al volver a la pestaña) se consulta datos_version(): si otro panel cambió algo,
+  //    la pantalla actual se refresca. Nunca se refresca con un modal abierto o mientras se está tipeando.
+  var CFG=window._SINC_CFG||{}; CFG.paginas=CFG.paginas||{}; CFG.excluir=CFG.excluir||[];
+  var ultimaVersion=null, tDeb=null, tRetry=null, ultChequeo=0, ultEscritura=0, enCurso=false, reintentos=0, pendiente=null;
+  function modalAbierto(){ return !!document.querySelector('.mo.open,.modal-ov.open,[id^="_mo"],.modal.open'); }
+  function escribiendo(){ var a=document.activeElement; return !!(a&&(/^(INPUT|TEXTAREA|SELECT)$/.test(a.tagName)||a.isContentEditable)); }
+  function activo(){ try{ return CFG.activo?!!CFG.activo():true; }catch(e){ return true; } }
+  function puedeRefrescar(){ if(document.hidden||!activo()) return false; if(modalAbierto()||escribiendo()) return false; if(CFG.enApp){ try{ if(CFG.enApp()) return false; }catch(e){} } return true; }
+  function refrescar(motivo){
+    var pg=null; try{ pg=CFG.paginaActual(); }catch(e){}
+    var fn=pg&&CFG.paginas[pg]; if(!fn) return;
+    if(!puedeRefrescar()){ pendiente=motivo; clearTimeout(tRetry); if(reintentos++<200) tRetry=setTimeout(function(){ refrescar(pendiente); },CFG.reintento||4000); return; }
+    reintentos=0; pendiente=null;
+    try{ if(typeof fn==='string') window[fn](); else fn(); }catch(e){ console.warn('[sinc] refrescar '+pg,e); }
+    if(motivo==='remoto'&&CFG.aviso!==false){ try{ toast('🔄 Datos actualizados','tok'); }catch(e){} }
+    try{ if(CFG.despues) CFG.despues(pg,motivo); }catch(e){}
+  }
+  function leerVersion(){ return apiPost('rpc/datos_version',{}).then(function(v){ return typeof v==='string'?v:(v==null?null:JSON.stringify(v)); }).catch(function(){ return null; }); }
+  window._sincTrasEscritura=function(tabla){
+    tabla=String(tabla||''); if(CFG.excluir.some(function(x){ return tabla===x||tabla.indexOf(x)===0; })) return;
+    ultEscritura=Date.now(); if(CFG.invalidar){ try{ CFG.invalidar(tabla); }catch(e){} }
+    clearTimeout(tDeb); tDeb=setTimeout(function(){ refrescar('escritura'); leerVersion().then(function(v){ if(v) ultimaVersion=v; }); },CFG.espera||900);
+  };
+  function chequear(forzar){
+    var ahora=Date.now(); if(!forzar&&ahora-ultChequeo<5000) return; if(document.hidden||!activo()||enCurso) return;
+    ultChequeo=ahora; enCurso=true;
+    leerVersion().then(function(v){ enCurso=false; if(!v) return;
+      if(ultimaVersion===null){ ultimaVersion=v; return; }
+      if(v!==ultimaVersion){ ultimaVersion=v; if(Date.now()-ultEscritura<3000) return; if(CFG.invalidar){ try{ CFG.invalidar('remoto'); }catch(e){} } refrescar('remoto'); }
+    },function(){ enCurso=false; });
+  }
+  setInterval(function(){ chequear(false); },CFG.intervalo||30000);
+  document.addEventListener('visibilitychange',function(){ if(!document.hidden) chequear(true); });
+  window.addEventListener('focus',function(){ chequear(false); });
+  setTimeout(function(){ chequear(true); },4000);
+  window._sincChequear=chequear; window._sincRefrescar=refrescar; window._sincEstado=function(){ return {version:ultimaVersion,pendiente:pendiente}; };
+  // envoltura de api(): toda escritura que termina bien dispara el refresco
+  if(typeof api==='function'&&!api._sinc){ var _api0=api; api=function(method,table,data,filters){ var p=_api0.apply(this,arguments); if(method!=='GET'){ p.then(function(){ try{ _sincTrasEscritura(table); }catch(e){} },function(){}); } return p; }; api._sinc=true; }
 })();
 
 </script>
