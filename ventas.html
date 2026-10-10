@@ -24613,9 +24613,9 @@ window._SINC_CFG={
 (function(){
   // ═══ SINCRONIZACIÓN EN VIVO (2026-10-10) ═══
   // 1) Después de cualquier escritura (POST/PATCH/DELETE/RPC) la pantalla actual se vuelve a cargar sola.
-  // 2) Cada 15 s (y al volver a la pestaña) se consulta datos_version(): si otro panel cambió algo en
-  //    cualquier tabla, la pantalla actual se refresca. Nunca con un modal abierto ni mientras se tipea.
-  // 3) Las pantallas con editores (manual:true) no se pisan solas: muestran un cartel "Hay datos nuevos".
+  // 2) Cada 15 s (y al volver a la pestaña) se consulta datos_version(): si otro panel cambió algo, aparece el
+  //    cartel "Hay datos nuevos · Actualizar". Nunca se recarga sola una pantalla que se está leyendo.
+  // 3) La recarga por escritura propia nunca ocurre con un modal abierto ni mientras se tipea.
   var CFG=window._SINC_CFG||{}; CFG.paginas=CFG.paginas||{}; CFG.excluir=CFG.excluir||[];
   var ultimaVersion=null, tDeb=null, tRetry=null, ultChequeo=0, ultEscritura=0, enCurso=false, reintentos=0, pendiente=null;
   function modalAbierto(){ return !!document.querySelector('.mo.open,.modal-ov.open,[id^="_mo"],.modal.open'); }
@@ -24623,7 +24623,8 @@ window._SINC_CFG={
   function activo(){ try{ return CFG.activo?!!CFG.activo():true; }catch(e){ return true; } }
   function puedeRefrescar(){ if(document.hidden||!activo()) return false; if(modalAbierto()||escribiendo()) return false; if(CFG.enApp){ try{ if(CFG.enApp()) return false; }catch(e){} } return true; }
   function paginaActual(){ try{ return CFG.paginaActual(); }catch(e){ return null; } }
-  function ejecutar(pg,fn){ try{ if(typeof fn==='string') window[fn](); else fn(); }catch(e){ console.warn('[sinc] refrescar '+pg,e); } }
+  var ignorarHasta=0;   // mientras corre un loader (y unos segundos después) sus propias escrituras no vuelven a disparar la recarga
+  function ejecutar(pg,fn){ ignorarHasta=Date.now()+(CFG.ventanaLoader||6000); try{ if(typeof fn==='string') window[fn](); else fn(); }catch(e){ console.warn('[sinc] refrescar '+pg,e); } }
   function quitarBanner(){ var b=document.getElementById('sincBanner'); if(b) b.remove(); }
   function mostrarBanner(pg,fn){
     var b=document.getElementById('sincBanner');
@@ -24634,17 +24635,20 @@ window._SINC_CFG={
   function refrescar(motivo){
     var pg=paginaActual(); var ent=pg&&CFG.paginas[pg]; if(!ent) return;
     var manual=!!(typeof ent==='object'&&ent.manual); var fn=manual?ent.fn:ent;
-    if(manual){ if(motivo==='remoto') mostrarBanner(pg,fn); return; }   // tras una escritura propia el editor ya se ocupa
+    // 2026-10-10: un cambio hecho desde OTRO panel nunca recarga la pantalla que se está leyendo: avisa con el
+    // cartel y el usuario decide cuándo actualizar. Solo la escritura propia recarga sola (y sólo en pantallas de datos).
+    if(motivo==='remoto'){ mostrarBanner(pg,fn); return; }
+    if(manual) return;   // tras una escritura propia el editor ya se ocupa
     if(!puedeRefrescar()){ pendiente=motivo; clearTimeout(tRetry); if(reintentos++<200) tRetry=setTimeout(function(){ refrescar(pendiente); },CFG.reintento||4000); return; }
     reintentos=0; pendiente=null;
     ejecutar(pg,fn);
-    if(motivo==='remoto'&&CFG.aviso!==false&&Date.now()-ultEscritura>10000){ try{ toast('🔄 Datos actualizados','tok'); }catch(e){} }
     try{ if(CFG.despues) CFG.despues(pg,motivo); }catch(e){}
   }
   function leerVersion(){ return apiPost('rpc/datos_version',{}).then(function(v){ return typeof v==='string'?v:(v==null?null:JSON.stringify(v)); }).catch(function(){ return null; }); }
   window._sincTrasEscritura=function(tabla){
     tabla=String(tabla||''); if(CFG.excluir.some(function(x){ return tabla===x||tabla.indexOf(x)===0; })) return;
     ultEscritura=Date.now(); if(CFG.invalidar){ try{ CFG.invalidar(tabla); }catch(e){} }
+    if(Date.now()<ignorarHasta) return;   // escritura hecha por el propio loader: no recargar de nuevo
     quitarBanner(); clearTimeout(tDeb);
     tDeb=setTimeout(function(){ refrescar('escritura'); setTimeout(function(){ leerVersion().then(function(v){ if(v) ultimaVersion=v; }); },CFG.esperaVersion||1500); },CFG.espera||900);
   };
