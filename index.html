@@ -8881,6 +8881,7 @@ function addCart(id){
       tipo:r.oferta_tipo,
       etiqueta:r.oferta_etiqueta||'',
       precio_aplicado:price,
+      seg:seg,   // 2026-10-15: tramo de la promo, para volver a él si el carrito cambia
       multi_paga:r.multi_paga||null,
       multi_lleva:r.multi_lleva||null,
       ts:Date.now()   // auditoría 2026-10-04: el precio de oferta guardado vence a las 48 h
@@ -9214,6 +9215,14 @@ function _ofertaSnapVigente(item){
   else lim=ts+3*3600*1000;
   return Date.now() < lim;
 }
+// 2026-10-15: con oferta guardada en el carrito, devuelve el tramo normal si hoy sale más barato que el precio promo
+// (null si el precio promo sigue siendo el mejor). Mismo criterio que getBestSeg: siempre el más barato.
+function _mejorTramoSnap(item,r,totalUnits,precioPromo){
+  if(!r||!(precioPromo>0)) return null;
+  var _mj=getBestSeg(totalUnits,r);
+  if(!(r[_mj]>0)||r[_mj]>=precioPromo) return null;
+  return {price:r[_mj],seg:_mj,label:({pm:"precio x10",pe:"precio x3",pi:"precio de lista"})[_mj]};
+}
 function renderDrawer(){
   recomputarBonificados();
   var items=Object.values(cart);var db=document.getElementById("db");
@@ -9308,8 +9317,16 @@ function renderDrawer(){
       // ese precio aunque la oferta haya vencido (decisión de Ger).
       if(_ofertaSnapVigente(item)){
         price = item.oferta.precio_aplicado;
-        seg   = item.seg || 'pi';
+        // el tramo propio de la promo (guardado al agregar; carritos viejos: el tramo cuyo precio coincide)
+        seg   = item.oferta.seg || (['pm','pe','pi'].find(function(sg){ return r[sg]===price; })) || item.seg || 'pi';
         segLabel = '🔥 ' + (item.oferta.etiqueta || 'oferta');
+        // 2026-10-15 (WEB-675217): el precio promo guardado al agregar NUNCA puede salir más caro que el tramo
+        // que el cliente ya alcanza con el carrito de ahora (10 o más → x10, VIP → x10, 3 o más → x3).
+        // Antes: Eclaire entró al carrito con 1 unidad a "x3 sin mínimo" ($70.000) y, aunque después el
+        // pedido llegó a 16 unidades, quedó congelado en x3 mientras el resto cobraba x10 ($64.000).
+        var _mj=_mejorTramoSnap(item,r,totalUnits,price);
+        if(_mj){ price=_mj.price; seg=_mj.seg; segLabel=_mj.label; if(seg!==item.seg) upgrades.push(_nomMl(item.nombre, item.prodId||item.id)); }
+        if(cart[item.id]&&(cart[item.id].seg!==seg||cart[item.id].precio!==price)){ cart[item.id].seg=seg; cart[item.id].precio=price; }
         sub = price * item.qty;
         total += sub;
       } else {
@@ -9976,8 +9993,12 @@ function _catCobCalcSubtotal(){
     } else if(item.isDecan){
       total += (item.precio||0) * (item.qty||1);
     } else if(_ofertaSnapVigente(item)){
-      // Oferta snapshot: respetar siempre el precio que vio el cliente al agregar
-      total += (item.oferta.precio_aplicado||0) * (item.qty||1);
+      // Oferta snapshot: respetar el precio que vio el cliente al agregar, salvo que el tramo normal
+      // que alcanza con el carrito de ahora sea más barato (2026-10-15, misma regla que renderDrawer)
+      var _pS=allProds.find(function(x){return x.id===item.id;});
+      var _rS=_pS?calcP(_pS):(item.pData?{pm:item.pData.pm,pe:item.pData.pe,pi:item.pData.pi}:null);
+      var _mjS=_mejorTramoSnap(item,_rS,totalUnits,item.oferta.precio_aplicado||0);
+      total += (_mjS?_mjS.price:(item.oferta.precio_aplicado||0)) * (item.qty||1);
     } else {
       var p = allProds.find(function(x){return x.id===item.id;});
       var _pU = p ? (p.precio_pestana||0) : 0;
