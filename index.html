@@ -4234,11 +4234,14 @@ function aplicarOferta(r, oferta, esCC){
   // Si es cliente CC y el precio CC normal (pm) sigue siendo más barato que la oferta,
   // dejamos el CC. Decisión de Ger: el cliente CC siempre ve el precio más barato.
   if(esCC&&r.pm){
-    var precioConOferta=(out.precio_unico||out.pm);
-    if(r.pm<precioConOferta){
-      // Volver al estado pre-oferta (CC gana)
-      out.pm=r.pm;out.pe=r.pe;out.pi=r.pi;
-      out.oferta_descartada_por_cc=true;
+    // 2026-10-17: antes se comparaba el VIP solo contra pm/precio único, y la oferta "x3 sin mínimo" (que cobra pe)
+    // pasaba igual: el cliente VIP veía la promo x3 más cara que su precio x10. Ahora se compara contra el precio
+    // efectivo de la oferta según su tipo; si el VIP ya paga igual o menos, la oferta no aplica para él.
+    var precioConOferta=(oferta.tipo==='precio_unico')?out.precio_unico:(oferta.tipo==='x3_sin_minimo')?out.pe:(oferta.tipo==='multixmenos')?Infinity:out.pm;
+    if(!(precioConOferta>0)) precioConOferta=Infinity;
+    if(r.pm<=precioConOferta && oferta.tipo!=='multixmenos'){
+      out.pm=r.pm;out.pe=r.pe;out.pi=r.pi;out.oferta_descartada_por_cc=true;
+      delete out.precio_efectivo;   // la card y el carrito vuelven a los tramos normales (VIP → x10)
     }
   }
   return out;
@@ -7186,9 +7189,9 @@ function renderCombosEnCatalogo(){
 // precio vigente del combo: la oferta si es válida (mayor que 0 y menor que el precio), si no el precio
 function _comboPrecioVigente(c){
   var base=(c.precio_oferta && parseFloat(c.precio_oferta) > 0 && parseFloat(c.precio_oferta) < parseFloat(c.precio)) ? parseFloat(c.precio_oferta) : (parseFloat(c.precio)||0);
-  // 2026-10-08: cliente VIP/CC → el combo nunca sale más caro que sus componentes al precio x10 (regla de Ger:
-  // "siempre lo más barato"). Si la suma VIP es menor que el precio del combo, se cobra la suma VIP.
-  try{ if(typeof _esVIPPrecio==='function' && _esVIPPrecio()){ var v=_comboSumaVIP(c); if(v>0 && v<base) return v; } }catch(e){}
+  // 2026-10-17 (Ger): el combo vale lo que dice el combo, también para el cliente VIP. La regla del 2026-10-08
+  // (cobrarle al VIP la suma x10 si era menor) hacía que en la campaña el combo saliera tachado y más barato
+  // que el precio de venta. Se saca.
   return base;
 }
 function _comboSumaVIP(c){
@@ -8849,7 +8852,7 @@ function addCart(id){
   // Si hay oferta vigente, IGNORAR precio_pestana (la oferta es más específica/temporal).
   // Sin oferta, si el producto tiene precio único (precio_pestana), usar ese.
   // Si no, usar el precio según tramo (x10/x3/x1).
-  var hayOferta = !!r.oferta;
+  var hayOferta = !!(r.oferta && !r.oferta_descartada_por_cc);
   var seg, price;
   if(hayOferta){
     seg=getBestSeg(totalUnits,r);
@@ -8875,7 +8878,7 @@ function addCart(id){
   // Snapshot del precio: si la oferta venciera mientras el cliente tiene el producto en
   // el carrito, queremos respetar el precio que vio al agregarlo (decisión de Ger).
   var ofertaSnapshot=null;
-  if(r.oferta){
+  if(r.oferta && !r.oferta_descartada_por_cc){
     ofertaSnapshot={
       id:r.oferta.id,
       tipo:r.oferta_tipo,
@@ -24678,8 +24681,8 @@ function _madreComboInfo(c){
     porSep+=pu*cant;
   });
   var precioBase=(c.precio_oferta&&parseFloat(c.precio_oferta)>0&&parseFloat(c.precio_oferta)<parseFloat(c.precio))?parseFloat(c.precio_oferta):parseFloat(c.precio)||0;
-  var precio=_comboPrecioVigente(c);   // 2026-10-08: VIP → nunca más caro que la suma a precio x10
-  return {items:items,fotos:fotos.slice(0,4),porSep:porSep,sinStock:sinStock,nombres:nombres,lista:lista,precio:precio,precioBase:precioBase,vip:vip,vipAjustado:(vip&&precio<precioBase),bolsa:bolsa};
+  var precio=_comboPrecioVigente(c);
+  return {items:items,fotos:fotos.slice(0,4),porSep:porSep,sinStock:sinStock,nombres:nombres,lista:lista,precio:precio,precioBase:precioBase,vip:vip,vipAjustado:false,bolsa:bolsa};
 }
 // logos de las marcas del combo (una vez cada marca; más chicos cuantas más marcas; sin logo no va nada)
 // dirección del logo de una marca (si ya llegaron los logos de belle); '' si no hay
@@ -24738,8 +24741,9 @@ function _madreComboTarjeta(c){
     _madreComboLogos(inf)+
     '<div class="md-nombre">'+_mEsc(c.nombre||inf.nombres.join(' + '))+'</div>'+
     '<ul class="md-lista">'+inf.lista.map(function(l){ return '<li><b>'+(l.cant>1?l.cant+'× ':'')+_mEsc(l.nombre)+'</b>'+(l.marca?'<em>'+_mEsc(l.marca)+'</em>':'')+(l.chips.length?'<small>'+_mEsc(l.chips.join(' · '))+'</small>':'')+'</li>'; }).join('')+'</ul>'+
-    '<div class="md-precios"><div class="md-pvip"><small>'+(inf.vip?'Precio VIP del combo':'Precio del combo')+'</small><b>'+fmt(inf.precio)+'</b></div>'+
-      '<div class="md-pmas">'+(inf.vipAjustado?'<div><small>Precio combo</small><b><s>'+fmt(inf.precioBase)+'</s></b></div>':'<div><small>Por separado</small><b><s>'+fmt(inf.porSep)+'</s></b></div>'+(inf.porSep>inf.precio?'<div><small>Ahorrás</small><b>'+fmt(inf.porSep-inf.precio)+'</b></div>':''))+'</div></div>'+
+    '<div class="md-precios"><div class="md-pvip"><small>Precio del combo</small><b>'+fmt(inf.precio)+'</b></div>'+
+      // 2026-10-17: "por separado" tachado solo cuando de verdad es más caro que el combo (al VIP, con sus precios, a veces no lo es)
+      '<div class="md-pmas">'+(inf.porSep>inf.precio?'<div><small>Por separado</small><b><s>'+fmt(inf.porSep)+'</s></b></div><div><small>Ahorrás</small><b>'+fmt(inf.porSep-inf.precio)+'</b></div>':'')+'</div></div>'+
     '<div class="md-decan">'+(inf.sinStock?'<b style="color:#a8156f">Sin stock por ahora</b>':'Lo llevás armado, listo para regalar')+'</div>'+
     '<div class="md-acc">'+(inf.sinStock?'':'<div class="md-qty"><button type="button" onclick="_madreComboQty('+c.id+',-1)">−</button><span id="mcq_'+c.id+'">'+q+'</span><button type="button" onclick="_madreComboQty('+c.id+',1)">+</button></div><button type="button" class="md-agregar" onclick="_madreAgregarCombo('+c.id+')">Agregar</button>')+'</div>'+
   '</article>';
