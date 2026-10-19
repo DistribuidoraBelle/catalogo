@@ -2438,7 +2438,14 @@ var WA_NUMBER="5493515121193";
 
 // FIX SEGURIDAD (RLS): si hay sesión Auth activa, usar el JWT del usuario.
 // Sino, fallback a anon key (para catálogo público).
-function _sbToken(){
+// 2026-10-19: un token de sesión vencido (la web quedó abierta o se reabre al otro día) hacía fallar TODAS las
+// consultas con 401 hasta que supabase-js lo renovaba: la página quedaba en blanco. Si venció, se sale como anónimo.
+function _tokVigente(tok){
+  try{ var p=JSON.parse(atob(String(tok).split('.')[1].replace(/-/g,'+').replace(/_/g,'/'))); if(p&&p.exp&&p.exp*1000<Date.now()+30000) return false; }catch(e){}
+  return true;
+}
+function _sbToken(){ var t=_sbTokenRaw(); return (t&&_tokVigente(t))?t:null; }
+function _sbTokenRaw(){
   // FIX (RLS): usar el token de la sesión ACTIVA del catálogo. Antes esta función
   // buscaba una clave de localStorage que no existe ('sb-...-auth-token'), por eso
   // las consultas del cliente salían como anónimas. La sesión real vive en
@@ -2464,10 +2471,13 @@ function _sbToken(){
   return null;
 }
 
-function apiGet(t,f){
-  var tok = _sbToken();
+function apiGet(t,f,_anon){
+  var tok = _anon ? null : _sbToken();
   var auth = tok ? "Bearer "+tok : "Bearer "+SB_KEY;
-  return fetch(SB_URL+"/rest/v1/"+t+(f?"?"+f:""),{headers:{"apikey":SB_KEY,"Authorization":auth,"Accept":"application/json"}}).then(function(r){if(!r.ok){return r.text().then(function(txt){throw new Error("HTTP "+r.status+": "+txt.slice(0,100));});}return r.json();});
+  return fetch(SB_URL+"/rest/v1/"+t+(f?"?"+f:""),{headers:{"apikey":SB_KEY,"Authorization":auth,"Accept":"application/json"}}).then(function(r){
+    // 2026-10-19: sesión rechazada (401) → la misma lectura como anónimo, una sola vez
+    if(r.status===401 && tok && !_anon) return apiGet(t,f,true);
+    if(!r.ok){return r.text().then(function(txt){throw new Error("HTTP "+r.status+": "+txt.slice(0,100));});}return r.json();});
 }
 function apiPost(t,d){
   var tok = _sbToken();
@@ -3254,7 +3264,10 @@ function loadProds(){
         window._homeCache={sections:r[1],combos:combosPublicos};
         if(curTab==="inicio"){var hEl=document.getElementById("homePage");if(hEl)hEl.style.display="block";loadHomePage();_homeScrollInicial();}
       }
-    }).catch(function(){});
+    }).catch(function(){
+      // 2026-10-19: antes este error se tragaba y el inicio quedaba en blanco para siempre
+      if(curTab==="inicio"){ var hEl2=document.getElementById("homePage"); if(hEl2){ hEl2.style.display="block"; loadHomePage(); } }
+    });
     // ── ELIMINADA ──
     // Antes había una segunda llamada a productos para traer pestana_id y precio_pestana,
     // pero el SELECT principal de la línea 1024 YA incluye esos campos. La segunda llamada
@@ -6421,9 +6434,10 @@ function _homeBuscadorHTML(){
     '<div id="homeResults" style="display:none"></div>';
 }
 // ═══════════════════════════════════════════════════════════════
-function loadHomePage(){
+function loadHomePage(_intento){
   var el=document.getElementById("homePage");
   if(!el)return;
+  _intento=_intento||0;
 
   // [Mobile UX] Setup listener para re-renderizar al cruzar el breakpoint
   // mobile/desktop. Las secciones de categoría pueden tener imagen_mobile_url
@@ -6464,6 +6478,8 @@ function loadHomePage(){
     window._homeCache={sections:sections,combos:combos};
     renderHomePage(sections,combos);
   }).catch(function(e){
+    // 2026-10-19: un corte de red momentáneo no tiene que dejar el inicio vacío: se reintenta solo una vez
+    if(_intento<1){ setTimeout(function(){ loadHomePage(_intento+1); },1500); return; }
     var el2=document.getElementById("homePage");
     if(el2)el2.innerHTML="<div style='text-align:center;padding:2rem;color:var(--tx-mid)'>"+
       "<div style='font-size:2rem;margin-bottom:.5rem'>⚠️</div>"+
@@ -8002,7 +8018,7 @@ function applyFilters(){
     } else {
       // Sin búsqueda — mostrar home
       if(_lc)_lc.style.display="none";
-      if(_hEl)_hEl.style.display="block";
+      if(_hEl){ _hEl.style.display="block"; if(!_hEl.querySelector('#homeDynamic') && !_hEl.querySelector('.spin') && !_hEl.querySelector('button')) loadHomePage(); }
     }
     return;
   }
