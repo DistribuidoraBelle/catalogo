@@ -26131,6 +26131,8 @@ html.lite .cy-viajero,html.lite .cy-viajero *{display:none}
 /* vista previa sin fondo: la foto recortada se apoya con su color real sobre la estación */
 html.cyber.cy-sinfondo .cy-st-foto img,html.cyber.cy-sinfondo:not(.cy-claro) .cy-st-foto img{mix-blend-mode:normal;filter:saturate(1.05) drop-shadow(0 26px 24px rgba(11,16,32,.34))}
 html.cyber.cy-sinfondo .cy-st-halo{opacity:.55}
+/* fotos excluidas del recorte: se muestran como antes (fundido sobre el halo blanco) */
+html.cyber.cy-sinfondo .cy-st-foto img.cy-sf-no,html.cyber.cy-sinfondo:not(.cy-claro) .cy-st-foto img.cy-sf-no{mix-blend-mode:multiply;filter:saturate(1.08) contrast(1.03) drop-shadow(0 28px 26px rgba(11,16,32,.28))}
 
 /* ── la botella se puede tocar: de atrás sale una barra de búsqueda con la lupa ── */
 html.cyber #listContainer.cy-rio > .cy-viajero .cy-vj-frasco{pointer-events:auto;cursor:pointer}
@@ -26256,11 +26258,13 @@ html.cyber:not(.cy-claro) #bqVer{box-shadow:4px 4px 0 #22d3ee;border-color:#fff}
   // ── Vista previa "sin fondo": recorta el fondo blanco de las fotos en el navegador (?sinfondo=1) ──
   var SINFONDO=qs('sinfondo')==='1';
   if(SINFONDO) document.documentElement.classList.add('cy-sinfondo');
-  var SF_CACHE={}, SF_N={ok:0,no:0};
+  var SF_CACHE={}, SF_N={ok:0,no:0}, SF_NO={};   // SF_NO: ids de productos que NO se recortan (fotos con cajas/frascos blancos: el recorte las arruina)
+  if(SINFONDO&&typeof apiGet==='function'){ try{ apiGet('configuracion','select=valor&clave=eq.fotos_sin_recorte').then(function(rows){ try{ var arr=JSON.parse((rows&&rows[0]&&rows[0].valor)||'[]'); for(var i=0;i<arr.length;i++) SF_NO[arr[i]]=1; }catch(e){} }).catch(function(){}); }catch(e){} }
   function sfUrl(u){ if(!u||/^(data|blob):/.test(u)) return u; return u+(u.indexOf('?')>=0?'&':'?')+'sf=1'; }
   window._cySinFondo=function(img){
     if(!SINFONDO||!img||img.dataset.sf==='1') return;
     var key=img.getAttribute('src')||''; if(!key) return;
+    var pid=parseInt(String(img.id||'').replace('img_',''),10); if(pid&&SF_NO[pid]){ img.dataset.sf='1'; img.classList.add('cy-sf-no'); return; }
     if(SF_CACHE[key]){ img.dataset.sf='1'; img.src=SF_CACHE[key]; return; }
     var W=img.naturalWidth,H=img.naturalHeight; if(!W||!H) return;
     try{
@@ -26268,24 +26272,28 @@ html.cyber:not(.cy-claro) #bqVer{box-shadow:4px 4px 0 #22d3ee;border-color:#fff}
       var cv=document.createElement('canvas'); cv.width=w; cv.height=h;
       var cx=cv.getContext('2d',{willReadFrequently:true}); cx.drawImage(img,0,0,w,h);
       var dat=cx.getImageData(0,0,w,h), px=dat.data, n=w*h, i, x, y;
-      var luz=new Uint8Array(n), cand=new Uint8Array(n);
-      for(i=0;i<n;i++){ var r=px[i*4],g=px[i*4+1],b=px[i*4+2]; var mn=r<g?(r<b?r:b):(g<b?g:b), mx=r>g?(r>b?r:b):(g>b?g:b); luz[i]=mn; cand[i]=(mn>=186&&mx-mn<=28)?1:0; }
-      // inundación desde los bordes: solo lo que toca el borde por píxeles claros es fondo (los blancos encerrados, como etiquetas, quedan)
+      var luz=new Uint8Array(n), sat=new Uint8Array(n);
+      for(i=0;i<n;i++){ var r=px[i*4],g=px[i*4+1],b=px[i*4+2]; var mn=r<g?(r<b?r:b):(g<b?g:b), mx=r>g?(r>b?r:b):(g>b?g:b); luz[i]=mn; sat[i]=mx-mn; }
+      // inundación ESTRICTA desde los bordes (solo blanco de verdad): los blancos encerrados y las botellas claras quedan
       var vis=new Uint8Array(n), cola=new Int32Array(n), qi=0, qf=0;
-      function meter(j){ if(!vis[j]&&cand[j]){ vis[j]=1; cola[qf++]=j; } }
+      function meter(j){ if(!vis[j]&&luz[j]>=230&&sat[j]<=16){ vis[j]=1; cola[qf++]=j; } }
       for(x=0;x<w;x++){ meter(x); meter((h-1)*w+x); } for(y=0;y<h;y++){ meter(y*w); meter(y*w+w-1); }
       while(qi<qf){ i=cola[qi++]; x=i%w; y=(i-x)/w; if(x>0) meter(i-1); if(x<w-1) meter(i+1); if(y>0) meter(i-w); if(y<h-1) meter(i+w); }
-      var hubo=0;
-      for(i=0;i<n;i++){
-        if(vis[i]){ hubo++; var L=luz[i];
-          if(L>=234){ px[i*4+3]=0; }
-          else { var a=Math.min(.55,(234-L)/48*.55); px[i*4]=30; px[i*4+1]=34; px[i*4+2]=52; px[i*4+3]=Math.round(a*255); } // sombra suave gris-azulada
-        }
-      }
-      if(hubo<n*0.08){ img.dataset.sf='1'; SF_N.no++; return; } // no era fondo blanco: se deja como está
-      // borde del objeto: suaviza el contorno donde el píxel es casi blanco y toca el fondo
-      for(i=0;i<n;i++){ if(vis[i]||luz[i]<212) continue; x=i%w; y=(i-x)/w;
-        if((x>0&&vis[i-1])||(x<w-1&&vis[i+1])||(y>0&&vis[i-w])||(y<h-1&&vis[i+w])){ var t=Math.max(0,Math.min(1,(240-luz[i])/28)); px[i*4+3]=Math.round(px[i*4+3]*t); } }
+      if(qf<n*0.08){ img.dataset.sf='1'; SF_N.no++; return; } // no era fondo blanco: se deja como está
+      // apertura (erosión + dilatación, radio 2): borra los "tentáculos" finos que se metieron por brillos del objeto
+      var R=2, t1=new Uint8Array(n), fondo=new Uint8Array(n), d;
+      for(y=0;y<h;y++) for(x=0;x<w;x++){ var v=1; for(d=-R;d<=R;d++){ var xx=x+d; var sv=(xx<0||xx>=w)?1:vis[y*w+xx]; if(!sv){ v=0; break; } } t1[y*w+x]=v; }
+      var t2=new Uint8Array(n);
+      for(y=0;y<h;y++) for(x=0;x<w;x++){ var v2=1; for(d=-R;d<=R;d++){ var yy=y+d; var sv2=(yy<0||yy>=h)?1:t1[yy*w+x]; if(!sv2){ v2=0; break; } } t2[y*w+x]=v2; }
+      for(y=0;y<h;y++) for(x=0;x<w;x++){ var v3=0; for(d=-R;d<=R&&!v3;d++){ var x2=x+d; if(x2>=0&&x2<w&&t2[y*w+x2]) v3=1; } t1[y*w+x]=v3; }
+      for(y=0;y<h;y++) for(x=0;x<w;x++){ var v4=0; for(d=-R;d<=R&&!v4;d++){ var y2=y+d; if(y2>=0&&y2<h&&t1[y2*w+x]) v4=1; } i=y*w+x; fondo[i]=(v4&&vis[i])?1:0; }
+      for(i=0;i<n;i++) if(fondo[i]) px[i*4+3]=0;
+      // borde suave: hasta 3 px pegados al fondo, solo si son casi blancos, se van desvaneciendo
+      var cur=fondo, k;
+      for(k=0;k<3;k++){ var nx=new Uint8Array(n);
+        for(y=0;y<h;y++) for(x=0;x<w;x++){ i=y*w+x; if(cur[i]||fondo[i]){ nx[i]=1; continue; }
+          if((x>0&&cur[i-1])||(x<w-1&&cur[i+1])||(y>0&&cur[i-w])||(y<h-1&&cur[i+w])){ nx[i]=1; if(luz[i]>=200&&sat[i]<=24&&px[i*4+3]===255){ var ta=Math.max(0,Math.min(1,(240-luz[i])/30)); px[i*4+3]=Math.round(255*ta); } } }
+        cur=nx; }
       cx.putImageData(dat,0,0);
       img.dataset.sf='1';
       SF_N.ok++;
