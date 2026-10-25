@@ -8498,7 +8498,8 @@ function renderCard(p,totalUnits){
   // Si tiene precio unico (precio_pestana), mostrar un solo recuadro
   var _pUnico=p.precio_pestana||0;
   // Detectar si hay oferta vigente (la oferta ya está aplicada en r — ver calcP)
-  var _hasOferta=!!(r.oferta&&!r.oferta_descartada_por_cc);
+  // 2026-10-25: con precio único no hay oferta que valga (misma regla que addCart y que Ventas)
+  var _hasOferta=!!(r.oferta&&!r.oferta_descartada_por_cc)&&!(_pUnico>0);
   // r.oferta queda disponible también cuando el precio VIP la descartó (para poder
   // vestir la card de campaña dentro de su pestaña sin tocar el precio).
   var _oferta=r.oferta||null;
@@ -8957,7 +8958,10 @@ function addCart(id){
   // Si hay oferta vigente, IGNORAR precio_pestana (la oferta es más específica/temporal).
   // Sin oferta, si el producto tiene precio único (precio_pestana), usar ese.
   // Si no, usar el precio según tramo (x10/x3/x1).
-  var hayOferta = !!(r.oferta && !r.oferta_descartada_por_cc);
+  // 2026-10-25 (auditoría CyberMonday): un producto con PRECIO ÚNICO (precio_pestana) no entra en las ofertas
+  // x10/x3/campaña: su precio es ese, igual que lo cobra Ventas (_calcLineaPrecio). Antes la tarjeta decía
+  // "Precio único $4.000" y el carrito cobraba el x10 de la oferta ($1.600).
+  var hayOferta = !!(r.oferta && !r.oferta_descartada_por_cc) && !(_puA>0);
   var seg, price;
   if(hayOferta){
     seg=getBestSeg(totalUnits,r);
@@ -8983,7 +8987,9 @@ function addCart(id){
   // Snapshot del precio: si la oferta venciera mientras el cliente tiene el producto en
   // el carrito, queremos respetar el precio que vio al agregarlo (decisión de Ger).
   var ofertaSnapshot=null;
-  if(r.oferta && !r.oferta_descartada_por_cc){
+  // 2026-10-25: solo si la oferta se aplicó de verdad (con precio único no hay snapshot: si no, el carrito
+  // volvía a elegir el tramo más barato de la promo y pisaba el precio único)
+  if(hayOferta){
     ofertaSnapshot={
       id:r.oferta.id,
       tipo:r.oferta_tipo,
@@ -26209,6 +26215,11 @@ html.cyber:not(.cy-claro) #bqBody .bq-sec > div[style*="font-size:.58rem"]{color
 html.cyber:not(.cy-claro) #bqLimpiar{background:#131c33;color:#fff;border-color:#fff;box-shadow:3px 3px 0 #22d3ee}
 html.cyber:not(.cy-claro) #bqVer{box-shadow:4px 4px 0 #22d3ee;border-color:#fff}
 
+/* aviso de vista rápida (?cyber=1 sin campaña cargada) */
+.cy-previa-aviso{position:fixed;left:50%;bottom:calc(70px + env(safe-area-inset-bottom));transform:translateX(-50%);z-index:99990;background:#0b1020;color:#fff;font:600 .72rem/1.3 'DM Sans',sans-serif;padding:.45rem .8rem;border-radius:999px;border:2px solid #ffc53d;box-shadow:3px 3px 0 #ffc53d;pointer-events:none;max-width:92vw;text-align:center}
+.cy-previa-aviso b{color:#ffc53d}
+@media(min-width:681px){.cy-previa-aviso{bottom:18px;left:auto;right:18px;transform:none}}
+
 </style>
 <script id="cyberJs">
 // ═══════════════════════════════════════════════════════════════════════════
@@ -26414,9 +26425,35 @@ html.cyber:not(.cy-claro) #bqVer{box-shadow:4px 4px 0 #22d3ee;border-color:#fff}
     if(window._cyTimer){ clearInterval(window._cyTimer); window._cyTimer=null; }
     if(window._cyAnnBak!=null){ var tr=document.getElementById('annTrack'); if(tr) tr.innerHTML=window._cyAnnBak; window._cyAnnBak=null; }
   }
+  // ── Vista rápida (?cyber=1 sin campaña cargada): para que el carrito cobre lo mismo que muestra el ticket,
+  // se inyecta una oferta x10 sin mínimo de muestra sobre todo el catálogo. Nunca sale un pedido con ella:
+  // sendWA queda bloqueado y la página lleva un aviso de vista previa.
+  var PREVIA_CAMP={id:'cyber-preview',_preview:true,nombre:'CyberMonday',slug:'cybermonday',plantilla:'cyber',activa:true};
+  function previaInyectar(){
+    var nuevo=false;
+    if(!Array.isArray(window._ofertas)) window._ofertas=[];
+    if(!window._ofertas.some(function(o){ return o&&o.id==='of-cyber-preview'; })){ window._ofertas.push({id:'of-cyber-preview',producto_id:null,campania_id:'cyber-preview',tipo:'x10_sin_minimo',activa:true,fecha_desde:null,fecha_hasta:null,etiqueta:'CYBERMONDAY'}); nuevo=true; }
+    if(!window._ofertaCampaniaProductos||typeof window._ofertaCampaniaProductos!=='object') window._ofertaCampaniaProductos={};
+    if(!Object.getOwnPropertyDescriptor(window._ofertaCampaniaProductos,'cyber-preview')){ Object.defineProperty(window._ofertaCampaniaProductos,'cyber-preview',{get:function(){ return (window.allProds||[]).map(function(p){ return p.id; }); },enumerable:true,configurable:true}); nuevo=true; }
+    ['_ofertaCampanias','_ofertaCampaniasTodas'].forEach(function(k){ if(!Array.isArray(window[k])) window[k]=[]; if(!window[k].some(function(c){ return c&&c.id==='cyber-preview'; })) window[k].push(PREVIA_CAMP); });
+    return nuevo;
+  }
+  function previaAviso(on){
+    var el=document.getElementById('cyPreviaAviso');
+    if(!on){ if(el) el.remove(); return; }
+    if(el) return;
+    el=document.createElement('div'); el.id='cyPreviaAviso'; el.className='cy-previa-aviso'; el.innerHTML='<b>Vista previa</b> · así se ve durante el CyberMonday · los pedidos están deshabilitados';
+    document.body.appendChild(el);
+  }
+  function previaBloquearPedido(){
+    if(typeof window.sendWA!=='function'||window.sendWA._cy) return;
+    var orig=window.sendWA; var w=function(){ if(ST&&ST.camp&&ST.camp._preview){ try{ showToast('Vista previa: los pedidos se habilitan cuando la campaña esté cargada'); }catch(e){} return; } return orig.apply(this,arguments); }; w._cy=true; window.sendWA=w;
+  }
   window._cyberAplicar=function(){
     var st=null; try{ st=window._cyberEstado(); }catch(e){ st=null; }
     var on=!!st, html=document.documentElement, antes=html.classList.contains('cyber'), faseAntes=ST&&ST.fase;
+    var previa=!!(on&&st.camp&&st.camp._preview); previaAviso(previa);
+    if(previa){ previaBloquearPedido(); if(previaInyectar()){ try{ if(typeof curTab!=='undefined'&&curTab==='inicio'&&typeof renderHomePage==='function') renderHomePage(); else if(typeof applyFilters==='function'){ _lv.sig=null; applyFilters(); } }catch(e){} } }
     if(on) envolverCard();
     ST=st;
     html.classList.toggle('cyber',on);
@@ -26446,7 +26483,7 @@ html.cyber:not(.cy-claro) #bqVer{box-shadow:4px 4px 0 #22d3ee;border-color:#fff}
     var card=tpl.content.querySelector('.card'); if(!card) return html;
     card.classList.add('cy-card');
     var r=calcP(p);
-    var x10=!!(r&&r.oferta&&r.oferta_tipo==='x10_sin_minimo'&&!r.oferta_descartada_por_cc&&(r.precio_efectivo||'pm')==='pm'&&(p.stock_actual||0)>0&&p.tipo!=='cosmetico'&&r.pm>0);
+    var x10=!!(r&&r.oferta&&r.oferta_tipo==='x10_sin_minimo'&&!r.oferta_descartada_por_cc&&(r.precio_efectivo||'pm')==='pm'&&(p.stock_actual||0)>0&&p.tipo!=='cosmetico'&&r.pm>0&&!(p.precio_pestana>0));
     if(x10){
       var row=card.querySelector('.cright .prices-row');
       var popts=row?row.querySelectorAll('.popt'):[];
