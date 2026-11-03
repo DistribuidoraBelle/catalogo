@@ -40,7 +40,14 @@ def bellizar(t):
         ra=','.join(str(int(a[i:i+2],16)) for i in (0,2,4)); rb=','.join(str(int(b[i:i+2],16)) for i in (0,2,4))
         t=re.sub(r'rgba?\(\s*'+ra.replace(',',r'\s*,\s*')+r'\s*([,)])',lambda m:'rgba('+rb+m.group(1) if m.group(1)==',' else 'rgb('+rb+')',t)
     return t
-if belle: css=bellizar(css)+'\n'+open(S+'/nuevo_belle.css',encoding='utf-8').read(); js=bellizar(js)
+# El Inicio (portada, cartel, recuadros, cinta) conserva los colores de la prueba 2: sus reglas y su JS no pasan por el mapeo.
+HOME_SEL=re.compile(r'#homePage|\bhb-|#hbRects|#hbFoto|nv-cartel|nv-f-|mc-scroll|cinta',re.I)
+def bellizar_css(t):
+    return re.sub(r'([^{}]+)\{([^{}]*)\}',lambda m: m.group(0) if HOME_SEL.search(m.group(1)) else m.group(1)+'{'+bellizar(m.group(2))+'}',t)
+def bellizar_js(t):
+    a=t.index('  function cinta(){'); b=t.index('  function selectorFondos()')
+    return bellizar(t[:a])+t[a:b]+bellizar(t[b:])
+if belle: css=bellizar_css(css)+'\n'+open(S+'/nuevo_belle.css',encoding='utf-8').read(); js=bellizar_js(js)
 bloque=MARK+'\n<style id="nuevoCss">\n'+css+'\n</style>\n<script id="nuevoJs">\n'+js+'\n</script>\n'
 i=src.rindex('</body>')
 out=src[:i]+bloque+src[i:]
