@@ -40,7 +40,7 @@ def bellizar(t):
         ra=','.join(str(int(a[i:i+2],16)) for i in (0,2,4)); rb=','.join(str(int(b[i:i+2],16)) for i in (0,2,4))
         t=re.sub(r'rgba?\(\s*'+ra.replace(',',r'\s*,\s*')+r'\s*([,)])',lambda m:'rgba('+rb+m.group(1) if m.group(1)==',' else 'rgb('+rb+')',t)
     return t
-if belle: css=bellizar(css); js=bellizar(js)
+if belle: css=bellizar(css)+'\n'+open(S+'/nuevo_belle.css',encoding='utf-8').read(); js=bellizar(js)
 bloque=MARK+'\n<style id="nuevoCss">\n'+css+'\n</style>\n<script id="nuevoJs">\n'+js+'\n</script>\n'
 i=src.rindex('</body>')
 out=src[:i]+bloque+src[i:]
