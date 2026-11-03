@@ -1,6 +1,6 @@
 import os,sys,json
 S=os.path.dirname(os.path.abspath(__file__)); REPO='/home/user/catalogo'
-real='--real' in sys.argv
+real='--real' in sys.argv; belle='--belle' in sys.argv
 MARK='<!-- BELLE NUEVO · card -->'
 s=open(REPO+'/card.html',encoding='utf-8').read()
 if MARK in s: s=s[:s.index(MARK)].rstrip()+'\n</head>\n'+s[s.index('</head>')+len('</head>'):] if False else s
@@ -10,6 +10,9 @@ if MARK in s:
     s=s[:a]+s[b:]
 fonts='<link href="https://fonts.googleapis.com/css2?family=Unbounded:wght@600;700;800&family=DM+Sans:ital,opsz,wght@0,9..40,400;0,9..40,500;0,9..40,600;0,9..40,700;0,9..40,800&display=swap" rel="stylesheet">'
 css=open(S+'/card_nuevo.css',encoding='utf-8').read()
+if belle:
+    sys.path.insert(0,S); from belle_paleta import bellizar
+    css=bellizar(css)   # paleta Belle (dorados), igual que el catálogo
 if real:
     # el tema de la card arranca cuando termina el CyberMonday (igual que el catálogo); ?nuevo=1 lo muestra antes
     bloque=(MARK+'\n'+fonts+'\n<script>(function(){try{var q=new URLSearchParams(location.search).get("nuevo");if(q==="0")return;'
