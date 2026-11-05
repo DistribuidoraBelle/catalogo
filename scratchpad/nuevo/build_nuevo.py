@@ -34,7 +34,7 @@ def bellizar_js(t):
     return bellizar(t[:a])+t[a:b]+bellizar(t[b:])
 if belle: css=bellizar_css(css)+'\n'+open(S+'/nuevo_belle.css',encoding='utf-8').read()+'\n'+open(S+'/nuevo_regaleria.css',encoding='utf-8').read(); js=bellizar_js(js)
 # (la prueba 4 ya forma parte de nuevo_belle.css; --p4 solo cambia el archivo de salida)
-if p5: css+='\n'+open(S+'/nuevo_p5.css',encoding='utf-8').read()
+# (la prueba 5 ya forma parte de nuevo_belle.css; --p5 solo cambia el archivo de salida)
 bloque=MARK+'\n<style id="nuevoCss">\n'+css+'\n</style>\n<script id="nuevoJs">\n'+js+'\n</script>\n'
 i=src.rindex('</body>')
 out=src[:i]+bloque+src[i:]
