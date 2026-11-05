@@ -1,6 +1,6 @@
 import sys,re,os
 S=os.path.dirname(os.path.abspath(__file__)); REPO='/home/user/catalogo'
-real='--real' in sys.argv; suave='--suave' in sys.argv; belle='--belle' in sys.argv
+real='--real' in sys.argv; suave='--suave' in sys.argv; belle='--belle' in sys.argv; p4='--p4' in sys.argv
 src=open(REPO+'/index.html',encoding='utf-8').read()
 MARK='<!-- BELLE NUEVO 2026-10-25 -->'
 if MARK in src: src=src[:src.index(MARK)]+'</body>\n</html>\n'
@@ -33,9 +33,10 @@ def bellizar_js(t):
     a=t.index('  function cinta(){'); b=t.index('  function selectorFondos()')
     return bellizar(t[:a])+t[a:b]+bellizar(t[b:])
 if belle: css=bellizar_css(css)+'\n'+open(S+'/nuevo_belle.css',encoding='utf-8').read(); js=bellizar_js(js)
+if p4: css+='\n'+open(S+'/nuevo_p4.css',encoding='utf-8').read()
 bloque=MARK+'\n<style id="nuevoCss">\n'+css+'\n</style>\n<script id="nuevoJs">\n'+js+'\n</script>\n'
 i=src.rindex('</body>')
 out=src[:i]+bloque+src[i:]
 if not real: out=out.replace("'card.html?id='","'card-nuevo-prueba.html?id='")
-dst=REPO+('/index.html' if real else ('/index-nuevo-prueba-3.html' if belle else ('/index-nuevo-prueba-2.html' if suave else '/index-nuevo-prueba.html')))
+dst=REPO+('/index.html' if real else ('/index-nuevo-prueba-4.html' if p4 else '/index-nuevo-prueba-3.html' if belle else ('/index-nuevo-prueba-2.html' if suave else '/index-nuevo-prueba.html')))
 open(dst,'w',encoding='utf-8').write(out); print('ok ->',dst,len(out))
