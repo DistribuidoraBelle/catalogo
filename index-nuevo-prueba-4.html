@@ -2356,6 +2356,31 @@ function toggleTheme(){var isDark=document.documentElement.getAttribute('data-th
 // porque no están conectados al borde. Resultado en caché (blob) por URL. Si la foto no tiene
 // fondo claro o el canvas queda "tainted" por CORS, se deja como está.
 var _dkFondoBarrer;
+// 2026-11-05: el fondo es solo el blanco NEUTRO (antes bastaba con que los tres canales superaran 214 y se comía los frascos
+// crema o rosados, p. ej. 9am White); el contorno se funde en dos bandas para que no quede el filete blanco sobre el fondo oscuro.
+// Recorte de fondo blanco para modo oscuro (versión nueva). px = ImageData.data, devuelve true si recortó.
+window._dkRecortar=function(px,w,h){
+  var i,n=0,lum=0;
+  for(var x=0;x<w;x+=3){ i=x*4; lum+=px[i]*.299+px[i+1]*.587+px[i+2]*.114; i=((h-1)*w+x)*4; lum+=px[i]*.299+px[i+1]*.587+px[i+2]*.114; n+=2; }
+  for(var y=0;y<h;y+=3){ i=(y*w)*4; lum+=px[i]*.299+px[i+1]*.587+px[i+2]*.114; i=(y*w+w-1)*4; lum+=px[i]*.299+px[i+1]*.587+px[i+2]*.114; n+=2; }
+  if(lum/n<222) return false;
+  // fondo = blanco NEUTRO (los tres canales altos y parecidos). Un frasco crema o rosado pálido no es fondo.
+  var MINC=226, DIF=16, seen=new Uint8Array(w*h), st=new Int32Array(w*h), sp=0;
+  function fondo(k){ var j=k*4, r=px[j],g=px[j+1],b=px[j+2]; var mn=r<g?(r<b?r:b):(g<b?g:b), mx=r>g?(r>b?r:b):(g>b?g:b); return mn>=MINC&&(mx-mn)<=DIF; }
+  for(var x2=0;x2<w;x2++){ st[sp++]=x2; st[sp++]=(h-1)*w+x2; } for(var y2=0;y2<h;y2++){ st[sp++]=y2*w; st[sp++]=y2*w+w-1; }
+  while(sp>0){ var k=st[--sp]; if(seen[k]||!fondo(k)) continue; seen[k]=1; var xx=k%w; if(xx>0)st[sp++]=k-1; if(xx<w-1)st[sp++]=k+1; if(k>=w)st[sp++]=k-w; if(k<w*(h-1))st[sp++]=k+w; }
+  // bandas de borde (1 y 2 px hacia adentro del objeto): los píxeles claros del contorno se funden en vez de quedar como filete blanco
+  var band=new Uint8Array(w*h);
+  for(var k1=0;k1<w*h;k1++){ if(seen[k1]) continue; var xa=k1%w; if((xa>0&&seen[k1-1])||(xa<w-1&&seen[k1+1])||(k1>=w&&seen[k1-w])||(k1<w*(h-1)&&seen[k1+w])) band[k1]=1; }
+  for(var k3=0;k3<w*h;k3++){ if(seen[k3]||band[k3]) continue; var xb=k3%w; if((xb>0&&band[k3-1]===1)||(xb<w-1&&band[k3+1]===1)||(k3>=w&&band[k3-w]===1)||(k3<w*(h-1)&&band[k3+w]===1)) band[k3]=2; }
+  for(var k2=0;k2<w*h;k2++){
+    var j=k2*4, l=px[j]*.299+px[j+1]*.587+px[j+2]*.114, a;
+    if(seen[k2]){ a=(255-l)/(255-MINC); a=a<0?0:(a>1?1:a); px[j+3]=Math.round(px[j+3]*a*a); }
+    else if(band[k2]===1){ a=(255-l)/(255-150); a=a<0?0:(a>1?1:a); px[j+3]=Math.round(px[j+3]*a); }
+    else if(band[k2]===2){ a=(255-l)/(255-215); a=a<0?0:(a>1?1:a); px[j+3]=Math.round(px[j+3]*(0.55+0.45*a)); }
+  }
+  return true;
+};
 (function(){
   var cache={}, pend={}, cola=[], activos=0, MAXC=2;
   function isDark(){ return document.documentElement.getAttribute('data-theme')==='dark'; }
@@ -2372,17 +2397,7 @@ var _dkFondoBarrer;
           var sc=Math.min(1,720/Math.max(W,H)); var w=Math.round(W*sc),h=Math.round(H*sc);
           var c=document.createElement('canvas'); c.width=w;c.height=h; var ctx=c.getContext('2d',{willReadFrequently:true}); ctx.drawImage(im,0,0,w,h);
           var d=ctx.getImageData(0,0,w,h), px=d.data;
-          // ¿el borde es claro? (si la foto tiene fondo de color/oscuro, no se toca)
-          var n=0,lum=0,i;
-          for(var x=0;x<w;x+=3){ i=x*4; lum+=px[i]*.299+px[i+1]*.587+px[i+2]*.114; i=((h-1)*w+x)*4; lum+=px[i]*.299+px[i+1]*.587+px[i+2]*.114; n+=2; }
-          for(var y=0;y<h;y+=3){ i=(y*w)*4; lum+=px[i]*.299+px[i+1]*.587+px[i+2]*.114; i=(y*w+w-1)*4; lum+=px[i]*.299+px[i+1]*.587+px[i+2]*.114; n+=2; }
-          if(lum/n<222){ cache[src]='x'; res(null); return; }
-          var TH=214, seen=new Uint8Array(w*h), st=new Int32Array(w*h), sp=0; // 214: también se lleva las sombras grises claras del fondo
-          function claro(k){ var j=k*4; return px[j]>=TH&&px[j+1]>=TH&&px[j+2]>=TH; }
-          for(var x2=0;x2<w;x2++){ st[sp++]=x2; st[sp++]=(h-1)*w+x2; } for(var y2=0;y2<h;y2++){ st[sp++]=y2*w; st[sp++]=y2*w+w-1; }
-          while(sp>0){ var k=st[--sp]; if(seen[k]||!claro(k)) continue; seen[k]=1; var xx=k%w; if(xx>0)st[sp++]=k-1; if(xx<w-1)st[sp++]=k+1; if(k>=w)st[sp++]=k-w; if(k<w*(h-1))st[sp++]=k+w; }
-          // fondo → transparente; los píxeles de fondo cercanos al blanco puro desaparecen del todo, los grises claros del borde quedan con alpha parcial (antialias natural)
-          for(var k2=0;k2<w*h;k2++){ if(seen[k2]){ var j=k2*4; var l=px[j]*.299+px[j+1]*.587+px[j+2]*.114; var a=(255-l)/(255-TH); a=a<0?0:(a>1?1:a); px[j+3]=Math.round(px[j+3]*a*a*a); } }
+          if(!window._dkRecortar(px,w,h)){ cache[src]='x'; res(null); return; }
           ctx.putImageData(d,0,0);
           c.toBlob(function(b){ if(!b){cache[src]='x';res(null);return;} var u=URL.createObjectURL(b); cache[src]=u; res(u); },'image/png');
         }catch(e){ cache[src]='x'; res(null); }
@@ -24130,10 +24145,11 @@ html[data-cards="2"] .hb-rect[data-cat="combos"]::after{background:linear-gradie
         for(var x=0;x<w;x+=3){ i=x*4; lum+=px[i]*.299+px[i+1]*.587+px[i+2]*.114; i=((h-1)*w+x)*4; lum+=px[i]*.299+px[i+1]*.587+px[i+2]*.114; n+=2; }
         for(var y=0;y<h;y+=3){ i=(y*w)*4; lum+=px[i]*.299+px[i+1]*.587+px[i+2]*.114; i=(y*w+w-1)*4; lum+=px[i]*.299+px[i+1]*.587+px[i+2]*.114; n+=2; }
         var bordeClaro = lum/n>=222;
-        var TH=214, seen=new Uint8Array(w*h);
+        var TH=226, seen=new Uint8Array(w*h);
         if(bordeClaro){
           var st=new Int32Array(w*h), sp=0;
-          var claro=function(k){ var j=k*4; return px[j]>=TH&&px[j+1]>=TH&&px[j+2]>=TH; };
+          // fondo = blanco neutro (los frascos crema no se tocan)
+          var claro=function(k){ var j=k*4, r=px[j],g=px[j+1],b=px[j+2]; var mn=Math.min(r,g,b), mx=Math.max(r,g,b); return mn>=TH&&(mx-mn)<=16; };
           for(var x2=0;x2<w;x2++){ st[sp++]=x2; st[sp++]=(h-1)*w+x2; } for(var y2=0;y2<h;y2++){ st[sp++]=y2*w; st[sp++]=y2*w+w-1; }
           while(sp>0){ var k=st[--sp]; if(seen[k]||!claro(k)) continue; seen[k]=1; var xx=k%w; if(xx>0)st[sp++]=k-1; if(xx<w-1)st[sp++]=k+1; if(k>=w)st[sp++]=k-w; if(k<w*(h-1))st[sp++]=k+w; }
         }
@@ -24148,7 +24164,7 @@ html[data-cards="2"] .hb-rect[data-cat="combos"]::after{background:linear-gradie
         }
         var col; if(peso>0.6){ col={h:Math.round((Math.atan2(sy,sx)*180/Math.PI+360)%360), s:1}; } else { var lm=nf?lumSum/nf:.5; col={h: lm<.4?260:36, s:0}; }
         if(!bordeClaro){ var r0={col:col, src:url, plate:true}; VID.fotos[url]=r0; cb(r0); return; }
-        for(var k3=0;k3<w*h;k3++){ if(seen[k3]){ var j3=k3*4; var l3=px[j3]*.299+px[j3+1]*.587+px[j3+2]*.114; var a=(255-l3)/(255-TH); a=a<0?0:(a>1?1:a); px[j3+3]=Math.round(px[j3+3]*a*a*a); } }
+        if(window._dkRecortar){ window._dkRecortar(px,w,h); } else { for(var k3=0;k3<w*h;k3++){ if(seen[k3]){ var j3=k3*4; var l3=px[j3]*.299+px[j3+1]*.587+px[j3+2]*.114; var a=(255-l3)/(255-TH); a=a<0?0:(a>1?1:a); px[j3+3]=Math.round(px[j3+3]*a*a*a); } } }
         ctx.putImageData(d,0,0);
         c.toBlob(function(bl){ var r1={col:col, src: bl?URL.createObjectURL(bl):url, plate:!bl}; VID.fotos[url]=r1; cb(r1); },'image/png');
       }catch(e){ var r2={col:null, src:url, plate:true}; VID.fotos[url]=r2; cb(r2); }
