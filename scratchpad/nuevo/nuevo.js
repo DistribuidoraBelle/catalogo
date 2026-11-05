@@ -48,13 +48,32 @@
     var ps=window.allProds||[], mejor=null;
     for(var i=0;i<ps.length;i++){ var p=ps[i]; if(!p||!p.imagen_url||p.activo===false||p.oculto) continue; if(norm(p.empresa)!==k) continue; if(!mejor||((p.stock_actual||0)>0&&(mejor.stock_actual||0)<=0)||((p.unidades_vendidas||0)>(mejor.unidades_vendidas||0)&&(p.stock_actual||0)>0)) mejor=p; }
     var u=mejor?((typeof fixImgUrl==='function')?fixImgUrl(mejor.imagen_url):mejor.imagen_url):'';
-    FOTO[k]=u; return u;
+    FOTO[k]=u; FOTOP[k]=mejor||null; return u;
   }
+  var FOTOP={};
+  function genDe(p){ var g=String(p&&p.genero||''); var f=g.indexOf('\u2640')>=0||/fem/i.test(g), m=g.indexOf('\u2642')>=0||/masc/i.test(g); return (f&&!m)?'f':(m&&!f)?'m':'u'; }
+  // al elegir una marca desde el menú con foto, el perfume que se mostraba sale primero en la lista (solo en ese caso)
+  function primeroDeMarca(){
+    var mp=window._nvMarcaPrimero; if(!mp||!mp.id) return;
+    var hr=document.getElementById('homeResults');
+    if(hr&&hr.offsetHeight){ var el=hr.querySelector('#card-'+mp.id+',#card_'+mp.id+',[data-pid="'+mp.id+'"]'); if(el&&el.parentNode&&el.parentNode.firstElementChild!==el) el.parentNode.insertBefore(el,el.parentNode.firstElementChild); return; }
+    var bf=document.getElementById('brandFilter'); if(!bf||bf.value!==mp.marca){ window._nvMarcaPrimero=null; return; }
+    if(typeof _lv==='undefined'||!_lv||!_lv.cont) return;
+    var ps=_lv.prods||[], i=-1; for(var j=0;j<ps.length;j++){ if(ps[j]&&ps[j].id===mp.id){ i=j; break; } }
+    if(i<=0) return;
+    var p=ps.splice(i,1)[0]; ps.unshift(p);
+    _lv.cont.querySelectorAll('.card,.lv-sent').forEach(function(e){ e.remove(); }); _lv.n=0;
+    try{ _lvRenderHasta(typeof _LV_LOTE!=='undefined'?_LV_LOTE:24); }catch(e){}
+  }
+  (function(){ var o=window._mcElegir; if(typeof o!=='function'||o._nv) return;
+    var w=function(m){ try{ var k=norm(m); window._nvMarcaPrimero=(FOTOP[k]&&FOTOP[k].id)?{marca:m,id:FOTOP[k].id}:null; }catch(e){}
+      var r=o.apply(this,arguments); try{ primeroDeMarca(); }catch(e){} return r; };
+    w._nv=true; window._mcElegir=w; })();
   function marcasConFoto(){
     var its=document.querySelectorAll('.mc-it:not(.nv-mc)');
     for(var i=0;i<its.length;i++){ var it=its[i]; it.classList.add('nv-mc'); var nombre=it.getAttribute('data-mc')||''; var u=fotoDe(nombre); if(!u) continue;
       var ph=document.createElement('span'); ph.className='nv-mc-ph'; ph.innerHTML='<img src="'+u.replace(/"/g,'&quot;')+'" alt="" loading="lazy">';
-      it.insertBefore(ph,it.firstChild); it.classList.add('nv-mc-foto'); }
+      it.insertBefore(ph,it.firstChild); it.classList.add('nv-mc-foto'); var pp=FOTOP[norm(nombre)]; it.classList.add('nv-mc-'+genDe(pp)); if(pp&&pp.id) it.setAttribute('data-nvpid',pp.id); }
   }
   // ── género de la tarjeta (para el fondo y el precio que corre) + botones Notas/Acordes/Te puede gustar con el formato del Cyber ──
   var TXT={ntog:'Notas olfativas','ac-tog':'Acordes','cpar-tog':'Te puede gustar'};
@@ -419,7 +438,7 @@
     var ns=document.getElementById('_notasSearch'); if(ns&&/^\s*\uD83D\uDD0D/.test(ns.placeholder)) ns.placeholder='Buscar nota (ej: naranja)';
     var cs=document.getElementById('compSrch'); if(cs){ var prev=cs.previousElementSibling; if(prev&&prev.tagName==='SPAN'&&/\uD83D\uDD0D/.test(prev.textContent)) prev.style.display='none'; }
   }
-  function tick(){ observar(); vestirCards(); marcasConFoto(); viajero(); logo(); hamb(); alturaCab(); alturaBarra(); enInicio(); cinta(); selectorVistas(); selectorFondos(); portada(); paneles(); }
+  function tick(){ try{ primeroDeMarca(); }catch(e){} observar(); vestirCards(); marcasConFoto(); viajero(); logo(); hamb(); alturaCab(); alturaBarra(); enInicio(); cinta(); selectorVistas(); selectorFondos(); portada(); paneles(); }
   function enganchar(){ envolver('applyFilters',tick); envolver('renderHomePage',tick); envolver('switchTab',tick); envolver('_mcRender',marcasConFoto); envolver('bqPintar',function(){ bqMarcaSelect(); bqNovedades(); }); envolver('bqCambio',bqNovedades); }
   function init(){ enganchar(); tick(); try{ new MutationObserver(function(){ tick(); }).observe(document.getElementById('listContainer')||document.body,{childList:true}); }catch(e){} }
   if(document.readyState==='loading') document.addEventListener('DOMContentLoaded',init); else init();
