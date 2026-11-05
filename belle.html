@@ -6897,8 +6897,11 @@ function _logMovStock(opts){
 
 
 function apiDelete(t,f){return api("DELETE",t,null,f);}
-function apiUpsert(t,d){
-  var url=SB_URL+"/rest/v1/"+t;
+// 2026-11-05: `onConflict` = columnas de la clave única por la que se resuelve el duplicado (p. ej. 'proveedor,producto_id').
+// Sin eso PostgREST solo mira la clave primaria: si la tabla tiene un id autonumérico y la fila se identifica por otra
+// clave única, cada "upsert" intentaba insertar y chocaba con la restricción (pasaba con los precios propios por proveedor).
+function apiUpsert(t,d,onConflict){
+  var url=SB_URL+"/rest/v1/"+t+(onConflict?('?on_conflict='+encodeURIComponent(onConflict)):'');
   if(_escrituraSinSesion("POST")) return _sesionVencida();
   var h={"Content-Type":"application/json","apikey":SB_KEY,"Authorization":"Bearer "+(_authToken||SB_KEY),
          "Prefer":"resolution=merge-duplicates,return=minimal"};
@@ -31089,14 +31092,16 @@ function bcPropioRender(){
 // Guarda un precio/código propio (debounce por producto) y lo refleja en la lista cargada, si está
 function _bcPropioSet(prov, pid, campo, val, desdeLista){
   if(!prov||!pid) return;
-  if(_bcPropio.prov!==prov){ _bcPropio.prov=prov; }
+  // si el panel tenía cargado OTRO proveedor, su mapa de precios no sirve para este (antes se mezclaban)
+  if(_bcPropio.prov!==prov){ _bcPropio.prov=prov; _bcPropio.precios={}; _bcPropio.cargado=false; }
   var rec=_bcPropio.precios[pid]||(_bcPropio.precios[pid]={precio_usd:0,codigo:''});
   if(campo==='precio_usd'){ var n=parseFloat(String(val).replace(',','.')); rec.precio_usd=(isNaN(n)||n<0)?0:Math.round(n*100)/100; }
   else rec.codigo=String(val||'').trim();
   clearTimeout(_bcPropioTimers[pid]);
   _bcPropioTimers[pid]=setTimeout(function(){
-    apiUpsert('proveedor_precios_propios',{proveedor:prov,producto_id:pid,precio_usd:rec.precio_usd,codigo:rec.codigo||'',updated_at:new Date().toISOString()})
-      .then(function(r){ if(r&&r.error){ toast('No se guardó el precio: '+(r.message||r.error),'terr'); } });
+    apiUpsert('proveedor_precios_propios',{proveedor:prov,producto_id:pid,precio_usd:rec.precio_usd,codigo:rec.codigo||'',updated_at:new Date().toISOString()},'proveedor,producto_id')
+      .then(function(r){ if(r&&r.error){ toast('No se guardó el precio: '+(r.message||r.error),'terr'); } })
+      .catch(function(e){ toast('No se guardó el precio: '+((e&&e.message)||e),'terr'); });
   },500);
   // reflejar en la lista ya cargada en el ayudante
   var lista=bcProveedores[prov];
@@ -54354,7 +54359,7 @@ function guardarFotosNotasSupabase(){
     var nEmbebidas=pend.length-nExternas;
     bellConfirm('Se van a guardar '+pend.length+' fotos en tu storage:\n• '+nExternas+' de sitios externos\n• '+nEmbebidas+' embebidas (se mueven a archivo y aligeran la base)\n\nSe guarda copia de los links externos antes de empezar.\n¿Continuar?', function(){
     var backup={}; pend.forEach(function(n){ if(/^https?:\/\//.test(n.foto_url||''))backup[n.id]=n.foto_url; });
-    apiUpsert('configuracion',{clave:'notas_rehost_backup',valor:JSON.stringify(backup)}).catch(function(){}).then(function(){
+    apiUpsert('configuracion',{clave:'notas_rehost_backup',valor:JSON.stringify(backup)},'clave').catch(function(){}).then(function(){
       var ok=0,fail=0,i=0;
       function subirYActualizar(n,blob){
         if(!blob||!blob.size){ fail++; setTimeout(siguiente,80); return; }
