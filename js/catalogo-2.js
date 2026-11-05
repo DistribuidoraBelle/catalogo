@@ -393,7 +393,7 @@ function _catFinalizarCargaCliente(){
   // Catálogos del cliente: si Belle cambió precios desde la última vez, deja
   // UN aviso simple en la campanita (sin mostrar ningún precio).
   if(_catCliente && _catCliente.puede_crear_catalogos && typeof _catCatChequearPrecios === 'function'){
-    setTimeout(function(){ _catCatChequearPrecios(function(){ if(typeof _catCargarNotifs==='function')_catCargarNotifs(); }); }, 2500);
+    setTimeout(function(){ _catCatChequearPrecios(function(){ if(typeof _catCargarNotifs==='function')_catCargarNotifs(true); }); }, 2500);
   }
   // Si el drawer está abierto, re-renderizarlo
   var dw = document.getElementById("drawerCuenta");
@@ -3227,15 +3227,26 @@ function _catCatCerrarModal(){
 // ══════════════ NOTIFICACIONES DEL CLIENTE (campanita + tab) ══════════════
 var _catNotifs = [];
 var _catNotifLoaded = false;
+var _catNotifFirma = "";   // JSON de la última carga: si no cambió, no se re-renderiza (evita re-pedir fotos)
+var _catNotifUltCarga = 0; // ts de la última carga OK: evita recargas en ráfaga (TOKEN_REFRESHED, focus, etc.)
+window._catImgMal = window._catImgMal || {}; // src de <img> que fallaron: no se vuelven a pedir en esta sesión
+function _catImgErr(img){ try{ img.style.display='none'; window._catImgMal[img.getAttribute('src')]=1; }catch(e){} }
 var _catBellOpen = false; // true mientras se ABRE la campanita: evita que markAllRead vacíe el dropdown al instante
 
-function _catCargarNotifs(){
-  if(!_catCliente || !_catCliente.id){ _catNotifs=[]; _catNotifLoaded=false; if(typeof _catRenderBell==='function')_catRenderBell(); return; }
+function _catCargarNotifs(force){
+  if(!_catCliente || !_catCliente.id){ _catNotifs=[]; _catNotifLoaded=false; _catNotifFirma=""; if(typeof _catRenderBell==='function')_catRenderBell(); return; }
+  // Debounce: los eventos de auth (SIGNED_IN al volver a la pestaña, TOKEN_REFRESHED) llaman a esto
+  // en ráfaga; si ya cargamos hace <30s y no es forzado, no volvemos a pegarle a la DB.
+  if(!force && _catNotifLoaded && (Date.now()-_catNotifUltCarga) < 30000) return;
   apiGet("notificaciones_cliente","select=*&cliente_id=eq."+_catCliente.id+"&order=created_at.desc&limit=200")
     .then(function(rows){
       _catNotifs = Array.isArray(rows)?rows:[];
       _catNotifLoaded = true;
+      _catNotifUltCarga = Date.now();
+      var firma=""; try{ firma=JSON.stringify(_catNotifs); }catch(e){ firma=String(Date.now()); }
+      var cambio = (firma!==_catNotifFirma); _catNotifFirma=firma;
       _catRenderBell();
+      if(!cambio) return; // mismos datos → no repintar listas (no re-pedir imágenes)
       var dd=document.getElementById("catNotifDrop");
       if(dd && dd.style.display==="block") _catRenderNotifList(document.getElementById("catNotifDropBody"), false, true);
       if(_catPanelTab==="notificaciones"){ var box=document.getElementById("_catTabBody"); if(box)_catRenderTabNotifs(box); }
@@ -3480,7 +3491,7 @@ function _catNotifDeleteOne(id){
     if(idx>=0)_catNotifs.splice(idx,1);
     _catNotifRefreshViews();
     apiDelete("notificaciones_cliente","id=eq."+id)
-      .catch(function(e){ console.error("[notif del]",e); if(typeof _catToast==='function')_catToast("No se pudo borrar, proba de nuevo","twarn"); _catCargarNotifs(); });
+      .catch(function(e){ console.error("[notif del]",e); if(typeof _catToast==='function')_catToast("No se pudo borrar, proba de nuevo","twarn"); _catCargarNotifs(true); });
   };
   if(typeof _catModalConfirm==='function'){
     var dd=document.getElementById("catNotifDrop"); if(dd)dd.style.display="none";
@@ -3559,7 +3570,7 @@ function _catRenderNotifList(box, inPanel, bellMode){
     var wrapClick="";
     if(hasProds && !rich){ wrapClick=" onclick=\"_catAbrirAvisos()\" style='cursor:pointer'"; }
     else if(hasLink && !hasProds){ wrapClick=" onclick=\""+linkCall+"\" style='cursor:pointer'"; }
-    var imgHtml=n.imagen_url?("<img src='"+_catEsc(n.imagen_url)+"' style='width:100%;max-height:160px;object-fit:cover;border-radius:9px;margin-top:.5rem;display:block' onerror=\"this.style.display='none'\">"):"";
+    var imgHtml=(n.imagen_url && !window._catImgMal[n.imagen_url])?("<img src='"+_catEsc(n.imagen_url)+"' loading='lazy' style='width:100%;max-height:160px;object-fit:cover;border-radius:9px;margin-top:.5rem;display:block' onerror=\"_catImgErr(this)\">"):"";
     var prodHtml="";
     if(hasProds && rich){
       prodHtml="<div style='margin-top:.5rem;display:flex;flex-direction:column;gap:.4rem'>";
@@ -3567,9 +3578,9 @@ function _catRenderNotifList(box, inPanel, bellMode){
         if(pi===8){ prodHtml+="<div id='_catNrest"+n.id+"' style='display:none;flex-direction:column;gap:.4rem'>"; }
         var pid=(p&&(p.id||p.producto_id))||null;
         var pn=(p&&_nomMl(p.nombre||p.producto_nombre, pid))||("Producto "+(pid||""));
-        var pim=(p&&(p.imagen||p.imagen_url))||"";
+        var pim=(p&&(p.imagen||p.imagen_url))||""; if(pim && window._catImgMal[pim]) pim="";
         prodHtml+="<div onclick=\"_catNotifClick("+n.id+",'producto',"+(pid||"null")+",null)\" style='display:flex;align-items:center;gap:.55rem;padding:.45rem .55rem;border:1px solid #eee;border-radius:9px;cursor:pointer;background:#fff'>"+
-          (pim?("<img src='"+_catEsc(pim)+"' style='width:42px;height:42px;object-fit:contain;border-radius:6px;flex-shrink:0;background:#faf8f4' onerror=\"this.style.display='none'\">"):"")+
+          (pim?("<img src='"+_catEsc(pim)+"' loading='lazy' style='width:42px;height:42px;object-fit:contain;border-radius:6px;flex-shrink:0;background:#faf8f4' onerror=\"_catImgErr(this)\">"):"")+
           "<span style='font-size:.78rem;color:#5a4a30;font-weight:600;flex:1;min-width:0'>"+_catEsc(pn)+"</span>"+
           "<span style='font-size:1.05rem;color:#c4965a;flex-shrink:0'>\u203a</span>"+
         "</div>";
