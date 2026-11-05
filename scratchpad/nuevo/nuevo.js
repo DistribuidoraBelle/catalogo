@@ -6,7 +6,7 @@
   // En el catálogo real el tema nuevo arranca solo cuando termina el CyberMonday (4/11/2026 23:59:59 hora Argentina).
   // Antes de esa fecha el catálogo queda como está (y del 2 al 4 manda el tema Cyber). ?nuevo=1 lo muestra antes.
   var SUAVE=__NV_SUAVE__;
-  var REAL=__NV_REAL__, DESDE=Date.UTC(2026,10,5,3,0,0);
+  var REAL=(window.__NV_REAL===true), DESDE=Date.UTC(2026,10,5,3,0,0);   // __NV_REAL lo pone el HTML (index real: true; pruebas: false)
   if(REAL && qs('nuevo')!=='1' && Date.now()<DESDE){
     var faltan=DESDE-Date.now(); if(faltan<36e5) setTimeout(function(){ try{ location.reload(); }catch(e){} }, faltan+1500);
     return;
@@ -440,7 +440,8 @@
   }
   function tick(){ try{ primeroDeMarca(); }catch(e){} observar(); vestirCards(); marcasConFoto(); viajero(); logo(); hamb(); alturaCab(); alturaBarra(); enInicio(); cinta(); selectorVistas(); selectorFondos(); portada(); paneles(); }
   function enganchar(){ envolver('applyFilters',tick); envolver('renderHomePage',tick); envolver('switchTab',tick); envolver('_mcRender',marcasConFoto); envolver('bqPintar',function(){ bqMarcaSelect(); bqNovedades(); }); envolver('bqCambio',bqNovedades); }
-  function init(){ enganchar(); tick(); try{ new MutationObserver(function(){ tick(); }).observe(document.getElementById('listContainer')||document.body,{childList:true}); }catch(e){} }
+  var tickPend=false; function tickRaf(){ if(tickPend) return; tickPend=true; requestAnimationFrame(function(){ tickPend=false; tick(); }); }
+  function init(){ enganchar(); tick(); try{ new MutationObserver(function(){ tickRaf(); }).observe(document.getElementById('listContainer')||document.body,{childList:true}); }catch(e){} }
   if(document.readyState==='loading') document.addEventListener('DOMContentLoaded',init); else init();
   setInterval(tick,1500);
 })();
