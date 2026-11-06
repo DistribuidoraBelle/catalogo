@@ -4131,7 +4131,21 @@ function _homeBuscadorHTML(){
       "@media(max-width:720px){.hb-hero h1{font-size:1.7rem}.hb-input{padding:1.15rem 1.4rem;font-size:1.05rem;border-radius:20px}.hb-compact .hb-input{padding:.8rem 1.2rem;font-size:.95rem}.hb-btns{flex-wrap:nowrap;gap:.35rem}.hbb{flex:1;justify-content:center;font-size:.66rem;padding:.5rem .25rem;gap:.2rem;border-radius:11px}.hb-rect{height:122px}.hb-rect .lb{font-size:1.45rem}.hb-wa{font-size:.92rem;padding:.85rem 1rem}}";
     document.head.appendChild(st);
   }
-  var _wn=(typeof waNumber!=='undefined'&&waNumber)?waNumber:WA_NUMBER;
+  /* ═══ Piloto de Belle · del 6 al 9 de noviembre de 2026 ═══════════════
+   * Solo ESTE botón —"Solicitar asesoramiento", el del inicio— lleva al
+   * WhatsApp de Belle, el bot. Son unos días de prueba con clientes reales.
+   *
+   * El resto sigue yendo a la persona de siempre, a propósito: el pedido que
+   * se cierra en la web, el "tengo un problema con mi pedido" y la consulta
+   * de disponibilidad usan waNumber (configuracion.whatsapp_admin) y no se
+   * tocan. Cambiar ese valor en la base habría desviado también los pedidos.
+   *
+   * Pasado el lunes vuelve solo al número de la base. Para cortarlo antes,
+   * poner una fecha ya pasada en WA_PILOTO_HASTA. */
+  var WA_PILOTO_BELLE = "5493512513030";                      // +54 9 351 251-3030
+  var WA_PILOTO_HASTA = Date.parse("2026-11-10T03:00:00Z");   // lunes 9, medianoche de Córdoba
+  var _wnHumano = (typeof waNumber !== 'undefined' && waNumber) ? waNumber : WA_NUMBER;
+  var _wn = (Date.now() < WA_PILOTO_HASTA) ? WA_PILOTO_BELLE : _wnHumano;
   var _waMsg=encodeURIComponent('¡Hola! Me comunico desde el catálogo de Distribuidora Belle. Me gustaría recibir asesoramiento personalizado. ¿Me pueden ayudar? 🌸');
   var _waSvg='<svg viewBox="0 0 24 24" width="24" height="24" fill="currentColor" aria-hidden="true"><path d="M12.04 2C6.58 2 2.13 6.45 2.13 11.91c0 1.75.46 3.45 1.32 4.95L2 22l5.25-1.38c1.45.79 3.08 1.21 4.79 1.21h.01c5.46 0 9.91-4.45 9.91-9.91 0-2.65-1.03-5.14-2.9-7.01A9.82 9.82 0 0 0 12.04 2zm0 18.15h-.01c-1.52 0-3.01-.41-4.31-1.18l-.31-.18-3.2.84.85-3.12-.2-.32a8.2 8.2 0 0 1-1.26-4.36c0-4.54 3.7-8.23 8.25-8.23 2.2 0 4.27.86 5.83 2.42a8.18 8.18 0 0 1 2.41 5.82c0 4.54-3.7 8.23-8.25 8.23zm4.52-6.16c-.25-.12-1.47-.72-1.69-.81-.23-.08-.39-.12-.56.12-.16.25-.64.81-.79.97-.14.16-.29.18-.54.06-.25-.12-1.05-.39-2-1.23-.74-.66-1.23-1.48-1.38-1.73-.14-.25-.02-.38.11-.5.11-.11.25-.29.37-.43.12-.14.16-.25.25-.41.08-.16.04-.31-.02-.43-.06-.12-.56-1.34-.76-1.84-.2-.48-.41-.42-.56-.43h-.48c-.16 0-.43.06-.66.31-.23.25-.86.85-.86 2.07 0 1.22.89 2.4 1.01 2.56.12.16 1.75 2.67 4.25 3.74.59.26 1.06.41 1.42.52.6.19 1.14.16 1.57.1.48-.07 1.47-.6 1.68-1.18.21-.58.21-1.07.14-1.18-.06-.1-.22-.16-.47-.28z"/></svg>';
   return ''+
