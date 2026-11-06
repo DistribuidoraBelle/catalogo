@@ -6644,12 +6644,27 @@ function _sesionVencida(){
 function _escrituraSinSesion(method){
   return method!=="GET" && !_authToken && !!curUser;
 }
+// 2026-11-06: lecturas con tiempo límite (30 s) y hasta 2 reintentos ante corte de red; antes un fetch
+// colgado dejaba la pantalla "cargando" sin fin. Las escrituras no se reintentan (podrían duplicarse).
+function _fetchApi(url, opts, method, intento){
+  intento = intento||0;
+  var ctl=null, timer=null;
+  try{ if(typeof AbortController==='function'){ ctl=new AbortController(); opts.signal=ctl.signal; } }catch(e){ ctl=null; }
+  if(ctl) timer=setTimeout(function(){ try{ ctl.abort(); }catch(e){} }, 30000);
+  return fetch(url,opts).then(function(r){ if(timer)clearTimeout(timer); return r; }, function(e){
+    if(timer)clearTimeout(timer);
+    if(method==="GET" && intento<2){
+      return new Promise(function(res){ setTimeout(res, 1500*(intento+1)); }).then(function(){ delete opts.signal; return _fetchApi(url, opts, method, intento+1); });
+    }
+    throw e;
+  });
+}
 function api(method,table,data,filters){
   var url=SB_URL+"/rest/v1/"+table+(filters?"?"+filters:"");
   if(_escrituraSinSesion(method)) return _sesionVencida();
   var h={"Content-Type":"application/json","apikey":SB_KEY,"Authorization":"Bearer "+(_authToken||SB_KEY)};
   if(method==="POST"||method==="PATCH")h["Prefer"]="return=representation";
-  return fetch(url,{method:method,headers:h,body:data?JSON.stringify(data):undefined})
+  return _fetchApi(url,{method:method,headers:h,body:data?JSON.stringify(data):undefined},method)
     .catch(function(e){
       // 2026-10-04: antes un fetch rechazado (sin red, CORS, etc.) resolvía null y el caller mostraba "Guardado".
       console.error("API sin conexión",method,table,e);
@@ -58746,7 +58761,7 @@ function _dashV2Load(){
     apiGet('ofertas_campanias','select=id,nombre,activa&activa=is.true').catch(function(){return [];}),
     apiGet('ofertas','select=id,campania_id,fecha_desde,fecha_hasta,activa,tipo&activa=is.true&campania_id=not.is.null').catch(function(){return [];}),
     apiGet('productos','select=id,nombre,empresa,stock_actual,reserva,en_viaje,costo_ars,costo_ind,costo_log,precio_may_ars,tipo,cat,cat_catalogo,ml&activo=is.true&limit=5000').catch(function(){return [];}),
-    apiGet('vendedores','select=id,nombre,rol,activo').catch(function(){return [];}),
+    apiGet('vendedores','select=id,nombre,activo').catch(function(){return [];}),
     Promise.resolve([]),   // gastos: vienen con el resumen de Reportes
     apiGet('movimientos_stock','select=producto_id,tipo,cantidad,stock_despues,created_at&created_at=gte.'+_v2Fecha(hoy,-8)+'T03:00:00&limit=5000').catch(function(){return [];}),
     // 2026-10-10: los combos se costean por sus componentes (antes entraban a costo cero)

@@ -154,10 +154,26 @@ function _sbTokenRaw(){
   return null;
 }
 
+// 2026-11-06: una lectura que se cuelga (red móvil inestable) dejaba el catálogo "cargando" para siempre,
+// porque fetch no tiene tiempo límite. Ahora cada lectura corta a los 20 s y se reintenta hasta 2 veces
+// (solo ante falla de red o corte, nunca ante una respuesta HTTP de error).
+function _apiFetchGet(url, headers, intento){
+  intento = intento||0;
+  var ctl=null, timer=null, opts={headers:headers};
+  try{ if(typeof AbortController==='function'){ ctl=new AbortController(); opts.signal=ctl.signal; } }catch(e){ ctl=null; }
+  if(ctl) timer=setTimeout(function(){ try{ ctl.abort(); }catch(e){} }, 20000);
+  return fetch(url,opts).then(function(r){ if(timer)clearTimeout(timer); return r; }, function(e){
+    if(timer)clearTimeout(timer);
+    if(intento<2){
+      return new Promise(function(res){ setTimeout(res, 1200*(intento+1)); }).then(function(){ return _apiFetchGet(url, headers, intento+1); });
+    }
+    throw e;
+  });
+}
 function apiGet(t,f,_anon){
   var tok = _anon ? null : _sbToken();
   var auth = tok ? "Bearer "+tok : "Bearer "+SB_KEY;
-  return fetch(SB_URL+"/rest/v1/"+t+(f?"?"+f:""),{headers:{"apikey":SB_KEY,"Authorization":auth,"Accept":"application/json"}}).then(function(r){
+  return _apiFetchGet(SB_URL+"/rest/v1/"+t+(f?"?"+f:""),{"apikey":SB_KEY,"Authorization":auth,"Accept":"application/json"}).then(function(r){
     // 2026-10-19: sesión rechazada (401) → la misma lectura como anónimo, una sola vez
     if(r.status===401 && tok && !_anon) return apiGet(t,f,true);
     if(!r.ok){return r.text().then(function(txt){throw new Error("HTTP "+r.status+": "+txt.slice(0,100));});}return r.json();});
@@ -4817,6 +4833,15 @@ function _homeEsqueleto(){
   if(el.querySelector('#homeDynamic,#homeDynamicWait')) return;
   _homePoner(el,(typeof _homeBuscadorHTML==='function'?_homeBuscadorHTML():"")+"<div id='homeDynamicWait' style='display:flex;align-items:center;justify-content:center;padding:2rem'><div class='spin'></div></div>");
   if(typeof window._hbArmar==='function'){ try{ window._hbArmar(); }catch(e){} }
+  // Si a los 8 s todavía no llegaron los productos, avisar que la conexión está lenta (antes: spinner mudo)
+  setTimeout(function(){
+    var w=document.getElementById('homeDynamicWait');
+    if(!w || (window.allProds&&window.allProds.length) || document.getElementById('homeLento')) return;
+    var m=document.createElement('div'); m.id='homeLento';
+    m.style.cssText='text-align:center;color:#9a8060;font-size:.8rem;padding:0 1rem 1.2rem;line-height:1.5';
+    m.innerHTML='La conexi\u00f3n est\u00e1 lenta, seguimos intentando\u2026<br><a href="javascript:location.reload()" style="color:#a9763f;font-weight:700">Recargar</a>';
+    w.parentNode.insertBefore(m, w.nextSibling);
+  }, 8000);
 }
 function renderHomePage(sections,combos){
   var el=document.getElementById("homePage");
