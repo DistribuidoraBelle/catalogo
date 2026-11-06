@@ -865,7 +865,9 @@ function loadProds(){
     // agarra la PRIMERA del array. Ordenamos por updated_at DESC para que la primera sea
     // la más recientemente actualizada (datos más completos/correctos).
     // nullslast por si alguna ficha vieja no tiene updated_at; en ese caso van al final.
-    window._fichasSBPromise = apiGet('fichas_perfume','select=*&order=updated_at.desc.nullslast,id.desc&limit=2000').then(function(fdata){
+    // 2026-11-06: en bloque solo baja lo estructural (notas, familia, inspirado-en) desde la vista
+    // fichas_publicas. Los textos de cada ficha se traen de a uno con _fichaDetalle() al abrirla.
+    window._fichasSBPromise = apiGet('fichas_publicas','select=*&order=updated_at.desc.nullslast,id.desc&limit=2000').then(function(fdata){
       window._fichasSB = Array.isArray(fdata) ? fdata : [];
       window._fichasSBLoading = false;
       return window._fichasSB;
@@ -3193,6 +3195,7 @@ function _gtElegir(id){
   var p=prods.filter(function(x){return x.id==id;})[0];
   if(!p)return;
   _gtState.prod=p;
+  _fichaDetalle(p.id).then(function(d){ if(d && !d.limite && _gtState.prod===p){ try{ _gtRefreshCard(); }catch(e){} } });
   var box=document.getElementById("gtResults"); if(box){box.innerHTML="";box.style.display="none";}
   var sn=document.getElementById("gtSelName"); if(sn) sn.textContent="✓ "+(p.nombre||"")+(p.ml?(" | "+p.ml+"ml"):"");
   var si=document.getElementById("gtSearch"); if(si) si.value="";
@@ -10901,6 +10904,33 @@ function scrollToProduct(id){
 
 
 var FICHAS_BELLE=[];
+// 2026-11-06: ficha COMPLETA de un producto (descripción, perfil, inspiraciones con texto, etc.).
+// Viene de la función ficha_publica (una por pedido, con límite por IP). Se mezcla en la fila de
+// _fichasSB para que todo lo que ya lee la ficha (modal, comparador, tarjetas) la vea completa.
+window._fichaDetCache = window._fichaDetCache || {};
+function _fichaDetalle(pid){
+  pid = parseInt(pid,10);
+  if(!pid) return Promise.resolve(null);
+  if(window._fichaDetCache[pid]) return window._fichaDetCache[pid];
+  var tok = (typeof _sbToken==='function') ? _sbToken() : null;
+  var pr = fetch(SB_URL+'/rest/v1/rpc/ficha_publica',{
+      method:'POST',
+      headers:{'Content-Type':'application/json','apikey':SB_KEY,'Authorization':'Bearer '+(tok||SB_KEY),'Accept':'application/json'},
+      body:JSON.stringify({pid:pid})
+    }).then(function(r){ return r.ok ? r.json() : null; })
+    .then(function(d){
+      if(!d || d.limite){ setTimeout(function(){ delete window._fichaDetCache[pid]; }, 60000); return d||null; }
+      var arr = Array.isArray(window._fichasSB) ? window._fichasSB : (window._fichasSB=[]);
+      var row = null;
+      for(var i=0;i<arr.length;i++){ if(arr[i] && arr[i].producto_id===pid){ row=arr[i]; break; } }
+      if(row){ for(var k in d){ if(d[k]!=null && d[k]!=='') row[k]=d[k]; } row._det=true; }
+      else { d._det=true; arr.push(d); }
+      return d;
+    })
+    .catch(function(){ delete window._fichaDetCache[pid]; return null; });
+  window._fichaDetCache[pid] = pr;
+  return pr;
+}
 // Auditoría 2026-10-04: las fichas de respaldo (250 KB) viven en fichas-belle.json y se bajan
 // aparte, sin frenar la carga. Cuando llegan, se vuelve a pintar el catálogo si ya estaba.
 (function(){
@@ -11051,6 +11081,12 @@ function verFichaBelle(prodId, btn){
     window._fichaActualProd=prod;window._fichaActualData=ficha;
     content.innerHTML=renderFichaModal(prod, ficha);
     mo.scrollTop=0;
+    // Detalle (descripción, perfil, inspiraciones…) de a uno: cuando llega, se re-pinta la ficha
+    if(ficha && ficha.producto_id && !ficha._det){
+      _fichaDetalle(ficha.producto_id).then(function(d){
+        if(d && !d.limite && mo.style.display==='block' && window._fichaActualProdId===prodId){ renderConDatos(); }
+      });
+    }
     if(prod.imagen_url){ _fichaAdaptarColor(prod.imagen_url, content); _fichaFotoTransparente(prod, content); }
     // Sync fotos de notas en background — si llegan, re-renderizar solo la pirámide
     syncNotasFotosDesdeSupabase(function(){
@@ -12509,6 +12545,7 @@ function compToggle(prodId){
   } else {
     if(_compSelIds.length>=4){_catToast('Máximo 4 perfumes','twarn');return;}
     _compSelIds.push(prodId);
+    _fichaDetalle(prodId).then(function(d){ if(d && !d.limite && _compSelIds.indexOf(prodId)>=0){ try{ compRenderGraficos(); }catch(e){} } });
   }
   var q=document.getElementById('compSrch').value;
   if(q)compBuscar(q);
