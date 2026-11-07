@@ -420,7 +420,9 @@
       }catch(e){}
       var cw=Math.max(1,x1-x0), ch=Math.max(1,y1-y0), A=cw/ch;
       // alto según la proporción: cuadrado ≈ 50 px, ancho ≈ 24 px (tope de ancho 170 px)
-      var h=Math.max(24,Math.min(50,Math.sqrt(2500/A))), w=h*A; if(w>170){ w=170; h=w/A; }
+      // 7/11: curva más suave para que los logos anchos (Armani, Versace) no queden tan bajos.
+      // Cuadrados siguen en 50; A≈1.8 pasa de ~37 a ~43; los muy anchos quedan limitados por el ancho (170).
+      var h=Math.max(24,Math.min(50,50*Math.pow(1/A,0.25))), w=h*A; if(w>170){ w=170; h=w/A; }
       c.listo=true; c.v={lw:w.toFixed(1),lh:h.toFixed(1),sx:(iw/cw).toFixed(4),sy:(ih/ch).toFixed(4),ox:(x0/cw).toFixed(4),oy:(y0/ch).toFixed(4)};
       c.cbs.forEach(function(f){ f(c); }); c.cbs=[]; };
     img.onerror=function(){ c.listo=true; c.v=null; c.cbs.forEach(function(f){ f(c); }); c.cbs=[]; };
