@@ -16154,6 +16154,11 @@ function abrirControlPedido(pedidoId){
       return;
     }
 
+    // Ger 2026-11: al controlar por PRIMERA vez un pedido en camino, asumir que
+    // llegó TODO (recibida = pedida). El admin solo corrige lo que vino mal/falta.
+    // Para borradores guardados o pedidos ya tocados, respetar lo que había.
+    var esPrimerControl = !!(pedido && pedido.estado === 'pendiente');
+
     // Build decisions
     items.forEach(function(it){
       var matchId=it.producto_id||null;
@@ -16168,19 +16173,24 @@ function abrirControlPedido(pedidoId){
         if(fm){matchId=fm.prod.id;accion="match";}
       }
       var cantPed=it.cantidad_pedida||0;
-      // FIX 2026-05-18 BUG #21 (REGLA ORO): NO pre-poblar cantRec con cantPed.
-      // El admin debe revisar y poner explícitamente la cantidad recibida de cada item.
+      // Ger 2026-11: primer control de un pedido en camino → recibida = pedida
+      // (asumir que llegó todo). Si ya tenía cantidad guardada, respetarla.
       var cantRec;
       if(it.cantidad_recibida > 0){
         cantRec = it.cantidad_recibida;
+      } else if(esPrimerControl){
+        cantRec = cantPed;
       } else {
         cantRec = 0;
       }
+      var cantFall=it.cantidad_fallada||0;
       _controlDecisions[it.id]={
         catalogoAccion:accion,
         prodId:matchId,
         cantRecibida:cantRec,
-        cantFallada:it.cantidad_fallada||0,
+        cantFallada:cantFall,
+        cantOk:Math.max(0,cantRec-cantFall),
+        cantFaltante:Math.max(0,cantPed-cantRec),
         obsFallada:it.observacion||""
       };
     });
@@ -28656,7 +28666,7 @@ function renderPedidosProveedor(){
         var btnFecha='<button class="btn btn-g" onclick="guardarGuia('+p.id+')" style="font-size:.7rem">&#128197; Fecha</button>';
         var btnRastrear=guiasArr.length?'<button class="btn btn-g" onclick="abrirTracking('+p.id+')" style="font-size:.7rem;color:var(--green);border-color:var(--green);font-weight:700">Rastrear</button>':'';
         btns='<div style="display:flex;flex-wrap:wrap;gap:.35rem;margin-top:.55rem">'+
-          '<button class="btn btn-a" onclick="abrirControlPedido('+p.id+')" style="font-weight:600;flex:1 1 100%">Controlar pedido</button>'+
+          '<button class="btn btn-a" onclick="abrirControlPedido('+p.id+')" style="font-weight:600">Controlar</button>'+
           btnGuia+btnRastrear+btnFecha+
           '<button class="btn btn-g" onclick="editarMatchesPedido('+p.id+')" style="font-size:.7rem;color:var(--cyan);border-color:var(--cyan)">&#128279; Machear</button>'+
           '<button class="btn btn-g" onclick="editarItemsPedidoProveedor('+p.id+')" style="font-size:.7rem">Items</button>'+
@@ -28665,7 +28675,7 @@ function renderPedidosProveedor(){
         '</div>';
       } else if(p.estado==="controlado"){
         btns='<div style="display:flex;flex-wrap:wrap;gap:.35rem;margin-top:.55rem">'+
-          '<button class="btn btn-a" onclick="_lockClick(this,function(){return agregarControlAlStock('+p.id+');},{texto:&quot;Agregando...&quot;,timeout:60000})" style="font-weight:600;background:var(--green);color:#000;flex:1 1 100%">&#128230; Agregar al stock</button>'+
+          '<button class="btn btn-a" onclick="_lockClick(this,function(){return agregarControlAlStock('+p.id+');},{texto:&quot;Agregando...&quot;,timeout:60000})" style="font-weight:600;background:var(--green);color:#000">&#128230; Agregar al stock</button>'+
           '<button class="btn btn-g" onclick="verDetallePedido('+p.id+')" style="font-size:.7rem">&#128203; Ver items</button>'+
           '<button class="btn btn-g" onclick="editarMatchesPedido('+p.id+')" style="font-size:.7rem;color:var(--cyan);border-color:var(--cyan)">&#128279; Editar matches</button>'+
           '<button class="btn btn-red" onclick="eliminarPedidoProveedor('+p.id+')" style="font-size:.7rem">&#128465; Eliminar</button>'+
@@ -28839,10 +28849,10 @@ function verDetallePedido(id){
       var costoProyARS=costoProyectado>0?(costoProyectado*cotiz).toFixed(0):0;
       return"<tr style='border-bottom:1px solid var(--bd)'>"+
         "<td style='padding:.28rem .4rem;color:var(--tx3);font-size:.68rem'>"+(it.codigo_proveedor||"-")+"</td>"+
-        "<td style='padding:.28rem .4rem;color:var(--tx);font-size:.75rem;font-weight:500'>"+it.nombre_proveedor+
+        "<td style='padding:.28rem .4rem;color:var(--tx);font-size:.75rem;font-weight:500;word-break:break-word;overflow-wrap:anywhere'>"+it.nombre_proveedor+
           (it.observacion?"<div style='font-size:.62rem;color:var(--tx3);font-style:italic'>"+it.observacion+"</div>":"")+
         "</td>"+
-        "<td style='padding:.28rem .4rem;font-size:.7rem;color:"+(catProd?"var(--green)":"var(--tx3)")+";overflow:hidden;text-overflow:ellipsis;white-space:nowrap'>"+
+        "<td style='padding:.28rem .4rem;font-size:.7rem;color:"+(catProd?"var(--green)":"var(--tx3)")+";word-break:break-word;overflow-wrap:anywhere'>"+
           (catProd?_admEsc(_prodMl(catProd)):(it.es_nuevo?"<span style='color:var(--cyan)'>&#10024; Nuevo</span>":"<span style='font-style:italic'>Sin vincular</span>"))+
         "</td>"+
         "<td style='padding:.28rem .4rem;text-align:center'>"+it.cantidad_pedida+"</td>"+
@@ -28873,12 +28883,24 @@ function verDetallePedido(id){
     }).join("");
 
     el.innerHTML=hdr+statsHdr+
-      "<div style='overflow-x:auto'>"+
-      "<table style='width:100%;border-collapse:collapse;font-size:.73rem;table-layout:fixed'>"+
+      "<div style='overflow-x:auto;-webkit-overflow-scrolling:touch'>"+
+      "<table style='width:100%;min-width:720px;border-collapse:collapse;font-size:.73rem;table-layout:fixed'>"+
+      "<colgroup>"+
+        "<col style='width:6%'>"+   // Cod
+        "<col style='width:23%'>"+  // Producto
+        "<col style='width:21%'>"+  // Catálogo
+        "<col style='width:5%'>"+   // Ped.
+        "<col style='width:6%'>"+   // Recib.
+        "<col style='width:5%'>"+   // Fall.
+        "<col style='width:5%'>"+   // Falt.
+        "<col style='width:10%'>"+  // Precio pagado
+        "<col style='width:11%'>"+  // Costo promedio
+        "<col style='width:8%'>"+   // Estado
+      "</colgroup>"+
       "<thead><tr style='border-bottom:2px solid var(--bd)'>"+
-        "<th style='padding:.28rem .4rem;text-align:left;color:var(--tx3);width:60px'>Cod</th>"+
-        "<th style='padding:.28rem .4rem;text-align:left;color:var(--tx3);width:22%'>Producto</th>"+
-        "<th style='padding:.28rem .4rem;text-align:left;color:var(--tx3);width:20%'>Catálogo</th>"+
+        "<th style='padding:.28rem .4rem;text-align:left;color:var(--tx3)'>Cod</th>"+
+        "<th style='padding:.28rem .4rem;text-align:left;color:var(--tx3)'>Producto</th>"+
+        "<th style='padding:.28rem .4rem;text-align:left;color:var(--tx3)'>Catálogo</th>"+
         "<th style='padding:.28rem .4rem;text-align:center;color:var(--tx3)'>Ped.</th>"+
         "<th style='padding:.28rem .4rem;text-align:center;color:var(--green)'>Recib.</th>"+
         "<th style='padding:.28rem .4rem;text-align:center;color:#e06020'>Fall.</th>"+
