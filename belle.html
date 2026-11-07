@@ -6975,6 +6975,7 @@ function _entrarStaff(perfil){
   var le=document.getElementById("lErr"); if(le)le.style.display="none";
   initApp();
   try{ if(curRole==='admin' && typeof _dispRegistrar==='function') _dispRegistrar(); }catch(e){}
+  try{ if(curRole==='admin' && typeof _bioSoportado==='function' && _bioSoportado() && _bioActivada() && !window._bioUnlocked) _bioLockMostrar(); }catch(e){}
 }
 function doLogin(){
   var u=document.getElementById("lUser").value.trim().toLowerCase();
@@ -14833,21 +14834,84 @@ function _dispCall(fn,body){
   return fetch(SB_URL+"/rest/v1/rpc/"+fn,{method:"POST",headers:{"Content-Type":"application/json","apikey":SB_KEY,"Authorization":"Bearer "+(_authToken||SB_KEY),"x-belle-dispositivo":_disposSecret},body:JSON.stringify(body||{})}).then(function(r){return r.json().catch(function(){return null;});});
 }
 function _dispNombre(){
-  try{
-    var ua=navigator.userAgent||"", pf=navigator.platform||"", t="Dispositivo";
-    if(/iPhone/i.test(ua)) t="iPhone";
-    else if(/iPad/i.test(ua)) t="iPad";
-    else if(/Android/i.test(ua)) t="Celular Android";
-    else if(/Windows|Win32|Win64/i.test(ua+pf)) t="PC Windows";
-    else if(/Macintosh|Mac OS/i.test(ua)) t="Mac";
-    else if(/Linux/i.test(ua+pf)) t="PC Linux";
+  return new Promise(function(res){
+    var ua=navigator.userAgent||"", pf=navigator.platform||"";
     var b=(ua.match(/(Edg|OPR|Chrome|Firefox|Safari)/)||["navegador"])[0];
     b=({Edg:"Edge",OPR:"Opera"})[b]||b;
-    return t+" · "+b;
-  }catch(e){ return "Dispositivo"; }
+    function base(){ var t="Dispositivo";
+      if(/iPhone/i.test(ua)) t="iPhone";
+      else if(/iPad/i.test(ua)) t="iPad";
+      else if(/Android/i.test(ua)) t="Celular Android";
+      else if(/Windows|Win32|Win64/i.test(ua+pf)) t="PC Windows";
+      else if(/Macintosh|Mac OS/i.test(ua)) t="Mac";
+      else if(/Linux/i.test(ua+pf)) t="PC Linux";
+      return t; }
+    try{
+      if(navigator.userAgentData && navigator.userAgentData.getHighEntropyValues){
+        navigator.userAgentData.getHighEntropyValues(['model','platform']).then(function(h){
+          var mdl=(h&&h.model)||"", t=base();
+          if(mdl){ var marca=/^SM-/.test(mdl)?"Samsung ":(/Pixel/i.test(mdl)?"Google ":(/moto/i.test(mdl)?"Motorola ":"")); t=(marca+mdl).trim(); }
+          res((t+" · "+b).trim());
+        }).catch(function(){ res(base()+" · "+b); });
+        return;
+      }
+    }catch(e){}
+    res(base()+" · "+b);
+  });
 }
 function _dispRegistrar(){
-  return _dispCall("registrar_dispositivo",{p_secreto:_disposSecret,p_nombre:_dispNombre(),p_ua:(navigator.userAgent||"").slice(0,200)}).catch(function(){});
+  return _dispNombre().then(function(nom){
+    return _dispCall("registrar_dispositivo",{p_secreto:_disposSecret,p_nombre:nom,p_ua:(navigator.userAgent||"").slice(0,200)});
+  }).catch(function(){});
+}
+function _bioSoportado(){ try{ return !!(window.PublicKeyCredential && navigator.credentials && navigator.credentials.create); }catch(e){ return false; } }
+function _bioActivada(){ try{ return !!localStorage.getItem('belle_bio_cred'); }catch(e){ return false; } }
+function _b64u(buf){ var b=new Uint8Array(buf),s=""; for(var i=0;i<b.length;i++)s+=String.fromCharCode(b[i]); return btoa(s).replace(/\+/g,'-').replace(/\//g,'_').replace(/=+$/,''); }
+function _b64uDec(str){ str=String(str).replace(/-/g,'+').replace(/_/g,'/'); while(str.length%4)str+='='; var bin=atob(str),arr=new Uint8Array(bin.length); for(var i=0;i<bin.length;i++)arr[i]=bin.charCodeAt(i); return arr.buffer; }
+function _bioEnroll(){
+  if(!_bioSoportado()){ toast('Este dispositivo no permite huella/cara','twarn'); return; }
+  var cha=new Uint8Array(32); crypto.getRandomValues(cha);
+  var uid=new Uint8Array(16); crypto.getRandomValues(uid);
+  navigator.credentials.create({publicKey:{
+    challenge:cha, rp:{id:location.hostname, name:'Distribuidora Belle'},
+    user:{id:uid, name:(curUser||'admin'), displayName:(curUser||'Admin')},
+    pubKeyCredParams:[{type:'public-key',alg:-7},{type:'public-key',alg:-257}],
+    authenticatorSelection:{authenticatorAttachment:'platform', userVerification:'required'},
+    timeout:60000, attestation:'none'
+  }}).then(function(cred){
+    try{ localStorage.setItem('belle_bio_cred', _b64u(cred.rawId)); }catch(e){}
+    window._bioUnlocked=true;
+    toast('Huella/cara activada en este dispositivo ✓','tok');
+    try{ loadDispositivos(); }catch(e){}
+  }).catch(function(e){ toast('No se pudo activar: '+((e&&e.message)||e),'twarn'); });
+}
+function _bioDesactivar(){ try{ localStorage.removeItem('belle_bio_cred'); }catch(e){} toast('Desbloqueo con huella/cara desactivado','tok'); try{ loadDispositivos(); }catch(e){} }
+function _bioUnlock(){
+  var id=null; try{ id=localStorage.getItem('belle_bio_cred'); }catch(e){}
+  if(!id || !_bioSoportado()){ window._bioUnlocked=true; _bioQuitarLock(); return; }
+  var cha=new Uint8Array(32); crypto.getRandomValues(cha);
+  navigator.credentials.get({publicKey:{ challenge:cha, timeout:60000, userVerification:'required', allowCredentials:[{type:'public-key', id:_b64uDec(id)}] }})
+    .then(function(){ window._bioUnlocked=true; _bioQuitarLock(); })
+    .catch(function(){ var m=document.getElementById('bioLockMsg'); if(m)m.textContent='No se reconoció. Proba de nuevo o usá la contraseña.'; });
+}
+function _bioQuitarLock(){ var oo=document.getElementById('bioLock'); if(oo&&oo.parentNode)oo.parentNode.removeChild(oo); }
+function _bioUsarPass(){ try{ var c=_sbAuth(); if(c)c.auth.signOut(); }catch(e){} location.reload(); }
+function _bioLockMostrar(){
+  if(document.getElementById('bioLock')) return;
+  var oo=document.createElement('div'); oo.id='bioLock';
+  oo.style.cssText='position:fixed;inset:0;z-index:100000;background:var(--bg,#0e1116);display:flex;flex-direction:column;align-items:center;justify-content:center;gap:1rem;padding:2rem;text-align:center';
+  oo.innerHTML="<div style='font-size:3rem'>👆</div>"+
+    "<div style='font-size:1.1rem;font-weight:600;color:var(--tx,#eee)'>Desbloqueá el panel</div>"+
+    "<div id='bioLockMsg' style='font-size:.8rem;color:var(--tx3,#999);max-width:280px'>Usá tu huella o cara para entrar.</div>"+
+    "<button class='btn btn-p' style='padding:.7rem 1.4rem;font-size:.9rem' onclick='_bioUnlock()'>Desbloquear</button>"+
+    "<button style='background:none;border:none;color:var(--tx3,#999);font-size:.76rem;text-decoration:underline;cursor:pointer' onclick='_bioUsarPass()'>Usar contraseña</button>";
+  document.body.appendChild(oo);
+  setTimeout(_bioUnlock, 300);
+}
+function _bioBotonHtml(){
+  if(!_bioSoportado()) return "<div style='font-size:.66rem;color:var(--tx3);margin-bottom:.6rem'>Este dispositivo no permite huella/cara.</div>";
+  var on=_bioActivada();
+  return "<div style='margin-bottom:.7rem'><button class='btn "+(on?'btn-g':'btn-p')+"' style='font-size:.72rem;padding:.4rem .8rem' onclick='"+(on?'_bioDesactivar()':'_bioEnroll()')+"'>"+(on?'🔒 Huella/cara ACTIVADA aquí · tocar para desactivar':'👆 Activar huella/cara en este dispositivo')+"</button></div>";
 }
 function loadDispositivos(){
   var el=document.getElementById("cuentasDispositivos"); if(!el) return;
@@ -14855,7 +14919,7 @@ function loadDispositivos(){
   apiGet("admin_dispositivos","select=id,nombre,user_agent,estado,ultimo_uso,creado&order=creado.desc").then(function(rows){
     rows=Array.isArray(rows)?rows:[];
     var h="<div class='sec-title'>Dispositivos autorizados</div>";
-    h+="<div style='font-size:.66rem;color:var(--tx3);margin-bottom:.5rem'>Solo los dispositivos autorizados podr\u00e1n entrar al panel cuando actives la restricci\u00f3n. Autoriz\u00e1 uno nuevo desde un dispositivo ya autorizado.</div>";
+    h+="<div style='font-size:.66rem;color:var(--tx3);margin-bottom:.5rem'>Solo los dispositivos autorizados podr\u00e1n entrar al panel cuando actives la restricci\u00f3n. Autoriz\u00e1 uno nuevo desde un dispositivo ya autorizado.</div>"; h+=_bioBotonHtml();
     if(!rows.length){ h+="<div style='font-size:.72rem;color:var(--tx3)'>Todav\u00eda no hay dispositivos registrados.</div>"; el.innerHTML=h; return; }
     h+=rows.map(function(d){
       var est=d.estado==='autorizado'?"<span class='badge bg-green'>Autorizado</span>":"<span class='badge bg-yel'>Pendiente</span>";
