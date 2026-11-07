@@ -1432,6 +1432,11 @@ function _entrarStaff(perfil){
       setTimeout(function(){ try{ if(!_appEstaActivo()) _appMobileOpen(); }catch(e){} }, 300);
     }
   }catch(e){}
+  // 🔔 Si no tiene las notificaciones andando, se lo pedimos. En cada entrada,
+  // hasta que las active (ver _nagNotisVendedor). Los 2,5 segundos son para que
+  // no pelee con la app abriendose: un cartel que aparece encima de la pantalla
+  // a medio dibujar se cierra de puro reflejo.
+  try{ setTimeout(function(){ try{ _nagNotisVendedor(); }catch(e){} }, 2500); }catch(e){}
 }
 function _loginError(msg){
   var le=document.getElementById("lErr");
@@ -13218,6 +13223,111 @@ function _probarNotiV(){
     if(res&&res.sent>0) toast("Push del servidor OK ✓ ("+res.sent+")","tok");
   });
 }
+// ══════════════════════════════════════════════════════════════════════
+// 🔔 EL RECORDATORIO INSISTENTE (2026-11-07)
+//
+// Decision de Ger: "mandale un aviso a David para que active si o si las
+// notificaciones, cada vez que entre, hasta que en algun momento lo active".
+//
+// Por que hizo falta: la campanita le llegaba bien —tenia 1.044
+// notificaciones— pero NO tenia ninguna suscripcion push, asi que el cartel
+// en el celular no le entraba nunca. De un pedido nuevo o de un reclamo se
+// enteraba cuando abria la app por su cuenta, y eso puede ser horas.
+//
+// A proposito NO tiene "no mostrar mas". Vuelve en cada entrada hasta que las
+// notificaciones esten activas de verdad, y entonces no aparece nunca mas sin
+// que nadie lo apague. El boton de "Ahora no" existe igual: si lo bloqueamos,
+// lo unico que se logra es que cierre la app.
+// ══════════════════════════════════════════════════════════════════════
+
+/**
+ * Esta persona ya tiene las notificaciones andando en ESTE dispositivo?
+ *
+ * No alcanza con que el permiso este dado: el permiso puede estar concedido de
+ * hace meses y la suscripcion haber caducado o haberse borrado, y ahi el push
+ * no llega aunque el navegador diga "granted". Por eso se mira tambien que
+ * exista la suscripcion de verdad.
+ */
+function _nagNotisYaEstan(){
+  try{
+    // En iPhone fuera de la app instalada no hay forma de activarlo: el aviso
+    // tiene que aparecer igual, pero explicando el paso de la pantalla de inicio.
+    if(_iOSV() && !_standaloneV()) return Promise.resolve(false);
+    // Si el celular de verdad no soporta notificaciones, insistir no sirve de
+    // nada y solo molesta.
+    if(!_pushSupportedV()) return Promise.resolve(true);
+    if(_pushEstadoV() !== 'granted') return Promise.resolve(false);
+    return navigator.serviceWorker.getRegistration().then(function(reg){
+      if(!reg || !reg.pushManager) return false;
+      return reg.pushManager.getSubscription().then(function(s){ return !!s; });
+    }).catch(function(){ return false; });
+  }catch(e){ return Promise.resolve(true); }
+}
+
+function _nagNotisCerrar(){
+  var o=document.getElementById('_nagNotis'); if(o)o.remove();
+}
+
+/** Despues de activar, se vuelve a mirar: si quedo andando, el cartel se va. */
+function _nagNotisActivar(){
+  try{ _activarNotisVendedor(); }catch(e){}
+  // El permiso del navegador y la suscripcion tardan un par de segundos, asi
+  // que se chequea dos veces antes de darlo por no hecho.
+  setTimeout(function(){ _nagNotisYaEstan().then(function(ok){ if(ok) _nagNotisCerrar(); }); }, 2500);
+  setTimeout(function(){ _nagNotisYaEstan().then(function(ok){ if(ok) _nagNotisCerrar(); }); }, 6000);
+}
+
+function _nagNotisVendedor(){
+  _nagNotisYaEstan().then(function(ok){
+    if(ok) return;                                   // ya estan: no molestar
+    if(document.getElementById('_nagNotis')) return;  // ya esta en pantalla
+
+    var iosSinInstalar = _iOSV() && !_standaloneV();
+    var o=document.createElement('div');
+    o.id='_nagNotis';
+    o.style.cssText='position:fixed;inset:0;z-index:99999;background:rgba(0,0,0,.72);'+
+      'display:flex;align-items:center;justify-content:center;padding:1.2rem';
+
+    var cuerpo = iosSinInstalar
+      ? "<div style='font-size:.86rem;color:var(--tx2,#b9aea3);line-height:1.5'>"+
+          "En iPhone las notificaciones solo funcionan con la app agregada a la pantalla de inicio:"+
+          "<div style='margin-top:.7rem;background:var(--sur,#1a1714);border:1px solid var(--bd,#332c25);border-radius:10px;padding:.7rem .85rem;font-size:.82rem;color:var(--tx,#f0e6dc)'>"+
+            "1. Toc\u00e1 Compartir \u2b06\ufe0f abajo<br>"+
+            "2. Eleg\u00ed <b>Agregar a pantalla de inicio</b><br>"+
+            "3. Abr\u00ed Belle desde ese \u00edcono<br>"+
+            "4. Volv\u00e9 a entrar y toc\u00e1 Activar"+
+          "</div></div>"
+      : "<div style='font-size:.86rem;color:var(--tx2,#b9aea3);line-height:1.5'>"+
+          "Sin esto <b style='color:var(--tx,#f0e6dc)'>no te enter\u00e1s de un pedido nuevo ni de un reclamo</b> "+
+          "hasta que abr\u00eds la app por tu cuenta. Con las notificaciones activadas te llega "+
+          "el aviso al celular en el momento, aunque tengas la app cerrada."+
+        "</div>";
+
+    var botonPrincipal = iosSinInstalar
+      ? ""
+      : "<button onclick='_nagNotisActivar()' style='width:100%;background:linear-gradient(135deg,#1e3a5f,#274c7a);"+
+        "border:none;border-radius:12px;padding:.95rem 1rem;color:#fff;cursor:pointer;font-size:.95rem;"+
+        "font-weight:800;margin-top:1.1rem'>\ud83d\udd14 Activar ahora</button>";
+
+    o.innerHTML =
+      "<div style='background:var(--sur2,#26221e);border:1px solid var(--bd,#332c25);border-radius:16px;"+
+        "padding:1.3rem 1.2rem;max-width:380px;width:100%;box-shadow:0 18px 50px rgba(0,0,0,.5)'>"+
+        "<div style='font-size:2.1rem;line-height:1;margin-bottom:.6rem'>\ud83d\udd14</div>"+
+        "<div style='font-weight:800;font-size:1.05rem;color:var(--tx,#f0e6dc);margin-bottom:.6rem'>"+
+          "Te falta activar las notificaciones</div>"+
+        cuerpo +
+        botonPrincipal +
+        "<button onclick='_nagNotisCerrar()' style='width:100%;background:transparent;border:none;"+
+          "color:var(--tx2,#b9aea3);cursor:pointer;font-size:.84rem;font-weight:600;"+
+          "text-decoration:underline;text-underline-offset:3px;padding:1rem 0 .9rem;margin-top:.3rem'>Ahora no</button>"+
+        "<div style='font-size:.7rem;color:var(--tx3,#8a7f74);text-align:center;line-height:1.4;"+
+          "border-top:1px solid var(--bd,#332c25);padding-top:.75rem'>"+
+          "Te lo vamos a volver a pedir cada vez que entres, hasta que est\u00e9n activas.</div>"+
+      "</div>";
+    document.body.appendChild(o);
+  });
+}
+
 // ══════════════════════════════════════════════════════════════════════
 // 🔔 AVISO PROPIO (2026-08-27): deja el registro en MI campanita, sin push
 // al celular (no tiene sentido vibrar por algo que acabo de hacer yo).
