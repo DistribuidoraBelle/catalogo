@@ -3277,7 +3277,7 @@ function catToggleNotifs(){
   _catRenderNotifList(document.getElementById("catNotifDropBody"), false, true);
   dd.style.display="block";
   // 🆕 2026-07: al abrir, marcar como leídas → se va el punto rojo (ya las vio).
-  // La lista queda VISIBLE mientras el dropdown está abierto; al reabrir (ya leídas) muestra el vacío con botón al panel.
+  // 2026-11-11: la lista ahora muestra TODAS (leídas y no leídas), así que al reabrir SIGUEN visibles (ya no se vacía).
   try{ _catNotifMarkAllRead(); }catch(e){}
   _catBellOpen=false;
 }
@@ -3534,16 +3534,20 @@ function _catRenderNotifList(box, inPanel, bellMode){
   var rich = inPanel || bellMode; // formato COMPLETO (con fotos de productos) igual en panel y campanita
   var lista=_catNotifs.slice();
   lista.sort(function(a,b){ return new Date(b.created_at||0) - new Date(a.created_at||0); });
-  if(!inPanel){ lista=lista.filter(function(n){ return !n.leida; }); }
+  // 2026-11-11: la campanita ahora muestra TODAS (leídas y no leídas), recientes primero,
+  // para que no "desaparezcan" al abrir (antes filtraba solo no leídas y al marcarlas leídas quedaba vacía).
+  // El filtro de solo-no-leídas queda disponible por si en el futuro se usa en otro contexto.
+  if(!inPanel && !bellMode){ lista=lista.filter(function(n){ return !n.leida; }); }
+  if(bellMode && lista.length>40){ lista=lista.slice(0,40); }
   if(!lista.length){
     if(inPanel){
       box.innerHTML="<div style='padding:1.6rem 1rem;text-align:center;color:#9a8870;font-size:.8rem'><div style='font-size:1.8rem;margin-bottom:.3rem'>&#128276;</div>No ten\u00e9s notificaciones todav\u00eda.</div>";
     } else {
-      // Campanita sin no le\u00eddas \u2192 mensaje + bot\u00f3n para ver las anteriores en el panel
+      // Campanita vac\u00eda \u2192 realmente no hay ninguna notificaci\u00f3n todav\u00eda
       box.innerHTML="<div style='padding:1.5rem 1.1rem;text-align:center;color:#9a8870'>"+
-        "<div style='font-size:1.8rem;margin-bottom:.35rem'>&#10003;</div>"+
-        "<div style='font-size:.82rem;font-weight:700;color:#5a4a30'>No ten\u00e9s notificaciones nuevas</div>"+
-        "<div style='font-size:.74rem;color:#9a8870;margin-top:.25rem;line-height:1.35'>Entr\u00e1 al panel para ver las anteriores.</div>"+
+        "<div style='font-size:1.8rem;margin-bottom:.35rem'>&#128276;</div>"+
+        "<div style='font-size:.82rem;font-weight:700;color:#5a4a30'>No ten\u00e9s notificaciones todav\u00eda</div>"+
+        "<div style='font-size:.74rem;color:#9a8870;margin-top:.25rem;line-height:1.35'>Cuando te enviemos avisos van a aparecer ac\u00e1.</div>"+
         "<button onclick='_catAbrirAvisos()' style='margin-top:.85rem;background:var(--accent,#c4965a);color:#fff;border:none;padding:.5rem 1rem;border-radius:9px;font-size:.76rem;font-weight:700;cursor:pointer;font-family:inherit'>&#128276; Ver panel de notificaciones</button>"+
       "</div>";
     }
