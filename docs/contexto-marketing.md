@@ -69,6 +69,21 @@
   Yara Rosa $61.900, Odyssey Mandarin Elixir $88.000, Fakhar Men Black $60.800, Oud Mood Elixir $40.200,
   Yara Tous $52.700. Precio de venta = `precio_min_ars`.
 
+### Etapa 2 — dirección que SÍ gustó (2026-11-14)
+- Ger quiere **todo gratis, hecho por código** (nada de IA paga: ni Higgsfield ni Gemini).
+- Le gustaron **los 3 estilos** de muestra (cuadros 1080×1920 con foto real del producto):
+  **A · Póster pop** (color plano del perfume, League Gothic gigante cortada en los bordes, precio en tarjeta blanca),
+  **B · Suizo/grilla** (fondo #F1EEE6 con grilla, Inter Tight 800, un punto rojo #E63022),
+  **C · Collage/sticker** (fondo lila, papel rasgado, frasco como sticker con borde blanco, Permanent Marker, sello "-15%").
+  *"Mucho mejor ahora, va mejorando rotundamente."*
+- **Recortes: NUNCA puede quedar nada del fondo blanco** (huecos de manijas, línea del piso, halos).
+  Usar `herramientas/recorte_limpio.py` (saca huecos encerrados, banda de piso, halo) y revisar SIEMPRE el
+  `--check` (magenta + negro) antes de usar un recorte.
+- **Segunda línea de contenido: videos INFORMATIVOS** del mundo del perfume (tipos de perfume, notas,
+  concentraciones, familias olfativas, etc.), con estética propia. Después se suman a la **Academia Belle**
+  (pestaña Academia de `index.html`, código en `js/catalogo-1.js` → `_acRender`, datos `_AC_CONC`).
+  Referencia que pasó Ger: un reel de Instagram (no se puede abrir desde el entorno: Instagram bloqueado).
+
 ## Usos de historia pedidos (para cuando se defina el estilo)
 Producto/Novedad · Oferta (precio tachado + %) · Combo (2 productos) · Llegó stock · Reseña de cliente.
 Más adelante: campañas por fecha (Black Friday/Cyber, Navidad, Día de la Madre), reels, prueba social.
