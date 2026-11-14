@@ -123,6 +123,21 @@
   reutilizando el mismo cerebro. Requiere: IG profesional vinculada a una Página de FB, la app de Meta con el
   producto Instagram y permisos `instagram_manage_messages` / `instagram_manage_comments` (+ App Review).
 
+### ✅ APROBADO: Academia 01 · Concentraciones (2026-11-14) — "me encantó"
+- Archivo: `marketing/videos/academia-01-concentraciones/` (index.html + frases.py/timing.js + MP3 de Dante + MP4).
+- **Fórmula que funcionó (repetir en los próximos de la Academia):**
+  1. **Gancho 0–15 s = tipografía cinética GIGANTE** a pantalla completa (Baloo 2 800, 300–620 px, auto-ajuste al
+     ancho), **un corte de color por frase** (mostaza #F4B63A / negro / blanco / coral #FF5A4E), efectos variados
+     (golpe con rebote, caída, letras que saltan, temblor, recuadro que se dibuja, letra hueca, tachado en vivo) y
+     **emojis chicos** (84 px) que rebotan. Al final del gancho la capa sube y aparece la maqueta normal.
+     (El primer gancho, con frasco "?" en tarjeta, NO enganchaba.)
+  2. Cuerpo: fondo mostaza con puntitos, barra de capítulos 1/4…4/4, titular Baloo con palabra en recuadro blanco,
+     tarjeta blanca con borde negro y sombra dura, **ilustraciones de producto reales (botellas SVG de vidrio con
+     la cantidad marcada adentro)** — nada de gráficos simples —, subtítulos karaoke con palabra clave resaltada.
+  3. Cierre: fondo negro, "Escribinos **BELLE**", marca de agua B. fija.
+- **Voz: Dante** (ElevenLabs, id DzZyY3xqjLUXGaT9wykC, eleven_v4), generada por bloques (~400–550 caracteres) —
+  el texto entero de una vez daba "busy". Tiempos de cada frase con `ffmpeg silencedetect` → `frases.py` → `timing.js`.
+
 ## Usos de historia pedidos (para cuando se defina el estilo)
 Producto/Novedad · Oferta (precio tachado + %) · Combo (2 productos) · Llegó stock · Reseña de cliente.
 Más adelante: campañas por fecha (Black Friday/Cyber, Navidad, Día de la Madre), reels, prueba social.
