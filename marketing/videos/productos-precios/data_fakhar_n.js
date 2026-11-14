@@ -1,0 +1,1 @@
+window.DATA={theme:'collage',brand:'LATTAFA',name1:'FAKHAR',name2:'PLATIN SILVER',hand:'el que todos preguntan',notes:['guayaba','incienso','ámbar'],x1:60000,x3:50000,x10:45000,promo:0};
