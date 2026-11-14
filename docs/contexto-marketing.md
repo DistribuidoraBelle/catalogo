@@ -95,6 +95,18 @@
     CTA "Escribinos NOCHE por mensaje directo".
   Ger quiere esa ESTRUCTURA con **otra estética** propia de Belle.
 
+### Marca en los videos
+- **Logo de Belle = "B."** (B serif + punto cuadrado redondeado). Archivos: `marketing/marca/logoB_{ink,white,yellow}.png`
+  (transparentes, sacados del favicon). Debajo, "DISTRIBUIDORA BELLE" chico, DM Sans con mucho letter-spacing.
+  **Usarlo con delicadeza**: chico, en el cierre; no gigante ni en todas las escenas.
+- Bordes de recortes: en el estilo póster pop **cero borde blanco/claro** — `recorte_limpio.py` ya suaviza el
+  contorno y "sangra" el color del interior al borde. La foto del Go Mango es chica (845 px): no agrandarla de más.
+
+### Voz
+- Ger grabó su voz y no le gustó → **voz con ElevenLabs** (conector MCP, plan free 10.000 caracteres/mes).
+  Primera prueba: voz "Julieta - Argentine Warm & Friendly" (id YLtqUTaEXb7a9MAYuJu4), modelo eleven_v4.
+  Los MP3 se bajan de `elevenlabsusercontent.com` (permitido en el entorno "catalogo").
+
 ## Usos de historia pedidos (para cuando se defina el estilo)
 Producto/Novedad · Oferta (precio tachado + %) · Combo (2 productos) · Llegó stock · Reseña de cliente.
 Más adelante: campañas por fecha (Black Friday/Cyber, Navidad, Día de la Madre), reels, prueba social.

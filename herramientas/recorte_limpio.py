@@ -26,6 +26,7 @@ ap.add_argument('--check')
 ap.add_argument('--tol', type=int, default=24, help='cuán blanco cuenta como fondo (0-255)')
 ap.add_argument('--erode', type=int, default=3)
 ap.add_argument('--open', dest='open_px', type=int, default=4, help='grosor de líneas finas a borrar')
+ap.add_argument('--sharpen', type=int, default=60, help='nitidez (0 = nada)')
 ap.add_argument('--upscale', type=float, default=1.0, help='agrandar (Lanczos) antes de recortar')
 a = ap.parse_args()
 
@@ -66,19 +67,34 @@ for y in range(h):
 fg = ~remove
 # borrar líneas finas (piso, reflejos) y basura chica
 if a.open_px > 0:
-    st = np.ones((a.open_px * 2 + 1, a.open_px * 2 + 1), bool)
-    yy, xx = np.ogrid[-a.open_px:a.open_px + 1, -a.open_px:a.open_px + 1]
-    st = (xx * xx + yy * yy) <= a.open_px * a.open_px
+    r = int(round(a.open_px * max(1.0, a.upscale)))
+    yy, xx = np.ogrid[-r:r + 1, -r:r + 1]
+    st = (xx * xx + yy * yy) <= r * r
     fg = ndi.binary_opening(fg, structure=st)
 lab2, n2 = ndi.label(fg)
 if n2:
     sizes = ndi.sum(fg, lab2, range(1, n2 + 1))
     keep = [i + 1 for i, s in enumerate(sizes) if s >= 0.02 * sizes.max()]
     fg = np.isin(lab2, keep)
-if a.erode > 0:
-    fg = ndi.binary_erosion(fg, iterations=a.erode)
+k = max(1.0, a.upscale)                      # todo en píxeles de la foto original
+# contorno suave (sin serrucho de JPEG): desenfocar la máscara y volver a cortar al 50%
+fgf = ndi.gaussian_filter(fg.astype(np.float32), 1.6 * k)
+fg = fgf > 0.5
+er = int(round(a.erode * k))
+if er > 0:
+    fg = ndi.binary_erosion(fg, iterations=er)
+# sangrado de color: el borde toma el color del interior (mata el halo claro del fondo)
+inner = ndi.binary_erosion(fg, iterations=int(round(3 * k)))
+if inner.any():
+    _, (iy, ix) = ndi.distance_transform_edt(~inner, return_indices=True)
+    rgb8 = np.asarray(im).copy()
+    band = fg & ~inner
+    rgb8[band] = rgb8[iy[band], ix[band]]
+    im = Image.fromarray(rgb8)
+if a.sharpen:
+    im = im.filter(ImageFilter.UnsharpMask(radius=1.2 * k, percent=a.sharpen, threshold=2))
 
-alpha = Image.fromarray((fg * 255).astype(np.uint8)).filter(ImageFilter.GaussianBlur(0.8))
+alpha = Image.fromarray((fg * 255).astype(np.uint8)).filter(ImageFilter.GaussianBlur(0.7 * k))
 out = im.copy(); out.putalpha(alpha)
 bbox = alpha.point(lambda v: 255 if v > 8 else 0).getbbox()
 out = out.crop(bbox)
