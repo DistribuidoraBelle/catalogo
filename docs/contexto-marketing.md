@@ -107,6 +107,22 @@
   Primera prueba: voz "Julieta - Argentine Warm & Friendly" (id YLtqUTaEXb7a9MAYuJu4), modelo eleven_v4.
   Los MP3 se bajan de `elevenlabsusercontent.com` (permitido en el entorno "catalogo").
 
+### Reglas fijas de los videos (Ger, 2026-11-14)
+- **Marca de agua**: logo "B." blanco + "DISTRIBUIDORA BELLE" chiquito, **abajo y centrado, en TODO el video**
+  (anti-robo), tamaño delicado (~52 px de alto en 1080×1920, top 1786).
+- **Palabra clave del CTA = "BELLE"** ("Escribinos BELLE por mensaje directo"), no otra.
+- Videos guardados en `marketing/videos/<nombre>/` (fuente HTML + render.js + MP4).
+- ElevenLabs gratis **bloqueó la cuenta** ("unusual activity… proxy or VPN") al generar desde el entorno cloud:
+  Ger genera los bloques desde su navegador y me pasa los MP3. Bloque 1 (Dante) ya está.
+
+### Bot de Instagram (pendiente, idea)
+- El bot de WhatsApp es la edge function `belle-whatsapp` (repo aparte "belle-whatsapp", deploy por GitHub
+  Actions; NO está en este repo). Está separado en canal (`whatsapp.ts`) y cerebro (`cerebro.ts`, `prompt.ts`,
+  `catalogo.ts`, `precios.ts`, `pedido.ts`…). Para Instagram se agrega un canal `instagram.ts` + rama del webhook
+  para `object: "instagram"` (DMs) y `comments` (responder comentarios y mandar el privado por "private reply"),
+  reutilizando el mismo cerebro. Requiere: IG profesional vinculada a una Página de FB, la app de Meta con el
+  producto Instagram y permisos `instagram_manage_messages` / `instagram_manage_comments` (+ App Review).
+
 ## Usos de historia pedidos (para cuando se defina el estilo)
 Producto/Novedad · Oferta (precio tachado + %) · Combo (2 productos) · Llegó stock · Reseña de cliente.
 Más adelante: campañas por fecha (Black Friday/Cyber, Navidad, Día de la Madre), reels, prueba social.

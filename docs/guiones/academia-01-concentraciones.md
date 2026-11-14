@@ -37,7 +37,7 @@ Datos = los mismos de la Academia (`_AC_CONC` en `js/catalogo-1.js`), para que w
 > Y un tip: el perfume dura más en la piel hidratada. Ponete crema antes.
 
 **[CIERRE · 55–60 s]**
-> ¿No sabés cuál es el tuyo? Escribinos **DURA** por mensaje directo y te asesoramos.
+> ¿No sabés cuál es el tuyo? Escribinos **BELLE** por mensaje directo y te asesoramos.
 > Distribuidora Belle.
 
 ---
