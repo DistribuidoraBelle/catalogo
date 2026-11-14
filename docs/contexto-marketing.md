@@ -82,7 +82,18 @@
 - **Segunda línea de contenido: videos INFORMATIVOS** del mundo del perfume (tipos de perfume, notas,
   concentraciones, familias olfativas, etc.), con estética propia. Después se suman a la **Academia Belle**
   (pestaña Academia de `index.html`, código en `js/catalogo-1.js` → `_acRender`, datos `_AC_CONC`).
-  Referencia que pasó Ger: un reel de Instagram (no se puede abrir desde el entorno: Instagram bloqueado).
+  Referencia que pasó Ger (reel subido como archivo; Instagram está bloqueado en el entorno): explainer de
+  86 s de otra tienda, "¿perfume de día o de noche?". Lo que lo hace bueno:
+  - **Gancho con intriga**: "Si usás este perfume a la mañana…" + frasco con "?" + "al final te digo".
+  - **Un solo mundo continuo** (sin cortes): cielo naranja/violeta en diagonal que pasa de día a noche, sol y
+    luna que se mueven, **reloj** arriba que avanza (06:44 → 21:00) = la metáfora es el hilo del video.
+  - **Capítulos** con barra de progreso ("Capítulo 1/4 · Las capas", El calor, La noche, El veredicto).
+  - Ciencia visual simple: moléculas como bolitas que se evaporan de la "piel", fórmulas (limoneno,
+    vainillina), termómetro, "10.000 veces más volátil", tarjetas de íconos (cítricos/verdes/acuáticos).
+  - **Voz en off + subtítulos tipo karaoke** abajo; titular grande arriba con la palabra clave en amarillo.
+  - **Cierre que vende**: revela 2 productos reales (9AM Dive de día / 9PM Black de noche) con sus notas y
+    CTA "Escribinos NOCHE por mensaje directo".
+  Ger quiere esa ESTRUCTURA con **otra estética** propia de Belle.
 
 ## Usos de historia pedidos (para cuando se defina el estilo)
 Producto/Novedad · Oferta (precio tachado + %) · Combo (2 productos) · Llegó stock · Reseña de cliente.
