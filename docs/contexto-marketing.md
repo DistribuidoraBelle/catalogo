@@ -150,6 +150,7 @@ Más adelante: campañas por fecha (Black Friday/Cyber, Navidad, Día de la Madr
 
 ## Música — REGLA DE GER: NUNCA repetir música entre videos (cada video lleva una pista nueva y distinta)
 - SIN percusión hecha con ruido blanco (hats/palmas/shaker suenan a "estática" en el celu): usar percusión tonal + lowpass 6 kHz a la pista. Mezcla final con limitador, NO loudnorm (hace "respirar" el fondo).
+- VOZ: NO usar loudnorm dinámico (la voz de ElevenLabs viene a ~-28 LUFS y al subirla 13 dB de golpe suena "saturada, como que satura el micrófono"). Cadena: highpass 70 + treble -2 dB a 7 kHz + acompressor suave (thr -24, ratio 2.5) + ganancia lineal a -17 LUFS + alimiter 0.8.
 - Toda nota con fundido de entrada/salida (si no, chasquidos: el especial 01 sonaba "roto" por eso). Verificar saltos de muestra antes de mezclar.
 - Ducking suave (ratio ~2, release ~900 ms), nada de bombeo. Nivel: música a ~-24 dB de media antes de mezclar (medir con volumedetect; cada pista tiene distinto volumen, no usar un % fijo).
 - Usadas: Academia 05 = house 120 BPM (beat.py) · Academia 06 = nu-disco (power.py v2) · Especial 01 = sunny funk-pop 112 BPM (musica_especial01.py).
