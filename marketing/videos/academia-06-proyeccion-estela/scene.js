@@ -62,19 +62,19 @@ function render(t){
       var temp=Math.round(L(20,35,cl((t-C.x3)/1.5)));out+='<g transform="translate(170,560)"><rect x="-26" y="-140" width="52" height="260" rx="26" fill="#fff" stroke="#1a1a1a" stroke-width="7"/><rect x="-14" y="'+(110-L(60,220,cl((t-C.x3)/1.5)))+'" width="28" height="'+L(60,220,cl((t-C.x3)/1.5))+'" rx="14" fill="#E5322B"/><circle cy="130" r="42" fill="#E5322B" stroke="#1a1a1a" stroke-width="7"/><text x="70" y="-90" font-family="Baloo 2" font-weight="800" font-size="64" fill="#fff" stroke="#1a1a1a" stroke-width="10" paint-order="stroke">'+temp+'°</text></g>';
       out+=bubble(540,1050,L(200,420,k),'#C77B30',.45,t)+'<text x="540" y="760" text-anchor="middle" font-size="60" opacity="'+k+'">🍯🪵🍦</text>';
       out+=ch('m',90,980,0.9,t,{dizzy:t>C.x3+1.2})+ch('h',540,980,0.9,t,{dizzy:t>C.x3+0.8});
-      out+=chip('🥵 EMPALAGA A TODOS',540,1500,(t-C.x3-1.0)/0.4,'#FFE9D6');}
+      out+=chip('🥵 EMPALAGA A TODOS',540,1500,(t-C.x4)/0.4,'#FFE9D6');}
   }
   // ── TIP: guardarropa de perfumes
   if(t>=C.t&&t<C.end){
     out+='<rect x="90" y="720" width="900" height="30" rx="10" fill="#8A5636" stroke="#1a1a1a" stroke-width="6"/>';
     var B=[['☀️','DÍA','#FFD23F'],['🌙','NOCHE','#4A2C6E'],['💼','OFICINA','#9FD8FF'],['✨','SALIDA','#FF4F8B']];
-    B.forEach(function(b,i){var ts=C.t2+i*0.9,k=cl((t-ts)/0.4),on=t>=ts;var x=200+i*226;
+    B.forEach(function(b,i){var ts=C.t2+i*1.6,k=cl((t-ts)/0.4),on=t>=ts;var x=200+i*226;
       out+='<g transform="translate('+x+',720)"><g transform="scale('+(on?1+0.08*Math.sin((t-ts)*6)*Math.max(0,1-(t-ts)):0.9)+')" opacity="'+(on?1:0.35)+'"><rect x="-56" y="-180" width="112" height="170" rx="26" fill="'+b[2]+'" stroke="#1a1a1a" stroke-width="7"/><rect x="-24" y="-222" width="48" height="46" rx="8" fill="#1a1a1a"/><rect x="-40" y="-150" width="16" height="110" rx="8" fill="#fff" opacity=".5"/><text y="-70" text-anchor="middle" font-size="58">'+b[0]+'</text></g>'+
         (on?'<g transform="translate(0,90) scale('+back(k)+')"><rect x="-96" y="-34" width="192" height="64" rx="32" fill="#fff" stroke="#1a1a1a" stroke-width="5"/><text y="12" text-anchor="middle" font-family="Baloo 2" font-weight="800" font-size="36" fill="#1a1a1a">'+b[1]+'</text></g>':'')+
         (on&&t<ts+1.2?'<circle r="'+(80+(t-ts)*120)+'" cy="-95" fill="none" stroke="#fff" stroke-width="6" opacity="'+(1-(t-ts)/1.2)+'"/>':'')+'</g>';});
     out+='<rect x="90" y="1080" width="900" height="30" rx="10" fill="#8A5636" stroke="#1a1a1a" stroke-width="6"/>';
     var S2=[['🌸','PRIMAVERA','#FFB6D9'],['☀️','VERANO','#7FE3FF'],['🍂','OTOÑO','#E0893A'],['❄️','INVIERNO','#E8F0FF']];
-    S2.forEach(function(b,i){var ts=C.t2b+i*0.7,k=cl((t-ts)/0.4),on=t>=ts;var x=200+i*226;
+    S2.forEach(function(b,i){var ts=C.t2c+i*1.2,k=cl((t-ts)/0.4),on=t>=ts;var x=200+i*226;
       out+='<g transform="translate('+x+',1080)"><g transform="scale('+(on?1:0.9)+')" opacity="'+(on?1:0.3)+'"><rect x="-50" y="-160" width="100" height="150" rx="50" fill="'+b[2]+'" stroke="#1a1a1a" stroke-width="7"/><rect x="-20" y="-196" width="40" height="40" rx="8" fill="#1a1a1a"/><text y="-62" text-anchor="middle" font-size="54">'+b[0]+'</text></g>'+(on?'<g transform="translate(0,84) scale('+back(k)+')"><rect x="-104" y="-32" width="208" height="60" rx="30" fill="#fff" stroke="#1a1a1a" stroke-width="5"/><text y="12" text-anchor="middle" font-family="Baloo 2" font-weight="800" font-size="32" fill="#1a1a1a">'+b[1]+'</text></g>':'')+'</g>';});
     out+=(t>=C.t3?ch('m',40,1240,0.8,t,{wink:t>=C.t3+0.6})+ch('h',590,1240,0.8,t,{q:t>=C.t3}):'');
     if(t>=C.t3)out+=chip('🤔 ¿QUÉ SE HABRÁ PUESTO HOY?',540,1690,(t-C.t3-0.2)/0.4,'#fff',38);
