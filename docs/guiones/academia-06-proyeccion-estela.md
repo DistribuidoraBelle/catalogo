@@ -52,3 +52,17 @@ Reel 9:16 · ~65 s · Voz: Dante · Personajes Pera (los mismos del video 5).
 6. "Tu perfume tiene dos superpoderes que casi nadie conoce. Y uno puede jugarte en contra."
 
 Productos de ejemplo posibles (con stock): proyección fuerte Club de Nuit Intense / Asad; suave CK One.
+
+---
+## TEXTO FINAL PARA LA VOZ (gancho elegido: 1)
+
+**Bloque 1**
+Hay perfumes que entran a la habitación antes que vos… y siguen ahí cuando ya te fuiste. Te explico por qué.
+Tu perfume arma una burbuja invisible a tu alrededor. Eso es la proyección: hasta dónde llega tu aroma mientras estás quieto. Puede ser íntima, pegada a la piel. Moderada, a un brazo de distancia. O fuerte, que llena toda la habitación.
+La estela es otra cosa: es el rastro que dejás cuando te movés… lo que queda en el aire cuando ya te fuiste. La proyección es tu burbuja. La estela, tu firma.
+
+**Bloque 2**
+¿Qué las hace más fuertes? La concentración: un Parfum llega más lejos que una Eau de Toilette. Las notas de fondo, como ámbar, oud y vainilla. Y el calor, que expande el perfume.
+Ojo con el error más común: un perfume muy potente en un lugar cerrado, como el ascensor o la oficina. No deja respirar. O perfumes de invierno en pleno verano: con el calor, empalagan a todos.
+Tip Belle: armá tu guardarropa de perfumes. Uno fresco para el día, uno intenso para la noche, uno suave para la oficina, y uno especial para dejar huella. Vas a estar listo para cualquier momento… y para los demás, vas a ser un misterio. ¿Qué se habrá puesto hoy?
+¿Querés armar tu guardarropa de perfumes? Escribinos "BELLE" por mensaje directo.
