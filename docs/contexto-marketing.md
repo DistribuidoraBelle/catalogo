@@ -150,7 +150,7 @@ Más adelante: campañas por fecha (Black Friday/Cyber, Navidad, Día de la Madr
 
 ## Música — REGLA DE GER: NUNCA repetir música entre videos (cada video lleva una pista nueva y distinta)
 - Toda nota con fundido de entrada/salida (si no, chasquidos: el especial 01 sonaba "roto" por eso). Verificar saltos de muestra antes de mezclar.
-- Ducking suave (ratio ~2.5, release ~900 ms), nada de bombeo.
+- Ducking suave (ratio ~2, release ~900 ms), nada de bombeo. Nivel: música a ~-24 dB de media antes de mezclar (medir con volumedetect; cada pista tiene distinto volumen, no usar un % fijo).
 - Usadas: Academia 05 = house 120 BPM (beat.py) · Academia 06 = nu-disco (power.py v2) · Especial 01 = sunny funk-pop 112 BPM (musica_especial01.py).
 
 ## Música aprobada (histórico)
