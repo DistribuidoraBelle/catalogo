@@ -31,20 +31,24 @@ Reel 9:16 · ~65 s · Voz: Dante · Personajes Pera (los mismos del video 5).
 *(termómetro que sube, sol; la burbuja se pone pesada/oscura; cara de empalagado 🥵🤢)*
 > Con el calor se expanden el doble… y empalagan a todos.
 
-**[BLOQUE 5 · LA SOLUCIÓN]**
-> Para lugares cerrados y para el calor: cítricos, frescos, de proyección suave.
-> Y los intensos, guardalos para la noche, el frío o el aire libre. Ahí sí: que dejen huella.
-*(cambia el frasco: ascensor feliz 😊; noche con estrellas y estela larguísima ✨)*
+**[BLOQUE 5 · TIP BELLE: UN PERFUME PARA CADA OCASIÓN]**
+> Tip Belle: armá tu guardarropa de perfumes.
+> Uno fresco para el día y el calor. Uno intenso para la noche y el frío. Uno suave para la oficina. Y uno especial para cuando querés dejar huella.
+*(estante con 4 frascos que se encienden uno por uno: ☀️ DÍA · 🌙 NOCHE · 💼 OFICINA · ✨ SALIDA)*
+> Así estás listo para cualquier momento, no te encasillás en un solo aroma…
+> y para los demás vas a ser un misterio: ¿qué se habrá puesto hoy?
+*(él la mira con un "?" que flota; ella guiña el ojo 😉)*
+> Conocer los momentos y tener opciones: así caés bien siempre.
 
 **[CIERRE · mostaza]**
 > ¿Querés un perfume con estela que no se olvide? Escribinos **BELLE** por mensaje directo.
 
-## OPCIONES DE GANCHO (v2)
-1. "Tu perfume puede enamorar… o espantar a todos en un ascensor. Depende de dos cosas."
-2. "Ese perfume que te encanta… puede estar molestando a todos a tu alrededor. Y no te das cuenta."
-3. "¿Por qué hay perfumes que se sienten desde la otra punta… y otros que solo los sentís si te abrazan?"
-4. "Hay gente que entra a un lugar y todos preguntan qué perfume usa. Esto es lo que hace."
-5. "Ponerte perfume de más no te hace oler mejor. Te hace oler peor. Te explico."
-6. "Vainilla y oud con 35 grados de calor… el error que empalaga a todos."
+## OPCIONES DE GANCHO (v3) — foco: proyección, estela y ambiente
+1. "Hay perfumes que entran a la habitación antes que vos… y siguen ahí cuando ya te fuiste."
+2. "Pasaste hace cinco minutos… y todavía saben que estuviste ahí. Eso tiene nombre."
+3. "Tu perfume no se queda en tu piel: viaja por el aire. Mirá hasta dónde llega."
+4. "¿Hasta dónde llega tu perfume? Spoiler: mucho más lejos de lo que pensás."
+5. "Lo que sienten de vos cuando te acercás… y lo que queda en el aire cuando te vas."
+6. "Tu perfume tiene dos superpoderes que casi nadie conoce. Y uno puede jugarte en contra."
 
 Productos de ejemplo posibles (con stock): proyección fuerte Club de Nuit Intense / Asad; suave CK One.
