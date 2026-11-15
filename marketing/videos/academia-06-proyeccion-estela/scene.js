@@ -65,7 +65,7 @@ function render(t){
       out+=chip('🥵 EMPALAGA A TODOS',540,1500,(t-C.x4)/0.4,'#FFE9D6');}
   }
   // ── TIP: guardarropa de perfumes
-  if(t>=C.t&&t<C.end){
+  if(t>=C.t&&t<C.end){var shOp=t>=C.t3?L(1,0.28,cl((t-C.t3)/0.5)):1;out+='<g opacity="'+shOp+'">';
     out+='<rect x="90" y="720" width="900" height="30" rx="10" fill="#8A5636" stroke="#1a1a1a" stroke-width="6"/>';
     var B=[['☀️','DÍA','#FFD23F'],['🌙','NOCHE','#4A2C6E'],['💼','OFICINA','#9FD8FF'],['✨','SALIDA','#FF4F8B']];
     B.forEach(function(b,i){var ts=C.t2+i*1.6,k=cl((t-ts)/0.4),on=t>=ts;var x=200+i*226;
@@ -76,8 +76,9 @@ function render(t){
     var S2=[['🌸','PRIMAVERA','#FFB6D9'],['☀️','VERANO','#7FE3FF'],['🍂','OTOÑO','#E0893A'],['❄️','INVIERNO','#E8F0FF']];
     S2.forEach(function(b,i){var ts=C.t2c+i*1.2,k=cl((t-ts)/0.4),on=t>=ts;var x=200+i*226;
       out+='<g transform="translate('+x+',1080)"><g transform="scale('+(on?1:0.9)+')" opacity="'+(on?1:0.3)+'"><rect x="-50" y="-160" width="100" height="150" rx="50" fill="'+b[2]+'" stroke="#1a1a1a" stroke-width="7"/><rect x="-20" y="-196" width="40" height="40" rx="8" fill="#1a1a1a"/><text y="-62" text-anchor="middle" font-size="54">'+b[0]+'</text></g>'+(on?'<g transform="translate(0,84) scale('+back(k)+')"><rect x="-104" y="-32" width="208" height="60" rx="30" fill="#fff" stroke="#1a1a1a" stroke-width="5"/><text y="12" text-anchor="middle" font-family="Baloo 2" font-weight="800" font-size="32" fill="#1a1a1a">'+b[1]+'</text></g>':'')+'</g>';});
-    out+=(t>=C.t3?ch('m',40,1240,0.8,t,{wink:t>=C.t3+0.6})+ch('h',590,1240,0.8,t,{q:t>=C.t3}):'');
-    if(t>=C.t3)out+=chip('🤔 ¿QUÉ SE HABRÁ PUESTO HOY?',540,1690,(t-C.t3-0.2)/0.4,'#fff',38);
+    out+='</g>';var cy3=L(1240,940,ent(C.t3));
+    out+=(t>=C.t3?ch('m',40,cy3,0.8,t,{wink:t>=C.t3+0.6})+ch('h',590,cy3,0.8,t,{q:t>=C.t3}):'');
+    if(t>=C.t3)out+=chip('🤔 ¿QUÉ SE HABRÁ PUESTO HOY?',540,1420,(t-C.t3-0.2)/0.4,'#fff',38);
   }
   document.getElementById('sv').innerHTML='<defs><clipPath id="elev"><rect x="290" y="560" width="500" height="840"/></clipPath></defs>'+out;
   renderSubs2(t);
