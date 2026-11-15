@@ -1,11 +1,14 @@
 var C=window.CUES;
 var MO={skin:'#F4C3A0',hair:'#5A3422',hairLt:'#8A5636',iris:'#6B4A2E',c1:'#FF8FBF',c2:'#fff'};
-var HO={skin:'#D9A07A',hair:'#211A16',hairLt:'#4A3D35',iris:'#3B2A1F',c1:'#FF8A3D',c2:'#3B6EA8'};
+var HO={skin:'#D9A07A',hair:'#211A16',hairLt:'#4A3D35',iris:'#3B2A1F',c1:'#BFD8EE',c2:'#C7B28A'};
 var GV=VEST[3][1];
-var GT=function(o){var J=o.c2;return {sl:o.c1,in:'<rect x="0" y="0" width="500" height="800" fill="'+o.c1+'"/><path d="M200 470 L 196 540 M300 470 L 304 540" stroke="#fff" stroke-width="7" stroke-linecap="round"/><circle cx="196" cy="546" r="8" fill="#fff"/><circle cx="304" cy="546" r="8" fill="#fff"/><path d="M175 520 L 325 520 L 330 556 L 170 556 Z" fill="rgba(0,0,0,.12)"/>'+
-  '<rect x="0" y="575" width="500" height="240" fill="'+J+'"/><path d="M0 575 L 500 575" stroke="#1a1a1a" stroke-width="6"/><rect x="0" y="560" width="500" height="18" fill="'+o.c1+'"/><path d="M0 560 L 500 560" stroke="#1a1a1a" stroke-width="5"/>'+
-  '<path d="M250 578 L 250 800" stroke="#2A5288" stroke-width="5"/><path d="M110 596 C 130 626 170 626 190 596 M310 596 C 330 626 370 626 390 596" stroke="#F4C542" stroke-width="4" fill="none" stroke-dasharray="8 6"/><circle cx="250" cy="598" r="7" fill="#F4C542" stroke="#1a1a1a" stroke-width="3"/>',
-  ov:'<path d="M0 452 C 160 500 340 500 500 452 L 500 478 C 340 528 160 528 0 478 Z" fill="'+o.c1+'" stroke="#1a1a1a" stroke-width="5"/>'};};
+var GT=function(o){var P=o.c2;return {sl:o.c1,in:'<rect x="0" y="0" width="500" height="800" fill="'+o.c1+'"/>'+
+  '<path d="M250 496 L 250 560" stroke="rgba(0,0,0,.22)" stroke-width="4"/><circle cx="262" cy="520" r="6" fill="#fff" stroke="#7d9cbb" stroke-width="2"/><circle cx="262" cy="546" r="6" fill="#fff" stroke="#7d9cbb" stroke-width="2"/>'+
+  '<path d="M150 512 L 200 512 L 200 545 Q 175 552 150 545 Z" fill="none" stroke="rgba(0,0,0,.18)" stroke-width="4"/>'+
+  '<rect x="0" y="575" width="500" height="240" fill="'+P+'"/><path d="M0 575 L 500 575" stroke="#1a1a1a" stroke-width="5"/>'+
+  '<rect x="0" y="556" width="500" height="22" fill="#5A3A22"/><path d="M0 556 L 500 556 M0 578 L 500 578" stroke="#1a1a1a" stroke-width="5"/><rect x="232" y="552" width="36" height="30" rx="5" fill="none" stroke="#D8B45A" stroke-width="5"/>'+
+  '<path d="M250 582 L 250 800" stroke="rgba(0,0,0,.2)" stroke-width="4"/><path d="M120 590 C 140 620 170 630 190 640 M380 590 C 360 620 330 630 310 640" stroke="rgba(0,0,0,.2)" stroke-width="4" fill="none"/>',
+  ov:'<path d="M176 474 Q 214 492 250 496 L 214 552 Z M324 474 Q 286 492 250 496 L 286 552 Z" fill="'+o.c1+'" stroke="#1a1a1a" stroke-width="5" stroke-linejoin="round"/><path d="M0 452 C 160 500 340 500 500 452" fill="none" stroke="#1a1a1a" stroke-width="5"/>'};};
 function L(a,b,k){return a+(b-a)*k}
 function cl(x){return x<0?0:x>1?1:x}
 // ── personaje Pera parametrizable ──
