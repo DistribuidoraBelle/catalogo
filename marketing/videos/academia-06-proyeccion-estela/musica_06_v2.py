@@ -96,38 +96,41 @@ def chop(fs,dur=0.12):  # guitarra funk cortita
 
 
 
-# ACADEMIA 06 · "Sol de tarde": Sol mayor, 104 BPM, guitarra pulsada + piano suave + bajo redondo + percusión tonal (sin ruido)
-BPM=104; B=60/BPM
-def tick(p=1.0):
-    n=int(0.06*SR); t=np.arange(n)/SR; x=sum(np.sin(2*np.pi*f*p*t) for f in (2900,4100,5200))/3
-    return x*np.exp(-t/0.012)*0.05
-def rim2():
-    n=int(0.1*SR); t=np.arange(n)/SR; x=np.sin(2*np.pi*820*t)+0.5*np.sin(2*np.pi*1460*t)
-    return x*np.exp(-t/0.02)*0.18
-def keys(f,dur):
-    n=int(dur*SR); t=np.arange(n)/SR; x=np.sin(2*np.pi*f*t)+0.3*np.sin(4*np.pi*f*t)*np.exp(-t*2)+0.1*np.sin(6*np.pi*f*t)*np.exp(-t*5)
-    return x*np.minimum(1,t/0.004)*np.exp(-t/0.9)*np.minimum(1,(dur-t)/0.1).clip(0)*0.14
-def pluckg(f,dur=0.5):
-    n=int(dur*SR); t=np.arange(n)/SR; x=np.sin(2*np.pi*f*t)+0.5*np.sin(4*np.pi*f*t)*np.exp(-t*8)+0.25*np.sin(6*np.pi*f*t)*np.exp(-t*14)
-    return lp(x,3500)*np.exp(-t/0.25)*0.2
-def bassr(f,dur):
-    n=int(dur*SR); t=np.arange(n)/SR; x=np.sin(2*np.pi*f*t)+0.12*np.sin(4*np.pi*f*t)
-    return lp(x,450)*np.minimum(1,t/0.01)*np.exp(-t/0.5)*np.minimum(1,(dur-t)/0.04).clip(0)*0.5
-prog=[(55,[0,4,7,14]),(52,[0,3,7,10]),(48,[0,4,7,11]),(50,[0,4,7,9])]   # Gadd9 - Em7 - Cmaj7 - D6
+# ACADEMIA 06 v3 · "Ingenio": Fa mayor, 116 BPM, pizzicato saltarín + fagot staccato + xilofón con melodía pícara + taco de madera tonal (sin ruido)
+BPM=116; B=60/BPM
+def wood(p=1.0):
+    n=int(0.07*SR); t=np.arange(n)/SR; x=np.sin(2*np.pi*1050*p*t)+0.4*np.sin(2*np.pi*2310*p*t)
+    return x*np.exp(-t/0.018)*0.16
+def pizz(f,dur=0.3):
+    n=int(dur*SR); t=np.arange(n)/SR; x=np.sin(2*np.pi*f*t)+0.35*np.sin(4*np.pi*f*t)+0.12*np.sin(6*np.pi*f*t)
+    return lp(x,2200)*np.minimum(1,t/0.003)*np.exp(-t/0.09)*0.3
+def fagot(f,dur):
+    n=int(dur*SR); t=np.arange(n)/SR; ph=2*np.pi*f*t; x=np.sin(ph)+0.5*np.sin(2*ph)+0.3*np.sin(3*ph)+0.15*np.sin(4*ph)
+    return lp(x,900)*np.minimum(1,t/0.015)*np.minimum(1,(dur-t)/0.03).clip(0)*0.22
+def xilo(f,dur=0.35):
+    n=int(dur*SR); t=np.arange(n)/SR; x=np.sin(2*np.pi*f*t)+0.3*np.sin(2*np.pi*3.9*f*t)*np.exp(-t*40)
+    return x*np.exp(-t/0.12)*0.2
+prog=[(53,[0,4,7]),(50,[0,3,7]),(46,[0,4,7]),(48,[0,4,7,10])]   # F - Dm - Bb - C7
+# melodía pícara (semitonos sobre Fa4=65), patrón de 2 compases que se repite
+MEL=[(0,72,.5),(.5,69,.25),(1,72,.25),(1.5,74,.5),(2.5,72,.25),(3,69,.5),(4,70,.5),(4.5,72,.25),(5,74,.25),(5.5,76,.5),(6.5,77,.25),(7,72,.75)]
 bars=int(DUR/(4*B))+1
 for bar in range(bars):
     t0=bar*4*B; root,q=prog[bar%4]; fs=[m(root+12+i) for i in q]; intro=bar==0
-    for off in (0,2): add(sum(keys(f,1.9*B) for f in fs),t0+off*B,pan=-0.1,g=1.0)
-    for s16,ix in ((0,0),(0.75,2),(1.5,1),(2,3),(2.75,2),(3.5,1)): add(pluckg(fs[ix%len(fs)]*2,0.5),t0+s16*B,pan=0.3,g=0.8)
+    # pizzicato saltarín: acorde en los contratiempos
+    for off in (0.5,1.5,2.5,3.5): 
+        for f in fs[:3]: add(pizz(f*2,0.25),t0+off*B,pan=0.25,g=0.7)
+    # fagot staccato: bajo "caminando" tipo comedia
+    for off,o in ((0,0),(1,7),(2,12),(3,7)): add(fagot(m(root-12+o),0.32*B),t0+off*B,pan=-0.15,g=1.0)
     if intro: continue
     for b in range(4):
-        t=t0+b*B
-        add(kick(0.2,52),t,g=0.8 if b in (0,2) else 0.45)
-        if b%2==1: add(rim2(),t,pan=0.1)
-        add(tick(),t+0.5*B,pan=-0.25,g=0.8)
-    for off,o,d in ((0,0,1.4),(1.5,7,0.4),(2,0,1.4),(3.5,12,0.4)): add(bassr(m(root-12+o),d*B),t0+off*B,g=0.9)
+        add(kick(0.15,58),t0+b*B,g=0.55 if b%2==0 else 0.0)
+        add(wood(1.0 if b%2 else 0.8),t0+b*B+(0.5 if b%2==0 else 0)*B,pan=0.2)
+    if bar%2==1 or bar>=1:
+        base=(bar%2)*4
+        for (s_,n_,d_) in MEL:
+            if base<=s_<base+4: add(xilo(m(n_),max(0.2,d_*B*0.9)),t0+(s_-base)*B,pan=0.1,g=0.85)
 mix=np.stack([L,R],1)
-mix=np.stack([lp(mix[:,0],6000),lp(mix[:,1],6000)],1)
+mix=np.stack([lp(mix[:,0],6500),lp(mix[:,1],6500)],1)
 mix=np.stack([hp(mix[:,0],45),hp(mix[:,1],45)],1)
 fo=int(2*SR); mix[-fo:]*=np.linspace(1,0,fo)[:,None]; fi=int(0.3*SR); mix[:fi]*=np.linspace(0,1,fi)[:,None]
 mix=mix/np.max(np.abs(mix))*0.9
