@@ -101,3 +101,97 @@ No es casualidad: cada perfume pertenece a una FAMILIA 👨‍👩‍👧 Y si s
 - **Música:** agregá un audio en tendencia desde Instagram, **bien bajito** (10–15%) para que se escuche la voz.
 - **Primer comentario fijado:** "Escribí BELLE y te asesoramos 💛" — ayuda a que comenten.
 - Los de la Academia: subilos también a una **historia destacada "Academia"** para que queden a mano.
+
+---
+
+## 5) Academia Belle 05 — Dónde ponerte el perfume (y dónde NUNCA)
+Portada: `portadas-academia/portada_05_donde_aplicar_9x16.png`
+
+```
+📍 ¿Te ponés el perfume abajo del mentón? ERROR 🙅‍♀️ Y por eso a la hora ya no lo sentís.
+
+Estos son los lugares donde SÍ va 👇
+
+1️⃣ MUÑECAS → cada vez que movés las manos, el aroma se esparce
+2️⃣ COSTADOS DEL CUELLO → la piel calentita hace que tu perfume proyecte
+3️⃣ NUCA → cuando caminás, deja tu estela ✨
+
+💪 Truco pro: la parte de arriba de los brazos. No hay roce, dura más y lo esparcís con cada movimiento.
+
+🚫 NUNCA en el centro del cuello ni en el pecho: el olor sube directo a tu nariz y aparece la fatiga olfativa 🧠 → tu cerebro lo "apaga" y dejás de sentir tu propio perfume (o terminás empalagado 🥴).
+
+🎓 Guardalo para la próxima vez que te perfumes.
+
+📩 ¿Querés un perfume que proyecte de verdad? Escribinos BELLE por DM.
+
+#perfumes #dondeaplicarperfume #comoaplicarperfume #academiabelle #perfumetips #tipsdeperfume #fatigaolfativa #proyeccion #estela #perfumesarabes #perfumeriaargentina #perfumesoriginales #fragancias #perfumelover #perfumetok #aprendeconbelle #distribuidorabelle
+```
+
+---
+
+## 6) Academia Belle 06 — Proyección y estela
+Portada: `portadas-academia/portada_06_proyeccion_estela_9x16.png`
+
+```
+💨 Hay perfumes que entran a la habitación antes que vos… y siguen ahí cuando ya te fuiste 😮‍💨✨
+
+Eso tiene nombre 👇
+
+🫧 PROYECCIÓN → tu burbuja: hasta dónde llega tu aroma cuando estás quieto
+   • Íntima: pegada a la piel
+   • Moderada: a un brazo de distancia
+   • Fuerte: llena toda la habitación
+
+✨ ESTELA → tu firma: el rastro que dejás cuando te movés
+
+💪 ¿Qué las hace más fuertes? La concentración (un Parfum llega más lejos que una EDT), las notas de fondo (ámbar, oud, vainilla) y el calor 🔥
+
+⚠️ Ojo con el error más común: un perfume potente en el ascensor o la oficina 😵 O perfumes de invierno en pleno verano: empalagan a todos 🥵
+
+💡 Tip Belle: armá tu guardarropa de perfumes 👇
+☀️ Uno fresco para el día · 🌙 uno intenso para la noche · 💼 uno suave para la oficina · ✨ uno especial para dejar huella
+🌸☀️🍂❄️ Y uno por temporada.
+Vas a ser un misterio: ¿qué se habrá puesto hoy? 😉
+
+👇 Contanos: ¿tu perfume es de burbuja íntima o de estela que no se olvida?
+
+📩 ¿Querés armar tu guardarropa de perfumes? Escribinos BELLE por DM.
+
+#perfumes #proyeccion #estela #sillage #academiabelle #perfumetips #tipsdeperfume #guardarropadeperfumes #perfumesarabes #perfumeriaargentina #perfumesoriginales #fragancias #perfumelover #perfumetok #aprendeconbelle #distribuidorabelle
+```
+
+---
+
+## 7) Especial Belle 01 — Lo que hacés vs. lo que funciona (4 errores)
+Portada: `portadas-academia/portada_especial01_errores_9x16.png`
+
+```
+😱 Gastás un montón en tu perfume… y a la hora ya no huele a nada.
+No es el perfume: sos vos 👀
+
+4 errores que están matando tu perfume ❌ ➜ ✅
+
+👐 1. FROTAR LAS MUÑECAS
+❌ El roce calienta la piel y rompe las notas de salida
+✅ Rociá y dejá que se seque solo
+
+🧴 2. PIEL SECA
+❌ La piel seca absorbe el perfume y se evapora
+✅ Una crema SIN aroma antes: el perfume se "pega" y dura horas 🧲
+
+☁️ 3. LA NUBE EN EL AIRE
+❌ Rociar al aire y caminar por la nube: la mitad termina en el piso 💸
+✅ Directo a la piel, a un palmo de distancia ✋
+
+🚿 4. GUARDARLO EN EL BAÑO
+❌ El calor, el vapor y la luz lo arruinan
+✅ Guardalo en un lugar fresco y oscuro: cajón o placard 🗄️
+
+✨ No necesitás otro perfume… necesitás usarlo bien.
+
+👇 Confesá en los comentarios: ¿cuál de los 4 hacías? 🙈
+
+📩 ¿Querés uno que dure de verdad? Escribinos BELLE por DM.
+
+#perfumes #perfumetips #tipsdeperfume #erroresconperfume #comohacerduraelperfume #perfumeduradero #especialbelle #academiabelle #perfumesarabes #perfumeriaargentina #perfumesoriginales #fragancias #perfumelover #perfumetok #aprendeconbelle #distribuidorabelle
+```
