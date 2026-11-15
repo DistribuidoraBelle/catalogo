@@ -141,3 +141,13 @@
 ## Usos de historia pedidos (para cuando se defina el estilo)
 Producto/Novedad · Oferta (precio tachado + %) · Combo (2 productos) · Llegó stock · Reseña de cliente.
 Más adelante: campañas por fecha (Black Friday/Cyber, Navidad, Día de la Madre), reels, prueba social.
+
+
+## Voces ElevenLabs (plan Starter desde 2026-11-15, uso comercial incluido)
+- **Dante** (masculina) — voice_id `DzZyY3xqjLUXGaT9wykC`. Voz de la Academia 01–06 y del Especial 01.
+- **Belle Femenina (AR)** (diseñada, rioplatense con voseo) — voice_id `7hwWxK75z20rN4syVI8W`. Elegida por Ger (opción B) para los próximos videos.
+- Modelo `eleven_v4`, flow `W8ZOFVuCySGeyTjKmjMC`, 1 toma por bloque.
+
+## Música aprobada
+- Videos con ritmo: **nu-disco** (`marketing/videos/academia-06-proyeccion-estela/musica_power.py`, variante 2), siempre bajita (volume 0.13 + sidechain para que la voz sea protagonista).
+- Suaves para otros videos: `marketing/musica/favoritas-suaves/` (le encantaron, guardadas para más adelante).

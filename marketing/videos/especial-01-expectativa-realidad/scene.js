@@ -70,14 +70,18 @@ function render(t){
   if(t>=C.s&&t<C.n){out+=cards(t,C.s,C.s2);
     out+='<g clip-path="url(#cpL)">'+ch('h',xL,CHY,SC,t,{hL:[150,430],sad:t>C.s+2.2});
     var w=sp(xL,CHY,SC,150,430);
-    for(var j=0;j<5;j++){var cx=w[0]-30+j*14,cy=w[1]+20+(j%2)*12;out+='<path d="M'+cx+' '+cy+' l 8 10 l -6 8 l 9 10" stroke="#8A5636" stroke-width="4" fill="none" opacity=".8"/>';}
-    out+='<text x="'+(w[0]-40)+'" y="'+(w[1]+110)+'" font-size="56">🏜️</text>';
-    for(var i=0;i<10;i++){var b=C.s+0.4+i*0.35;var k=(t-b)/1.3;if(k<0||k>1)continue;var hit=0.45;var px,py;
-      if(k<hit){var q=k/hit;px=w[0]+(hsh(i)-0.5)*40;py=L(w[1]-420,w[1]-20,q*q);}
-      else{var q=(k-hit)/(1-hit);var dir=hsh(i+4)>0.5?1:-1;px=w[0]+(hsh(i)-0.5)*40+dir*q*260;py=w[1]-20-Math.sin(q*Math.PI)*180-q*200;}
-      out+=orb(px,py,18,k<hit?1:1-(k-hit)/(1-hit));}
+    // piel seca: las esferas caen, la piel las "chupa" y se evaporan en hilitos de vapor
+    var dry=cl((t-C.s-0.3)/0.6);
+    out+='<g opacity="'+(0.85*dry)+'">';[[-26,-6,1],[4,-14,-1],[22,4,1]].forEach(function(q){var x=w[0]+q[0],y=w[1]+q[1];out+='<path d="M'+(x-10)+' '+y+' l 7 -5 l 6 6 l 7 -4" stroke="#A0522D" stroke-width="3.5" fill="none" stroke-linecap="round" stroke-linejoin="round"/>';});out+='</g>';
+    for(var i=0;i<10;i++){var b0=C.s+0.5+i*0.42;var k=(t-b0)/1.6;if(k<0||k>1)continue;var px=w[0]+(hsh(i)-0.5)*50;var land=0.35,abs_=0.5;
+      if(k<land){var q=k/land;out+=orb(px,L(w[1]-420,w[1]-24,q*q),18,1);}
+      else if(k<abs_){var q=(k-land)/(abs_-land);out+=orb(px,w[1]-24+q*10,18*(1-q),1)+'<ellipse cx="'+px+'" cy="'+(w[1]-14)+'" rx="'+(10+q*30)+'" ry="'+(4+q*8)+'" fill="none" stroke="#F0A21A" stroke-width="4" opacity="'+(1-q)+'"/>';}
+      else{var q=(k-abs_)/(1-abs_);for(var j=0;j<2;j++){var sx=px+(j?14:-10),sy=w[1]-30-q*240;out+='<path d="M'+sx+' '+(sy+60)+' C '+(sx+18*Math.sin(q*9+j))+' '+(sy+40)+' '+(sx-18*Math.sin(q*9+j))+' '+(sy+20)+' '+sx+' '+sy+'" stroke="#AEB9C4" stroke-width="'+(10-q*5)+'" fill="none" stroke-linecap="round" opacity="'+(0.8*(1-q))+'"/>';}}}
+    // medidor de hidratación que baja
+    if(t>=C.s+0.6){var mk=cl((t-C.s-0.6)/0.4),lev=L(0.55,0.12,cl((t-C.s-1)/3));var mx=CL.x+CL.w-70,my=790;
+      out+='<g transform="translate('+mx+','+my+') scale('+back(mk)+')"><rect x="-22" y="-130" width="44" height="260" rx="22" fill="#fff" stroke="#1a1a1a" stroke-width="6"/><rect x="-12" y="'+(120-240*lev)+'" width="24" height="'+(240*lev)+'" rx="12" fill="'+(lev<0.25?'#E5322B':'#3DB8F5')+'"/><text y="-150" text-anchor="middle" font-size="46">💧</text>'+(lev<0.25?'<text x="0" y="175" text-anchor="middle" font-family="Baloo 2" font-weight="800" font-size="28" fill="#E5322B" opacity="'+(0.6+0.4*Math.sin(t*8))+'">¡SECA!</text>':'')+'</g>';}
     out+='</g>';
-    out+=chip('🏜️ PIEL SECA',CL.x+CL.w/2,450,(t-C.s-0.8)/0.35,'#fff',30);
+    out+=chip('💨 SE EVAPORA',CL.x+CL.w/2,450,(t-C.s-0.8)/0.35,'#fff',30);
     if(t>=C.s2){var k=t-C.s2;var rubbing=k<2.2;var o=Math.sin(t*12)*30;
       out+='<g clip-path="url(#cpR)">'+ch('m',xR,CHY,SC,t,{hL:[150,450],hR:rubbing?[200+o,440]:REST.hR,ang:rubbing?-30:6,prop:rubbing?cream():null,wink:t>=C.s3+1.5});
       var w2=sp(xR,CHY,SC,150,450);
