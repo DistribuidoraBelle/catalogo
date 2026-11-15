@@ -61,6 +61,10 @@ var NOTAS={
   '<rect x="54" y="56" width="12" height="54" rx="4" fill="#8A5A3B" '+SW+'/><circle cx="60" cy="54" r="5" fill="#FF6A2E" '+SW+'/><path d="M60 46 C 48 36 72 26 58 14 M60 46 C 72 38 52 28 66 18" fill="none" stroke="#9AA3AD" stroke-width="5" stroke-linecap="round"/>'},
  cuero:{n:'CUERO',g:'cuero',c:'#7A4A2A',svg:
   '<path d="M22 30 C 40 20 80 20 98 30 C 104 52 104 72 98 92 C 80 102 40 102 22 92 C 16 72 16 52 22 30 Z" fill="#8A5230" '+SW+'/><path d="M30 38 C 46 30 74 30 90 38 C 94 54 94 70 90 84 C 74 92 46 92 30 84 C 26 70 26 54 30 38 Z" fill="none" stroke="#C98A55" stroke-width="3" stroke-dasharray="7 6"/>'+hl('M34 44 C 44 38 56 36 66 36')},
+ labdano:{n:'LABDANO',g:'resina',c:'#FFF4F0',svg:
+  [0,72,144,216,288].map(function(a){return '<path d="M60 60 C 40 50 34 24 52 16 C 60 12 68 12 72 18 C 84 30 76 52 60 60 Z" transform="rotate('+a+' 60 60)" fill="#FFF8F4" '+SW+'/><ellipse cx="60" cy="40" rx="5" ry="7" transform="rotate('+a+' 60 60)" fill="#B3263A"/>';}).join('')+'<circle cx="60" cy="60" r="11" fill="#FFD23F" '+SW+'/>'+[0,1,2,3,4,5].map(function(i){var a=i*1.05;return '<circle cx="'+(60+Math.cos(a)*6)+'" cy="'+(60+Math.sin(a)*6)+'" r="2" fill="#C98A12"/>';}).join('')},
+ benjui:{n:'BENJUÍ',g:'resina',c:'#D98A3A',svg:
+  [[42,70,20,-20],[74,58,24,15],[62,90,15,5],[86,88,12,30]].map(function(p){return '<g transform="rotate('+p[3]+' '+p[0]+' '+p[1]+')"><path d="M'+p[0]+' '+(p[1]-p[2])+' C '+(p[0]+p[2])+' '+(p[1]-p[2]*0.6)+' '+(p[0]+p[2])+' '+(p[1]+p[2]*0.8)+' '+p[0]+' '+(p[1]+p[2])+' C '+(p[0]-p[2])+' '+(p[1]+p[2]*0.8)+' '+(p[0]-p[2])+' '+(p[1]-p[2]*0.6)+' '+p[0]+' '+(p[1]-p[2])+' Z" fill="#D98A3A" '+SW+'/><ellipse cx="'+(p[0]-p[2]*0.3)+'" cy="'+(p[1]-p[2]*0.35)+'" rx="'+(p[2]*0.25)+'" ry="'+(p[2]*0.18)+'" fill="#FFE2B0"/></g>';}).join('')},
 };
 function nota(id,x,y,s,rot,extra){var N=NOTAS[id];return '<g transform="translate('+x+','+y+') rotate('+(rot||0)+') scale('+(s||1)+') translate(-60,-60)" '+(extra||'')+'>'+N.svg+'</g>';}
 if(typeof module!=='undefined')module.exports={NOTAS:NOTAS,nota:nota};
