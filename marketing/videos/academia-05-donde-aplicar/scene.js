@@ -11,7 +11,7 @@ function pera2(G,o,gen,st){var M=G==='m',s='';var R=gen(o);var sl=R.sl;var b=st.
   s+='<g transform="translate(0,'+b+')">';
   if(M&&!st.back)s+=p('M148 220 C 108 300 118 384 150 424 L 350 424 C 382 384 392 300 352 220 Z',o.hair);
   s+=p(BODY,o.skin)+shadeR(BODY,K,320);
-  s+=inCloth(R.in+'<rect x="320" y="0" width="300" height="800" fill="#000" opacity=".18"/>');
+  s+=inCloth((st.back?'<rect x="0" y="0" width="500" height="800" fill="'+sl+'"/><path d="M250 470 L 250 800" stroke="rgba(0,0,0,.25)" stroke-width="5"/>'+(M?'':'<path d="M150 600 C 200 620 300 620 350 600" stroke="rgba(0,0,0,.2)" stroke-width="5" fill="none"/>'):R.in)+'<rect x="320" y="0" width="300" height="800" fill="#000" opacity=".18"/>');
   s+=clipG(BODY,'<path d="M0 452 C 160 500 340 500 500 452" fill="none" stroke="'+K+'" stroke-width="7"/>')+p(BODY,'none');
   if(!st.back){s+=clipG(BODY,R.ov);
     if(st.dizzy){[218,282].forEach(function(x){s+=p('M'+(x-12)+' 260 L '+(x+12)+' 284 M'+(x+12)+' 260 L '+(x-12)+' 284',null,6);});
