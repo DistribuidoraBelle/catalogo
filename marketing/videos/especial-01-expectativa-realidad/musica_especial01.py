@@ -102,6 +102,12 @@ def ep(fs,dur):  # piano eléctrico suave con fundido largo
 def bassr(f,dur):
     n=int(dur*SR); t=np.arange(n)/SR; x=np.sin(2*np.pi*f*t)+0.15*np.sin(4*np.pi*f*t)
     return lp(x,500)*np.minimum(1,t/0.01)*np.exp(-t/0.6)*np.minimum(1,(dur-t)/0.04).clip(0)*0.5
+def tick(p=1.0):   # "hat" tonal: campanita metálica muy corta, sin ruido
+    n=int(0.06*SR); t=np.arange(n)/SR; x=sum(np.sin(2*np.pi*f*p*t) for f in (3100,4270,5390))/3
+    return x*np.exp(-t/0.012)*0.06
+def tsnare():      # caja suave tonal (cuerpo + armónicos), sin ruido blanco
+    n=int(0.2*SR); t=np.arange(n)/SR; x=np.sin(2*np.pi*(180+60*np.exp(-t*40))*t)+0.4*np.sin(2*np.pi*330*t)+0.25*np.sin(2*np.pi*560*t)
+    return x*np.exp(-t/0.06)*0.3
 bars=int(DUR/(4*B))+1
 for bar in range(bars):
     t0=bar*4*B; root,q=prog[bar%4]; fs=[m(root+i) for i in q]; intro=bar==0
@@ -113,14 +119,14 @@ for bar in range(bars):
     for b in range(4):
         t=t0+b*B
         add(kick(0.2,52),t,g=0.85)
-        if b%2==1: add(clap(0.7),t,pan=0.05); add(snap(),t+0.02,g=0.4)
-        for k in range(4): add(hat(k==2),t+k*B/4,pan=0.25,g=(0.6 if k%2 else 0.9))
-        add(shaker(),t+0.5*B,pan=-0.3,g=0.6)
+        if b%2==1: add(tsnare(),t,pan=0.05)
+        for k in (1,3): add(tick(),t+k*B/4,pan=0.25,g=0.7)
+        add(tick(1.4),t+0.5*B,pan=-0.2,g=0.9)
     # bajo: groove con octavas
     for off,o,d in ((0,0,0.7),(1,12,0.3),(1.5,0,0.4),(2,0,0.7),(3,7,0.4),(3.5,12,0.3)): add(bassr(m(root-24+o),d*B),t0+off*B,g=0.9)
 mix=np.stack([L,R],1)
-for dl,gn in ((0.027,0.15),(0.041,0.11),(0.063,0.07)):
-    d=int(dl*SR); mix[d:]+=np.stack([mix[:-d,1],mix[:-d,0]],1)*gn
+mix=np.stack([lp(mix[:,0],6000),lp(mix[:,1],6000)],1)
+mix=np.stack([hp(mix[:,0],45),hp(mix[:,1],45)],1)
 fo=int(1.8*SR); mix[-fo:]*=np.linspace(1,0,fo)[:,None]; fi=int(0.3*SR); mix[:fi]*=np.linspace(0,1,fi)[:,None]
 mix=mix/np.max(np.abs(mix))*0.9
 wavfile.write(OUT,SR,(mix*32767).astype(np.int16)); print('ok')
