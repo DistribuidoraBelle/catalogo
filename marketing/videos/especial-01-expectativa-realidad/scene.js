@@ -50,8 +50,8 @@ function render(t){
     out+='<g clip-path="url(#cpL)">'+ch('h',xL,CHY,SC,t,{hL:hL,hR:hR,ang:rub?-70:-20,q:t>=C.r2+1.2,bob:rub?0:null});
     var w=sp(xL,CHY,SC,250,515);
     if(!rub){out+=mistTo(sp(xL,CHY,SC,420,280)[0],sp(xL,CHY,SC,420,280)[1],sp(xL,CHY,SC,150,420)[0],sp(xL,CHY,SC,150,420)[1],1,t);}
-    for(var i=0;i<9;i++){var b=C.r+0.4+i*0.25,pt=C.r+1.4+i*0.32;var a=i*0.7+t*0.8,rr=70+hsh(i)*60;var px=w[0]+Math.cos(a)*rr,py=w[1]-60+Math.sin(a)*rr*0.7;
-      if(t>=b&&t<pt)out+=orb(px,py,L(6,24,cl((t-b)/0.4)),1);else if(t>=pt)out+=pop(px,py,24,(t-pt)/0.45);}
+    for(var i=0;i<9;i++){var t0=C.r+0.4+i*0.2;if(t<t0)continue;var cyc=1.5,ph=((t-t0)%cyc)/cyc,n=Math.floor((t-t0)/cyc);var a=i*0.7+n*1.9,rr=70+hsh(i+n*7)*60;var px=w[0]+Math.cos(a)*rr,py=w[1]-60+Math.sin(a)*rr*0.7;
+      if(!rub||ph<0.55)out+=orb(px,py,L(6,24,cl(ph/0.3)),1);else out+=pop(px,py,24,(ph-0.55)/0.35);}
     if(rub)out+=sparks(w[0],w[1]-20,t,10,70);
     out+='</g>';
     if(t>=C.r2)out+=chip('💥 ROMPÉS LAS NOTAS',CL.x+CL.w/2,450,(t-C.r2)/0.35,'#fff',30);
@@ -138,7 +138,7 @@ function render(t){
     for(var i=0;i<5;i++){var a=i*1.25+t*0.5;out+=orb(bx+Math.cos(a)*120,1030+Math.sin(a)*60,14*(1-bad),1-bad);}
     out+='</g>';
     if(t>=C.b2)out+=chip('🚿 CALOR + LUZ',CL.x+CL.w/2,450,(t-C.b2)/0.35,'#fff',30);
-    if(t>=C.b3){var k=t-C.b3;var open=k<0.8?L(1,0,cl(k/0.5)):k<1.6?0:cl((k-1.6)/0.5);
+    if(t>=C.b3){var k=t-C.b3;var open=k<0.4?L(1,0,cl(k/0.3)):k<0.7?0:cl((k-0.7)/0.4);
       out+='<g clip-path="url(#cpR)">';
       var dx=CR.x+60,dy=900;
       out+='<rect x="'+dx+'" y="'+dy+'" width="380" height="560" rx="20" fill="#B9794B" stroke="#1a1a1a" stroke-width="7"/><rect x="'+(dx+30)+'" y="'+(dy+330)+'" width="320" height="190" rx="14" fill="#9C6238" stroke="#1a1a1a" stroke-width="6"/><circle cx="'+(dx+190)+'" cy="'+(dy+425)+'" r="14" fill="#F4C542" stroke="#1a1a1a" stroke-width="4"/>';
