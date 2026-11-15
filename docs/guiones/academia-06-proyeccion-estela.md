@@ -34,7 +34,7 @@ Reel 9:16 · ~65 s · Voz: Dante · Personajes Pera (los mismos del video 5).
 **[BLOQUE 5 · TIP BELLE: UN PERFUME PARA CADA OCASIÓN]**
 > Tip Belle: armá tu guardarropa de perfumes.
 > Uno fresco para el día y el calor. Uno intenso para la noche y el frío. Uno suave para la oficina. Y uno especial para cuando querés dejar huella.
-*(estante con 4 frascos que se encienden uno por uno: ☀️ DÍA · 🌙 NOCHE · 💼 OFICINA · ✨ SALIDA)*
+*(estante con 4 frascos que se encienden uno por uno: ☀️ DÍA · 🌙 NOCHE · 💼 OFICINA · ✨ SALIDA; segundo estante por temporada: 🌸 PRIMAVERA · ☀️ VERANO · 🍂 OTOÑO · ❄️ INVIERNO)*
 > Así estás listo para cualquier momento, no te encasillás en un solo aroma…
 > y para los demás vas a ser un misterio: ¿qué se habrá puesto hoy?
 *(él la mira con un "?" que flota; ella guiña el ojo 😉)*
@@ -64,5 +64,5 @@ La estela es otra cosa: es el rastro que dejás cuando te movés… lo que queda
 **Bloque 2**
 ¿Qué las hace más fuertes? La concentración: un Parfum llega más lejos que una Eau de Toilette. Las notas de fondo, como ámbar, oud y vainilla. Y el calor, que expande el perfume.
 Ojo con el error más común: un perfume muy potente en un lugar cerrado, como el ascensor o la oficina. No deja respirar. O perfumes de invierno en pleno verano: con el calor, empalagan a todos.
-Tip Belle: armá tu guardarropa de perfumes. Uno fresco para el día, uno intenso para la noche, uno suave para la oficina, y uno especial para dejar huella. Vas a estar listo para cualquier momento… y para los demás, vas a ser un misterio. ¿Qué se habrá puesto hoy?
+Tip Belle: armá tu guardarropa de perfumes. Uno fresco para el día, uno intenso para la noche, uno suave para la oficina, y uno especial para dejar huella. Y sumá uno por temporada: floral en primavera, cítrico en verano, especiado en otoño y ambarado en invierno. Vas a estar listo para cualquier momento… y para los demás, vas a ser un misterio. ¿Qué se habrá puesto hoy?
 ¿Querés armar tu guardarropa de perfumes? Escribinos "BELLE" por mensaje directo.

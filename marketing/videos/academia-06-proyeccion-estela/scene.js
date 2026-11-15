@@ -17,21 +17,30 @@ function render(t){
     out+='<text x="'+(270+(1-eio(cl((t-t0-0.12)/0.4)))*400)+'" y="'+(part[2].length>12?235:250)+'" font-family="Baloo 2" font-weight="800" font-size="'+(part[2].length>12?76:104)+'" fill="#fff" stroke="#1a1a1a" stroke-width="14" paint-order="stroke" opacity="'+cl((t-t0-0.12)/0.2)+'">'+part[2]+'</text>';}
   var ent=function(t0){return eio(cl((t-t0)/0.5));};
   // ── PROYECCIÓN: ella sola, burbuja que crece
-  if(t>=C.p&&t<C.e){var cx=540,cy=930;var R=L(0,260,ent(C.p+0.4));
+  if(t>=C.p&&t<C.e){var cx=540,cy=1040;var R=L(0,260,ent(C.p+0.4));
     if(t>=C.p2)R=L(260,190,ent(C.p2));if(t>=C.p3)R=L(190,330,ent(C.p3));if(t>=C.p4)R=L(330,780,ent(C.p4));
     out+=bubble(cx,cy,R*(1+0.03*Math.sin(t*3)),'#fff',.22,t);
     for(var i=0;i<14;i++){var a=i*0.45+t*0.3,rr=R*(0.4+((i*37)%60)/100);out+='<text x="'+(cx+Math.cos(a)*rr)+'" y="'+(cy+Math.sin(a)*rr)+'" font-size="30" opacity=".75" text-anchor="middle">'+(i%2?'✨':'🌸')+'</text>';}
-    out+=ch('m',540-250*1.1,cy-260,1.1,t);
+    out+=ch('m',540-250*1.1,cy-400,1.1,t);
     if(t>=C.p2)out+=chip('🤏 ÍNTIMA',190,1470,(t-C.p2)/0.4,t<C.p3?'#fff':'rgba(255,255,255,.6)',34);
     if(t>=C.p3)out+=chip('🙋 MODERADA',525,1470,(t-C.p3)/0.4,t<C.p4?'#fff':'rgba(255,255,255,.6)',34);
     if(t>=C.p4)out+=chip('🏠 FUERTE',880,1470,(t-C.p4)/0.4,'#FFD23F',34);
-    if(t>=C.p+0.6&&t<C.p2){var k=ent(C.p+0.6);out+='<path d="M'+(cx)+' '+(cy-30)+' L '+(cx+R*k)+' '+(cy-30)+'" stroke="#fff" stroke-width="8" stroke-linecap="round"/><path d="M'+(cx+R*k-20)+' '+(cy-46)+' L '+(cx+R*k)+' '+(cy-30)+' L '+(cx+R*k-20)+' '+(cy-14)+'" fill="none" stroke="#fff" stroke-width="8" stroke-linecap="round"/>';}
+    var bx=540,byc=cy+110,kA=ent(C.p+0.5);if(kA>0&&R>150){for(var i=0;i<8;i++){var a=i*Math.PI/4+Math.PI/8;var ph=((t*0.7+i*0.13)%1);var r0=L(170,190,0.5),r1=Math.max(r0+40,R*0.95);var rr=L(r0,r1,ph);var x1=bx+Math.cos(a)*rr*1.0,y1=byc+Math.sin(a)*rr*1.15,x0=bx+Math.cos(a)*(rr-46),y0=byc+Math.sin(a)*(rr-46)*1.15;var op=kA*Math.sin(ph*Math.PI);
+      out+='<path d="M'+x0+' '+y0+' L '+x1+' '+y1+'" stroke="#fff" stroke-width="9" stroke-linecap="round" opacity="'+op+'"/><path d="M'+(x1-Math.cos(a-0.5)*22)+' '+(y1-Math.sin(a-0.5)*22)+' L '+x1+' '+y1+' L '+(x1-Math.cos(a+0.5)*22)+' '+(y1-Math.sin(a+0.5)*22)+'" fill="none" stroke="#fff" stroke-width="9" stroke-linecap="round" stroke-linejoin="round" opacity="'+op+'"/>';}}
   }
   // ── ESTELA: ella cruza dejando rastro, él llega y huele
   if(t>=C.e&&t<C.f){var dur=(C.e2-C.e)+1.2;var k=cl((t-C.e)/dur);var wx=L(900,-560,k);var by=-Math.abs(Math.sin(t*7))*16;
-    for(var i=0;i<40;i++){var ts=C.e+i*dur/40;if(ts>t)break;var px=L(900,-560,cl((ts-C.e)/dur))+250*0.95;var age=t-ts;var op=Math.max(0.25,1-age/6);out+='<text x="'+(px+((i*37)%40-20))+'" y="'+(940+((i*53)%60-30)-Math.min(age,2)*20)+'" font-size="'+(30+(i%3)*10)+'" opacity="'+op+'" text-anchor="middle">'+(['✨','🌸','💫'][i%3])+'</text>';}
-    out+='<path d="M'+(wx+240)+' 1000 L 1100 1000" stroke="#fff" stroke-width="10" stroke-dasharray="4 26" stroke-linecap="round" opacity=".5"/>';
-    if(k<1)out+=ch('m',wx,1000,0.95,t,{bob:by,flip:true});
+    var sc=0.95,backX=wx+(500-150)*sc,backY=1000+sc*(430-120);var startX=900+(500-150)*sc;var x0=Math.min(backX,1200),x1=startX+120;
+    if(x1>x0+10){var len=x1-x0;var fq=(0.012+0.004*Math.sin(t*0.6)).toFixed(4),fq2=(0.03+0.006*Math.cos(t*0.5)).toFixed(4);
+      out+='<defs><linearGradient id="eg1" gradientUnits="userSpaceOnUse" x1="'+x0+'" y1="0" x2="'+x1+'" y2="0"><stop offset="0" stop-color="#f0d9a6" stop-opacity=".9"/><stop offset=".5" stop-color="#fbbf24" stop-opacity=".45"/><stop offset="1" stop-color="#fbbf24" stop-opacity="0"/></linearGradient>'+
+        '<linearGradient id="eg2" gradientUnits="userSpaceOnUse" x1="'+x0+'" y1="0" x2="'+x1+'" y2="0"><stop offset="0" stop-color="#facc15" stop-opacity=".85"/><stop offset=".55" stop-color="#fef08a" stop-opacity=".4"/><stop offset="1" stop-color="#fef08a" stop-opacity="0"/></linearGradient>'+
+        '<linearGradient id="eg3" gradientUnits="userSpaceOnUse" x1="'+x0+'" y1="0" x2="'+x1+'" y2="0"><stop offset="0" stop-color="#f59e0b" stop-opacity=".8"/><stop offset=".6" stop-color="#f0d9a6" stop-opacity=".3"/><stop offset="1" stop-color="#f0d9a6" stop-opacity="0"/></linearGradient>'+
+        '<filter id="humo" x="-20%" y="-200%" width="140%" height="500%" color-interpolation-filters="sRGB"><feTurbulence type="fractalNoise" baseFrequency="'+fq+' '+fq2+'" numOctaves="2" seed="7" result="n"/><feDisplacementMap in="SourceGraphic" in2="n" scale="38" xChannelSelector="R" yChannelSelector="G"/></filter>'+
+        '<filter id="hblur" x="-50%" y="-200%" width="200%" height="500%"><feGaussianBlur stdDeviation="9"/></filter></defs>';
+      var wv=function(amp,ph){var d='M'+x0+' '+backY;for(var xx=x0;xx<=x1;xx+=30){var q=(xx-x0)/len;d+=' L '+xx+' '+(backY+Math.sin(xx*0.012+t*2+ph)*amp*q-q*40);}return d;};
+      out+='<g filter="url(#humo)"><path d="'+wv(26,0)+'" fill="none" stroke="url(#eg1)" stroke-width="'+90+'" stroke-linecap="round"/><path d="'+wv(18,1.3)+'" fill="none" stroke="url(#eg2)" stroke-width="34" stroke-linecap="round"/><path d="'+wv(12,2.1)+'" fill="none" stroke="url(#eg3)" stroke-width="8" stroke-linecap="round"/>';
+      out+='<g filter="url(#hblur)">';for(var i=0;i<14;i++){var q=((i/14)+t*0.05)%1;var px=L(x0,x1,q);var py=backY-q*40+Math.sin(px*0.012+t*2)*20*q-((t*0.6+i*0.3)%1)*40;out+='<circle cx="'+px+'" cy="'+py+'" r="'+(18+q*40)+'" fill="#f0d9a6" opacity="'+((1-q)*0.55)+'"/>';}out+='</g></g>';}
+    if(k<1)out+=ch('m',wx,1000,sc,t,{bob:by,flip:true});
     if(t>=C.e2){var k2=ent(C.e2);var hx=L(1100,300,k2);out+=ch('h',hx,1000,0.95,t,{bob:t<C.e2+0.6?-Math.abs(Math.sin(t*7))*14:0,hearts:t>C.e2+0.8});}
     if(t>=C.e3){out+=chip('💨 PROYECCIÓN = TU BURBUJA',540,1380,(t-C.e3)/0.4,'#fff',40);out+=chip('✨ ESTELA = TU FIRMA',540,1480,(t-C.e3-0.9)/0.4,'#FFD23F',40);}
   }
@@ -57,14 +66,18 @@ function render(t){
   }
   // ── TIP: guardarropa de perfumes
   if(t>=C.t&&t<C.end){
-    out+='<rect x="90" y="760" width="900" height="30" rx="10" fill="#8A5636" stroke="#1a1a1a" stroke-width="6"/>';
+    out+='<rect x="90" y="720" width="900" height="30" rx="10" fill="#8A5636" stroke="#1a1a1a" stroke-width="6"/>';
     var B=[['☀️','DÍA','#FFD23F'],['🌙','NOCHE','#4A2C6E'],['💼','OFICINA','#9FD8FF'],['✨','SALIDA','#FF4F8B']];
     B.forEach(function(b,i){var ts=C.t2+i*0.9,k=cl((t-ts)/0.4),on=t>=ts;var x=200+i*226;
-      out+='<g transform="translate('+x+',760)"><g transform="scale('+(on?1+0.08*Math.sin((t-ts)*6)*Math.max(0,1-(t-ts)):0.9)+')" opacity="'+(on?1:0.35)+'"><rect x="-56" y="-180" width="112" height="170" rx="26" fill="'+b[2]+'" stroke="#1a1a1a" stroke-width="7"/><rect x="-24" y="-222" width="48" height="46" rx="8" fill="#1a1a1a"/><rect x="-40" y="-150" width="16" height="110" rx="8" fill="#fff" opacity=".5"/><text y="-70" text-anchor="middle" font-size="58">'+b[0]+'</text></g>'+
+      out+='<g transform="translate('+x+',720)"><g transform="scale('+(on?1+0.08*Math.sin((t-ts)*6)*Math.max(0,1-(t-ts)):0.9)+')" opacity="'+(on?1:0.35)+'"><rect x="-56" y="-180" width="112" height="170" rx="26" fill="'+b[2]+'" stroke="#1a1a1a" stroke-width="7"/><rect x="-24" y="-222" width="48" height="46" rx="8" fill="#1a1a1a"/><rect x="-40" y="-150" width="16" height="110" rx="8" fill="#fff" opacity=".5"/><text y="-70" text-anchor="middle" font-size="58">'+b[0]+'</text></g>'+
         (on?'<g transform="translate(0,90) scale('+back(k)+')"><rect x="-96" y="-34" width="192" height="64" rx="32" fill="#fff" stroke="#1a1a1a" stroke-width="5"/><text y="12" text-anchor="middle" font-family="Baloo 2" font-weight="800" font-size="36" fill="#1a1a1a">'+b[1]+'</text></g>':'')+
         (on&&t<ts+1.2?'<circle r="'+(80+(t-ts)*120)+'" cy="-95" fill="none" stroke="#fff" stroke-width="6" opacity="'+(1-(t-ts)/1.2)+'"/>':'')+'</g>';});
-    out+=ch('m',40,1010,0.8,t,{wink:t>=C.t3+0.6})+ch('h',590,1010,0.8,t,{q:t>=C.t3});
-    if(t>=C.t3)out+=chip('🤔 ¿QUÉ SE HABRÁ PUESTO HOY?',540,1500,(t-C.t3-0.2)/0.4,'#fff',38);
+    out+='<rect x="90" y="1080" width="900" height="30" rx="10" fill="#8A5636" stroke="#1a1a1a" stroke-width="6"/>';
+    var S2=[['🌸','PRIMAVERA','#FFB6D9'],['☀️','VERANO','#7FE3FF'],['🍂','OTOÑO','#E0893A'],['❄️','INVIERNO','#E8F0FF']];
+    S2.forEach(function(b,i){var ts=C.t2b+i*0.7,k=cl((t-ts)/0.4),on=t>=ts;var x=200+i*226;
+      out+='<g transform="translate('+x+',1080)"><g transform="scale('+(on?1:0.9)+')" opacity="'+(on?1:0.3)+'"><rect x="-50" y="-160" width="100" height="150" rx="50" fill="'+b[2]+'" stroke="#1a1a1a" stroke-width="7"/><rect x="-20" y="-196" width="40" height="40" rx="8" fill="#1a1a1a"/><text y="-62" text-anchor="middle" font-size="54">'+b[0]+'</text></g>'+(on?'<g transform="translate(0,84) scale('+back(k)+')"><rect x="-104" y="-32" width="208" height="60" rx="30" fill="#fff" stroke="#1a1a1a" stroke-width="5"/><text y="12" text-anchor="middle" font-family="Baloo 2" font-weight="800" font-size="32" fill="#1a1a1a">'+b[1]+'</text></g>':'')+'</g>';});
+    out+=(t>=C.t3?ch('m',40,1240,0.8,t,{wink:t>=C.t3+0.6})+ch('h',590,1240,0.8,t,{q:t>=C.t3}):'');
+    if(t>=C.t3)out+=chip('🤔 ¿QUÉ SE HABRÁ PUESTO HOY?',540,1690,(t-C.t3-0.2)/0.4,'#fff',38);
   }
   document.getElementById('sv').innerHTML='<defs><clipPath id="elev"><rect x="290" y="560" width="500" height="840"/></clipPath></defs>'+out;
   renderSubs2(t);
