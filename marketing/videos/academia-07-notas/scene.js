@@ -196,7 +196,7 @@ function render(t){
     if(t>=C.cj3)out+=chip('🔥 CÁLIDO Y DURADERO',540,1490,(t-C.cj3-0.6)/0.35,'#FFD9A8',46);
   }
   // ── COMENTARIOS
-  if(t>=C.cm&&t<C.end){bg='#1a1a1a';
+  if(t>=C.cm&&t<C.end){bg='#FF4F8B';
     out+=confetti(ALL,t,C.cm,24,91,0.55);
     out+=title('¿CUÁL ES TU',330,(t-C.cm)/0.4,'#fff',120)+title('NOTA FAVORITA? 👇',470,(t-C.cm-0.4)/0.4,'#FFD23F',110);
     var CM=[['vainilla','vainilla siempre 🤤'],['rosa','rosa, soy romántica 🌹'],['oud','oud, obvio 🔥'],['cafe','café ☕ me muero']];
