@@ -11,6 +11,13 @@
   defensiva: iterá rápido. **Odia lo genérico/amateur**; quiere cosas **pro, de calidad superior**.
 - Email: `gerzini@hotmail.com` — **privado**, solo para identificarlo. Nunca compartirlo con servicios externos.
 
+## Reglas de marketing / UX cara al cliente (IMPORTANTE)
+- **NUNCA** mostrar al cliente señales negativas o internas: "nunca se vendió", "sin vender hace X días",
+  y similares. Espanta al cliente. Son datos internos, no van en el catálogo ni en campañas.
+- **NO** usar escasez por unidades ("últimas 3 u.", "quedan pocas"). Ger lo rechazó.
+- Todo lo cara al cliente va **responsive de verdad**: modo PC (ancho, grilla multi-columna) y mobile,
+  nunca un mobile estirado en PC.
+
 ## Reglas de trabajo — git / deploy (IMPORTANTE)
 - Se **desarrolla en `main`**. El sitio público se publica desde `main` por **GitHub Pages →
   distribuidorabelle.com** (tarda **~10 min** por el CDN).
