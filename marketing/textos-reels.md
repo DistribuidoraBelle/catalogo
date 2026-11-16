@@ -195,3 +195,91 @@ No es el perfume: sos vos 👀
 
 #perfumes #perfumetips #tipsdeperfume #erroresconperfume #comohacerduraelperfume #perfumeduradero #especialbelle #academiabelle #perfumesarabes #perfumeriaargentina #perfumesoriginales #fragancias #perfumelover #perfumetok #aprendeconbelle #distribuidorabelle
 ```
+
+---
+
+## 8) Academia Belle 07 — Notas olfativas (y qué es un acorde)
+Portada: `portadas-academia/portada_07_notas_9x16.png`
+
+```
+🎨 Esto es lo que tiene adentro tu perfume… y si aprendés a leerlo, nunca más comprás a ciegas 🙈
+
+Cada perfume se arma con NOTAS: son como los colores de un cuadro. Solas son simples… juntas, son una obra ✨
+
+🍋 CÍTRICOS → bergamota, limón, naranja: el primer golpe de frescura (duran poco, pero enamoran)
+🌸 FLORES → rosa, jazmín, lavanda: el alma romántica
+🍮 DULCES → vainilla, caramelo, café, haba tonka: lo adictivo, lo que hace que te pregunten "¿qué tenés puesto?"
+🌶️ ESPECIAS → pimienta, canela, cardamomo: calor y carácter
+🌲 MADERAS → cedro, sándalo, pachulí: la base elegante que te acompaña todo el día
+
+🤯 Las 3 que nadie entiende:
+• OUD: madera oscura y misteriosa, de las más caras del mundo
+• ÁMBAR: no es la piedra 🙅 es una mezcla cálida de resinas y vainilla
+• ALMIZCLE: ese olor a piel limpia que hace que el perfume sea TUYO
+
+🎹 Y la magia: cuando mezclás notas nace un olor nuevo = ACORDE (labdano + vainilla + benjuí = acorde ámbar)
+
+📦 Tip: dá vuelta la caja. ¿Cítricos? Fresco ❄️ ¿Vainilla y maderas? Cálido y duradero 🔥
+
+👇 ¿Cuál es tu nota favorita? Te leemos
+📩 ¿Querés uno con tus notas? Escribinos BELLE por DM.
+
+#perfumes #notasolfativas #acordes #academiabelle #perfumetips #tipsdeperfume #oud #ambar #almizcle #vainilla #perfumesarabes #perfumeriaargentina #perfumesoriginales #fragancias #perfumelover #perfumetok #aprendeconbelle #distribuidorabelle
+```
+
+---
+
+## 9) Academia Belle 08 — El oud, la madera que vale más que el oro
+Portada: `portadas-academia/portada_08_oud_9x16.png`
+
+```
+💰 Hay una madera que vale MÁS que el oro… y seguro está en uno de tus perfumes. Se llama OUD 🪵✨
+
+🌳 Sale del Aquilaria, un árbol del sudeste asiático. Pero ojo: el árbol sano NO huele a nada.
+
+🩹 El secreto es una herida: cuando el árbol se lastima y lo ataca un hongo, se defiende fabricando una resina oscura y perfumada que le llena la madera de vetas negras. ESO es el oud. Y en la naturaleza pasa en muy pocos árboles.
+
+🪓 Cómo se obtiene: se corta la madera ➜ se separan a mano las vetas ➜ remojo 💧 ➜ destilación durante días 🔥
+De decenas de kilos de madera salen apenas unos mililitros 😱
+
+🌏 No hay un solo oud:
+🇮🇳 India → intenso y animal
+🇰🇭 Camboya → dulce y frutal
+🇹🇭🇱🇦 Tailandia y Laos → ahumado
+🇲🇾🇮🇩 Malasia e Indonesia → suave y amaderado
+
+¿Por qué tan caro? Es escaso, tarda años en formarse y está protegido 🛡️ Gramo por gramo, el de mejor calidad supera al oro. Por eso muchos perfumes usan un ACORDE de oud: una recreación más accesible 🧪
+
+🤎 El oud da profundidad, misterio y una duración enorme: es el alma de los perfumes árabes.
+
+📩 ¿Querés probar uno con oud? Escribinos BELLE por DM.
+
+📸 Fotos: Wikimedia Commons (Krzysztof Golik CC BY-SA 4.0, BhuyanBhaskar CC BY 4.0, Lannafolium CC0, Rohitjahnavi CC0, Hafizmuar CC BY-SA 3.0, S. A. Peter CC0, Sinedi Matt CC BY 4.0; mapa: Uwe Dedering CC BY-SA 3.0)
+
+#perfumes #oud #agarwood #perfumesarabes #academiabelle #perfumetips #tipsdeperfume #oudwood #lattafa #perfumeriaargentina #perfumesoriginales #fragancias #perfumelover #perfumetok #aprendeconbelle #distribuidorabelle
+```
+
+---
+
+## 10) Academia Belle 09 — Por qué el mismo perfume huele distinto en cada persona
+Portada: `portadas-academia/portada_09_quimica_9x16.png`
+
+```
+😍 A tu amiga le queda increíble… y a vos, el mismo perfume, no 😐
+No es tu imaginación: es QUÍMICA ⚗️
+
+🔬 El perfume no flota sobre tu piel: reacciona con ella. Tu piel es un laboratorio, y cada uno da un resultado distinto.
+
+1️⃣ El pH → qué tan ácida es tu piel. Cambia de persona a persona y puede volver al perfume más dulce 🍬, más ácido 🍋 o más apagado ☁️
+2️⃣ Piel grasa o seca → la grasa atrapa las moléculas y lo hace durar más 💧 la seca lo deja escapar rápido 💨
+3️⃣ Temperatura → piel más calentita = se evapora más rápido y proyecta más 🔥
+4️⃣ Lo que comés → picante 🌶️ ajo 🧄 alcohol 🍷 y cigarrillo 🚬 cambian tu olor natural. También las hormonas y algunos medicamentos 💊
+5️⃣ Tus bacterias → tenés millones en la piel 🦠 y algunas se "comen" moléculas del perfume y lo transforman
+
+💡 Tip Belle: nunca compres un perfume porque le queda bien a otra persona. Probalo en TU piel, esperá 30 minutos ⏱️ y ahí decidí.
+
+👇 ¿Te pasó con algún perfume? Contanos
+📩 ¿Querés encontrar el que va con tu química? Escribinos BELLE por DM.
+
+#perfumes #quimicadelapiel #perfumetips #academiabelle #tipsdeperfume #comoelegirperfume #perfumesarabes #perfumeriaargentina #perfumesoriginales #fragancias #perfumelover #perfumetok #aprendeconbelle #distribuidorabelle
+```
