@@ -75,10 +75,7 @@ function render(t){
     var orb=function(front){var s_='';var spin=t*0.55+(t>C.h4?(t-C.h4)*0.9:0);var arr=[];P.forEach(function(p,i){var a=spin+i*6.283/7;var z=Math.sin(a);if((z>0.15)!==front)return;var rx=460,ry=320;arr.push({p:p,x:PX+Math.cos(a)*rx,y:PY+z*ry*(sweet>0?1:1)-(sweet>0?0:0),s:0.85+z*0.32,z:z,i:i});});arr.sort(function(a,b){return a.z-b.z;});
       arr.forEach(function(o){var kk=1;var sx=1;s_+='<ellipse cx="'+o.x+'" cy="'+(o.y+o.s*260)+'" rx="'+(o.s*125)+'" ry="'+(o.s*18)+'" fill="#000" opacity=".25"/><g transform="translate('+o.x+','+o.y+') scale('+sx+',1) rotate(0) translate('+(-o.x)+','+(-o.y)+')">'+img(o.p.cut,o.x,o.y,410*o.s,kk,0)+'</g>';});return s_;};
     out+=orb(false);
-    if(true){out+='<g transform="translate('+PX+','+PY+') scale('+kp+')"><ellipse rx="'+(PR*1.75)+'" ry="'+(PR*0.42)+'" fill="none" stroke="'+GOLD+'" stroke-width="8" opacity=".55" transform="rotate(-12)"/>'+
-      '<circle r="'+(PR+40)+'" fill="'+GOLD+'" opacity=".15"/><circle r="'+PR+'" fill="url(#planet)" stroke="#1a1a1a" stroke-width="8"/>'+
-      '<g><image href="fotos/logo_armaf.png" x="'+(-PR*0.86)+'" y="'+(-PR*0.86)+'" width="'+(PR*1.72)+'" height="'+(PR*1.72)+'" style="filter:drop-shadow(0 4px 0 rgba(0,0,0,.25))"/></g>'+
-      '<ellipse cx="'+(-PR*0.35)+'" cy="'+(-PR*0.4)+'" rx="'+(PR*0.38)+'" ry="'+(PR*0.22)+'" fill="#fff" opacity=".18" transform="rotate(-30)"/></g>';}
+    out+='<g transform="translate('+PX+','+PY+')"><image href="fotos/logo_armaf_hd.png" x="'+(-PR*1.5)+'" y="'+(-PR*1.5)+'" width="'+(PR*3)+'" height="'+(PR*3)+'" style="filter:drop-shadow(0 6px 0 rgba(255,255,255,.55))"/></g>';
     out+=orb(true);
     // título ODYSSEY
     var L_='ODYSSEY',fs=228,yT=340,yB=1610;var w=0;for(var i=0;i<L_.length;i++)w+=cw(L_[i])*fs;var xx=540-w/2;
