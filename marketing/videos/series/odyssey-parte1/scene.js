@@ -63,7 +63,7 @@ function theme(th,t,lt,idx){var s='';
   return s;}
 function render(t){
   var out='',bg='#2B1D4E';var ent=function(t0){return eio(cl((t-t0)/0.5));};
-  out+='<defs><linearGradient id="gGold" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#FFF3B0"/><stop offset=".5" stop-color="#F4C542"/><stop offset="1" stop-color="#C98A12"/></linearGradient><radialGradient id="halo"><stop offset="0" stop-color="#fff" stop-opacity=".75"/><stop offset="1" stop-color="#fff" stop-opacity="0"/></radialGradient><radialGradient id="spot"><stop offset="0" stop-color="#FFF6CC" stop-opacity=".8"/><stop offset="1" stop-color="#FFF6CC" stop-opacity="0"/></radialGradient><linearGradient id="refl" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#fff" stop-opacity=".35"/><stop offset="1" stop-color="#fff" stop-opacity="0"/></linearGradient><radialGradient id="planet" cx=".38" cy=".32" r=".8"><stop offset="0" stop-color="#FFFBEA"/><stop offset=".45" stop-color="#FFE27A"/><stop offset=".8" stop-color="#E0A21A"/><stop offset="1" stop-color="#9A6A08"/></radialGradient><radialGradient id="goldbg" cx=".5" cy=".55" r=".75"><stop offset="0" stop-color="#FFF7D6"/><stop offset=".55" stop-color="#FFD966"/><stop offset="1" stop-color="#E8A817"/></radialGradient><mask id="rm"><rect x="0" y="0" width="1080" height="1920" fill="url(#refl)"/></mask></defs>';
+  out+='<defs><linearGradient id="gGold" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#FFF3B0"/><stop offset=".5" stop-color="#F4C542"/><stop offset="1" stop-color="#C98A12"/></linearGradient><radialGradient id="halo"><stop offset="0" stop-color="#fff" stop-opacity=".75"/><stop offset="1" stop-color="#fff" stop-opacity="0"/></radialGradient><radialGradient id="spot"><stop offset="0" stop-color="#FFF6CC" stop-opacity=".8"/><stop offset="1" stop-color="#FFF6CC" stop-opacity="0"/></radialGradient><linearGradient id="refl" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#fff" stop-opacity=".35"/><stop offset="1" stop-color="#fff" stop-opacity="0"/></linearGradient><radialGradient id="planet" cx=".38" cy=".32" r=".8"><stop offset="0" stop-color="#FFFBEA"/><stop offset=".45" stop-color="#FFE27A"/><stop offset=".8" stop-color="#E0A21A"/><stop offset="1" stop-color="#9A6A08"/></radialGradient><linearGradient id="rimG" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#FFF4C2"/><stop offset=".35" stop-color="#F2C230"/><stop offset=".7" stop-color="#C98A12"/><stop offset="1" stop-color="#8A5A00"/></linearGradient><radialGradient id="goldbg" cx=".5" cy=".55" r=".75"><stop offset="0" stop-color="#FFF7D6"/><stop offset=".55" stop-color="#FFD966"/><stop offset="1" stop-color="#E8A817"/></radialGradient><mask id="rm"><rect x="0" y="0" width="1080" height="1920" fill="url(#refl)"/></mask></defs>';
   // ── INTRO: planeta Armaf con los Odyssey en órbita
   if(t<C.p1){var sweet=cl((t-C.h4)/0.6);bg=sweet>0.5?'#FF8FBF':'#F4C542';
     if(sweet<1){out+='<g opacity="'+(1-sweet)+'"><rect width="1080" height="1920" fill="url(#goldbg)"/>'+rays(540,1060,1700,t,'#FFFFFF',28,0.28)+rays(540,1060,1700,-t*0.6,'#FFE9A0',14,0.35);for(var i=0;i<40;i++){var tw=0.4+0.6*Math.abs(Math.sin(t*2+i));out+=star(hsh(i*3)*1080,hsh(i*7)*1920,6+hsh(i)*14,tw,'#FFFFFF');}out+='</g>';}
@@ -71,11 +71,22 @@ function render(t){
       for(var i=0;i<60;i++){var ph=((t*0.15+hsh(i))%1);var x=hsh(i*3)*1080,y=-40+ph*2000;out+='<rect x="'+x+'" y="'+y+'" width="26" height="9" rx="4.5" fill="'+PAL[i%6]+'" transform="rotate('+(hsh(i*5)*180+t*60)+' '+(x+13)+' '+(y+4)+')"/>';}
       for(var i=0;i<10;i++){var ph=((t*0.12+hsh(i+20))%1);out+='<text x="'+(hsh(i*7)*1000)+'" y="'+(-100+ph*2100)+'" font-size="'+(80+hsh(i)*50)+'" transform="rotate('+(t*40+i*30)+' '+(hsh(i*7)*1000+40)+' '+(-100+ph*2100-40)+')">'+['🍩','🍭','🍬','🧁','🍫'][i%5]+'</text>';}out+='</g>';}
     // planeta = logo Armaf
-    var PX=540,PY=980,PR=300*(1-0.2*sweet);var kp=1;
-    var orb=function(front){var s_='';var spin=t*0.55+(t>C.h4?(t-C.h4)*0.9:0);var arr=[];P.forEach(function(p,i){var a=spin+i*6.283/7;var z=Math.sin(a);if((z>0.15)!==front)return;var rx=460,ry=320;arr.push({p:p,x:PX+Math.cos(a)*rx,y:PY+z*ry*(sweet>0?1:1)-(sweet>0?0:0),s:0.85+z*0.32,z:z,i:i});});arr.sort(function(a,b){return a.z-b.z;});
+    var PX=540,PY=980,PR=360*(1-0.15*sweet);var kp=1;
+    var orb=function(front){var s_='';var spin=t*0.55+(t>C.h4?(t-C.h4)*0.9:0);var arr=[];P.forEach(function(p,i){var a=spin+i*6.283/7;var z=Math.sin(a);if((z>0.15)!==front)return;var rx=470,ry=330;arr.push({p:p,x:PX+Math.cos(a)*rx,y:PY+z*ry*(sweet>0?1:1)-(sweet>0?0:0),s:0.85+z*0.32,z:z,i:i});});arr.sort(function(a,b){return a.z-b.z;});
       arr.forEach(function(o){var kk=1;var sx=1;s_+='<ellipse cx="'+o.x+'" cy="'+(o.y+o.s*260)+'" rx="'+(o.s*125)+'" ry="'+(o.s*18)+'" fill="#000" opacity=".25"/><g transform="translate('+o.x+','+o.y+') scale('+sx+',1) rotate(0) translate('+(-o.x)+','+(-o.y)+')">'+img(o.p.cut,o.x,o.y,410*o.s,kk,0)+'</g>';});return s_;};
     out+=orb(false);
-    out+='<g transform="translate('+PX+','+PY+')"><image href="fotos/logo_armaf_hd.png" x="'+(-PR*1.5)+'" y="'+(-PR*1.5)+'" width="'+(PR*3)+'" height="'+(PR*3)+'" style="filter:drop-shadow(0 6px 0 rgba(255,255,255,.55))"/></g>';
+    var gl=((t*0.35)%1.6)-0.3;
+    out+='<g transform="translate('+PX+','+PY+')">'+
+      '<ellipse cy="'+(PR*1.08)+'" rx="'+(PR*0.85)+'" ry="'+(PR*0.12)+'" fill="#7A4A00" opacity=".25"/>'+
+      '<circle r="'+(PR+28)+'" fill="#FFF6D0" opacity=".45"/>'+
+      '<circle r="'+PR+'" fill="url(#rimG)" stroke="#6B4300" stroke-width="7"/>'+
+      '<circle r="'+(PR*0.9)+'" fill="url(#planet)" stroke="#8A5A00" stroke-width="5"/>'+
+      '<circle r="'+(PR*0.84)+'" fill="none" stroke="#B57E0E" stroke-width="3" opacity=".7"/>'+
+      '<image href="fotos/logo_armaf_hd_w.png" x="'+(-PR*0.8)+'" y="'+(-PR*0.8+4)+'" width="'+(PR*1.6)+'" height="'+(PR*1.6)+'" opacity=".55"/>'+
+      '<image href="fotos/logo_armaf_hd.png" x="'+(-PR*0.8)+'" y="'+(-PR*0.8)+'" width="'+(PR*1.6)+'" height="'+(PR*1.6)+'"/>'+
+      '<clipPath id="coinC"><circle r="'+PR+'"/></clipPath><g clip-path="url(#coinC)"><rect x="'+(-PR*2+gl*PR*2.6)+'" y="'+(-PR*1.3)+'" width="'+(PR*0.35)+'" height="'+(PR*2.6)+'" fill="#fff" opacity=".35" transform="skewX(-22)"/><ellipse cx="'+(-PR*0.32)+'" cy="'+(-PR*0.5)+'" rx="'+(PR*0.5)+'" ry="'+(PR*0.2)+'" fill="#fff" opacity=".22" transform="rotate(-28)"/></g>';
+    for(var j=0;j<4;j++){var aa=j*1.57+0.6,tw=Math.max(0,Math.sin(t*2.2+j*1.7));out+=star(Math.cos(aa)*PR*0.97,Math.sin(aa)*PR*0.97,10+26*tw,tw,'#FFFFFF');}
+    out+='</g>';
     out+=orb(true);
     // título ODYSSEY
     var L_='ODYSSEY',fs=228,yT=340,yB=1610;var w=0;for(var i=0;i<L_.length;i++)w+=cw(L_[i])*fs;var xx=540-w/2;
