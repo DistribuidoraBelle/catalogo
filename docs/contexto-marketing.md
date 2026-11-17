@@ -173,3 +173,13 @@ Más adelante: campañas por fecha (Black Friday/Cyber, Navidad, Día de la Madr
 - Pronunciación: en el texto del TTS escribir **"distribuidora Bel, punto com"** (si no, Dante dice "beye").
 - Audio: `alimiter` SIEMPRE con `level=disabled` (si no, aplica auto-ganancia y clipea a 0 dB).
 - Tiempos de frase: transcribir la voz con ElevenLabs Scribe (timestamps por palabra) es más confiable que adivinar con silencedetect.
+
+## Series de perfumes — regla de contenido (2026-11-17)
+- Las series hablan de **TODOS los perfumes de la línea**, estén o no en catálogo y tengan o no stock (pedido de Ger). No filtrar por stock.
+- Agrupar por estilo, ~7-8 por video (si son más, no hay drama).
+- Inspiraciones: usar la ficha (`fichas_perfume`); si no hay dato confiable, preguntar a Ger antes de grabar. Si es "composición propia que va para el lado de X", mostrar las botellitas de referencia en fila con el cartel dorado.
+- **Armaf Odyssey (33 perfumes, 4 partes):**
+  1. Dulces (9): Mandarin Sky, MS Elixir, MS Vintage, Black Forest, Dubai Chocolat, Candee, Marshmallow, Toffee Coffee (Amore Caffè), Soda Pop (Tonka Cola).
+  2. Intensos (8): Homme, Homme White, Spectra, Spectra Blue (Ultra Male), Artisto, Revolution, Aoud (Initio Oud for Greatness), Eau de Montagne.
+  3. Frescos (7): Aqua, Tyrant, Limoni Fresh, Bahamas (Le Sel d'Issey), Mega Man (YSL Y EDP), Wild One (Sauvage), Nexus (Acqua di Giò Profumo).
+  4. Frutales, florales y Spicy Collection (9): Li'chi Lush (Harrods Ruby Naga), Pink Pop (Kurky MFK), French Kiss (Vanilla Powder + toque Delina), Go Mango, Femme White (→ Gucci Bloom / Valentino Donna / Coco Mademoiselle), Femme Black (→ Good Girl / My Burberry Black), Bloody Hot (propia, trago Bloody Mary), Jalapeach-O (propia), Ring My Bell (propia → Santal 33).
