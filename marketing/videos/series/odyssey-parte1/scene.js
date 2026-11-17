@@ -77,14 +77,10 @@ function render(t){
     out+=orb(false);
     var gl=((t*0.35)%1.6)-0.3;
     out+='<g transform="translate('+PX+','+PY+')">'+
-      '<ellipse cy="'+(PR*1.08)+'" rx="'+(PR*0.85)+'" ry="'+(PR*0.12)+'" fill="#7A4A00" opacity=".25"/>'+
-      '<circle r="'+(PR+28)+'" fill="#FFF6D0" opacity=".45"/>'+
-      '<circle r="'+PR+'" fill="url(#rimG)" stroke="#6B4300" stroke-width="7"/>'+
-      '<circle r="'+(PR*0.9)+'" fill="url(#planet)" stroke="#8A5A00" stroke-width="5"/>'+
-      '<circle r="'+(PR*0.84)+'" fill="none" stroke="#B57E0E" stroke-width="3" opacity=".7"/>'+
-      '<image href="fotos/logo_armaf_hd_w.png" x="'+(-PR*0.8)+'" y="'+(-PR*0.8+4)+'" width="'+(PR*1.6)+'" height="'+(PR*1.6)+'" opacity=".55"/>'+
-      '<image href="fotos/logo_armaf_hd.png" x="'+(-PR*0.8)+'" y="'+(-PR*0.8)+'" width="'+(PR*1.6)+'" height="'+(PR*1.6)+'"/>'+
-      '<clipPath id="coinC"><circle r="'+PR+'"/></clipPath><g clip-path="url(#coinC)"><rect x="'+(-PR*2+gl*PR*2.6)+'" y="'+(-PR*1.3)+'" width="'+(PR*0.35)+'" height="'+(PR*2.6)+'" fill="#fff" opacity=".35" transform="skewX(-22)"/><ellipse cx="'+(-PR*0.32)+'" cy="'+(-PR*0.5)+'" rx="'+(PR*0.5)+'" ry="'+(PR*0.2)+'" fill="#fff" opacity=".22" transform="rotate(-28)"/></g>';
+      '<circle r="'+(PR+40)+'" fill="'+GOLD+'" opacity=".15"/><circle r="'+PR+'" fill="url(#planet)" stroke="#1a1a1a" stroke-width="8"/>'+
+      '<image href="fotos/logo_armaf_hd.png" x="'+(-PR*0.86)+'" y="'+(-PR*0.86)+'" width="'+(PR*1.72)+'" height="'+(PR*1.72)+'" style="filter:drop-shadow(0 4px 0 rgba(0,0,0,.25))"/>'+
+      '<clipPath id="coinC"><circle r="'+PR+'"/></clipPath><g clip-path="url(#coinC)"><rect x="'+(-PR*2+gl*PR*2.6)+'" y="'+(-PR*1.3)+'" width="'+(PR*0.35)+'" height="'+(PR*2.6)+'" fill="#fff" opacity=".35" transform="skewX(-22)"/></g>'+
+      '<ellipse cx="'+(-PR*0.35)+'" cy="'+(-PR*0.4)+'" rx="'+(PR*0.38)+'" ry="'+(PR*0.22)+'" fill="#fff" opacity=".18" transform="rotate(-30)"/>';
     for(var j=0;j<4;j++){var aa=j*1.57+0.6,tw=Math.max(0,Math.sin(t*2.2+j*1.7));out+=star(Math.cos(aa)*PR*0.97,Math.sin(aa)*PR*0.97,10+26*tw,tw,'#FFFFFF');}
     out+='</g>';
     out+=orb(true);
