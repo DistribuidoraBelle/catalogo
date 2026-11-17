@@ -158,3 +158,10 @@ Más adelante: campañas por fecha (Black Friday/Cyber, Navidad, Día de la Madr
 ## Música aprobada (histórico)
 - Videos con ritmo: **nu-disco** (`marketing/videos/academia-06-proyeccion-estela/musica_power.py`, variante 2), siempre bajita (volume 0.13 + sidechain para que la voz sea protagonista).
 - Suaves para otros videos: `marketing/musica/favoritas-suaves/` (le encantaron, guardadas para más adelante).
+
+
+## CIERRE DE LOS VIDEOS (regla nueva de Ger, 2026-11-17)
+- De ahora en más los videos NO terminan con "escribinos BELLE por DM". Terminan mandando a la web:
+  voz: "…lo encontrás en distribuidorabelle.com" + pantalla final "LOS ENCONTRÁS EN / logo B. / distribuidorabelle.com".
+- Fotos de perfumes en videos: SOLO LA BOTELLA, sin caja, fondo transparente (Fragrantica thumbs `fimgs.net/mdimg/perfume-thumbs/dark-375x500.<id>.2x.avif` vienen con alfa). Nada de recortes con pedazos blancos.
+- Voz de las series y publicidades: Dante.
