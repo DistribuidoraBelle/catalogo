@@ -193,7 +193,13 @@ function initRealtime() {
     var ps=[];
     try{ if(navigator.serviceWorker&&navigator.serviceWorker.getRegistrations) ps.push(navigator.serviceWorker.getRegistrations().then(function(rs){ return Promise.all(rs.map(function(x){ return x.update(); })); })); }catch(e){}
     try{ if(window.caches&&caches.keys) ps.push(caches.keys().then(function(ks){ return Promise.all(ks.map(function(k){ return caches.delete(k); })); })); }catch(e){}
-    Promise.all(ps).catch(function(){}).then(function(){ location.replace(location.pathname+location.search.replace(/[?&]v=\d+/,'')+(location.search&&location.search.indexOf('?')===0&&location.search.length>1?'&':'?')+'v='+Date.now()+location.hash); });
+    Promise.all(ps).catch(function(){}).then(function(){
+      // 🩹 Fix: armar la query YA LIMPIA (sin el v= viejo) y recién ahí decidir el separador.
+      // Antes se miraba location.search (con el ?v= viejo) y en la 2da recarga quedaba "/&v=..." (URL rota -> 404).
+      var _s=location.search.replace(/[?&]v=\d+/g,''); if(_s.charAt(0)==='&')_s='?'+_s.slice(1); if(_s==='?')_s='';
+      var _sep=(_s&&_s.length>1)?'&':'?';
+      location.replace(location.pathname+_s+_sep+'v='+Date.now()+location.hash);
+    });
   }
   var _avisado=false;
   // Auditoría 2026-10-04: antes se bajaba el HTML completo (1,8 MB) cada 3 minutos para
