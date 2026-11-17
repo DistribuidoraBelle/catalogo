@@ -37,7 +37,7 @@ F=[
 ('out',"¿Cuál es tu Odyssey?",2,35.10,35.96),
 (None,"Contanos en los comentarios.",2,36.33,37.63),
 ('out2',"En la parte dos, los más intensos.",2,38.04,40.43),
-('end',"Y si querés el tuyo, escribinos BELLE por mensaje directo.",2,40.77,44.13),
+('end',"Y si querés el tuyo, lo encontrás en distribuidorabelle.com",2,40.92,44.55),
 ]
 OFF={1:0.0,2:40.75}
 import json,re
@@ -54,6 +54,6 @@ for k,txt,b,a,z in F:
         if len(line)>=6 or (len(line)>=3 and re.search(r'[,:…;]$',w)) or j==len(wt)-1:
             nxt=wt[j+1][1] if j+1<len(wt) else z
             subs.append({'t0':line[0]['t'],'t1':round(nxt+0.15 if j==len(wt)-1 else nxt-0.02,3),'w':line}); line=[]
-cues['hook']=0;cues['t1']=-5;cues['dur']=round(OFF[2]+44.32+1.6,2)
+cues['hook']=0;cues['t1']=-5;cues['dur']=round(OFF[2]+44.60+3.0,2)
 open('timing.js','w').write('window.CUES='+json.dumps(cues)+';\nwindow.SUBS='+json.dumps(subs,ensure_ascii=False)+';\n')
 print(cues)
