@@ -14,9 +14,14 @@ var P=[
   N:[['mandarina','Mandarina'],['vainilla','Vainilla'],['cardamomo','Cardamomo'],['iris','Iris'],['cuero','Cuero'],['sandalo','Sándalo']],
   A:[['Ámbar',100,'#D4A020'],['Amaderado',90,'#8B5E3C'],['Cítrico',80,'#E8C430'],['Especiado suave',70,'#C44A1A']],
   ins:{img:'f45258.png',n:'Stronger With You',m:'logo_ea.png'}},
- {k:'p3',mk:['🚀 PROYECCIÓN','BESTIAL'],mc:'m3',q:'q3',n:'n3',i:'i3',end:'p4',cut:'b98692.png',name:'SPECTRA',sub:'ODYSSEY · EDP',bg:'#6A2FD6',bg2:'#A57CFF',theme:'neon',
+ {k:'p3',mk:['🚀 PROYECCIÓN','BESTIAL'],mc:'m3',q:'q3',n:'n3',i:'i3',end:'p8',cut:'b98692.png',name:'SPECTRA',sub:'ODYSSEY · EDP',bg:'#6A2FD6',bg2:'#A57CFF',theme:'neon',
   quote:'Dulce, potente, imposible de ignorar.',
   N:[['canela','Canela'],['manzana','Manzana'],['lavanda','Lavanda'],['vainilla','Vainilla'],['tabaco','Tabaco'],['tonka','Haba tonka']],
+  A:[['Avainillado',100,'#D4A830'],['Cálido especiado',90,'#C45A1A'],['Canela',80,'#C46830'],['Ámbar',70,'#D4A020']],
+  ins:{img:'f30947.png',n:'Ultra Male',m:'logo_jpg.png'}},
+ {k:'p8',mk:['💙 PARA','COLECCIONISTAS'],mc:'m8',q:'q8',n:'n8',i:'i8',end:'p4',cut:'b115140.png',name:'SPECTRA BLUE',sub:'BLUE EDITION · EDP',bg:'#1749A8',bg2:'#4F86E8',theme:'neon',
+  quote:'El mismo fuego del Spectra… vestido de azul.',
+  N:[['canela','Canela'],['manzana','Manzana'],['lavanda','Lavanda'],['tabaco','Tabaco'],['vainilla','Vainilla'],['tonka','Haba tonka']],
   A:[['Avainillado',100,'#D4A830'],['Cálido especiado',90,'#C45A1A'],['Canela',80,'#C46830'],['Ámbar',70,'#D4A020']],
   ins:{img:'f30947.png',n:'Ultra Male',m:'logo_jpg.png'}},
  {k:'p4',mk:['🌴 VERANO','TODO EL AÑO'],mc:'m4',q:'q4',n:'n4',i:'i4',end:'p5',cut:'b106710.png',name:'ARTISTO',sub:'ODYSSEY · EDP',bg:'#0FA394',bg2:'#5FD8C6',theme:'tropical',
@@ -109,7 +114,7 @@ function render(t){
     var ik=cl(lt/0.35);if(ik<1)out+='<rect width="1080" height="1920" fill="'+p.bg2+'" opacity="'+(0.85*(1-eio(ik)))+'"/>';
     var insT=p.i?C[p.i]:(p.ins&&p.ins.misma?C[p.q]+1.2:1e9);var inK=p.ins?eio(cl((t-insT)/0.6)):0;
     // índice
-    out+='<g transform="translate(120,170) rotate('+(Math.sin(t*2)*6)+') scale('+back(cl(lt/0.35))+')"><circle r="62" fill="'+GOLD+'" stroke="#1a1a1a" stroke-width="6"/><text y="-6" text-anchor="middle" font-family="Baloo 2" font-weight="800" font-size="40">'+(idx+1)+'/7</text><text y="28" text-anchor="middle" font-family="DM Sans" font-weight="700" font-size="16">ODYSSEY</text></g>';
+    out+='<g transform="translate(120,170) rotate('+(Math.sin(t*2)*6)+') scale('+back(cl(lt/0.35))+')"><circle r="62" fill="'+GOLD+'" stroke="#1a1a1a" stroke-width="6"/><text y="-6" text-anchor="middle" font-family="Baloo 2" font-weight="800" font-size="40">'+(idx+1)+'/'+P.length+'</text><text y="28" text-anchor="middle" font-family="DM Sans" font-weight="700" font-size="16">ODYSSEY</text></g>';
     // nombre
     out+=popWord(p.name,540,310,p.name.length>12?96:116,t,t0+0.05,'#fff',p.bg2==='#A8E2F5'?'#2E6E8A':'#1a1a1a');
     out+=chip(p.sub,540,400,(lt-0.5)/0.35,'#1a1a1a',30,-2,'#fff');
@@ -141,7 +146,7 @@ function render(t){
     out+=popWord('¿CUÁL ES TU',540,420,104,t,C.out,'#fff')+popWord('ODYSSEY?',540,560,150,t,C.out+0.4,GOLD,'#5A3A00');
     var spin=t*0.8;var arr=[];P.forEach(function(p,i){var a=spin+i*6.283/7;var z=Math.sin(a);arr.push({p:p,x:540+Math.cos(a)*400,y:1100+z*110,s:0.75+z*0.3,z:z});});arr.sort(function(a,b){return a.z-b.z;});
     arr.forEach(function(o){out+=img(o.p.cut,o.x,o.y,380*o.s,ent(C.out+0.2),0);});
-    if(t>=C.out2){out+=chip('🍋 PARTE 3: FRESCOS Y FRUTALES',540,1450,(t-C.out2)/0.35,'#22C3B0',44,-3,'#fff');for(var i=0;i<6;i++){var ph=((t*1.2+i/6)%1);out+='<text x="'+(260+i*110)+'" y="'+(1530-ph*120)+'" font-size="56" opacity="'+(1-ph)+'">'+['🍋','🥭','🍍'][i%3]+'</text>';}}
+    if(t>=C.out2){out+=(C.fol!=null&&t>=C.fol)?chip('📲 SEGUINOS: SE VIENEN MÁS SERIES',540,1450,(t-C.fol)/0.35,'#FF4F8B',42,-3,'#fff'):chip('🍋 PARTE 3: FRESCOS Y FRUTALES',540,1450,(t-C.out2)/0.35,'#22C3B0',44,-3,'#fff');for(var i=0;i<6;i++){var ph=((t*1.2+i/6)%1);out+='<text x="'+(260+i*110)+'" y="'+(1530-ph*120)+'" font-size="56" opacity="'+(1-ph)+'">'+['🍋','🥭','🍍'][i%3]+'</text>';}}
   }
   document.getElementById('bgc').style.background=bg;
   document.getElementById('sv').innerHTML=out;

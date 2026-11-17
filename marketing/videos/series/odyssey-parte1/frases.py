@@ -42,10 +42,24 @@ F=[
 (None,"imposible de no abrazar.",2,39.36,40.76),
 ('m7',"Ideal para regalar: no falla nunca.",2,41.30,43.50),
 ('i7',"Se inspira en Yum Boujee Marshmallow, de Kayali.",2,44.02,46.76),
-('out',"¿Cuál es tu Odyssey?",2,47.36,48.22),
-(None,"Contanos en los comentarios.",2,48.64,49.92),
-('out2',"En la parte dos, los más intensos.",2,50.40,52.64),
-('end',"Y si querés el tuyo, lo encontrás en distribuidorabelle.com",2,53.04,56.30),
+('p8',"Toffee Coffee:",2,47.08,47.76),
+('n8',"café, dulce de leche y toffee.",2,48.30,50.52),
+('q8',"Como un café con leche de cafetería cara…",2,51.12,53.22),
+(None,"pero en la piel.",2,53.76,54.82),
+('m8',"El mimo dulce que se vuelve adicción.",2,55.54,57.54),
+('i8',"Se inspira en Amore Caffè, de Mancera.",2,58.08,60.50),
+('p9',"Soda Pop:",2,61.52,62.10),
+('n9',"cola helada, jengibre y menta, sobre vainilla.",2,62.64,65.76),
+('q9',"Como abrir una gaseosa bien fría en pleno verano.",2,66.42,69.24),
+('m9',"El más divertido y original de toda la serie.",2,69.82,72.20),
+('i9',"Se inspira en Tonka Cola, de Mancera.",2,72.72,75.00),
+('out',"¿Cuál es tu Odyssey?",2,75.76,76.62),
+(None,"Contanos en los comentarios.",2,77.04,78.32),
+('out2',"En la parte dos, los más intensos.",2,78.80,81.04),
+('fol',"Y si querés ver las otras partes o más series de perfumes,",2,81.30,84.06),
+(None,"están todas en nuestro perfil.",2,84.26,85.78),
+(None,"¡Seguinos, que se viene mucho más!",2,86.18,88.00),
+('end',"Y si querés el tuyo, lo encontrás en distribuidorabelle.com",2,88.79,92.05),
 ]
 OFF={1:0.0,2:55.47}
 import json,re
@@ -62,6 +76,6 @@ for k,txt,b,a,z in F:
         if len(line)>=6 or (len(line)>=3 and re.search(r'[,:…;]$',w)) or j==len(wt)-1:
             nxt=wt[j+1][1] if j+1<len(wt) else z
             subs.append({'t0':line[0]['t'],'t1':round(nxt+0.15 if j==len(wt)-1 else nxt-0.02,3),'w':line}); line=[]
-cues['hook']=0;cues['t1']=-5;cues['dur']=round(OFF[2]+56.56+3.0,2)
+cues['hook']=0;cues['t1']=-5;cues['dur']=round(OFF[2]+92.31+3.0,2)
 open('timing.js','w').write('window.CUES='+json.dumps(cues)+';\nwindow.SUBS='+json.dumps(subs,ensure_ascii=False)+';\n')
 print(cues)

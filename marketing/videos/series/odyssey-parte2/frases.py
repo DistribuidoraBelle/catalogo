@@ -19,11 +19,16 @@ F=[
 ('q3',"Dulce, potente, imposible de ignorar.",1,43.94,46.82),
 ('m3',"Entrás a un lugar… y se enteran todos.",1,47.42,49.7),
 ('i3',"Se inspira en Ultra Male, de Jean Paul Gaultier.",1,50.28,52.74),
-('p4',"Artisto:",1,53.38,53.9),
-('n4',"coco, haba tonka y frutas tropicales.",1,54.48,57.02),
-('q4',"Un verano en la piel… pero en versión noche.",1,57.6,60.0),
-('m4',"El que te hace oler a vacaciones todo el año.",1,60.58,62.84),
-('i4',"Se inspira en Le Beau Le Parfum, de Jean Paul Gaultier.",1,63.42,66.16),
+('p8',"Spectra Blue Edition:",1,53.12,54.38),
+('n8',"canela, manzana y lavanda, sobre tabaco y vainilla.",1,54.88,58.50),
+('q8',"El mismo fuego del Spectra… ahora vestido de azul.",1,59.08,62.36),
+('m8',"Para coleccionistas: si tenés uno, te falta el otro.",1,62.86,66.16),
+('i8',"Se inspira en Ultra Male, de Jean Paul Gaultier.",1,66.66,69.34),
+('p4',"Artisto:",1,70.08,70.60),
+('n4',"coco, haba tonka y frutas tropicales.",1,71.18,73.72),
+('q4',"Un verano en la piel… pero en versión noche.",1,74.30,76.70),
+('m4',"El que te hace oler a vacaciones todo el año.",1,77.28,79.54),
+('i4',"Se inspira en Le Beau Le Parfum, de Jean Paul Gaultier.",1,80.12,82.86),
 ('p5',"Revolution:",2,0.14,0.82),
 ('n5',"ananá y grosella que estallan sobre praliné y vainilla.",2,1.32,4.32),
 ('q5',"Frutal, dulce y con actitud.",2,4.94,7.10),
@@ -43,9 +48,12 @@ F=[
 ('out',"¿Cuál es tu Odyssey?",2,42.94,43.80),
 (None,"Contanos en los comentarios.",2,44.24,45.52),
 ('out2',"En la parte tres, los frescos y frutales.",2,45.94,48.44),
-('end',"Y si querés el tuyo, lo encontrás en distribuidorabelle.com",2,48.80,52.06),
+('fol',"Y si querés ver las otras partes o más series de perfumes,",2,48.65,51.41),
+(None,"están todas en nuestro perfil.",2,51.61,53.13),
+(None,"¡Seguinos, que se viene mucho más!",2,53.53,55.35),
+('end',"Y si querés el tuyo, lo encontrás en distribuidorabelle.com",2,56.15,59.41),
 ]
-OFF={1:0.0,2:66.75}
+OFF={1:0.0,2:83.45}
 import json,re
 def syl(w): return max(1,len(re.findall(r'[aeiouáéíóúü]+',w.lower())))
 cues={};subs=[]
@@ -60,6 +68,6 @@ for k,txt,b,a,z in F:
         if len(line)>=6 or (len(line)>=3 and re.search(r'[,:…;]$',w)) or j==len(wt)-1:
             nxt=wt[j+1][1] if j+1<len(wt) else z
             subs.append({'t0':line[0]['t'],'t1':round(nxt+0.15 if j==len(wt)-1 else nxt-0.02,3),'w':line}); line=[]
-cues['hook']=0;cues['t1']=-5;cues['dur']=round(OFF[2]+52.3+3.0,2)
+cues['hook']=0;cues['t1']=-5;cues['dur']=round(OFF[2]+59.65+3.0,2)
 open('timing.js','w').write('window.CUES='+json.dumps(cues)+';\nwindow.SUBS='+json.dumps(subs,ensure_ascii=False)+';\n')
 print(cues)

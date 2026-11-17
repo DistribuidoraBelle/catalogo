@@ -1,4 +1,4 @@
-// ═══════════ SERIE · ARMAF ODYSSEY · PARTE 3 (FRESCOS Y FRUTALES) ═══════════
+// ═══════════ SERIE · ARMAF ODYSSEY · PARTE 3 (LOS FRESCOS) ═══════════
 var C=window.CUES;
 function hsh(i){var x=Math.sin(i*127.1+311.7)*43758.5453;return x-Math.floor(x);}
 var PAL=['#FF4F8B','#3DB8F5','#F0A21A','#22C3B0','#8E6CF5','#FF5A4E'];
@@ -19,21 +19,26 @@ var P=[
   N:[['limon','Limón'],['mandarina','Mandarina'],['marino','Notas marinas'],['azahar','Azahar'],['jengibre','Jengibre'],['te','Té negro']],
   A:[['Cítrico',100,'#E8C430'],['Fresco especiado',90,'#4AAEE0'],['Aromático',80,'#6AB87A'],['Verde',60,'#5A9E3C']],
   ins:null},
- {k:'p4',mk:['🥭 ADICTIVO','Y DIFERENTE'],mc:'m4',q:'q4',n:'n4',i:'i4',end:'p5',cut:'b115130.png',name:'GO MANGO',sub:'ODYSSEY · EDP',bg:'#6B36B8',bg2:'#A274E6',theme:'sol',
-  quote:'Una fruta tropical bajo un sol que quema.',
-  N:[['mango','Mango'],['jengibre','Jengibre'],['ambar','Ámbar'],['limon','Limón'],['vainilla','Vainilla'],['tonka','Haba tonka']],
-  A:[['Tropical',100,'#F6AF09'],['Dulce',90,'#E87AAA'],['Afrutado',80,'#E8703A'],['Amaderado',70,'#8B5E3C']],
-  ins:{img:'f72381.png',n:'God of Fire',mt:'S. H. LUCAS 777'}},
- {k:'p5',mk:['🤍 ELEGANCIA','PURA'],mc:'m5',q:'q5',n:'n5',i:'i5',end:'p6',cut:'b64456.png',name:'FEMME WHITE',sub:'WHITE EDITION · EDP',bg:'#D9568F',bg2:'#F59BC2',theme:'petalos',
-  quote:'Limpia y luminosa, como sábanas blancas al sol.',
-  N:[['tuberosa','Nardos'],['jazmin','Jazmín'],['vainilla','Vainilla'],['naranja','Naranja'],['iris','Lirio'],['sandalo','Sándalo']],
-  A:[['Floral blanco',100,'#F2EDEF'],['Nardos',90,'#E4C9D6'],['Verde',80,'#5A9E3C'],['Afrutado',70,'#E8703A']],
-  ins:{multi:[['f44894.png','Gucci Bloom'],['f31411.png','Valentino Donna'],['f611.png','Coco Mademoiselle']]}},
- {k:'p6',mk:['🖤 SEDUCCIÓN','NOCTURNA'],mc:'m6',q:'q6',n:'n6',i:'i6',end:'out',cut:'b68061.png',name:'FEMME BLACK',sub:'ODYSSEY FEMME · EDP',bg:'#A3532F',bg2:'#DE9468',theme:'gala',
-  quote:'Misteriosa y seductora, como una noche de gala.',
-  N:[['ciruela','Ciruela'],['miel','Miel'],['cacao','Cacao'],['gardenia','Gardenia'],['jazmin','Jazmín'],['tonka','Haba tonka']],
-  A:[['Floral blanco',100,'#F2EDEF'],['Dulce',90,'#E87AAA'],['Afrutado',80,'#E8703A'],['Cacao',70,'#6B3A2A']],
-  ins:{multi:[['f39681.png','Good Girl'],['f32566.png','My Burberry Black']]}}
+ {k:'p4',mk:['🏝️ VACACIONES','EN UN SPRAY'],mc:'m4',q:'q4',n:'n4',i:'i4',end:'p5',cut:'b115127.png',name:'BAHAMAS',sub:'BA HA MAS · EDP',bg:'#E0662A',bg2:'#FFA66A',theme:'playa',
+  quote:'Una tarde de playa en el Caribe, con olor a mar.',
+  N:[['melon','Melón'],['sal','Sal marina'],['marino','Algas'],['pera','Pera'],['manzana','Manzana verde'],['cedro','Cedro']],
+  A:[['Acuático',100,'#3A9CC4'],['Afrutado',90,'#E8703A'],['Salado',80,'#9FB8C8'],['Amaderado',70,'#8B5E3C']],
+  ins:{img:'f95642.png',n:"Le Sel d'Issey",mt:'ISSEY|MIYAKE'}},
+ {k:'p5',mk:['🎯 VA CON','TODO'],mc:'m5',q:'q5',n:'n5',i:'i5',end:'p6',cut:'b83133.png',name:'MEGA MAN',sub:'LIMITED EDITION · EDP',bg:'#1F5FA8',bg2:'#5A9BE6',theme:'cielo',
+  quote:'Fresco y elegante, como una camisa recién planchada.',
+  N:[['jengibre','Jengibre'],['anana','Ananá'],['salvia','Salvia'],['bergamota','Bergamota'],['menta','Menta'],['cedro','Cedro']],
+  A:[['Fresco especiado',100,'#4AAEE0'],['Cítrico',90,'#E8C430'],['Aromático',80,'#6AB87A'],['Afrutado',70,'#E8703A']],
+  ins:{img:'f50757.png',n:'Y Eau de Parfum',mt:'YSL'}},
+ {k:'p6',mk:['🐺 FRESCO CON','CARÁCTER'],mc:'m6',q:'q6',n:'n6',i:'i6',end:'p7',cut:'b83137.png',name:'WILD ONE',sub:'GOLD EDITION · EDP',bg:'#B87A10',bg2:'#EBB845',theme:'salvaje',
+  quote:'Libre y salvaje, como manejar con las ventanillas bajas.',
+  N:[['pimienta','Pimienta'],['bergamota','Bergamota'],['lavanda','Lavanda'],['jengibre','Jengibre'],['vetiver','Vetiver'],['cedro','Cedro']],
+  A:[['Fresco especiado',100,'#4AAEE0'],['Aromático',90,'#6AB87A'],['Amaderado',80,'#8B5E3C'],['Cítrico',70,'#E8C430']],
+  ins:{img:'f31861.png',n:'Sauvage',m:'logo_dior.png'}},
+ {k:'p7',mk:['🌊 EL MÁS','ELEGANTE'],mc:'m7',q:'q7',n:'n7',i:'i7',end:'out',cut:'b138751.png',name:'NEXUS',sub:'ODYSSEY · EDP',bg:'#0D5C73',bg2:'#2E97B5',theme:'mar',
+  quote:'Profundo como el mar de noche.',
+  N:[['bergamota','Bergamota'],['marino','Notas marinas'],['salvia','Salvia'],['romero','Romero'],['incienso','Incienso'],['pachuli','Pachulí']],
+  A:[['Acuático',100,'#3A9CC4'],['Aromático',90,'#6AB87A'],['Fresco especiado',80,'#4AAEE0'],['Amaderado',70,'#8B5E3C']],
+  ins:{img:'f29727.png',n:'Acqua di Giò Profumo',mt:'ARMANI'}}
 ];
 function star(x,y,s,op,col){return '<path d="M'+x+' '+(y-s)+' L '+(x+s*0.28)+' '+y+' L '+x+' '+(y+s)+' L '+(x-s*0.28)+' '+y+' Z" fill="'+(col||'#fff')+'" opacity="'+(op==null?1:op)+'"/>';}
 function chip(txt,x,y,k,col,fs,rot,tc){fs=fs||40;var w=txt.length*fs*0.56+64;return '<g transform="translate('+x+','+y+') rotate('+(rot||0)+') scale('+back(cl(k))+')"><rect x="'+(-w/2+6)+'" y="'+(-fs*0.95+7)+'" width="'+w+'" height="'+(fs*1.9)+'" rx="'+(fs*0.95)+'" fill="rgba(0,0,0,.3)"/><rect x="'+(-w/2)+'" y="'+(-fs*0.95)+'" width="'+w+'" height="'+(fs*1.9)+'" rx="'+(fs*0.95)+'" fill="'+(col||'#fff')+'" stroke="#1a1a1a" stroke-width="6"/><text y="'+(fs*0.36)+'" text-anchor="middle" font-family="Baloo 2" font-weight="800" font-size="'+fs+'" fill="'+(tc||'#1a1a1a')+'">'+txt+'</text></g>';}
@@ -48,6 +53,9 @@ function chocoBar(cx,cy,s,rot){var o='<g transform="translate('+cx+','+cy+') rot
   o+='<path d="M-130 0 L 130 0" stroke="#2E160A" stroke-width="4"/><path d="M40 -70 L 130 -70 L 130 70 L 70 70 Q 50 30 90 0 Q 50 -30 40 -70 Z" fill="#9CCB5A" stroke="#1a1a1a" stroke-width="5"/>'+[[100,-40],[110,20],[80,40],[95,-10]].map(function(p){return '<circle cx="'+p[0]+'" cy="'+p[1]+'" r="7" fill="#6E9A30"/>';}).join('')+'</g>';return o;}
 // partículas temáticas
 function theme(th,t,lt,idx){var s='';
+  if(th==='playa'){s+='<path d="M0 1700 '+[0,1,2,3,4,5,6,7,8].map(function(i){return 'Q '+(i*135+67)+' '+(1670+Math.sin(t*2+i)*22)+' '+((i+1)*135)+' 1700';}).join(' ')+' L 1080 1920 L 0 1920 Z" fill="#3FB6D9" opacity=".55"/><rect y="1800" width="1080" height="120" fill="#F7D99A" opacity=".7"/>';for(var i=0;i<4;i++){var sw=Math.sin(t*1.2+i)*6;s+='<text x="'+(i%2?950:-20)+'" y="'+(330+i*380)+'" font-size="170" transform="rotate('+sw+' '+(i%2?1030:60)+' '+(330+i*380)+')">🌴</text>';}for(var i=0;i<8;i++){var ph=((t*0.1+hsh(i+2))%1);s+=nota(i%2?'melon':'sal',hsh(i*5)*1080,-100+ph*2100,0.6,t*35+i*40);}}
+  if(th==='cielo'){for(var i=0;i<7;i++){var x=((t*35*(0.5+hsh(i))+hsh(i*3)*1400)%1500)-200,y=140+hsh(i*7)*1600,r=55+hsh(i)*45;s+='<g opacity=".8"><circle cx="'+x+'" cy="'+y+'" r="'+r+'" fill="#fff"/><circle cx="'+(x+r*0.9)+'" cy="'+(y+10)+'" r="'+(r*0.75)+'" fill="#fff"/><circle cx="'+(x-r*0.9)+'" cy="'+(y+14)+'" r="'+(r*0.7)+'" fill="#fff"/></g>';}for(var i=0;i<8;i++){var ph=((t*0.1+hsh(i+4))%1);s+=nota(i%2?'jengibre':'anana',hsh(i*7)*1080,-100+ph*2100,0.6,t*40+i*30);}}
+  if(th==='salvaje'){for(var i=0;i<9;i++){var x=i*130-60+Math.sin(t+i)*10;s+='<path d="M'+x+' 0 q 40 300 -10 600 q -50 300 20 700 q 40 300 -10 620" stroke="#5A3A00" stroke-width="'+(18+hsh(i)*16)+'" fill="none" opacity=".18"/>';}for(var i=0;i<8;i++){var ph=((t*0.11+hsh(i+6))%1);s+=nota(i%2?'pimienta':'bergamota',hsh(i*5)*1080,-100+ph*2100,0.6,t*45+i*30);}}
   if(th==='mar'){for(var i=0;i<30;i++){var ph=((t*(0.07+hsh(i)*0.08)+hsh(i*3))%1);var x=hsh(i*5)*1080+Math.sin(t*2+i)*20;s+='<circle cx="'+x+'" cy="'+(1980-ph*2050)+'" r="'+(8+hsh(i*2)*22)+'" fill="none" stroke="#fff" stroke-width="4" opacity="'+(0.7-ph*0.5)+'"/>';}s+='<path d="M0 1760 '+[0,1,2,3,4,5,6,7,8].map(function(i){return 'Q '+(i*135+67)+' '+(1730+Math.sin(t*2+i)*25)+' '+((i+1)*135)+' 1760';}).join(' ')+' L 1080 1920 L 0 1920 Z" fill="#fff" opacity=".18"/>';for(var i=0;i<6;i++){var ph=((t*0.09+hsh(i+3))%1);s+=nota(i%2?'menta':'pomelo',hsh(i*7)*1080,-100+ph*2100,0.6,t*35+i*40);}}
   if(th==='bosque'){for(var i=0;i<14;i++){var ph=((t*0.1+hsh(i+2))%1);var x=hsh(i*3)*1080+Math.sin(t*1.5+i)*60;s+='<text x="'+x+'" y="'+(-100+ph*2100)+'" font-size="'+(60+hsh(i)*40)+'" transform="rotate('+(t*60+i*40)+' '+x+' '+(-100+ph*2100)+')">'+['🍃','🌿','🍃'][i%3]+'</text>';}for(var i=0;i<6;i++){var ph=((t*0.11+hsh(i+7))%1);s+=nota(i%2?'pomelo':'pimienta',hsh(i*5)*1080,-100+ph*2100,0.6,t*40+i*30);}}
   if(th==='limon'){for(var i=0;i<14;i++){var ph=((t*0.12+hsh(i+1))%1);s+=nota(i%3?'limon':'mandarina',hsh(i*3)*1080,-100+ph*2100,0.7+hsh(i)*0.4,t*50*(i%2?1:-1)+i*30);}for(var i=0;i<4;i++){var tw=Math.abs(Math.sin(t*1.5+i));s+='<circle cx="'+(150+i*260)+'" cy="'+(160+hsh(i)*120)+'" r="'+(18+tw*10)+'" fill="#FFF3A0" opacity="'+(0.3+0.4*tw)+'"/>';}}
@@ -99,7 +107,7 @@ function render(t){
     if(t>0.9){var sw=((t-0.9)*0.7)%1.6;out+='<clipPath id="ttl"><text x="540" y="'+yT+'" text-anchor="middle" font-family="Baloo 2" font-weight="800" font-size="'+fs+'">ODYSSEY</text></clipPath><rect x="'+(-200+sw*900)+'" y="'+(yT-240)+'" width="80" height="320" fill="#fff" opacity=".3" transform="skewX(-20)" clip-path="url(#ttl)"/>';}
     if(t>=C.h2&&t<C.h3){out+='<text x="540" y="'+yB+'" text-anchor="middle" font-family="DM Sans" font-weight="700" font-size="50" fill="#5A3A00" letter-spacing="6" opacity="'+ent(C.h2)+'">LA SERIE DE ARMAF QUE</text>'+popWord('CONQUISTÓ EL MUNDO',540,yB+100,92,t,C.h2+0.6,'#fff','#7A4A00','#7A4A00');}
     if(t>=C.h3&&t<C.h4){out+='<text x="540" y="'+yB+'" text-anchor="middle" font-family="DM Sans" font-weight="700" font-size="54" fill="#5A3A00" letter-spacing="4">'+'TE LA EXPLICO'.slice(0,Math.floor(cl((t-C.h3)/0.6)*13))+'</text>'+popWord('PERFUME X PERFUME',540,yB+100,90,t,C.h3+0.6,'#fff','#FF4F8B');}
-    if(t>=C.h4){var k4=back(cl((t-C.h4-0.2)/0.4));out+='<g transform="translate(540,'+(yB+60)+') rotate(-4) scale('+k4+')"><rect x="-470" y="-110" width="940" height="220" rx="50" fill="#fff" stroke="#1a1a1a" stroke-width="9"/><text y="-22" text-anchor="middle" font-family="Baloo 2" font-weight="800" font-size="62" fill="#12A6A0">PARTE 3</text><text y="68" text-anchor="middle" font-family="Baloo 2" font-weight="800" font-size="80" fill="#1a1a1a">FRESCOS Y FRUTALES 🍋</text></g>';}
+    if(t>=C.h4){var k4=back(cl((t-C.h4-0.2)/0.4));out+='<g transform="translate(540,'+(yB+60)+') rotate(-4) scale('+k4+')"><rect x="-470" y="-110" width="940" height="220" rx="50" fill="#fff" stroke="#1a1a1a" stroke-width="9"/><text y="-22" text-anchor="middle" font-family="Baloo 2" font-weight="800" font-size="62" fill="#12A6A0">PARTE 3</text><text y="68" text-anchor="middle" font-family="Baloo 2" font-weight="800" font-size="96" fill="#1a1a1a">LOS FRESCOS 🌊</text></g>';}
   }
   // ── PERFUMES
   P.forEach(function(p,idx){var t0=C[p.k],t1=C[p.end];if(t<t0-0.05||t>=t1)return;var lt=t-t0;bg=p.bg;
@@ -110,7 +118,7 @@ function render(t){
     var ik=cl(lt/0.35);if(ik<1)out+='<rect width="1080" height="1920" fill="'+p.bg2+'" opacity="'+(0.85*(1-eio(ik)))+'"/>';
     var insT=p.i?C[p.i]:(p.ins&&p.ins.misma?C[p.q]+1.2:1e9);var inK=p.ins?eio(cl((t-insT)/0.6)):0;
     // índice
-    out+='<g transform="translate(120,170) rotate('+(Math.sin(t*2)*6)+') scale('+back(cl(lt/0.35))+')"><circle r="62" fill="'+GOLD+'" stroke="#1a1a1a" stroke-width="6"/><text y="-6" text-anchor="middle" font-family="Baloo 2" font-weight="800" font-size="40">'+(idx+1)+'/6</text><text y="28" text-anchor="middle" font-family="DM Sans" font-weight="700" font-size="16">ODYSSEY</text></g>';
+    out+='<g transform="translate(120,170) rotate('+(Math.sin(t*2)*6)+') scale('+back(cl(lt/0.35))+')"><circle r="62" fill="'+GOLD+'" stroke="#1a1a1a" stroke-width="6"/><text y="-6" text-anchor="middle" font-family="Baloo 2" font-weight="800" font-size="40">'+(idx+1)+'/'+P.length+'</text><text y="28" text-anchor="middle" font-family="DM Sans" font-weight="700" font-size="16">ODYSSEY</text></g>';
     // nombre
     out+=popWord(p.name,540,310,p.name.length>12?96:116,t,t0+0.05,'#fff',p.bg2==='#A8E2F5'?'#2E6E8A':'#1a1a1a');
     out+=chip(p.sub,540,400,(lt-0.5)/0.35,'#1a1a1a',30,-2,'#fff');
@@ -132,7 +140,7 @@ function render(t){
         out+='<g opacity="'+(1-inK)+'" transform="translate('+x+','+y+') scale('+(back(kk)*pulse)+')"><circle r="'+r+'" fill="'+a[2]+'" stroke="#1a1a1a" stroke-width="6"/><text y="10" text-anchor="middle" font-family="Baloo 2" font-weight="800" font-size="34" fill="#fff" stroke="#1a1a1a" stroke-width="6" paint-order="stroke">'+Math.round(a[1]*cl(kk*1.5))+'%</text><text y="'+(r+34)+'" text-anchor="middle" font-family="Baloo 2" font-weight="800" font-size="'+(a[0].length>10?22:28)+'" fill="#fff" stroke="#1a1a1a" stroke-width="6" paint-order="stroke">'+a[0]+'</text></g>';});}
     // inspiración: VS
     if(inK>0){var ox=L(1300,800,inK);if(!p.ins.multi)out+='<circle cx="'+ox+'" cy="'+by+'" r="330" fill="url(#spot)"/>'+rays(ox,by,500,-t,GOLD,14,0.22);
-      if(p.ins.multi){var nm=p.ins.multi.length,xs=nm==2?[380,700]:[250,540,830],hh=280;p.ins.multi.forEach(function(r,j){var kj=cl((t-insT-0.3-j*0.18)/0.5);if(kj<=0)return;var yj=1265+Math.sin(t*2+j)*6;out+='<ellipse cx="'+xs[j]+'" cy="'+(yj+130)+'" rx="90" ry="14" fill="#000" opacity=".25"/>'+img(r[0],xs[j],yj,hh,kj,Math.sin(t*1.7+j)*3)+'<g transform="translate('+xs[j]+','+(yj+172)+') scale('+back(kj)+')"><rect x="-'+(r[1].length*(nm==3?7.2:8.6)+18)+'" y="-26" width="'+(r[1].length*(nm==3?14.4:17.2)+36)+'" height="48" rx="24" fill="#fff" stroke="#1a1a1a" stroke-width="5"/><text y="9" text-anchor="middle" font-family="Baloo 2" font-weight="800" font-size="'+(nm==3?23:27)+'">'+r[1]+'</text></g>';});}
+      if(p.ins.multi){var nm=p.ins.multi.length,xs=nm==1?[540]:nm==2?[380,700]:[250,540,830],hh=280;p.ins.multi.forEach(function(r,j){var kj=cl((t-insT-0.3-j*0.18)/0.5);if(kj<=0)return;var yj=1265+Math.sin(t*2+j)*6;out+='<ellipse cx="'+xs[j]+'" cy="'+(yj+130)+'" rx="90" ry="14" fill="#000" opacity=".25"/>'+img(r[0],xs[j],yj,hh,kj,Math.sin(t*1.7+j)*3)+'<g transform="translate('+xs[j]+','+(yj+172)+') scale('+back(kj)+')"><rect x="-'+(r[1].length*(nm==3?7.2:8.6)+18)+'" y="-26" width="'+(r[1].length*(nm==3?14.4:17.2)+36)+'" height="48" rx="24" fill="#fff" stroke="#1a1a1a" stroke-width="5"/><text y="9" text-anchor="middle" font-family="Baloo 2" font-weight="800" font-size="'+(nm==3?23:27)+'">'+r[1]+'</text></g>';});}
       else if(p.ins.choco)out+=chocoBar(ox,by,1.4*inK,Math.sin(t*2)*6);else out+=img(p.ins.img,ox,by,560,inK,Math.sin(t*1.7)*3);
       var vk=cl((t-insT-0.3)/0.35);if(!p.ins.multi)out+='<g transform="translate(560,'+(by-40)+') rotate(-10) scale('+back(vk)+')"><circle r="70" fill="#E5322B" stroke="#1a1a1a" stroke-width="7"/><text y="22" text-anchor="middle" font-family="Baloo 2" font-weight="800" font-size="62" fill="#fff">VS</text></g>';
       var bk=cl((t-insT-0.5)/0.4);if(p.ins.multi){var bk2=cl((t-insT)/0.4);out+='<g transform="translate(540,1035) rotate(-2) scale('+back(bk2)+')"><rect x="-470" y="-62" width="940" height="124" rx="34" fill="'+GOLD+'" stroke="#1a1a1a" stroke-width="7"/><text y="-8" text-anchor="middle" font-family="Baloo 2" font-weight="800" font-size="46">✨ COMPOSICIÓN PROPIA</text><text y="38" text-anchor="middle" font-family="DM Sans" font-weight="700" font-size="30">QUE VA PARA EL LADO DE 👇</text></g>';}else out+='<g transform="translate(540,1470) scale('+back(bk)+')"><rect x="-480" y="-90" width="960" height="180" rx="34" fill="#1a1a1a" stroke="'+GOLD+'" stroke-width="7"/><text x="-440" y="-28" font-family="Baloo 2" font-weight="800" font-size="32" fill="'+GOLD+'">'+(p.ins.misma?'⚡ MISMA INSPIRACIÓN':'⚡ SE INSPIRA EN')+'</text><text x="-440" y="40" font-family="Baloo 2" font-weight="800" font-size="'+(p.ins.n.length>20?44:54)+'" fill="#fff">'+p.ins.n+'</text>'+(p.ins.m?'<image href="fotos/'+p.ins.m+'" x="200" y="-60" width="250" height="120" preserveAspectRatio="xMidYMid meet" style="filter:invert(1)"/>':p.ins.mt?(p.ins.mt.indexOf('|')>=0?'<text x="320" y="-6" text-anchor="middle" font-family="DM Sans" font-weight="700" font-size="32" letter-spacing="5" fill="#fff">'+p.ins.mt.split('|')[0]+'</text><text x="320" y="36" text-anchor="middle" font-family="DM Sans" font-weight="700" font-size="32" letter-spacing="5" fill="#fff">'+p.ins.mt.split('|')[1]+'</text>':'<text x="325" y="20" text-anchor="middle" font-family="DM Sans" font-weight="700" font-size="'+(p.ins.mt.length>6?38:46)+'" letter-spacing="'+(p.ins.mt.length>6?4:10)+'" fill="#fff">'+p.ins.mt+'</text>'):'<text x="330" y="22" text-anchor="middle" font-size="80">🍫</text>')+'</g>';}
@@ -143,7 +151,7 @@ function render(t){
     out+=popWord('¿CUÁL ES TU',540,420,104,t,C.out,'#fff')+popWord('ODYSSEY?',540,560,150,t,C.out+0.4,GOLD,'#5A3A00');
     var spin=t*0.8;var arr=[];P.forEach(function(p,i){var a=spin+i*6.283/7;var z=Math.sin(a);arr.push({p:p,x:540+Math.cos(a)*400,y:1100+z*110,s:0.75+z*0.3,z:z});});arr.sort(function(a,b){return a.z-b.z;});
     arr.forEach(function(o){out+=img(o.p.cut,o.x,o.y,380*o.s,ent(C.out+0.2),0);});
-    if(t>=C.out2){out+=chip('📲 SEGUINOS: SE VIENEN MÁS SERIES',540,1450,(t-C.out2)/0.35,'#FF4F8B',42,-3,'#fff');for(var i=0;i<6;i++){var ph=((t*1.2+i/6)%1);out+='<text x="'+(260+i*110)+'" y="'+(1530-ph*120)+'" font-size="56" opacity="'+(1-ph)+'">'+['💛','📲','✨'][i%3]+'</text>';}}
+    if(t>=C.out2){out+=(C.fol!=null&&t>=C.fol)?chip('📲 SEGUINOS: SE VIENEN MÁS SERIES',540,1450,(t-C.fol)/0.35,'#FF4F8B',42,-3,'#fff'):chip('🌶️ PARTE 4: FRUTALES Y SPICY',540,1450,(t-C.out2)/0.35,'#E5322B',44,-3,'#fff');for(var i=0;i<6;i++){var ph=((t*1.2+i/6)%1);out+='<text x="'+(260+i*110)+'" y="'+(1530-ph*120)+'" font-size="56" opacity="'+(1-ph)+'">'+['🌶️','🍓','🌸'][i%3]+'</text>';}}
   }
   document.getElementById('bgc').style.background=bg;
   document.getElementById('sv').innerHTML=out;
