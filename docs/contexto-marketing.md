@@ -165,3 +165,11 @@ Más adelante: campañas por fecha (Black Friday/Cyber, Navidad, Día de la Madr
   voz: "…lo encontrás en distribuidorabelle.com" + pantalla final "LOS ENCONTRÁS EN / logo B. / distribuidorabelle.com".
 - Fotos de perfumes en videos: SOLO LA BOTELLA, sin caja, fondo transparente (Fragrantica thumbs `fimgs.net/mdimg/perfume-thumbs/dark-375x500.<id>.2x.avif` vienen con alfa). Nada de recortes con pedazos blancos.
 - Voz de las series y publicidades: Dante.
+
+## Series — ajustes Odyssey P1 v4 (2026-11-17)
+- Intro de cada serie: **dorado, claro y llamativo** (fondo champagne/dorado con rayos y destellos, logo de la marca como "planeta" dorado con los frascos orbitando). Ger rechazó el fondo oscuro tipo espacio.
+- En la transición "Parte X" los frascos **siguen orbitando igual** (nada de giro/flip 2D, a Ger no le gustó).
+- Cada perfume lleva, además de la frase poética, una **línea marketinera** en voz + **sticker estallido** amarillo (ej. "🔥 ROMPECUELLOS / EL MÁS VENDIDO", "💖 GUSTA A TODAS", "🎁 IDEAL PARA REGALAR").
+- Pronunciación: en el texto del TTS escribir **"distribuidora Bel, punto com"** (si no, Dante dice "beye").
+- Audio: `alimiter` SIEMPRE con `level=disabled` (si no, aplica auto-ganancia y clipea a 0 dB).
+- Tiempos de frase: transcribir la voz con ElevenLabs Scribe (timestamps por palabra) es más confiable que adivinar con silencedetect.
