@@ -26,24 +26,24 @@ F=[
 ('i4',"Se inspira en Le Beau Le Parfum, de Jean Paul Gaultier.",1,63.42,66.16),
 ('p5',"Revolution:",2,0.14,0.82),
 ('n5',"ananá y grosella que estallan sobre praliné y vainilla.",2,1.32,4.32),
-('q5',"Frutal, dulce y con actitud.",2,4.94,7.1),
+('q5',"Frutal, dulce y con actitud.",2,4.94,7.10),
 ('m5',"Para los que no quieren oler igual que todos.",2,7.68,9.68),
 ('i5',"Composición propia de Armaf.",2,10.18,11.66),
-('p6',"Aoud:",2,12.3,12.64),
+('p6',"Aoud:",2,12.30,12.64),
 ('n6',"azafrán, lavanda y oud.",2,13.22,15.16),
 ('q6',"Madera oscura y especias, como entrar a un palacio árabe.",2,15.72,18.98),
-('m6',"Lujo de nicho, a un precio que no lo parece.",2,19.56,22.18),
-('i6',"Se inspira en Haltane, de Parfums de Marly.",2,22.7,24.88),
-('p7',"Eau de Montagne:",2,25.38,26.18),
-('n7',"almendra, leche y vainilla, con cacao y sándalo.",2,26.7,30.24),
-('q7',"Suave y cremoso, como una nevada dulce.",2,30.84,33.26),
-('m7',"La joyita escondida de la serie:",2,33.86,35.44),
-(None,"pocos la conocen… y todos preguntan.",2,35.98,38.42),
-('i7',"Se inspira en Blanche Bête, de Liquides Imaginaires.",2,38.98,41.34),
-('out',"¿Cuál es tu Odyssey?",2,41.84,42.7),
-(None,"Contanos en los comentarios.",2,43.14,44.42),
-('out2',"En la parte tres, los frescos y frutales.",2,44.84,47.34),
-('end',"Y si querés el tuyo, lo encontrás en distribuidorabelle.com",2,47.7,50.96),
+('m6',"Lujo de nicho, a un precio que no lo parece.",2,19.50,22.53),
+('i6',"Se inspira en Oud for Greatness, de Initio.",2,23.15,25.90),
+('p7',"Eau de Montagne:",2,26.48,27.28),
+('n7',"almendra, leche y vainilla, con cacao y sándalo.",2,27.80,31.34),
+('q7',"Suave y cremoso, como una nevada dulce.",2,31.94,34.36),
+('m7',"La joyita escondida de la serie:",2,34.96,36.54),
+(None,"pocos la conocen… y todos preguntan.",2,37.08,39.52),
+('i7',"Se inspira en Blanche Bête, de Liquides Imaginaires.",2,40.08,42.44),
+('out',"¿Cuál es tu Odyssey?",2,42.94,43.80),
+(None,"Contanos en los comentarios.",2,44.24,45.52),
+('out2',"En la parte tres, los frescos y frutales.",2,45.94,48.44),
+('end',"Y si querés el tuyo, lo encontrás en distribuidorabelle.com",2,48.80,52.06),
 ]
 OFF={1:0.0,2:66.75}
 import json,re
@@ -60,6 +60,6 @@ for k,txt,b,a,z in F:
         if len(line)>=6 or (len(line)>=3 and re.search(r'[,:…;]$',w)) or j==len(wt)-1:
             nxt=wt[j+1][1] if j+1<len(wt) else z
             subs.append({'t0':line[0]['t'],'t1':round(nxt+0.15 if j==len(wt)-1 else nxt-0.02,3),'w':line}); line=[]
-cues['hook']=0;cues['t1']=-5;cues['dur']=round(OFF[2]+51.2+3.0,2)
+cues['hook']=0;cues['t1']=-5;cues['dur']=round(OFF[2]+52.3+3.0,2)
 open('timing.js','w').write('window.CUES='+json.dumps(cues)+';\nwindow.SUBS='+json.dumps(subs,ensure_ascii=False)+';\n')
 print(cues)
