@@ -283,3 +283,106 @@ No es tu imaginación: es QUÍMICA ⚗️
 
 #perfumes #quimicadelapiel #perfumetips #academiabelle #tipsdeperfume #comoelegirperfume #perfumesarabes #perfumeriaargentina #perfumesoriginales #fragancias #perfumelover #perfumetok #aprendeconbelle #distribuidorabelle
 ```
+
+---
+
+## 11) Serie Odyssey · Parte 1 — Los dulces
+Portada: `portadas-series/portada_odyssey_p1_dulces_9x16.png`
+
+```
+🍬 ODYSSEY: la serie de Armaf que conquistó el mundo 🌍
+Te la explico perfume por perfume · PARTE 1: LOS DULCES
+
+🍊 Mandarin Sky → el rompecuellos, el más vendido · inspirado en Scandal Pour Homme (JPG)
+🌙 Mandarin Sky Elixir → más intenso, más duradero · inspirado en Scandal Le Parfum
+📸 Mandarin Sky Vintage → edición de colección
+🍒 Black Forest → el postre prohibido · composición propia
+🍫 Dubai Chocolat → el capricho más viral del mundo, hecho perfume
+🍓 Candee → el que les gusta a todas · inspirado en Burberry Her Elixir
+☁️ Marshmallow → ideal para regalar · inspirado en Yum Boujee Marshmallow (Kayali)
+☕ Toffee Coffee → café con dulce de leche · inspirado en Amore Caffè (Mancera)
+🥤 Soda Pop → el más original de la serie · inspirado en Tonka Cola (Mancera)
+
+👇 ¿Cuál es TU Odyssey? Contanos en los comentarios
+📲 Seguinos: las otras partes y más series de perfumes están en nuestro perfil
+🛒 Los encontrás en distribuidorabelle.com
+
+#odyssey #armaf #armafodyssey #mandarinsky #perfumesarabes #perfumesdulces #gourmand #perfumes #perfumetok #perfumelover #fragancias #perfumeriaargentina #perfumesoriginales #dupes #perfumedupe #blackforest #dubaichocolate #candee #marshmallow #viral #parati #fyp #reels #distribuidorabelle
+```
+
+---
+
+## 12) Serie Odyssey · Parte 2 — Los intensos
+Portada: `portadas-series/portada_odyssey_p2_intensos_9x16.png`
+
+```
+🔥 ODYSSEY · PARTE 2: LOS INTENSOS
+Los que se sienten, los que dejan estela, los que hacen que te pregunten qué tenés puesto 😮‍💨
+
+👔 Homme → tu perfume firma · inspirado en Tom Ford Noir Extreme
+💘 Homme White → imán de elogios · inspirado en Stronger With You (Armani)
+🚀 Spectra → proyección bestial · inspirado en Ultra Male (JPG)
+💙 Spectra Blue → para coleccionistas · inspirado en Ultra Male (JPG)
+🌴 Artisto → verano todo el año · inspirado en Le Beau Le Parfum (JPG)
+⚡ Revolution → único y con actitud · composición propia
+👑 Aoud → lujo de nicho · inspirado en Oud for Greatness (Initio)
+🤫 Eau de Montagne → la joyita escondida · inspirado en Blanche Bête (Liquides Imaginaires)
+
+👇 ¿Con cuál te quedás? Comentá 🔥
+📲 Seguinos: las otras partes y más series están en nuestro perfil
+🛒 Los encontrás en distribuidorabelle.com
+
+#odyssey #armaf #armafodyssey #perfumesintensos #perfumesarabes #perfumesdehombre #perfumesmasculinos #oud #ultramale #noirextreme #strongerwithyou #perfumes #perfumetok #perfumelover #fragancias #perfumeriaargentina #dupes #perfumedupe #nicho #viral #parati #fyp #reels #distribuidorabelle
+```
+
+---
+
+## 13) Serie Odyssey · Parte 3 — Los frescos
+Portada: `portadas-series/portada_odyssey_p3_frescos_9x16.png`
+
+```
+🌊 ODYSSEY · PARTE 3: LOS FRESCOS
+Para el calor, el laburo, el gym y todos los días ☀️
+
+🌊 Aqua → frescura todo el día · inspirado en Invictus Platinum (Paco Rabanne)
+👑 Tyrant → el rey de los frescos · inspirado en Sauvage (Dior)
+🍋 Limoni Fresh → puro verano · composición propia
+🏝️ Bahamas → vacaciones en un spray · inspirado en Le Sel d'Issey (Issey Miyake)
+🎯 Mega Man → va con todo · inspirado en Y Eau de Parfum (YSL)
+🐺 Wild One → frescura con carácter · inspirado en Sauvage (Dior)
+🌊 Nexus → el fresco más elegante · inspirado en Acqua di Giò Profumo (Armani)
+
+👇 ¿Cuál usarías este verano? Contanos
+📲 Seguinos: las otras partes y más series están en nuestro perfil
+🛒 Los encontrás en distribuidorabelle.com
+
+#odyssey #armaf #armafodyssey #perfumesfrescos #perfumesdeverano #perfumesarabes #sauvage #invictus #acquadigio #perfumesmasculinos #perfumes #perfumetok #perfumelover #fragancias #perfumeriaargentina #perfumesoriginales #dupes #perfumedupe #verano #viral #parati #fyp #reels #distribuidorabelle
+```
+
+---
+
+## 14) Serie Odyssey · Parte 4 — Frutales, florales y Spicy Collection
+Portada: `portadas-series/portada_odyssey_p4_frutales_spicy_9x16.png`
+
+```
+🌶️ ODYSSEY · PARTE 4: FRUTALES, FLORALES… ¡Y LA SPICY COLLECTION!
+El final de la serie, con los lanzamientos más locos de Armaf 🤯
+
+🌸 Li'chi Lush → súper original · inspirado en Harrods Ruby Naga (Stéphane Humbert Lucas)
+🎀 Pink Pop → te pone de buen humor · inspirado en Kurky (Maison Francis Kurkdjian)
+💋 French Kiss → romántico y adictivo · inspirado en Vanilla Powder (Matière Première) con un toque de Delina
+🥭 Go Mango → adictivo y diferente · inspirado en God of Fire (Stéphane Humbert Lucas)
+🤍 Femme White → elegancia pura · composición propia, para el lado de Gucci Bloom, Valentino Donna y Coco Mademoiselle
+🖤 Femme Black → seducción nocturna · composición propia, para el lado de Good Girl y My Burberry Black
+
+🔥 SPICY COLLECTION
+🍅 Bloody Hot! → inspirado en el trago Bloody Mary · el más audaz
+🍑 Jalapeach-O → dulce y picante a la vez
+🔔 Ring My Bell → rareza de colección · para el lado de Santal 33 (Le Labo)
+
+👇 ¿Te animarías a uno picante? 🌶️ Comentá
+📲 Seguinos: todas las partes y más series de perfumes están en nuestro perfil
+🛒 Los encontrás en distribuidorabelle.com
+
+#odyssey #armaf #armafodyssey #spicycollection #perfumesfrutales #perfumesdemujer #perfumesfemeninos #perfumesarabes #pinkpop #frenchkiss #lichilush #perfumes #perfumetok #perfumelover #fragancias #perfumeriaargentina #perfumesoriginales #dupes #perfumedupe #nuevo #viral #parati #fyp #reels #distribuidorabelle
+```
