@@ -106,7 +106,7 @@ function render(t){
     out+='<circle cx="540" cy="900" r="1400" fill="'+p.bg2+'" opacity=".55"/>';
     out+=theme(p.theme,t,lt,idx);
     // iris de entrada
-    var ik=cl(lt/0.45);if(ik<1)out+='<circle cx="540" cy="900" r="'+(1500*(1-eio(ik)))+'" fill="none" stroke="'+p.bg2+'" stroke-width="'+(3000*(1-ik))+'" opacity=".9"/>';
+    var ik=cl(lt/0.35);if(ik<1)out+='<rect width="1080" height="1920" fill="'+p.bg2+'" opacity="'+(0.85*(1-eio(ik)))+'"/>';
     var insT=p.i?C[p.i]:(p.ins&&p.ins.misma?C[p.q]+1.2:1e9);var inK=p.ins?eio(cl((t-insT)/0.6)):0;
     // índice
     out+='<g transform="translate(120,170) rotate('+(Math.sin(t*2)*6)+') scale('+back(cl(lt/0.35))+')"><circle r="62" fill="'+GOLD+'" stroke="#1a1a1a" stroke-width="6"/><text y="-6" text-anchor="middle" font-family="Baloo 2" font-weight="800" font-size="40">'+(idx+1)+'/7</text><text y="28" text-anchor="middle" font-family="DM Sans" font-weight="700" font-size="16">ODYSSEY</text></g>';
@@ -114,11 +114,11 @@ function render(t){
     out+=popWord(p.name,540,310,p.name.length>12?96:116,t,t0+0.05,'#fff',p.bg2==='#A8E2F5'?'#2E6E8A':'#1a1a1a');
     out+=chip(p.sub,540,400,(lt-0.5)/0.35,'#1a1a1a',30,-2,'#fff');
     // frasco
-    var bx=L(540,290,inK),bs=L(1,0.72,inK),by=930+Math.sin(t*2)*12;var dk=cl((lt-0.15)/0.55);var drop=(1-eio(dk))*-900;
-    out+=rays(bx,by,700,t,'#fff',18,0.2)+'<circle cx="'+bx+'" cy="'+by+'" r="'+(360*bs)+'" fill="url(#halo)"/>';
-    out+='<ellipse cx="'+bx+'" cy="'+(by+310*bs)+'" rx="'+(230*bs)+'" ry="'+(30*bs)+'" fill="#000" opacity=".3"/>';
+    var bx=L(540,290,inK),bs=L(1,0.72,inK),by=930+Math.sin(t*2)*12;var dk=cl((lt-0.1)/0.55);var drop=(1-eio(dk))*-160;var ek=eio(dk);
+    out+=rays(bx,by,700,t,'#fff',18,0.2*ek)+'<circle cx="'+bx+'" cy="'+by+'" r="'+(360*bs*(0.6+0.4*ek))+'" fill="url(#halo)" opacity="'+ek+'"/>';
+    out+='<ellipse cx="'+bx+'" cy="'+(by+310*bs)+'" rx="'+(230*bs*ek)+'" ry="'+(30*bs*ek)+'" fill="#000" opacity="'+(0.3*ek)+'"/>';
     out+='<g transform="translate(0,'+drop+')">'+img(p.cut,bx,by,620*bs,dk,Math.sin(t*1.5)*3)+'</g>';
-    if(dk>0.85&&dk<1)out+='<circle cx="'+bx+'" cy="'+(by+300)+'" r="'+(200+(dk-0.85)*2000)+'" fill="none" stroke="#fff" stroke-width="10" opacity="'+((1-dk)*6)+'"/>';
+    
     // notas que salen del frasco y orbitan
     var nk=cl((t-C[p.n])/0.8);var fade=1-inK;if(nk>0&&fade>0.02){p.N.forEach(function(n_,j){var kj=cl((t-C[p.n]-j*0.12)/0.7);if(kj<=0)return;var a=-Math.PI/2+j*6.283/6+t*0.25;var R=L(0,1,eio(kj));var x=bx+Math.cos(a)*400*R,y=by+Math.sin(a)*285*R;
         out+='<g opacity="'+fade+'" transform="translate('+x+','+y+') scale('+back(kj)+')"><circle r="74" fill="#fff" stroke="#1a1a1a" stroke-width="6"/></g>'+'<g opacity="'+fade+'">'+nota(n_[0],x,y-6,0.8*back(kj),Math.sin(t*2+j)*8)+'<g transform="translate('+x+','+(y+80)+') scale('+back(kj)+')"><rect x="'+(-n_[1].length*11-16)+'" y="-22" width="'+(n_[1].length*22+32)+'" height="40" rx="20" fill="#1a1a1a"/><text y="8" text-anchor="middle" font-family="Baloo 2" font-weight="800" font-size="26" fill="#fff">'+n_[1]+'</text></g></g>';});}
