@@ -55,4 +55,4 @@ catálogo personalizado con TU marca y TUS precios en PDF, fichas que venden, ta
 - "Precios mayoristas · combos · cuenta corriente".
 - Cierre con CTA.
 
-Voces: Dante en publicidad; femenina en las series (o alternamos, a elección de Ger).
+Voces: DANTE en todo (series y publicidad) — pedido de Ger.
