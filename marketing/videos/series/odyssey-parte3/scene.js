@@ -88,8 +88,8 @@ function render(t){
       for(var i=0;i<10;i++){var ph=((t*0.12+hsh(i+20))%1);out+=nota(['limon','naranja','mango','anana','pomelo'][i%5],hsh(i*7)*1000+40,-100+ph*2100,0.8+hsh(i)*0.4,t*50+i*30);}out+='</g>';}
     // planeta = logo Armaf
     var PX=540,PY=980,PR=360*(1-0.15*sweet);var kp=1;
-    var orb=function(front){var s_='';var spin=t*0.55+(t>C.h4?(t-C.h4)*0.9:0);var arr=[];P.forEach(function(p,i){var a=spin+i*6.283/7;var z=Math.sin(a);if((z>0.15)!==front)return;var rx=470,ry=330;arr.push({p:p,x:PX+Math.cos(a)*rx,y:PY+z*ry*(sweet>0?1:1)-(sweet>0?0:0),s:0.85+z*0.32,z:z,i:i});});arr.sort(function(a,b){return a.z-b.z;});
-      arr.forEach(function(o){var kk=1;var sx=1;s_+='<ellipse cx="'+o.x+'" cy="'+(o.y+o.s*260)+'" rx="'+(o.s*125)+'" ry="'+(o.s*18)+'" fill="#000" opacity=".25"/><g transform="translate('+o.x+','+o.y+') scale('+sx+',1) rotate(0) translate('+(-o.x)+','+(-o.y)+')">'+img(o.p.cut,o.x,o.y,410*o.s,kk,0)+'</g>';});return s_;};
+    var orb=function(front){var s_='';var spin=t*0.55+(t>C.h4?(t-C.h4)*0.9:0);var arr=[];P.forEach(function(p,i){var a=spin+i*6.283/P.length;var z=Math.sin(a);if((z>0.15)!==front)return;var rx=470,ry=330;arr.push({p:p,x:PX+Math.cos(a)*rx,y:PY+z*ry*(sweet>0?1:1)-(sweet>0?0:0),s:0.85+z*0.32,z:z,i:i});});arr.sort(function(a,b){return a.z-b.z;});
+      arr.forEach(function(o){var kk=1;var sx=1;s_+='<ellipse cx="'+o.x+'" cy="'+(o.y+o.s*260)+'" rx="'+(o.s*125)+'" ry="'+(o.s*18)+'" fill="#000" opacity=".25"/><g transform="translate('+o.x+','+o.y+') scale('+sx+',1) rotate(0) translate('+(-o.x)+','+(-o.y)+')">'+img(o.p.cut,o.x,o.y,(P.length>7?380:410)*o.s,kk,0)+'</g>';});return s_;};
     out+=orb(false);
     var gl=((t*0.35)%1.6)-0.3;
     out+='<g transform="translate('+PX+','+PY+')">'+
@@ -149,7 +149,7 @@ function render(t){
   // ── CIERRE
   if(t>=C.out&&t<C.end){bg='#170F2E';out+=rays(540,1100,1500,t,'#8E6CF5',24,0.14);
     out+=popWord('¿CUÁL ES TU',540,420,104,t,C.out,'#fff')+popWord('ODYSSEY?',540,560,150,t,C.out+0.4,GOLD,'#5A3A00');
-    var spin=t*0.8;var arr=[];P.forEach(function(p,i){var a=spin+i*6.283/7;var z=Math.sin(a);arr.push({p:p,x:540+Math.cos(a)*400,y:1100+z*110,s:0.75+z*0.3,z:z});});arr.sort(function(a,b){return a.z-b.z;});
+    var spin=t*0.8;var arr=[];P.forEach(function(p,i){var a=spin+i*6.283/P.length;var z=Math.sin(a);arr.push({p:p,x:540+Math.cos(a)*400,y:1100+z*110,s:0.75+z*0.3,z:z});});arr.sort(function(a,b){return a.z-b.z;});
     arr.forEach(function(o){out+=img(o.p.cut,o.x,o.y,380*o.s,ent(C.out+0.2),0);});
     if(t>=C.out2){out+=(C.fol!=null&&t>=C.fol)?chip('📲 SEGUINOS: SE VIENEN MÁS SERIES',540,1450,(t-C.fol)/0.35,'#FF4F8B',42,-3,'#fff'):chip('🌶️ PARTE 4: FRUTALES Y SPICY',540,1450,(t-C.out2)/0.35,'#E5322B',44,-3,'#fff');for(var i=0;i<6;i++){var ph=((t*1.2+i/6)%1);out+='<text x="'+(260+i*110)+'" y="'+(1530-ph*120)+'" font-size="56" opacity="'+(1-ph)+'">'+['🌶️','🍓','🌸'][i%3]+'</text>';}}
   }
