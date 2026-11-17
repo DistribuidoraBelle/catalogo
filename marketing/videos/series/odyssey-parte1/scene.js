@@ -4,37 +4,37 @@ function hsh(i){var x=Math.sin(i*127.1+311.7)*43758.5453;return x-Math.floor(x);
 var PAL=['#FF4F8B','#3DB8F5','#F0A21A','#22C3B0','#8E6CF5','#FF5A4E'];
 var GOLD='#F4C542';
 var P=[
- {k:'p1',q:'q1',n:'n1',i:'i1',end:'p2',cut:'b2046.png',name:'MANDARIN SKY',sub:'FOR MEN · EDP',bg:'#FF8A3D',bg2:'#FFB347',theme:'naranja',
+ {k:'p1',mk:['🔥 ROMPECUELLOS','EL MÁS VENDIDO'],mc:'m1',q:'q1',n:'n1',i:'i1',end:'p2',cut:'b2046.png',name:'MANDARIN SKY',sub:'FOR MEN · EDP',bg:'#FF8A3D',bg2:'#FFB347',theme:'naranja',
   quote:'Un atardecer naranja que se derrite en caramelo.',
   N:[['mandarina','Mandarina'],['naranja','Naranja'],['caramelo','Caramelo'],['tonka','Haba tonka'],['cedro','Cedro'],['ambargris','Ambroxan']],
   A:[['Cítrico',100,'#E8C430'],['Caramelo',90,'#D48C30'],['Dulce',80,'#E87AAA'],['Ámbar',70,'#D4A020']],
   ins:{img:'f68074.png',n:'Scandal Pour Homme',m:'logo_jpg.png'}},
- {k:'p2',q:'q2',n:'n2',i:'i2',end:'p3',cut:'b2047.png',name:'MANDARIN SKY',sub:'ELIXIR',bg:'#1E3A8A',bg2:'#3B6FE0',theme:'noche',
+ {k:'p2',mk:['💪 + INTENSO','+ DURADERO'],mc:'m2',q:'q2',n:'n2',i:'i2',end:'p3',cut:'b2047.png',name:'MANDARIN SKY',sub:'ELIXIR',bg:'#1E3A8A',bg2:'#3B6FE0',theme:'noche',
   quote:'El mismo cielo… pero de noche.',
   N:[['vainilla','Vainilla'],['incienso','Incienso'],['pimienta','Pimienta negra'],['mandarina','Mandarina'],['caramelo','Caramelo'],['vetiver','Vetiver']],
   A:[['Cítrico',100,'#E8C430'],['Avainillado',90,'#D4A830'],['Dulce',80,'#E87AAA'],['Caramelo',70,'#D48C30']],
   ins:{img:'b_scandal_lp.png',n:'Scandal Le Parfum',m:'logo_jpg.png'}},
- {k:'p3',q:'q3',n:'n3',i:null,end:'p4',cut:'b2481.png',name:'MANDARIN SKY',sub:'VINTAGE EDITION',bg:'#B07A3E',bg2:'#E3B77A',theme:'vintage',
+ {k:'p3',mk:['💎 EDICIÓN','DE COLECCIÓN'],mc:'m3',q:'q3',n:'n3',i:null,end:'p4',cut:'b2481.png',name:'MANDARIN SKY',sub:'VINTAGE EDITION',bg:'#B07A3E',bg2:'#E3B77A',theme:'vintage',
   quote:'Una foto vieja que todavía huele a verano.',
   N:[['mandarina','Mandarina'],['naranja','Naranja'],['salvia','Salvia'],['caramelo','Caramelo'],['tonka','Haba tonka'],['vetiver','Vetiver']],
   A:[['Cítrico',100,'#E8C430'],['Caramelo',90,'#D48C30'],['Dulce',80,'#E87AAA'],['Ámbar',70,'#D4A020']],
   ins:{img:'f68074.png',n:'Scandal Pour Homme',m:'logo_jpg.png',misma:true}},
- {k:'p4',q:'q4',n:'n4',i:'i4',end:'p5',cut:'b2380.png',name:'BLACK FOREST',sub:'GOURMAND · EDP',bg:'#4A1622',bg2:'#8E2A3E',theme:'cereza',
+ {k:'p4',mk:['😍 ¿QUÉ TENÉS','PUESTO?'],mc:'m4',q:'q4',n:'n4',i:'i4',end:'p5',cut:'b2380.png',name:'BLACK FOREST',sub:'GOURMAND · EDP',bg:'#4A1622',bg2:'#8E2A3E',theme:'cereza',
   quote:'Un postre prohibido que se lleva en la piel.',
   N:[['cereza','Cereza'],['miel','Miel'],['praline','Praliné'],['caramelo','Caramelo'],['vainilla','Vainilla'],['canela','Canela']],
   A:[['Dulce',100,'#E87AAA'],['Avainillado',90,'#D4A830'],['Caramelo',80,'#D48C30'],['Acerezado',70,'#B03A60']],
   ins:null},
- {k:'p5',q:'q5',n:'n5',i:'q5',end:'p6',cut:'b2038.png',name:'DUBAI CHOCOLAT',sub:'GOURMAND · EDP',bg:'#5E8A2E',bg2:'#9CCB5A',theme:'choco',
+ {k:'p5',mk:['📱 FUROR','EN REDES'],mc:'m5',q:'q5',n:'n5',i:'q5',end:'p6',cut:'b2038.png',name:'DUBAI CHOCOLAT',sub:'GOURMAND · EDP',bg:'#5E8A2E',bg2:'#9CCB5A',theme:'choco',
   quote:'El capricho más viral del mundo, hecho perfume.',
   N:[['pistacho','Pistacho'],['chocolate','Chocolate'],['galleta','Knafeh'],['cafe','Café'],['avellana','Avellana'],['caramelo','Caramelo']],
   A:[['Cálido especiado',100,'#C45A1A'],['Dulce',90,'#E87AAA'],['Amaderado',80,'#8B5E3C'],['Café',60,'#5C3420']],
   ins:{choco:true,n:'Chocolate de Dubái'}},
- {k:'p6',q:'q6',n:'n6',i:'i6',end:'p7',cut:'b2037.png',name:'CANDEE',sub:'FEMME · EDP',bg:'#FF5C9A',bg2:'#FF9CC2',theme:'feria',
+ {k:'p6',mk:['💖 GUSTA','A TODAS'],mc:'m6',q:'q6',n:'n6',i:'i6',end:'p7',cut:'b2037.png',name:'CANDEE',sub:'FEMME · EDP',bg:'#FF5C9A',bg2:'#FF9CC2',theme:'feria',
   quote:'Una tarde de feria, dulce y coqueta.',
   N:[['frutilla','Frutilla'],['frambuesa','Frambuesa'],['caramelo','Caramelo'],['durazno','Durazno'],['jazmin','Jazmín'],['maracuya','Maracuyá']],
   A:[['Afrutado',100,'#E8703A'],['Dulce',90,'#E87AAA'],['Pachulí',80,'#7A5A3A'],['Caramelo',70,'#D48C30']],
   ins:{img:'f75968.png',n:'Burberry Her Elixir',m:'logo_burberry.png'}},
- {k:'p7',q:'q7',n:'n7',i:'i7',end:'out',cut:'b2638.png',name:'MARSHMALLOW',sub:'FEMME · EDP',bg:'#4FB3D9',bg2:'#A8E2F5',theme:'nube',
+ {k:'p7',mk:['🎁 IDEAL PARA','REGALAR'],mc:'m7',q:'q7',n:'n7',i:'i7',end:'out',cut:'b2638.png',name:'MARSHMALLOW',sub:'FEMME · EDP',bg:'#4FB3D9',bg2:'#A8E2F5',theme:'nube',
   quote:'Suave como una nube de azúcar.',
   N:[['malvavisco','Malvavisco'],['vainilla','Vainilla'],['praline','Praliné'],['coco','Coco'],['frutilla','Frutilla'],['almizcle','Almizcle']],
   A:[['Dulce',100,'#E87AAA'],['Afrutado',80,'#E8703A'],['Atalcado',60,'#D4B0C4'],['Avainillado',50,'#D4A830']],
@@ -63,31 +63,30 @@ function theme(th,t,lt,idx){var s='';
   return s;}
 function render(t){
   var out='',bg='#2B1D4E';var ent=function(t0){return eio(cl((t-t0)/0.5));};
-  out+='<defs><linearGradient id="gGold" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#FFF3B0"/><stop offset=".5" stop-color="#F4C542"/><stop offset="1" stop-color="#C98A12"/></linearGradient><radialGradient id="halo"><stop offset="0" stop-color="#fff" stop-opacity=".75"/><stop offset="1" stop-color="#fff" stop-opacity="0"/></radialGradient><radialGradient id="spot"><stop offset="0" stop-color="#FFF6CC" stop-opacity=".8"/><stop offset="1" stop-color="#FFF6CC" stop-opacity="0"/></radialGradient><linearGradient id="refl" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#fff" stop-opacity=".35"/><stop offset="1" stop-color="#fff" stop-opacity="0"/></linearGradient><radialGradient id="planet" cx=".38" cy=".35" r=".75"><stop offset="0" stop-color="#3A4A8A"/><stop offset=".6" stop-color="#1A1F4A"/><stop offset="1" stop-color="#0A0C22"/></radialGradient><mask id="rm"><rect x="0" y="0" width="1080" height="1920" fill="url(#refl)"/></mask></defs>';
+  out+='<defs><linearGradient id="gGold" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#FFF3B0"/><stop offset=".5" stop-color="#F4C542"/><stop offset="1" stop-color="#C98A12"/></linearGradient><radialGradient id="halo"><stop offset="0" stop-color="#fff" stop-opacity=".75"/><stop offset="1" stop-color="#fff" stop-opacity="0"/></radialGradient><radialGradient id="spot"><stop offset="0" stop-color="#FFF6CC" stop-opacity=".8"/><stop offset="1" stop-color="#FFF6CC" stop-opacity="0"/></radialGradient><linearGradient id="refl" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#fff" stop-opacity=".35"/><stop offset="1" stop-color="#fff" stop-opacity="0"/></linearGradient><radialGradient id="planet" cx=".38" cy=".32" r=".8"><stop offset="0" stop-color="#FFFBEA"/><stop offset=".45" stop-color="#FFE27A"/><stop offset=".8" stop-color="#E0A21A"/><stop offset="1" stop-color="#9A6A08"/></radialGradient><radialGradient id="goldbg" cx=".5" cy=".55" r=".75"><stop offset="0" stop-color="#FFF7D6"/><stop offset=".55" stop-color="#FFD966"/><stop offset="1" stop-color="#E8A817"/></radialGradient><mask id="rm"><rect x="0" y="0" width="1080" height="1920" fill="url(#refl)"/></mask></defs>';
   // ── INTRO: planeta Armaf con los Odyssey en órbita
-  if(t<C.p1){var sweet=cl((t-C.h4)/0.6);bg=sweet>0.5?'#FF8FBF':'#0E0A24';
-    if(sweet<1){out+='<g opacity="'+(1-sweet)+'"><rect width="1080" height="1920" fill="#0E0A24"/>';for(var i=0;i<90;i++){var tw=0.3+0.7*Math.abs(Math.sin(t*1.5+i));out+=star(hsh(i*3)*1080,hsh(i*7)*1920,2+hsh(i)*7,tw);}
-      out+='<circle cx="250" cy="1500" r="500" fill="#8E6CF5" opacity=".18"/><circle cx="900" cy="500" r="420" fill="#FF4F8B" opacity=".12"/></g>';}
+  if(t<C.p1){var sweet=cl((t-C.h4)/0.6);bg=sweet>0.5?'#FF8FBF':'#F4C542';
+    if(sweet<1){out+='<g opacity="'+(1-sweet)+'"><rect width="1080" height="1920" fill="url(#goldbg)"/>'+rays(540,1060,1700,t,'#FFFFFF',28,0.28)+rays(540,1060,1700,-t*0.6,'#FFE9A0',14,0.35);for(var i=0;i<40;i++){var tw=0.4+0.6*Math.abs(Math.sin(t*2+i));out+=star(hsh(i*3)*1080,hsh(i*7)*1920,6+hsh(i)*14,tw,'#FFFFFF');}out+='</g>';}
     if(sweet>0){out+='<g opacity="'+sweet+'"><rect width="1080" height="1920" fill="#FF8FBF"/>';for(var i=-6;i<16;i++){out+='<path d="M'+(i*140+((t*40)%140))+' 0 L '+(i*140+((t*40)%140)+700)+' 1920" stroke="#FFF1F6" stroke-width="46" opacity=".5"/>';}
       for(var i=0;i<60;i++){var ph=((t*0.15+hsh(i))%1);var x=hsh(i*3)*1080,y=-40+ph*2000;out+='<rect x="'+x+'" y="'+y+'" width="26" height="9" rx="4.5" fill="'+PAL[i%6]+'" transform="rotate('+(hsh(i*5)*180+t*60)+' '+(x+13)+' '+(y+4)+')"/>';}
       for(var i=0;i<10;i++){var ph=((t*0.12+hsh(i+20))%1);out+='<text x="'+(hsh(i*7)*1000)+'" y="'+(-100+ph*2100)+'" font-size="'+(80+hsh(i)*50)+'" transform="rotate('+(t*40+i*30)+' '+(hsh(i*7)*1000+40)+' '+(-100+ph*2100-40)+')">'+['🍩','🍭','🍬','🧁','🍫'][i%5]+'</text>';}out+='</g>';}
     // planeta = logo Armaf
-    var PX=540,PY=1060,PR=300*(1-0.35*sweet);var kp=back(cl((t-0.1)/0.7));
-    var orb=function(front){var s_='';var spin=t*0.55+sweet*t*1.4;var arr=[];P.forEach(function(p,i){var a=spin+i*6.283/7;var z=Math.sin(a);if((z>0.15)!==front)return;var rx=L(450,430,sweet),ry=L(330,330,sweet);arr.push({p:p,x:PX+Math.cos(a)*rx,y:PY+z*ry*(sweet>0?1:1)-(sweet>0?0:0),s:0.85+z*0.32,z:z,i:i});});arr.sort(function(a,b){return a.z-b.z;});
-      arr.forEach(function(o){var kk=cl((t-0.4-o.i*0.1)/0.5);var sx=sweet>0?Math.cos(t*4+o.i):1;s_+='<ellipse cx="'+o.x+'" cy="'+(o.y+o.s*220)+'" rx="'+(o.s*110)+'" ry="'+(o.s*18)+'" fill="#000" opacity=".25"/><g transform="translate('+o.x+','+o.y+') scale('+sx+',1) rotate('+(sweet*Math.sin(t*3+o.i)*15)+') translate('+(-o.x)+','+(-o.y)+')">'+img(o.p.cut,o.x,o.y,(sweet>0?420:340)*o.s,kk,0)+'</g>';});return s_;};
+    var PX=540,PY=1060,PR=300*(1-0.25*sweet);var kp=back(cl((t-0.1)/0.7));
+    var orb=function(front){var s_='';var spin=t*0.55+(t>C.h4?(t-C.h4)*0.9:0);var arr=[];P.forEach(function(p,i){var a=spin+i*6.283/7;var z=Math.sin(a);if((z>0.15)!==front)return;var rx=450,ry=330;arr.push({p:p,x:PX+Math.cos(a)*rx,y:PY+z*ry*(sweet>0?1:1)-(sweet>0?0:0),s:0.85+z*0.32,z:z,i:i});});arr.sort(function(a,b){return a.z-b.z;});
+      arr.forEach(function(o){var kk=cl((t-0.4-o.i*0.1)/0.5);var sx=1;s_+='<ellipse cx="'+o.x+'" cy="'+(o.y+o.s*220)+'" rx="'+(o.s*110)+'" ry="'+(o.s*18)+'" fill="#000" opacity=".25"/><g transform="translate('+o.x+','+o.y+') scale('+sx+',1) rotate(0) translate('+(-o.x)+','+(-o.y)+')">'+img(o.p.cut,o.x,o.y,340*o.s,kk,0)+'</g>';});return s_;};
     out+=orb(false);
-    if(sweet<1){out+='<g transform="translate('+PX+','+PY+') scale('+kp+')" opacity="'+(1-sweet*0.9)+'"><ellipse rx="'+(PR*1.75)+'" ry="'+(PR*0.42)+'" fill="none" stroke="'+GOLD+'" stroke-width="8" opacity=".55" transform="rotate(-12)"/>'+
+    if(true){out+='<g transform="translate('+PX+','+PY+') scale('+kp+')"><ellipse rx="'+(PR*1.75)+'" ry="'+(PR*0.42)+'" fill="none" stroke="'+GOLD+'" stroke-width="8" opacity=".55" transform="rotate(-12)"/>'+
       '<circle r="'+(PR+40)+'" fill="'+GOLD+'" opacity=".15"/><circle r="'+PR+'" fill="url(#planet)" stroke="#1a1a1a" stroke-width="8"/>'+
-      '<g transform="rotate('+(t*12)+')"><image href="fotos/logo_armaf.png" x="'+(-PR*0.86)+'" y="'+(-PR*0.86)+'" width="'+(PR*1.72)+'" height="'+(PR*1.72)+'" style="filter:invert(1) brightness(1.4)"/></g>'+
+      '<g transform="rotate('+(t*12)+')"><image href="fotos/logo_armaf.png" x="'+(-PR*0.86)+'" y="'+(-PR*0.86)+'" width="'+(PR*1.72)+'" height="'+(PR*1.72)+'" style="filter:drop-shadow(0 4px 0 rgba(0,0,0,.25))"/></g>'+
       '<ellipse cx="'+(-PR*0.35)+'" cy="'+(-PR*0.4)+'" rx="'+(PR*0.38)+'" ry="'+(PR*0.22)+'" fill="#fff" opacity=".18" transform="rotate(-30)"/></g>';}
     out+=orb(true);
     // título ODYSSEY
     var L_='ODYSSEY',fs=200,yT=440;var w=0;for(var i=0;i<L_.length;i++)w+=cw(L_[i])*fs;var xx=540-w/2;
     for(var i=0;i<L_.length;i++){var cwi=cw(L_[i])*fs,tx=xx+cwi/2;xx+=cwi;var k=eio(cl((t-0.05-i*0.07)/0.6));var sx=540+(hsh(i)-0.5)*1600,sy=-300+hsh(i*3)*400;var cx=L(sx,tx,k),cy=L(sy,yT,k)+Math.sin(t*2+i)*6;var sc=L(4,1,k),rot=(1-k)*(hsh(i*5)-0.5)*720;
-      out+='<g transform="translate('+cx+','+cy+') rotate('+rot+') scale('+sc+')" opacity="'+cl(k*2)+'"><text x="10" y="14" text-anchor="middle" font-family="Baloo 2" font-weight="800" font-size="'+fs+'" fill="#000" opacity=".45">'+L_[i]+'</text><text text-anchor="middle" font-family="Baloo 2" font-weight="800" font-size="'+fs+'" fill="url(#gGold)" stroke="#5A3A00" stroke-width="7">'+L_[i]+'</text></g>';}
+      out+='<g transform="translate('+cx+','+cy+') rotate('+rot+') scale('+sc+')" opacity="'+cl(k*2)+'"><text x="10" y="14" text-anchor="middle" font-family="Baloo 2" font-weight="800" font-size="'+fs+'" fill="#000" opacity=".45">'+L_[i]+'</text><text text-anchor="middle" font-family="Baloo 2" font-weight="800" font-size="'+fs+'" fill="#FFFFFF" stroke="#7A4A00" stroke-width="16" paint-order="stroke">'+L_[i]+'</text></g>';}
     if(t>0.9){var sw=((t-0.9)*0.7)%1.6;out+='<clipPath id="ttl"><text x="540" y="'+yT+'" text-anchor="middle" font-family="Baloo 2" font-weight="800" font-size="'+fs+'">ODYSSEY</text></clipPath><rect x="'+(-200+sw*900)+'" y="'+(yT-200)+'" width="70" height="260" fill="#fff" opacity=".3" transform="skewX(-20)" clip-path="url(#ttl)"/>';}
-    if(t>=C.h2&&t<C.h3){out+='<text x="540" y="'+(yT+100)+'" text-anchor="middle" font-family="DM Sans" font-weight="700" font-size="46" fill="#fff" letter-spacing="6" opacity="'+ent(C.h2)+'">LA SERIE DE ARMAF QUE</text>'+popWord('CONQUISTÓ EL MUNDO',540,yT+205,86,t,C.h2+0.6,GOLD,'#5A3A00');}
-    if(t>=C.h3&&t<C.h4){out+='<text x="540" y="'+(yT+100)+'" text-anchor="middle" font-family="DM Sans" font-weight="700" font-size="52" fill="#fff" letter-spacing="4">'+'TE LA EXPLICO'.slice(0,Math.floor(cl((t-C.h3)/0.6)*13))+'</text>'+popWord('PERFUME X PERFUME',540,yT+210,84,t,C.h3+0.6,'#fff','#FF4F8B');}
+    if(t>=C.h2&&t<C.h3){out+='<text x="540" y="'+(yT+100)+'" text-anchor="middle" font-family="DM Sans" font-weight="700" font-size="46" fill="#5A3A00" letter-spacing="6" opacity="'+ent(C.h2)+'">LA SERIE DE ARMAF QUE</text>'+popWord('CONQUISTÓ EL MUNDO',540,yT+205,86,t,C.h2+0.6,'#fff','#7A4A00','#7A4A00');}
+    if(t>=C.h3&&t<C.h4){out+='<text x="540" y="'+(yT+100)+'" text-anchor="middle" font-family="DM Sans" font-weight="700" font-size="52" fill="#5A3A00" letter-spacing="4">'+'TE LA EXPLICO'.slice(0,Math.floor(cl((t-C.h3)/0.6)*13))+'</text>'+popWord('PERFUME X PERFUME',540,yT+210,84,t,C.h3+0.6,'#fff','#FF4F8B');}
     if(t>=C.h4){var k4=back(cl((t-C.h4-0.2)/0.4));out+='<g transform="translate(540,'+(yT+190)+') rotate(-4) scale('+k4+')"><rect x="-400" y="-110" width="800" height="220" rx="50" fill="#fff" stroke="#1a1a1a" stroke-width="9"/><text y="-22" text-anchor="middle" font-family="Baloo 2" font-weight="800" font-size="62" fill="#FF4F8B">PARTE 1</text><text y="68" text-anchor="middle" font-family="Baloo 2" font-weight="800" font-size="96" fill="#1a1a1a">LOS DULCES 🍬</text></g>';}
   }
   // ── PERFUMES
@@ -112,6 +111,8 @@ function render(t){
     // notas que salen del frasco y orbitan
     var nk=cl((t-C[p.n])/0.8);var fade=1-inK;if(nk>0&&fade>0.02){p.N.forEach(function(n_,j){var kj=cl((t-C[p.n]-j*0.12)/0.7);if(kj<=0)return;var a=-Math.PI/2+j*6.283/6+t*0.25;var R=L(0,1,eio(kj));var x=bx+Math.cos(a)*400*R,y=by+Math.sin(a)*285*R;
         out+='<g opacity="'+fade+'" transform="translate('+x+','+y+') scale('+back(kj)+')"><circle r="74" fill="#fff" stroke="#1a1a1a" stroke-width="6"/></g>'+'<g opacity="'+fade+'">'+nota(n_[0],x,y-6,0.8*back(kj),Math.sin(t*2+j)*8)+'<g transform="translate('+x+','+(y+80)+') scale('+back(kj)+')"><rect x="'+(-n_[1].length*11-16)+'" y="-22" width="'+(n_[1].length*22+32)+'" height="40" rx="20" fill="#1a1a1a"/><text y="8" text-anchor="middle" font-family="Baloo 2" font-weight="800" font-size="26" fill="#fff">'+n_[1]+'</text></g></g>';});}
+    // sticker marketinero
+    if(p.mc&&C[p.mc]!=null&&t>=C[p.mc]){var mk=cl((t-C[p.mc])/0.35);var wig=Math.sin(t*6)*3;var mx=L(830,540,inK),my=L(640,690,inK);out+='<g transform="translate('+mx+','+my+') rotate('+(L(8,-3,inK)+wig)+') scale('+(back(mk)*L(0.9,0.68,inK))+')"><path d="';for(var j=0;j<20;j++){var a=j*Math.PI/10,r=j%2?150:185;out+=(j?'L':'M')+(Math.cos(a)*r*1.25)+' '+(Math.sin(a)*r*0.82)+' ';}out+='Z" fill="#FFD23F" stroke="#1a1a1a" stroke-width="8"/><text y="-8" text-anchor="middle" font-family="Baloo 2" font-weight="800" font-size="42">'+p.mk[0]+'</text><text y="44" text-anchor="middle" font-family="Baloo 2" font-weight="800" font-size="38" fill="#E5322B">'+p.mk[1]+'</text></g>';}
     // frase poética
     var qk=cl((t-C[p.q])/0.35);if(qk>0){var qy=505;out+='<g transform="translate(540,'+qy+') rotate(-2) scale('+back(qk)+')"><path d="M-500 -60 L 500 -60 L 470 0 L 500 60 L -500 60 L -470 0 Z" fill="#FFF8E6" stroke="#1a1a1a" stroke-width="7"/><text x="-470" y="-12" font-family="Playfair Display" font-size="90" fill="'+p.bg+'">“</text><text x="470" y="62" text-anchor="end" font-family="Playfair Display" font-size="90" fill="'+p.bg+'">”</text></g>'+'<g transform="rotate(-2 540 '+qy+')">'+typewriter(p.quote,540,qy+14,p.quote.length>40?34:42,t,C[p.q]+0.2,1.6,'#1a1a1a')+'</g>';}
     // acordes en burbujas
