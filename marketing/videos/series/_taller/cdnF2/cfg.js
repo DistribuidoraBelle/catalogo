@@ -1,0 +1,6 @@
+var WORD={"p1": "SILLAGE", "p2": "MILESTONE", "p3": "ICONIC", "p4": "EXTRAIT", "p5": "URBAN", "p6": "ELIXIR", "p7": "ELITE"};
+var QT={"p1": "“Frío y brillante, como agua de deshielo.”", "p2": "“Verano en la piel.”", "p3": "“Azul profundo, limpio y seguro.”", "p4": "“Más madera, más incienso, más duración.”", "p5": "“Entre traje y zapatillas.”", "p6": "“Fresco, picante y adictivo.”", "p7": "“Verde, chispeante y sofisticado.”"};
+var MK={"p1": "EL MÁS ELEGANTE DE DÍA", "p2": "TODOS TE LO PIDEN", "p3": "VA CON TODO", "p4": "+ INTENSO · + DURADERO", "p5": "UN CLÁSICO MODERNO", "p6": "HÍBRIDO Y ADICTIVO", "p7": "LO MÁS NUEVO"};
+var EMO={"p1": "El perfume que te hace ver impecable.", "p2": "El fresco que todos te van a pedir.", "p3": "Va con todo: el trabajo, la cita y la noche.", "p4": "Cuando querés que te recuerden.", "p5": "Elegancia que nunca falla.", "p6": "Imposible pasar desapercibido.", "p7": "Para los que tienen gusto exigente."};
+var PAL={"p1": ["#3A9BD0", "#0B3A5C"], "p2": ["#E2475E", "#6A0E22"], "p3": ["#1F5FC4", "#071E4A"], "p4": ["#123E86", "#030E26"], "p5": ["#5E8A2E", "#1E3209"], "p6": ["#2A8C8C", "#06302F"], "p7": ["#3E9A5A", "#0C3018"]};
+var INTRO={"n": "02", "t": "LOS FRESCOS"};
