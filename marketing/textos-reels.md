@@ -386,3 +386,100 @@ El final de la serie, con los lanzamientos más locos de Armaf 🤯
 
 #odyssey #armaf #armafodyssey #spicycollection #perfumesfrutales #perfumesdemujer #perfumesfemeninos #perfumesarabes #pinkpop #frenchkiss #lichilush #perfumes #perfumetok #perfumelover #fragancias #perfumeriaargentina #perfumesoriginales #dupes #perfumedupe #nuevo #viral #parati #fyp #reels #distribuidorabelle
 ```
+
+---
+
+## 15) Serie Club de Nuit · Parte 1 — La familia Intense
+Portada: `portadas-series/portada_clubdenuit_p1_9x16.png` · Video: `videos/series/clubdenuit-parte1/clubdenuit_parte1_F.mp4`
+
+```
+🖤 CLUB DE NUIT: la serie que hizo famosa a Armaf en todo el mundo 🌍
+Te la explico perfume por perfume · PARTE 1: LA FAMILIA INTENSE
+
+💰 Club de Nuit Man → si buscás elegancia, es este · inspirado en One Million (Rabanne)
+✨ Man Improved Version → el más seductor de la serie · inspirado en One Million
+👑 Intense Man → entrás y todos se dan vuelta · inspirado en Aventus (Creed)
+💎 Intense Limited Edition → nadie se resiste a este aroma · inspirado en Aventus
+🖤 Intense Extrait → te van a preguntar qué tenés puesto · inspirado en Aventus
+🔥 Intense Extreme → el que te hace inolvidable · inspirado en Aventus
+🚀 Intense Overdose → imposible no volver a olerlo · inspirado en Absolu Aventus
+💠 Précieux I → para los que nacieron para brillar · inspirado en Absolu Aventus
+
+👇 ¿Con cuál te quedás? Contanos en los comentarios
+📲 Seguinos: las otras partes y más series de perfumes están en nuestro perfil
+🛒 Los encontrás en distribuidorabelle.com
+
+#clubdenuit #clubdenuitintense #armaf #aventus #creedaventus #onemillion #perfumesarabes #perfumeshombre #perfumes #perfumetok #perfumelover #fragancias #perfumeriaargentina #dupes #perfumedupe #olorrico #perfumequeenamora #viral #parati #fyp #reels #distribuidorabelle
+```
+
+---
+
+## 16) Serie Club de Nuit · Parte 2 — Los frescos
+Portada: `portadas-series/portada_clubdenuit_p2_9x16.png` · Video: `videos/series/clubdenuit-parte2/clubdenuit_parte2_F.mp4`
+
+```
+🌊 CLUB DE NUIT · PARTE 2: LOS FRESCOS
+Para el día, el calor, la oficina y la cita: los que huelen a limpio y elegante 😮‍💨
+
+❄️ Sillage → el perfume que te hace ver impecable · inspirado en Silver Mountain Water (Creed)
+🍉 Milestone → el fresco que todos te van a pedir · inspirado en Millésime Impérial (Creed)
+💙 Iconic → va con todo: el trabajo, la cita y la noche · inspirado en Bleu de Chanel
+🌌 Iconic Extrait → cuando querés que te recuerden · inspirado en Bleu de Chanel
+🏙️ Urban Man → elegancia que nunca falla · inspirado en Mr. Burberry
+⚡ Urban Elixir → imposible pasar desapercibido · inspirado en Sauvage (Dior)
+🌿 Elite → para los que tienen gusto exigente · inspirado en Wild Vetiver (Creed)
+
+👇 ¿Cuál es tu fresco favorito? Contanos en los comentarios
+📲 Seguinos: las otras partes y más series de perfumes están en nuestro perfil
+🛒 Los encontrás en distribuidorabelle.com
+
+#clubdenuit #armaf #clubdenuitsillage #clubdenuitmilestone #clubdenuiticonic #bleudechanel #sauvage #creed #perfumesfrescos #perfumesdeverano #perfumesarabes #perfumes #perfumetok #fragancias #perfumeriaargentina #dupes #perfumedupe #viral #parati #fyp #reels #distribuidorabelle
+```
+
+---
+
+## 17) Serie Club de Nuit · Parte 3 — Ámbar y nocturnos
+Portada: `portadas-series/portada_clubdenuit_p3_9x16.png` · Video: `videos/series/clubdenuit-parte3/clubdenuit_parte3_F.mp4`
+
+```
+🌙 CLUB DE NUIT · PARTE 3: ÁMBAR Y NOCTURNOS
+Los de la noche: dulces, cálidos, lujosos y con una estela que no se olvida 🔥
+
+💸 Untold → vas a oler a perfume de 300 dólares · inspirado en Baccarat Rouge 540
+🦁 Lionheart Man → el más seductor de la noche · inspirado en Le Male Elixir (JPG)
+👑 Club de Nuit Oud → lujo árabe para destacar en serio · inspirado en Erba Pura (Xerjoff)
+✨ Bling → brillá donde vayas · inspirado en Valaya (Parfums de Marly)
+🔥 Intenso Fuego → el que enciende cualquier noche · lo comparan con Oud Maracujá (Maison Crivelli)
+🌑 Précieux II → misterioso, magnético, distinto · ADN de Sauvage Elixir (Dior)
+⏳ Timeless → elegancia que no pasa de moda · 100% original de Armaf
+
+👇 ¿Con cuál salís esta noche? Contanos en los comentarios
+📲 Seguinos: las otras partes y más series de perfumes están en nuestro perfil
+🛒 Los encontrás en distribuidorabelle.com
+
+#clubdenuit #armaf #clubdenuituntold #baccaratrouge540 #lionheart #lemaleelixir #erbapura #valaya #perfumesarabes #perfumesdenoche #perfumesdulces #oud #perfumes #perfumetok #fragancias #perfumeriaargentina #dupes #perfumedupe #viral #parati #fyp #reels #distribuidorabelle
+```
+
+---
+
+## 18) Serie Club de Nuit · Parte 4 — Los femeninos
+Portada: `portadas-series/portada_clubdenuit_p4_9x16.png` · Video: `videos/series/clubdenuit-parte4/clubdenuit_parte4_F.mp4`
+
+```
+💐 CLUB DE NUIT · PARTE 4: LOS FEMENINOS
+Para ella: elegantes, románticos, golosos y con mucha personalidad 💖
+
+🌸 Club de Nuit Woman → elegante desde el primer segundo · inspirado en Coco Mademoiselle (Chanel)
+🌹 Intense Woman → para la mujer que deja huella · inspirado en Noir de Noir (Tom Ford)
+🤍 White Imperiale → romántica como un ramo de rosas blancas · inspirado en Delina Exclusif (PDM)
+👑 Maleka → una reina en cada paso · composición propia de Armaf
+🍫 Lionheart Woman → una caricia que nadie olvida · inspirado en Goddess (Burberry)
+🌊 Précieux IV → dulce, salado y adictivo · inspirado en Gaultier Divine (JPG)
+✨ Bling Gold → brillo dorado sobre tu piel · creación original con aire a Goddess y Bianco Latte
+
+👇 Etiquetá a quien le regalarías uno 🎁
+📲 Seguinos: las otras partes y más series de perfumes están en nuestro perfil
+🛒 Los encontrás en distribuidorabelle.com
+
+#clubdenuit #clubdenuitwoman #armaf #perfumesmujer #perfumesfemeninos #cocomademoiselle #delina #goddess #gaultierdivine #perfumesarabes #perfumesdulces #perfumes #perfumetok #perfumelover #fragancias #perfumeriaargentina #dupes #perfumedupe #ideaderegalo #viral #parati #fyp #reels #distribuidorabelle
+```
