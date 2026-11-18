@@ -3,6 +3,13 @@ var WORD={p1:'MAN',p2:'IMPROVED',p3:'INTENSE',p4:'LIMITED',p5:'EXTRAIT',p6:'EXTR
 var QT={p1:'“El clásico dorado que arrancó la leyenda.”',p2:'“Mismo ADN, con más fuego en la piel.”',p3:'“Humo de abedul sobre fruta encendida.”',p4:'“El Intense, vestido de gala.”',
  p5:'“El ahumado se vuelve terciopelo.”',p6:'“Humo, cuero y fruta, sin frenos.”',p7:'“Una tentación dulce que no se olvida.”',p8:'“La joya de la familia, en extracto.”'};
 var MK={p1:'EL QUE EMPEZÓ TODO',p2:'MÁS PRESENCIA · MÁS DURACIÓN',p3:'EL CLON MÁS FAMOSO DEL MUNDO',p4:'EDICIÓN LIMITADA',p5:'SUAVE · REDONDO · CARÍSIMO',p6:'SE SIENTE A UNA CUADRA',p7:'YA ES FUROR',p8:'LA MÁS REFINADA'};
+var EMO={p1:'Si buscás elegancia, es este.',p2:'El más seductor de la serie.',p3:'Entrás y todos se dan vuelta.',p4:'Nadie se resiste a este aroma.',
+ p5:'Te van a preguntar qué tenés puesto.',p6:'El que te hace inolvidable.',p7:'Imposible no volver a olerlo.',p8:'Para los que nacieron para brillar.'};
+function emo(txt,lt,t0,op,col){if(lt<t0||op<=0)return '';var k=cl((lt-t0)/0.7);var w=1000*eo(k);var s=Math.min(96,2000/txt.length);
+ return '<g opacity="'+op+'" transform="rotate(-3 540 480)"><clipPath id="ec"><rect x="'+(540-500)+'" y="380" width="'+w+'" height="180"/></clipPath><g clip-path="url(#ec)">'+
+ '<text x="540" y="492" text-anchor="middle" font-family="Caveat" font-weight="700" font-size="'+s+'" fill="#000" opacity=".25" transform="translate(3 4)">'+esc(txt)+'</text>'+
+ '<text x="540" y="492" text-anchor="middle" font-family="Caveat" font-weight="700" font-size="'+s+'" fill="#fff">'+esc(txt)+'</text>'+
+ '<path d="M'+(540-txt.length*s*0.21)+' 520 Q 540 '+(536)+' '+(540+txt.length*s*0.21)+' 514" fill="none" stroke="'+col+'" stroke-width="7" stroke-linecap="round"/></g></g>';}
 var PAL={p1:['#F2A51A','#B8560B'],p2:['#E8562A','#8E1F12'],p3:['#C21F3A','#4A0814'],p4:['#7B3FD0','#2A1260'],p5:['#2F6FD6','#0E2456'],p6:['#D23C1E','#3A0A04'],p7:['#E0306A','#4A0A24'],p8:['#C9A24A','#4A3410']};
 var DEFS='<defs><filter id="ds" x="-30%" y="-30%" width="160%" height="170%"><feDropShadow dx="0" dy="40" stdDeviation="30" flood-color="#000" flood-opacity=".45"/></filter>'+
  '<filter id="dso" x="-30%" y="-30%" width="160%" height="160%"><feDropShadow dx="0" dy="22" stdDeviation="16" flood-color="#000" flood-opacity=".35"/></filter><filter id="bo"><feGaussianBlur stdDeviation="5"/></filter>'+
@@ -55,6 +62,7 @@ function render(t){var out=DEFS;var cam=1;var showSub=true;
   out+='</g>';
   var hk=e5(cl((lt-0.15)/0.5));var nm=p.name;var sub=nm.indexOf('CLUB DE NUIT')==0?'CLUB DE NUIT':'CLUB DE NUIT';
   out+='<g opacity="'+(1-ik)+'">'+T(sub,540,190,{f:'Montserrat',w:600,s:30,c:'#fff',ls:14,op:hk})+T(nm.replace('CLUB DE NUIT ',''),540,262,{f:'Montserrat',w:900,s:62,c:'#fff',ls:4,op:hk})+'</g>';
+  out+=emo(EMO[p.k]||'',lt,0.8,1-ik,'#FFE29A');
   if(ik>0)out+=T('INSPIRADO EN',540,210,{f:'Montserrat',w:800,s:44,c:'#fff',ls:14,op:ik});
   if(lt>=nT){p.N.slice(0,3).forEach(function(n,j){var k=e5(cl((lt-nT-j*0.4)/0.35))*(1-ik);out+=pill(n[1].toUpperCase(),[250,540,830][j],350,30,'rgba(0,0,0,.28)','#fff',k);});}
   if(lt>=qT){var k=e5(cl((lt-qT)/0.4))*(1-ik);out+=T(QT[p.k]||p.quote,540,1500,{f:'Playfair Display',it:1,w:500,s:46,c:'#fff',op:k,tr:'translate(0 '+(1-k)*30+')'});
@@ -66,8 +74,8 @@ function render(t){var out=DEFS;var cam=1;var showSub=true;
   out+=explode(0.2,lt,allNotes(),540,1150,40,21,false,840);
   for(var i=0;i<8;i++){var p=P[i];var u=(i-3.5)/3.5;var kk=eb(cl((lt-0.1-Math.abs(u)*0.3)/0.5));var x=540+u*420,y=1200+u*u*120;if(kk>0)out+='<g transform="translate('+x+' '+(y+180)+') scale('+kk+') rotate('+(u*10)+') translate('+(-x)+' '+(-y-180)+')">'+img(p.cut,x,y,i==3||i==4?500:400,1,0,'filter="url(#ds)"')+'</g>';}
   out+=explode(0.2,lt,allNotes(),540,1150,40,21,true,840);
-  if(t>=C.fol){var k=eb(cl((t-C.fol)/0.4));out+='<g transform="translate(540 1600) scale('+k+') translate(-540 -1600)">'+pill('SEGUINOS · MÁS SERIES EN EL PERFIL',540,1610,34,'#fff','#2A1A10',1)+'</g>';}
-  else if(t>=C.out2){var k=eb(cl((t-C.out2)/0.4));out+='<g transform="translate(540 1600) scale('+k+') translate(-540 -1600)">'+pill('PARTE 2 · LOS FRESCOS',540,1610,34,'#F2A51A','#111',1)+'</g>';}
+  if(t>=C.out2){var k=eb(cl((t-C.out2)/0.4));out+='<g transform="translate(540 1500) scale('+k+') translate(-540 -1500)">'+pill('MIRÁ LAS OTRAS PARTES DE LA SERIE',540,1510,32,'#F2A51A','#111',1)+'</g>';}
+  if(t>=C.fol){var k=eb(cl((t-C.fol)/0.4));out+='<g transform="translate(540 1590) scale('+k+') translate(-540 -1590)">'+pill('+ MÁS SERIES EN NUESTRO PERFIL · SEGUINOS',540,1600,30,'#fff','#2A1A10',1)+'</g>';}
   if(lt<0.3){var k=e5(cl(lt/0.3));out+='<circle cx="540" cy="1000" r="'+(k*1400)+'" fill="none" stroke="#fff" stroke-width="'+((1-k)*2800)+'"/>';}
  }
  if(t>=C.end){showSub=false;var lt=t-C.end;out+=bgF('#3A2410','#000');var k=e5(cl(lt/0.6));
