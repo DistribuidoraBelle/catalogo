@@ -54,7 +54,7 @@ function render(t){var out=DEFS;var cam=1;var showSub=true;
   out+='</g>';
   var hk=e5(cl((lt-0.15)/0.5));var nm=p.name;var sub=nm.indexOf('CLUB DE NUIT')==0?'CLUB DE NUIT':'CLUB DE NUIT';
   out+='<g opacity="'+(1-ik)+'">'+T(sub,540,190,{f:'Montserrat',w:600,s:30,c:'#fff',ls:14,op:hk})+T(nm.replace('CLUB DE NUIT ',''),540,262,{f:'Montserrat',w:900,s:62,c:'#fff',ls:4,op:hk})+'</g>';
-  out+=emo(EMO[p.k]||'',lt,0.12,1-ik,'#FFE29A');
+  var eK='e'+p.k.slice(1),eT=C[eK]!=null?C[eK]-C[p.k]:0.12;out+=emo(EMO[p.k]||'',lt,eT,1-ik,'#FFE29A');
   if(ik>0)out+=T(p.ins&&p.ins.img?'INSPIRADO EN':(p.ins&&p.ins.lbl||'CREACIÓN ORIGINAL DE ARMAF'),540,210,{f:'Montserrat',w:800,s:44,c:'#fff',ls:14,op:ik});
   if(lt>=nT){p.N.slice(0,3).forEach(function(n,j){var k=e5(cl((lt-nT-j*0.4)/0.35))*(1-ik);out+=pill(n[1].toUpperCase(),[250,540,830][j],350,30,'rgba(0,0,0,.28)','#fff',k);});}
   if(lt>=qT){var k=e5(cl((lt-qT)/0.4))*(1-ik);out+=T(QT[p.k]||p.quote,540,1500,{f:'Playfair Display',it:1,w:500,s:46,c:'#fff',op:k,tr:'translate(0 '+(1-k)*30+')'});

@@ -42,11 +42,11 @@ PARTS={
 def frases(n):
     d=PARTS[n];F=[('hook',"Club de Nuit:"),('h2',"la serie que hizo famosa a Armaf."),('h4',d['h4'])]
     for i,p in enumerate(d['P'],1):
-        F+=[('p%d'%i,p[0]),('nm%d'%i,p[1]),('n%d'%i,p[2]),('q%d'%i,p[3]),('i%d'%i,p[4])]
+        F+=[('p%d'%i,p[1]),('e%d'%i,p[0]),('n%d'%i,p[2]),('q%d'%i,p[3]),('i%d'%i,p[4])]
     return F+OUTRO
 def texto(n):
     d=PARTS[n];t=INTRO_TXT+" "+d['h4']+"\n\n"
-    for p in d['P']: t+=" ".join(p[:5])+"\n\n"
+    for p in d['P']: t+=" ".join([p[1],p[0],p[2],p[3],p[4]])+"\n\n"
     t+=OUTRO[0][1]+"\n\n"+OUTRO[1][1]+"\n\n"+OUTRO[2][1]
     return t
 def cfg(n):
