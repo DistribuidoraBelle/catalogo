@@ -183,3 +183,13 @@ Más adelante: campañas por fecha (Black Friday/Cyber, Navidad, Día de la Madr
   2. Intensos (8): Homme, Homme White, Spectra, Spectra Blue (Ultra Male), Artisto, Revolution, Aoud (Initio Oud for Greatness), Eau de Montagne.
   3. Frescos (7): Aqua, Tyrant, Limoni Fresh, Bahamas (Le Sel d'Issey), Mega Man (YSL Y EDP), Wild One (Sauvage), Nexus (Acqua di Giò Profumo).
   4. Frutales, florales y Spicy Collection (9): Li'chi Lush (Harrods Ruby Naga), Pink Pop (Kurky MFK), French Kiss (Vanilla Powder + toque Delina), Go Mango, Femme White (→ Gucci Bloom / Valentino Donna / Coco Mademoiselle), Femme Black (→ Good Girl / My Burberry Black), Bloody Hot (propia, trago Bloody Mary), Jalapeach-O (propia), Ring My Bell (propia → Santal 33).
+
+## Club de Nuit — ESTILO F aprobado (2026-11-18) ❤️ "lo amé"
+- Cada serie tiene estilo propio. Club de Nuit = **estilo F**: palabra gigante (Anton) DETRÁS del frasco + **explosión congelada de notas REALES recortadas** (una por una, distintos tamaños, sin fondo) + fondo de color por perfume + cámara que avanza lento. Código: `marketing/videos/series/clubdenuit-parte1/estilo_F/` (scene.js genérico + cfg.js por parte + guiones en scratchpad `guiones.py`).
+- Rechazados antes: Odyssey-like, lux v1-v3, editorial (A), estudio claro (B), tráiler (C), cómic (D), neón (E), sumergido (G).
+- **Notas reales:** banco de recortes en `marketing/notas-recortes/` (~59 notas, índice `indice.js`). Se generan con ElevenLabs (seedream-5-pro, 2 notas por imagen sobre fondo blanco, "spread apart") + rembg isnet + componentes conexas. NADA de fotos de pilas de frutas: siempre objetos individuales.
+- **Intro:** logo Armaf como medallón dorado con brillo que sube desde abajo y pisa ~1/4 de los frascos. **SIN "¡Arrancamos!"** (ni voz ni efecto): del intro pasa directo al primer perfume.
+- **Logo Belle + www.distribuidorabelle.com SIEMPRE en pantalla** (marca de agua abajo, todo el video).
+- **Voz por perfume:** arranca con una **frase emocional dirigida a la gente** ("Si buscás elegancia, es este", "Nadie se resiste a este aroma", "Te van a preguntar qué tenés puesto"…) y después nombre, notas, frase y "inspirado en". La frase emocional también va escrita a mano (Caveat) arriba del frasco.
+- **Cierre:** "¿Con cuál te quedás? Comentalo." + "Y si querés ver las otras partes de la serie, o más series de perfumes, están todas en nuestro perfil: ¡seguinos!" + placa web.
+- Foto del Man Improved: armada desde la del Man (jugo ámbar más oscuro + tapa gunmetal) porque la original tenía bordes rotos. Ger nota al instante cualquier borde roto.
