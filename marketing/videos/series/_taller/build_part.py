@@ -5,7 +5,9 @@ from guiones import PARTS,frases,cfg
 S=os.path.dirname(os.path.abspath(__file__))+'/'
 n=int(sys.argv[1]);mode=sys.argv[2] if len(sys.argv)>2 else 'est'
 D=S+'cdnF%d/'%n;os.makedirs(D,exist_ok=True)
-for f in ['scene.js','common.js','common2.js','render.js','render_part.js','style.css','build.py','logo.png']: shutil.copy(S+'cdnF1/'+f,D+f)
+if D!=S+'cdnF1/':
+  if D!=S+'cdnF1/':
+    for f in ['scene.js','common.js','common2.js','render.js','render_part.js','style.css','build.py','logo.png']: shutil.copy(S+'cdnF1/'+f,D+f)
 if not os.path.exists(D+'fotos'): os.symlink('../lux1/fotos',D+'fotos')
 shutil.copy(S+'objs.js',D+'objs.js')
 open(D+'cfg.js','w').write(cfg(n))
