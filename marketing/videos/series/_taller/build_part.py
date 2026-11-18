@@ -30,6 +30,9 @@ if mode=='est':
     for k,txt in F:
         d=sum(syl(w) for w in txt.split())/5.6;T.append((k,txt,round(t,2),round(t+d,2)));t+=d+(0.5 if k and k[0] in 'pi' else 0.32)
     vdur=t
+elif mode=='stt':
+    from align_stt import align as al2
+    R=al2(D+'mix/stt.json',F);vdur=float(os.popen("ffprobe -v error -show_entries format=duration -of csv=p=0 "+D+"mix/voz.wav").read());T=[(k,txt,a,z) for k,txt,a,z,ws in R];WT={k:ws for k,txt,a,z,ws in R}
 else:
     sys.path.insert(0,S+'cdn');from align import align
     T=[(k,txt,a,z) for k,txt,a,z in align(D+'mix/voz.wav',F)]
@@ -39,6 +42,7 @@ for k,txt,a,z in T:
     cues[k]=max(0,round(a-0.1,3))
     words=txt.split();W=[syl(w) for w in words];tot=sum(W);acc=0;wt=[]
     for w,ww in zip(words,W): wt.append((w,a+(z-a)*acc/tot)); acc+=ww
+    if mode=='stt' and k in WT and len(WT[k])==len(wt): wt=WT[k]
     line=[]
     for j,(w,tt) in enumerate(wt):
         line.append({'s':w,'t':round(tt,3)})
