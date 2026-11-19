@@ -1,0 +1,8 @@
+F=[('hook','Jawás. La serie más famosa de Rasasi.'),('h4','Parte uno: los íconos.'),
+('p1','Jawás for Him.'),('e1','Con este perfume, no se te resiste nadie.'),('n1','Manzana, bergamota y canela, sobre ámbar gris y un fondo marino.'),('q1','Fresco, dulce y magnético.'),('i1','Inspirado en Invictus Aqua, de dos mil dieciséis.'),
+('p2','Jawás Ice.'),('e2','El olor de un hombre elegante y decidido.'),('n2','Manzana helada, limón y anís, sobre almizcle, ámbar y maderas.'),('q2','Un golpe de frescura que dura todo el día.'),('i2','Inspirado en Invictus Aqua, de dos mil dieciocho.'),
+('p3','Jawás Ice Freeze.'),('e3','Tan fresco, que te van a pedir que te acerques.'),('n3','Mandarina, naranja y menta, con jengibre, bergamota y sándalo.'),('q3','Cítrico, helado y adictivo.'),('i3','Algunos dicen que se inspira en Afternoon Swim, de Louis Vuitton. Otros, en Y Iced, de Yves Saint Laurent. Lo cierto es que es delicioso.'),
+('p4','Jawás Ice Ultradose.'),('e4','Para el que quiere que lo recuerden toda la noche.'),('n4','Manzana, limón y menta, con canela, cardamomo y tonka.'),('q4','El Ice, llevado al máximo.'),('i4','Es la versión más intensa del Jawás Ice.'),
+('p5','Jawás Atlantis.'),('e5','Una leyenda que se siente a metros.'),('n5','Manzana, limón y ciruela, con canela, ámbar gris y notas marinas.'),('q5','El misterio del océano profundo.'),('i5','Inspirado en Invictus Legend, de Rabanne.'),
+('p6','Jawás Sapphire.'),('e6','Nadie va a tener tu mismo perfume.'),('n6','Grosella, bergamota y azahar, sobre sándalo, tonka y ámbar gris.'),('q6','Una joya azul, única.'),('i6','Una creación cien por ciento original de Jawás.'),
+('out','¿Con cuál te quedás? Mirá las otras partes y todas nuestras series en el perfil. distribuidora Bel, punto com.')]
