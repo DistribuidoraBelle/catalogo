@@ -195,3 +195,10 @@ Más adelante: campañas por fecha (Black Friday/Cyber, Navidad, Día de la Madr
 - Foto del Man Improved: armada desde la del Man (jugo ámbar más oscuro + tapa gunmetal) porque la original tenía bordes rotos. Ger nota al instante cualquier borde roto.
 - **SINCRONÍA (lección 2026-11-18):** NO alinear con silencios (`align.py` + silencedetect): con voces sin pausas se corre hasta 2-3 s y Ger lo nota. Usar SIEMPRE la transcripción de ElevenLabs Scribe con tiempos por palabra (`_taller/align_stt.py`, `build_part.py n stt`; API `POST /v1/speech-to-text` model_id=scribe_v1, timestamps_granularity=word).
 - ElevenLabs por API: la key de Ger está guardada en el entorno (header xi-api-key, la inyecta el proxy). TTS: `POST /v1/text-to-speech/DzZyY3xqjLUXGaT9wykC` con model_id eleven_v4. Sirve cuando el conector MCP se cae.
+
+### Música de las series (2026-11-19)
+- **Ahora la música se genera con la API de música de ElevenLabs** (`POST /v1/music`, `{prompt, music_length_ms}`). La calidad es muy superior a la sintetizada por código; Ger no quiere volver a la sintética ("deprimente").
+- El flujo: se generan 5-6 previews de 30 s sobre el video con voz, Ger elige y después se genera el tema completo.
+- **Hawas Parte 1:** quedó la **1 Tropical house**.
+- **Nu-disco funk (opción 3):** a Ger le gustó para **otra parte de la serie Hawas**. Usarla en una próxima parte.
+- Los prompts están en `marketing/videos/series/_taller/musica_hawas/prompts.txt`.
