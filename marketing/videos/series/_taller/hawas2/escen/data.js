@@ -5,6 +5,6 @@ var P=[
  scene:'esc_ice.jpg',py:1340,emo:'Frescura que enamora al pasar.',quote:'“Hielo, manzana y anís.”',mk:'EL MÁS FRESCO',pal:['#2BA9D6','#05293F'],st0:{a:'#14C8E8',b:'#05507A',d:'#9FF2FF'}},
 {k:'p3',name:'BLACK',title:'Black',cut:'h96817hd.png',N:[['anana','Ananá'],['pomelo','Pomelo'],['bergamota','Bergamota'],['pachuli','Pachulí'],['cedro','Cedro'],['jazmin','Jazmín']],ins:{img:'h44174hd.png',n:'Hacivat',mt:'NISHANE'},n:'n3',q:'q3',i:'i3',e:'e3',end:'out',
  scene:'esc_black.jpg',py:1445,emo:'Elegancia oscura que no pasa desapercibida.',quote:'“Ananá, musgo y maderas.”',mk:'PARA LOS QUE SE ANIMAN',pal:['#8A7350','#120E08'],st0:{a:'#FF7A1A',b:'#3A1206',d:'#FFC27A'}}];
-var ALLB=['h46890hd.png','h67146hd.png','h89050hd.png','h96817hd.png','h112706hd.png','h101665hd.png','h113190hd.png'];
+var ALLB=['h67146hd.png','h89050hd.png','h112706hd.png','h46890hd.png','h96817hd.png','h101665hd.png','h113190hd.png'];
 
 var INTRO_BG='esc_diario.jpg',OUTRO_BG='esc_seda.jpg';
