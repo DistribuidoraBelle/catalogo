@@ -512,17 +512,17 @@ Portada: `portadas-series/portada_hawas_p2_9x16.png` · Video: `videos/series/ha
 🌊 HAWAS · PARTE 2: FRESCOS Y DEL MAR
 Los Hawas más frescos, para el calor y para todo el año 💙
 
-🐚 Hawas Nautilus → el perfume del hombre que no le teme a nada · creación propia, inspirada en el océano
-🌊 Hawas La Mer → fresco desde que te lo ponés, irresistible hasta la noche · creación original
+🐚 Hawas Nautilus → el perfume del hombre que no le teme a nada · inspirado en 40 Knots (Xerjoff)
+🌊 Hawas La Mer → fresco desde que te lo ponés, irresistible hasta la noche · inspirado en Pacific Chill (Louis Vuitton)
 🌅 Hawas Malibu → olés a vacaciones y todos lo van a notar · inspirado en Le Beau Le Parfum (JPG)
 🥥 Hawas Tropical → un perfume que no pasa desapercibido · inspirado en Le Beau Paradise Garden (JPG)
 🐍 Hawas Boa → exótico, hipnótico y difícil de olvidar · edición especial por los 10 años de Hawas
-🍏 Hawas Verde → energía pura, de la mañana a la noche · creación original
+🍏 Hawas Verde → energía pura, de la mañana a la noche · inspirado en Torino21 (Xerjoff)
 🖤 Hawas Kobra → elegancia oscura que no se olvida · inspirado en Imagination (Louis Vuitton)
 
 👇 ¿Y a vos cuál te gusta más? Contanos en los comentarios
 📲 Seguinos: las otras partes de la serie y más perfumes están en nuestro perfil
 🛒 Los encontrás en distribuidorabelle.com
 
-#hawas #rasasi #hawasmalibu #hawastropical #hawaskobra #hawasnautilus #hawaslamer #hawasboa #hawasverde #lebeau #paradisegarden #imagination #perfumesarabes #perfumeshombre #perfumesfrescos #perfumes #perfumetok #perfumelover #fragancias #perfumeriaargentina #dupes #viral #parati #fyp #reels #distribuidorabelle
+#hawas #rasasi #hawasmalibu #hawastropical #hawaskobra #hawasnautilus #hawaslamer #hawasboa #hawasverde #lebeau #paradisegarden #imagination #40knots #xerjoff #pacificchill #torino21 #perfumesarabes #perfumeshombre #perfumesfrescos #perfumes #perfumetok #perfumelover #fragancias #perfumeriaargentina #dupes #viral #parati #fyp #reels #distribuidorabelle
 ```
