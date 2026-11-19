@@ -534,3 +534,28 @@ TikTok (admite más hashtags):
 ```
 #hawas #rasasi #perfumesarabes #perfumetok #fragrancetok #perfumeshombre #perfumesfrescos #xerjoff #lebeau #imagination #perfumeriaargentina #dupes #fyp #parati #viral #distribuidorabelle
 ```
+
+## 21) Serie Hawas · Parte 3 — Dulces y adictivos
+Portada: `portadas-series/portada_hawas_p3_9x16.png` · Video: `videos/series/hawas-parte3/hawas_parte3_F.mp4`
+
+```
+🍯 HAWAS · PARTE 3: DULCES Y ADICTIVOS
+Los Hawas más golosos: imposible usarlos una sola vez 🤎
+
+✨ Hawas Elixir → el que se acerca, no se quiere ir más · inspirado en Le Male Elixir (JPG)
+🍫 Hawas Overdose → una sobredosis de seducción · inspirado en Althaïr (Parfums de Marly)
+🍬 Hawas Addiction → probalo una vez y no vas a poder dejarlo · creación original
+🐍 Hawas Private Dulce → para los que quieren oler distinto al resto · de la colección privada de Hawas
+🌿 Hawas Exotic → misterioso, magnético e imposible de ignorar · inspirado en Le Male Elixir Absolu (JPG)
+💰 Hawas Gold Digger → huele a éxito, a ambición y a dinero · inspirado en Ultra Male (JPG)
+
+👇 ¿Y a vos cuál te gusta más? Contanos en los comentarios
+📲 Seguinos: las otras partes de la serie y más perfumes están en nuestro perfil
+🛒 Los encontrás en distribuidorabelle.com
+
+#hawas #rasasi #perfumesarabes #perfumetok #perfumesdulces
+```
+TikTok (admite más hashtags):
+```
+#hawas #rasasi #perfumesarabes #perfumetok #fragrancetok #perfumeshombre #perfumesdulces #lemaleelixir #althair #ultramale #perfumeriaargentina #dupes #fyp #parati #viral #distribuidorabelle
+```
