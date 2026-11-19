@@ -405,7 +405,7 @@ Te la explico perfume por perfume · PARTE 1: LA FAMILIA INTENSE
 🚀 Intense Overdose → imposible no volver a olerlo · inspirado en Absolu Aventus
 💠 Précieux I → para los que nacieron para brillar · inspirado en Absolu Aventus
 
-👇 ¿Con cuál te quedás? Contanos en los comentarios
+👇 ¿Y a vos cuál te gusta más? Contanos en los comentarios
 📲 Seguinos: las otras partes y más series de perfumes están en nuestro perfil
 🛒 Los encontrás en distribuidorabelle.com
 
@@ -498,7 +498,7 @@ La serie más famosa de Rasasi, arrancando por los que la hicieron leyenda 💙
 🌊 Hawas Atlantis → una leyenda que se siente a metros · inspirado en Invictus Legend (Rabanne)
 💎 Hawas Sapphire → nadie va a tener tu mismo perfume · creación 100% original
 
-👇 ¿Con cuál te quedás? Contanos en los comentarios
+👇 ¿Y a vos cuál te gusta más? Contanos en los comentarios
 📲 Seguinos: las otras partes y más series de perfumes están en nuestro perfil
 🛒 Los encontrás en distribuidorabelle.com
 
