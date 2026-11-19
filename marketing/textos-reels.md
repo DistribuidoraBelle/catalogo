@@ -483,3 +483,24 @@ Para ella: elegantes, románticos, golosos y con mucha personalidad 💖
 
 #clubdenuit #clubdenuitwoman #armaf #perfumesmujer #perfumesfemeninos #cocomademoiselle #delina #goddess #gaultierdivine #perfumesarabes #perfumesdulces #perfumes #perfumetok #perfumelover #fragancias #perfumeriaargentina #dupes #perfumedupe #ideaderegalo #viral #parati #fyp #reels #distribuidorabelle
 ```
+
+## 19) Serie Hawas · Parte 1 — Los íconos
+Portada: `portadas-series/portada_hawas_p1_9x16.png` · Video: `videos/series/hawas-parte1/hawas_parte1_F.mp4`
+
+```
+🧊 HAWAS · PARTE 1: LOS ÍCONOS
+La serie más famosa de Rasasi, arrancando por los que la hicieron leyenda 💙
+
+💙 Hawas for Him → con este perfume, no se te resiste nadie · inspirado en Invictus Aqua 2016 (Rabanne)
+❄️ Hawas Ice → el olor de un hombre elegante y decidido · inspirado en Invictus Aqua 2018 (Rabanne)
+🍊 Hawas Ice Freeze → tan fresco que te van a pedir que te acerques · unos dicen Afternoon Swim (LV), otros Y Iced (YSL)… lo cierto es que es delicioso
+🔥 Hawas Ice Ultradose → para que te recuerden toda la noche · la versión más intensa del Ice
+🌊 Hawas Atlantis → una leyenda que se siente a metros · inspirado en Invictus Legend (Rabanne)
+💎 Hawas Sapphire → nadie va a tener tu mismo perfume · creación 100% original
+
+👇 ¿Con cuál te quedás? Contanos en los comentarios
+📲 Seguinos: las otras partes y más series de perfumes están en nuestro perfil
+🛒 Los encontrás en distribuidorabelle.com
+
+#hawas #rasasi #hawasforhim #hawasice #hawasicefreeze #hawasatlantis #hawassapphire #invictusaqua #invictuslegend #perfumesarabes #perfumeshombre #perfumesfrescos #perfumes #perfumetok #perfumelover #fragancias #perfumeriaargentina #dupes #perfumedupe #viral #parati #fyp #reels #distribuidorabelle
+```
