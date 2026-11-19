@@ -97,31 +97,35 @@ def chop(fs,dur=0.12):  # guitarra funk cortita
 
 
 
-# HAWAS P1 · "Hielo y cristal": Fa# menor/La mayor, 94 BPM, piano + glock cristalino + pad aireado + sub suave + pulso tenue
-BPM=94; B=60/BPM
-def tick(p=1.0):
-    n=int(0.05*SR); t=np.arange(n)/SR; x=sum(np.sin(2*np.pi*f*p*t) for f in (3300,4700))/2
-    return x*np.exp(-t/0.009)*0.035
-def subb(f,dur):
-    n=int(dur*SR); t=np.arange(n)/SR; x=np.sin(2*np.pi*f*t)+0.08*np.sin(4*np.pi*f*t)
-    return lp(x,320)*np.minimum(1,t/0.01)*np.minimum(1,(dur-t)/0.05).clip(0)*0.5
-def tsnap():
-    n=int(0.12*SR); t=np.arange(n)/SR; x=np.sin(2*np.pi*1150*t)+0.4*np.sin(2*np.pi*2630*t)
-    return x*np.exp(-t/0.025)*0.1
-prog=[(54,[0,3,7,14]),(50,[0,4,7,11]),(45,[0,4,7,14]),(52,[0,4,7,10])]   # F#m9 - Dmaj7 - Aadd9 - E7
-ARP=[0,2,1,3, 2,1,3,2]
+# HAWAS P1 v2 · "Verano helado": La mayor, 118 BPM, tropical/piano house alegre: piano stabs, pluck marimba, claps, shaker, bajo saltarín
+BPM=118; B=60/BPM
+def marimba(f,dur=0.35):
+    n=int(dur*SR); t=np.arange(n)/SR; x=np.sin(2*np.pi*f*t)+0.35*np.sin(2*np.pi*4*f*t)*np.exp(-t*30)
+    return x*np.minimum(1,t/0.002)*np.exp(-t/0.14)*0.22
+def shaker():
+    n=int(0.07*SR); x=hp(rng.standard_normal(n),7000); t=np.arange(n)/SR; return x*np.minimum(1,t/0.01)*np.exp(-t/0.02)*0.07
+def bbass(f,dur):
+    n=int(dur*SR); t=np.arange(n)/SR; x=np.sin(2*np.pi*f*t)+0.3*np.sin(4*np.pi*f*t)
+    return lp(x,600)*np.minimum(1,t/0.004)*np.exp(-t/0.22)*0.6
+prog=[(57,[0,4,7,11]),(52,[0,4,7,14]),(54,[0,3,7,10]),(50,[0,4,7,11])]   # Amaj7 - Eadd9 - F#m7 - Dmaj7  (I-V-vi-IV)
+HOOK=[(0,2),(0.75,1),(1.5,2),(2.5,3),(3,2),(3.5,1)]
 bars=int(DUR/(4*B))+1
 for bar in range(bars):
-    t0=bar*4*B; root,q=prog[bar%4]; fs=[m(root+12+i) for i in q]; intro=bar<2
-    add(pad([f/2 for f in fs[:3]],4*B+0.5),t0,g=0.75)
-    add(hpiano(fs[:3],2.2*B)*0.5,t0,pan=-0.15); add(hpiano(fs[1:3],1.6*B)*0.4,t0+2.5*B,pan=-0.15)
-    for k,d in enumerate(ARP): add(glock(fs[d]*2,0.9),t0+k*B/2,pan=(0.35 if k%2 else -0.25),g=0.55)
+    t0=bar*4*B; root,q=prog[bar%4]; fs=[m(root+12+i) for i in q]; intro=bar<1
+    add(pad([f/2 for f in fs[:3]],4*B+0.3),t0,g=0.45)
+    for off in (0.5,1.5,2.5,3.25):   # piano house a contratiempo
+        add(hpiano(fs[:3],0.45*B),t0+off*B,pan=-0.15,g=0.55)
+    for off,d in HOOK: add(marimba(fs[d]*2),t0+off*B,pan=0.3,g=0.8)
+    if bar%8>=4:
+        for k in range(8): add(glock(fs[(k*2)%4]*4,0.5),t0+k*B/2,pan=-0.3,g=0.35)
     if intro: continue
     for b in range(4):
-        add(kick(0.18,48),t0+b*B,g=0.5 if b%2==0 else 0.3)
-        if b%2==1: add(tsnap(),t0+b*B,pan=0.1)
-        add(tick(),t0+b*B+0.5*B,pan=0.3,g=0.7)
-    for off,o,d in ((0,0,1.8),(2,0,0.9),(3,7,0.9)): add(subb(m(root-12+o),d*B),t0+off*B,g=0.85)
+        add(kick(0.16,52),t0+b*B,g=0.6)
+        if b%2==1: add(clap(0.55),t0+b*B,pan=0.05)
+        for s16 in (0.5,):
+            add(hat(),t0+b*B+s16*B,pan=0.25,g=1.0)
+        add(shaker(),t0+b*B+0.25*B,pan=-0.3); add(shaker(),t0+b*B+0.75*B,pan=-0.3)
+    for off,o in ((0,0),(0.75,0),(1.5,12),(2,7),(2.75,7),(3.5,12)): add(bbass(m(root-12+o),0.4*B),t0+off*B,g=0.85)
 mix=np.stack([L,R],1)
 mix=np.stack([lp(mix[:,0],6000),lp(mix[:,1],6000)],1)
 mix=np.stack([hp(mix[:,0],45),hp(mix[:,1],45)],1)
