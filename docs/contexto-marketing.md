@@ -202,3 +202,6 @@ Más adelante: campañas por fecha (Black Friday/Cyber, Navidad, Día de la Madr
 - **Hawas Parte 1:** quedó la **1 Tropical house**.
 - **Nu-disco funk (opción 3):** a Ger le gustó para **otra parte de la serie Hawas**. Usarla en una próxima parte.
 - Los prompts están en `marketing/videos/series/_taller/musica_hawas/prompts.txt`.
+
+### Hashtags (2026-11-19)
+- **Instagram limita a 5 hashtags por post/reel** desde dic-2025. Con más, el post puede fallar o perder alcance. En IG van **5 bien elegidos** (marca + categoría + nicho). En **TikTok** se pueden poner más (~15).

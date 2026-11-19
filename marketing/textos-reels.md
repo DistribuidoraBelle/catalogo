@@ -502,7 +502,11 @@ La serie más famosa de Rasasi, arrancando por los que la hicieron leyenda 💙
 📲 Seguinos: las otras partes y más series de perfumes están en nuestro perfil
 🛒 Los encontrás en distribuidorabelle.com
 
-#hawas #rasasi #hawasforhim #hawasice #hawasicefreeze #hawasatlantis #hawassapphire #invictusaqua #invictuslegend #perfumesarabes #perfumeshombre #perfumesfrescos #perfumes #perfumetok #perfumelover #fragancias #perfumeriaargentina #dupes #perfumedupe #viral #parati #fyp #reels #distribuidorabelle
+#hawas #rasasi #perfumesarabes #perfumetok #perfumeshombre
+```
+TikTok (admite más hashtags):
+```
+#hawas #rasasi #perfumesarabes #perfumetok #fragrancetok #perfumeshombre #perfumesfrescos #invictusaqua #hawasice #perfumeriaargentina #dupes #fyp #parati #viral #distribuidorabelle
 ```
 
 ## 20) Serie Hawas · Parte 2 — Frescos y del mar
@@ -524,5 +528,9 @@ Los Hawas más frescos, para el calor y para todo el año 💙
 📲 Seguinos: las otras partes de la serie y más perfumes están en nuestro perfil
 🛒 Los encontrás en distribuidorabelle.com
 
-#hawas #rasasi #hawasmalibu #hawastropical #hawaskobra #hawasnautilus #hawaslamer #hawasboa #hawasverde #lebeau #paradisegarden #imagination #40knots #xerjoff #pacificchill #torino21 #perfumesarabes #perfumeshombre #perfumesfrescos #perfumes #perfumetok #perfumelover #fragancias #perfumeriaargentina #dupes #viral #parati #fyp #reels #distribuidorabelle
+#hawas #rasasi #perfumesarabes #perfumetok #perfumesfrescos
+```
+TikTok (admite más hashtags):
+```
+#hawas #rasasi #perfumesarabes #perfumetok #fragrancetok #perfumeshombre #perfumesfrescos #xerjoff #lebeau #imagination #perfumeriaargentina #dupes #fyp #parati #viral #distribuidorabelle
 ```
