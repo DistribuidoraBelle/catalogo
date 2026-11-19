@@ -7,7 +7,7 @@ var P=[
  ins:{img:'h53947.png',img2:'h120529.png',n:'Afternoon Swim',n2:'Y Iced Cologne',mt:'LOUIS VUITTON · YVES SAINT LAURENT',lbl:'¿EN QUIÉN SE INSPIRA?'},emo:'Tan fresco que te van a pedir que te acerques.',quote:'“Cítrico, helado y adictivo.”',mk:'LO NUEVO DE LOS ICE'},
 {k:'p4',title:'Ice Ultradose',cut:'hultradosehd.png',scene:'esc_ultra.jpg',ped:1252,N:[['manzana','Manzana'],['limon','Limón'],['menta','Menta'],['canela','Canela'],['cardamomo','Cardamomo'],['tonka','Tonka']],
  ins:{img:'h89050hd.png',n:'Hawas Ice',mt:'',lbl:'LA VERSIÓN MÁS INTENSA DE'},emo:'Para el que quiere que lo recuerden toda la noche.',quote:'“El Ice, llevado al máximo.”',mk:'MÁS INTENSO · MÁS DURADERO'},
-{k:'p5',title:'Atlantis',cut:'h112309hd.png',scene:'esc_atlantis.jpg',ped:1350,N:[['manzana','Manzana'],['limon','Limón'],['ciruela','Ciruela'],['canela','Canela'],['ambargris','Ámbar gris'],['marino','Marino']],
+{k:'p5',title:'Atlantis',cut:'hatl2hd.png',scene:'esc_atlantis.jpg',ped:1350,N:[['manzana','Manzana'],['limon','Limón'],['ciruela','Ciruela'],['canela','Canela'],['ambargris','Ámbar gris'],['marino','Marino']],
  ins:{img:'h54323.png',n:'Invictus Legend',mt:'RABANNE'},emo:'Una leyenda que se siente a metros.',quote:'“El misterio del océano profundo.”',mk:'EDICIÓN LEYENDA'},
 {k:'p6',title:'Sapphire',cut:'h136382hd.png',scene:'esc_sapphire.jpg',ped:1274,N:[['mora','Grosella'],['bergamota','Bergamota'],['neroli','Azahar'],['sandalo','Sándalo'],['tonka','Tonka'],['ambargris','Ámbar gris']],
  ins:{lbl:'CREACIÓN ORIGINAL',n:'100% Hawas',mt:'EXCLUSIVO DE RASASI'},emo:'Nadie va a tener tu mismo perfume.',quote:'“Una joya azul, única.”',mk:'CREACIÓN ORIGINAL'}];

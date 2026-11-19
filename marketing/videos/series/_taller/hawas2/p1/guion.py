@@ -5,4 +5,4 @@ F=[('hook','Jawás. La serie más famosa de Rasasi.'),('h4','Parte uno: los íco
 ('p4','Jawás Ice Ultradose.'),('e4','Para el que quiere que lo recuerden toda la noche.'),('n4','Manzana, limón y menta, con canela, cardamomo y tonka.'),('q4','El Ice, llevado al máximo.'),('i4','Es la versión más intensa del Jawás Ice.'),
 ('p5','Jawás Atlantis.'),('e5','Una leyenda que se siente a metros.'),('n5','Manzana, limón y ciruela, con canela, ámbar gris y notas marinas.'),('q5','El misterio del océano profundo.'),('i5','Inspirado en Invictus Legend, de Rabanne.'),
 ('p6','Jawás Sapphire.'),('e6','Nadie va a tener tu mismo perfume.'),('n6','Grosella, bergamota y azahar, sobre sándalo, tonka y ámbar gris.'),('q6','Una joya azul, única.'),('i6','Una creación cien por ciento original de Jawás.'),
-('out','¿Con cuál te quedás? Mirá las otras partes y todas nuestras series en el perfil. distribuidora Bel, punto com.')]
+('out','¿Con cuál te quedás?'),('s1','Esta fue solo la parte uno. No te pierdas las otras partes de la serie:'),('s2','seguinos en nuestro perfil, para no perderte ninguna.'),('web','distribuidora Bel, punto com.'),('fq','¿Y a vos... cuál te gusta más?')]

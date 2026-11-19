@@ -47,7 +47,14 @@ function render(t){var out=DEFS;
  if(t>=C.out){var lt=t-C.out,k=e5(cl(lt/0.6));var n=P.length,wd=1080/n;for(var i=0;i<n;i++){var p=P[i];var x0=i*wd;var kk=e5(cl((lt-i*0.12)/0.5));
    out+='<clipPath id="pn'+i+'"><rect x="'+x0+'" y="'+(1920*(1-kk))+'" width="'+wd+'" height="1920"/></clipPath><g clip-path="url(#pn'+i+')"><image href="fotos/'+p.scene+'" x="'+(x0+wd/2-540)+'" y="0" width="1080" height="1920" preserveAspectRatio="xMidYMid slice"/>'+bottleOn(p.cut,x0+wd/2,p.ped,Math.min(520,wd*1.45),1,1)+'</g>';
    if(i)out+='<rect x="'+(x0-2)+'" y="0" width="4" height="1920" fill="#fff" opacity=".8"/>';}
-  out+='<rect width="1080" height="1920" fill="url(#topfade)"/>'+serif('¿Con cuál',540,330,130,{op:k})+serif('te quedás?',540,470,130,{it:1,w:500,op:k});
-  P.forEach(function(p,i){out+=sans(p.title.toUpperCase(),i*wd+wd/2,1420,Math.min(30,wd/p.title.length*1.3),{ls:2,op:e5(cl((lt-0.5)/0.4))});});
-  out+=cta('SEGUINOS PARA VER TODOS',1580,e5(cl((lt-0.8)/0.5)));}
+  var s1=t>=C.s1?e5(cl((t-C.s1)/0.5)):0,fq=t>=C.fq?e5(cl((t-C.fq)/0.5)):0,dim=s1*(1-fq);
+  out+='<rect width="1080" height="1920" fill="url(#topfade)"/>';
+  if(dim>0)out+='<rect width="1080" height="1920" fill="#050a14" opacity="'+(0.72*dim)+'"/>';
+  var k1=k*(1-s1);out+=serif('¿Con cuál',540,330,130,{op:k1})+serif('te quedás?',540,470,130,{it:1,w:500,op:k1});
+  P.forEach(function(p,i){out+=sans(p.title.toUpperCase(),i*wd+wd/2,1420,Math.min(30,wd/p.title.length*1.3),{ls:2,op:e5(cl((lt-0.5)/0.4))*(1-dim)});});
+  if(dim>0){var a1=dim;out+=sans('ESTA FUE LA',540,520,34,{ls:12,op:a1})+serif('Parte 01',540,660,150,{op:a1})+sans('NO TE PIERDAS LAS OTRAS PARTES DE LA SERIE',540,760,27,{ls:4,op:a1});
+   var s2=t>=C.s2?eb(cl((t-C.s2)/0.6)):0;if(s2>0){var pu=1+0.035*Math.sin((t-C.s2)*5.5)*cl((t-C.s2-0.6)/0.3),op2=s2*(1-fq);
+    out+='<g opacity="'+op2+'" transform="translate(540 1000) scale('+(pu*(0.7+0.3*s2))+') translate(-540 -1000)"><rect x="150" y="915" width="780" height="170" rx="85" fill="#fff"/>'+sans('SEGUINOS',540,1035,104,{w:800,ls:6,c:'#0b1220'})+'</g>'+sans('EN NUESTRO PERFIL',540,1170,46,{w:800,ls:8,op:op2});}
+   var w2=t>=C.web?e5(cl((t-C.web)/0.5))*(1-fq):0;if(w2>0)out+=sans('WWW.DISTRIBUIDORABELLE.COM',540,1330,34,{w:700,ls:4,op:w2});}
+  if(fq>0)out+=serif('¿Y a vos',540,330,128,{op:fq})+serif('cuál te gusta más?',540,470,96,{it:1,w:500,op:fq});}
  document.getElementById('sv').innerHTML=out;}
