@@ -585,3 +585,29 @@ TikTok (admite más hashtags):
 ```
 #hawas #rasasi #perfumesarabes #perfumetok #fragrancetok #perfumeshombre #perfumesintensos #hacivat #nishane #perfumesdenoche #perfumeriaargentina #dupes #fyp #parati #viral #distribuidorabelle
 ```
+
+## 23) Serie Hawas · Parte 5 — Lujo y nicho
+Portada: `portadas-series/portada_hawas_p5_9x16.png` · Video: `videos/series/hawas-parte5/hawas_parte5_F.mp4`
+
+```
+👑 HAWAS · PARTE 5: LUJO Y NICHO
+Los Hawas más exclusivos: perfumes de nicho, a otro precio 💎
+
+👑 Hawas Majestic → para el que entra como un rey · inspirado en Baccarat Rouge 540 (MFK)
+🤍 Hawas Highness → elegancia que se nota sin decir una palabra · inspirado en Vibrato (Sospiro)
+🇬🇧 Hawas London → sofisticado, moderno y con mucha clase · creación propia inspirada en Londres
+🪩 Hawas Chrome → brilla tanto como su botella · inspirado en Erba Pura (Xerjoff)
+🐍 Hawas Private Luceo → para los que no se conforman con lo común · colección privada, extrait de parfum
+🌿 Hawas Private Terra → el aroma de un hombre con raíces y carácter · colección privada, extrait de parfum
+💎 Hawas Crystelle → brillante, exclusivo y difícil de olvidar · una joya de cristal
+
+👇 ¿Y a vos cuál te gusta más? Contanos en los comentarios
+📲 Seguinos: las otras partes de la serie y más perfumes están en nuestro perfil
+🛒 Los encontrás en distribuidorabelle.com
+
+#hawas #rasasi #perfumesarabes #perfumetok #perfumesnicho
+```
+TikTok (admite más hashtags):
+```
+#hawas #rasasi #perfumesarabes #perfumetok #fragrancetok #perfumesnicho #baccaratrouge540 #vibrato #erbapura #xerjoff #perfumeslujo #perfumeriaargentina #dupes #fyp #parati #viral #distribuidorabelle
+```
