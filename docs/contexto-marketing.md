@@ -204,4 +204,4 @@ Más adelante: campañas por fecha (Black Friday/Cyber, Navidad, Día de la Madr
 - Los prompts están en `marketing/videos/series/_taller/musica_hawas/prompts.txt`.
 
 ### Hashtags (2026-11-19)
-- **Instagram limita a 5 hashtags por post/reel** desde dic-2025. Con más, el post puede fallar o perder alcance. En IG van **5 bien elegidos** (marca + categoría + nicho). En **TikTok** se pueden poner más (~15).
+- Ger confirmó que **en su cuenta Instagram le deja poner muchos hashtags** (no lo bloquea al límite de 5). Usar **~30 hashtags** por texto (marca + categoría + nicho + virales).
