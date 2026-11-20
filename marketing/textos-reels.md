@@ -559,3 +559,29 @@ TikTok (admite más hashtags):
 ```
 #hawas #rasasi #perfumesarabes #perfumetok #fragrancetok #perfumeshombre #perfumesdulces #lemaleelixir #althair #biancolatte #tribeca #ultramale #perfumeriaargentina #dupes #fyp #parati #viral #distribuidorabelle
 ```
+
+## 22) Serie Hawas · Parte 4 — Oscuros e intensos
+Portada: `portadas-series/portada_hawas_p4_9x16.png` · Video: `videos/series/hawas-parte4/hawas_parte4_F.mp4`
+
+```
+🖤 HAWAS · PARTE 4: OSCUROS E INTENSOS
+Los Hawas con más carácter: para la noche y para dejar huella 🔥
+
+🖤 Hawas Black → entrás y te llevás todas las miradas · inspirado en Hacivat (Nishane)
+🔥 Hawas Fire → para el que enciende cualquier lugar al que llega · fresco por fuera, fuego por dentro
+🐍 Hawas Viper → peligrosamente irresistible · el más ahumado de toda la serie
+☠️ Hawas Venom → un veneno del que nadie se quiere curar · el lado más oscuro de Hawas
+🌋 Hawas Lava Gold → cuando llegás, la temperatura sube · oro fundido sobre tu piel
+⚡ Hawas Thunder → llega como una tormenta y deja huella
+🐺 Hawas Alpha → para el que nació para liderar · lo más nuevo de Rasasi
+
+👇 ¿Y a vos cuál te gusta más? Contanos en los comentarios
+📲 Seguinos: las otras partes de la serie y más perfumes están en nuestro perfil
+🛒 Los encontrás en distribuidorabelle.com
+
+#hawas #rasasi #perfumesarabes #perfumetok #perfumeshombre
+```
+TikTok (admite más hashtags):
+```
+#hawas #rasasi #perfumesarabes #perfumetok #fragrancetok #perfumeshombre #perfumesintensos #hacivat #nishane #perfumesdenoche #perfumeriaargentina #dupes #fyp #parati #viral #distribuidorabelle
+```
