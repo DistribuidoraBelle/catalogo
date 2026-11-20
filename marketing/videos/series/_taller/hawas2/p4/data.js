@@ -11,7 +11,7 @@ var P=[
  ins:{lbl:'INSPIRADO EN',n:'La lava dorada',mt:'CREACIÓN PROPIA DE HAWAS'},emo:'Cuando llegás, la temperatura sube.',quote:'“Oro fundido sobre tu piel.”',mk:'ORO FUNDIDO'},
 {k:'p6',title:'Thunder',cut:'h130938hd.png',scene:'esc_thunder.jpg',ped:1246,N:[['bergamota','Bergamota'],['jengibre','Jengibre'],['manzana','Manzana'],['pimienta','Especias'],['cedro','Maderas'],['ambar','Ámbar']],
  ins:{img:'h107428.png',n:'MYSLF L’Absolu',mt:'YVES SAINT LAURENT'},emo:'Llega como una tormenta, y deja huella.',quote:'“La fuerza de la tormenta, en un frasco.”',mk:'LA FUERZA DE LA TORMENTA'},
-{k:'p7',title:'Alpha',cut:'h140182hd.png',scene:'esc_alpha.jpg',ped:1080,N:[['pomelo','Pomelo rosado'],['jengibre','Jengibre'],['cuero','Cuero'],['jazmin','Jazmín'],['pachuli','Pachulí'],['ambargris','Ámbar gris']],
+{k:'p7',title:'Alpha',cut:'h140182hd.png',scene:'esc_alpha2.jpg',ped:1080,N:[['pomelo','Pomelo rosado'],['jengibre','Jengibre'],['cuero','Cuero'],['jazmin','Jazmín'],['pachuli','Pachulí'],['ambargris','Ámbar gris']],
  ins:{img:'h102882.png',n:'Forever Wanted Elixir',mt:'AZZARO'},emo:'Para el que nació para liderar.',quote:'“La nueva era de Hawas.”',mk:'NACIDO PARA LIDERAR'}];
 P.forEach(function(p,i){p.n='n'+(i+1);p.q='q'+(i+1);p.i='i'+(i+1);p.e='e'+(i+1);p.end=i<P.length-1?'p'+(i+2):'out';});
 var INTRO_BG='esc_seda.jpg',OUTRO_BG='esc_seda.jpg',PARTE={n:'04',t:'OSCUROS E INTENSOS'};
