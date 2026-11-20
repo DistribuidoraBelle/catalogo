@@ -544,8 +544,8 @@ Los Hawas más golosos: imposible usarlos una sola vez 🤎
 
 ✨ Hawas Elixir → el que se acerca, no se quiere ir más · inspirado en Le Male Elixir (JPG)
 🍫 Hawas Overdose → una sobredosis de seducción · inspirado en Althaïr (Parfums de Marly)
-🍬 Hawas Addiction → probalo una vez y no vas a poder dejarlo · creación original
-🐍 Hawas Private Dulce → para los que quieren oler distinto al resto · de la colección privada de Hawas
+🍬 Hawas Addiction → probalo una vez y no vas a poder dejarlo · inspirado en Bianco Latte (Giardini di Toscana)
+🐍 Hawas Private Dulce → para los que quieren oler distinto al resto · mismo ADN que TriBeCa (Bond No. 9), con un giro tropical propio
 🌿 Hawas Exotic → misterioso, magnético e imposible de ignorar · inspirado en Le Male Elixir Absolu (JPG)
 💰 Hawas Gold Digger → huele a éxito, a ambición y a dinero · inspirado en Ultra Male (JPG)
 
@@ -557,5 +557,5 @@ Los Hawas más golosos: imposible usarlos una sola vez 🤎
 ```
 TikTok (admite más hashtags):
 ```
-#hawas #rasasi #perfumesarabes #perfumetok #fragrancetok #perfumeshombre #perfumesdulces #lemaleelixir #althair #ultramale #perfumeriaargentina #dupes #fyp #parati #viral #distribuidorabelle
+#hawas #rasasi #perfumesarabes #perfumetok #fragrancetok #perfumeshombre #perfumesdulces #lemaleelixir #althair #biancolatte #tribeca #ultramale #perfumeriaargentina #dupes #fyp #parati #viral #distribuidorabelle
 ```
