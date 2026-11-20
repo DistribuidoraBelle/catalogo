@@ -1,0 +1,8 @@
+F=[('hook','Jawás. La serie más famosa de Rasasi.'),('h4','Parte tres: dulces y adictivos.'),
+('p1','Jawás Elixir.'),('e1','El que se acerca, no se quiere ir más.'),('n1','Lavanda y menta, con chocolate, vainilla, miel y haba tonka.'),('q1','Dulce, intenso y seductor.'),('i1','Inspirado en Le Male Elixir, de Jean Paul Gaultier.'),
+('p2','Jawás Overdose.'),('e2','Una sobredosis de seducción.'),('n2','Especias y azahar, con ámbar, vainilla, praliné y chocolate.'),('q2','Cálido, cremoso y adictivo.'),('i2','Inspirado en Altaír, de Parfums de Marly.'),
+('p3','Jawás Addiction.'),('e3','Probalo una vez, y no vas a poder dejarlo.'),('n3','Caramelo y coco, con leche, vainilla, ámbar y maderas.'),('q3','Un postre hecho perfume.'),('i3','Una creación original de Jawás.'),
+('p4','Jawás Private Dulce.'),('e4','Para los que quieren oler distinto al resto.'),('n4','Avellana, pimienta rosa y maracuyá, con cacao, coco y caramelo.'),('q4','De la colección privada de Jawás.'),('i4','Una creación exclusiva de Rasasi.'),
+('p5','Jawás Exotic.'),('e5','Misterioso, magnético e imposible de ignorar.'),('n5','Lavanda, cardamomo y coco, con iris, canela y pachulí.'),('q5','Un viaje a lo exótico.'),('i5','Inspirado en Le Male Elixir Absolu, de Jean Paul Gaultier.'),
+('p6','Jawás Gold Digger.'),('e6','Huele a éxito, a ambición y a dinero.'),('n6','Pera, lavanda y menta, con canela, vainilla y ámbar.'),('q6','Para los que van por todo.'),('i6','Inspirado en Ultra Male, de Jean Paul Gaultier.'),
+('out','¿Con cuál te quedás?'),('s1','Esta fue la parte tres. No te pierdas las otras partes de la serie:'),('s2','seguinos en nuestro perfil, para no perderte ninguna.'),('web','distribuidora Bel, punto com.'),('fq','¿Y a vos... cuál te gusta más?')]
