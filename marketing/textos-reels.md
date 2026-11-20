@@ -447,7 +447,7 @@ Los de la noche: dulces, cálidos, lujosos y con una estela que no se olvida �
 
 💸 Untold → vas a oler a perfume de 300 dólares · inspirado en Baccarat Rouge 540
 🦁 Lionheart Man → el más seductor de la noche · inspirado en Le Male Elixir (JPG)
-👑 Club de Nuit Oud → lujo árabe para destacar en serio · inspirado en Erba Pura (Xerjoff)
+👑 Club de Nuit Oud → lujo árabe para destacar en serio · inspirado en Erba Gold (Xerjoff)
 ✨ Bling → brillá donde vayas · inspirado en Valaya (Parfums de Marly)
 🔥 Intenso Fuego → el que enciende cualquier noche · lo comparan con Oud Maracujá (Maison Crivelli)
 🌑 Précieux II → misterioso, magnético, distinto · ADN de Sauvage Elixir (Dior)
@@ -579,15 +579,15 @@ Los Hawas más exclusivos: perfumes de nicho, a otro precio 💎
 
 👑 Hawas Majestic → para el que entra como un rey · inspirado en Baccarat Rouge 540 (MFK)
 🤍 Hawas Highness → elegancia que se nota sin decir una palabra · inspirado en Vibrato (Sospiro)
-🇬🇧 Hawas London → sofisticado, moderno y con mucha clase · creación propia inspirada en Londres
-🪩 Hawas Chrome → brilla tanto como su botella · inspirado en Erba Pura (Xerjoff)
-🐍 Hawas Private Luceo → para los que no se conforman con lo común · colección privada, extrait de parfum
+🇬🇧 Hawas London → sofisticado, moderno y con mucha clase · inspirado en Brompton Immortals Extrait (Ex Nihilo)
+🪩 Hawas Chrome → brilla tanto como su botella · inspirado en Erba Gold (Xerjoff)
+🐍 Hawas Private Luceo → para los que no se conforman con lo común · inspirado entre Tygar (Bvlgari) y Vibrato (Sospiro)
 🌿 Hawas Private Terra → el aroma de un hombre con raíces y carácter · colección privada, extrait de parfum
-💎 Hawas Crystelle → brillante, exclusivo y difícil de olvidar · una joya de cristal
+💎 Hawas Crystelle → brillante, exclusivo y difícil de olvidar · inspirado entre Castley (Parfums de Marly) y Spicebomb Metallic Musk (Viktor&Rolf)
 
 👇 ¿Y a vos cuál te gusta más? Contanos en los comentarios
 📲 Seguinos: las otras partes de la serie y más perfumes están en nuestro perfil
 🛒 Los encontrás en distribuidorabelle.com
 
-#hawas #rasasi #perfumesarabes #perfumetok #fragrancetok #perfumes #perfume #fragancias #perfumeshombre #perfumeriaargentina #perfumesimportados #dupes #perfumedupe #perfumelover #fyp #parati #viral #reels #argentina #distribuidorabelle #hawasmajestic #hawashighness #hawaslondon #hawaschrome #baccaratrouge540 #vibrato #erbapura #perfumesnicho #perfumeslujo #nicho
+#hawas #rasasi #perfumesarabes #perfumetok #fragrancetok #perfumes #perfume #fragancias #perfumeshombre #perfumeriaargentina #perfumesimportados #dupes #perfumedupe #perfumelover #fyp #parati #viral #reels #argentina #distribuidorabelle #hawasmajestic #hawashighness #hawaslondon #hawaschrome #baccaratrouge540 #vibrato #erbagold #bromptonimmortals #tygar #castley #spicebomb
 ```
