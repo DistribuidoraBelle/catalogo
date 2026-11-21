@@ -611,3 +611,23 @@ Los Hawas para ella: dulces, románticos e irresistibles 💗
 
 #hawas #rasasi #perfumesarabes #perfumetok #fragrancetok #perfumes #perfume #fragancias #perfumesmujer #perfumesfemeninos #perfumeriaargentina #perfumesimportados #dupes #perfumedupe #perfumelover #fyp #parati #viral #reels #argentina #distribuidorabelle #hawaspink #hawaslove #hawasglitz #hawasdreams #hawaseclat #oriana #lovedontbeshy #chanceeauvive #delina #guidance
 ```
+
+## 25) Serie Hawas · Parte 7 — Femeninos florales
+Portada: `portadas-series/portada_hawas_p7_9x16.png` · Video: `videos/series/hawas-parte7/hawas_parte7_F.mp4`
+
+```
+🌹 HAWAS · PARTE 7: FEMENINOS FLORALES
+Los Hawas para ella con más flores y carácter 💐
+
+💛 Hawas For Her → para la mujer que sabe lo que quiere · inspirado en La Vie Est Belle (Lancôme)
+❤️ Hawas Rouge → pasión pura en cada paso · inspirado en Sì Passione (Giorgio Armani)
+💜 Hawas Diva → para la que entra y se roba el show · inspirado en Born in Roma Intense (Valentino)
+👑 Hawas Reina → porque vos naciste para reinar · inspirado en Olympéa Absolu (Rabanne)
+🤍 Hawas Blanche → elegancia limpia que enamora de cerca · muchos lo comparan con Blanche (Byredo) y Galloway (Parfums de Marly)
+
+👇 ¿Y a vos cuál te gusta más? Contanos en los comentarios
+📲 Seguinos: las otras partes de la serie y más perfumes están en nuestro perfil
+🛒 Los encontrás en distribuidorabelle.com
+
+#hawas #rasasi #perfumesarabes #perfumetok #fragrancetok #perfumes #perfume #fragancias #perfumesmujer #perfumesfemeninos #perfumeriaargentina #perfumesimportados #dupes #perfumedupe #perfumelover #fyp #parati #viral #reels #argentina #distribuidorabelle #hawasforher #hawasrouge #hawasdiva #hawasreina #hawasblanche #lavieestbelle #sipassione #borninroma #olympea
+```
