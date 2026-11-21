@@ -599,15 +599,15 @@ Portada: `portadas-series/portada_hawas_p6_9x16.png` · Video: `videos/series/ha
 🌸 HAWAS · PARTE 6: FEMENINOS DULCES
 Los Hawas para ella: dulces, románticos e irresistibles 💗
 
-💗 Hawas Pink → dulce, divertida e imposible de ignorar · creación original pensada para ella
-❤️ Hawas Love → para enamorar desde el primer segundo · todo el romanticismo de Rasasi
+💗 Hawas Pink → dulce, divertida e imposible de ignorar · inspirado en Oriana (Parfums de Marly)
+❤️ Hawas Love → para enamorar desde el primer segundo · inspirado en Love, Don't Be Shy (By Kilian)
 ✨ Hawas Glitz → brillás aunque no digas nada · inspirado en Guidance (Amouage)
-🌙 Hawas Dreams → el perfume de las que van por sus sueños · creación original
-🌷 Hawas Éclat → delicada, chic y difícil de olvidar · inspirado en Delina (Parfums de Marly)
+🌙 Hawas Dreams → el perfume de las que van por sus sueños · inspirado en Chance Eau Vive (Chanel)
+🌷 Hawas Éclat → delicada, chic y difícil de olvidar · inspirado en Delina Exclusif (Parfums de Marly)
 
 👇 ¿Y a vos cuál te gusta más? Contanos en los comentarios
 📲 Seguinos: las otras partes de la serie y más perfumes están en nuestro perfil
 🛒 Los encontrás en distribuidorabelle.com
 
-#hawas #rasasi #perfumesarabes #perfumetok #fragrancetok #perfumes #perfume #fragancias #perfumesmujer #perfumesfemeninos #perfumeriaargentina #perfumesimportados #dupes #perfumedupe #perfumelover #fyp #parati #viral #reels #argentina #distribuidorabelle #hawaspink #hawaslove #hawasglitz #hawasdreams #hawaseclat #delina #guidance #perfumesdulces #regalomujer
+#hawas #rasasi #perfumesarabes #perfumetok #fragrancetok #perfumes #perfume #fragancias #perfumesmujer #perfumesfemeninos #perfumeriaargentina #perfumesimportados #dupes #perfumedupe #perfumelover #fyp #parati #viral #reels #argentina #distribuidorabelle #hawaspink #hawaslove #hawasglitz #hawasdreams #hawaseclat #oriana #lovedontbeshy #chanceeauvive #delina #guidance
 ```
