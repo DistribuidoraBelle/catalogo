@@ -86,7 +86,9 @@ Se vetearon (sin hooks ocultos ni exfiltración) e instalaron en `.agents/skills
     `configuracion.periodo_cierre_manual` = nombre de un período que el automático NO toca (Ger lo cierra a mano);
     cron `belle-cierre-periodo-auto` cada 5 min (actúa solo dentro de las 6 hs posteriores al día/hora configurados).
   - **Reportes**: usar siempre `_repProdsCosto()` (no el global `prods`, que puede no tener costos) y `_repGastos()`
-    (devuelve solo gastos operativos; los retiros `CAPITAL *` de socios y las `DEVOLUCION` van aparte, ver `_repAparte`).
+    (devuelve solo gastos operativos; el `CAPITAL *` de socios y las `DEVOLUCION` van aparte, ver `_repAparte`).
+    **Criterio de Ger:** el capital de socios es el sueldo fijo semanal del equipo → ES gasto y resta de la ganancia neta,
+    pero se muestra en su propio renglón, separado de los gastos operativos. Las devoluciones restan de lo cobrado.
     Toda consulta de ventas que pase por `_repCaja` tiene que traer `id,nro_orden,combo_id` (si no, duplica los pagos de CC).
 - **Instagram / marketing** (EN CURSO): ver `docs/contexto-marketing.md`. Etapa 1 (32 destacadas)
   entregada; Etapa 2 (historias/videos) en iteración — **leé el doc para saber qué estilos rechazó Ger
