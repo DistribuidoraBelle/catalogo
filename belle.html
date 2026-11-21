@@ -6497,7 +6497,7 @@ function patchStockFresco(prodId, delta, motivo){
   // 2026-10-04: se quitó el fallback "viejo" (GET + PATCH con Math.max(0,…) silencioso) y el catch final
   // que resolvía undefined: si la RPC falla o devuelve !ok, la promesa se RECHAZA con el id del producto,
   // así el caller no muestra "stock devuelto" cuando no pasó nada.
-  return apiPost('rpc/ajustar_stock',{ p_pid:pid, p_stock:delta.stock_actual||0, p_reserva:delta.reserva||0, p_vd:delta.vendido_david||0, p_vf:delta.vendido_facu||0, p_en_viaje:delta.en_viaje||0 })
+  return apiPost('rpc/ajustar_stock',{ p_pid:pid, p_stock:delta.stock_actual||0, p_reserva:delta.reserva||0, p_vd:delta.vendido_david||0, p_vf:delta.vendido_facu||0, p_en_viaje:delta.en_viaje||0, p_motivo:(motivo?String(motivo).slice(0,200):null) })
     .then(function(res){
       if(res && res.ok){ sincronizar(res); return res; }
       var det=(res&&(res.error||res.message))||'respuesta inválida de ajustar_stock';
@@ -39299,6 +39299,7 @@ function _stkBarras(sem){
   h+="<polyline points='"+pts.join(' ')+"' fill='none' stroke='#4cc9dc' stroke-width='2' stroke-linejoin='round' opacity='.95'/>";
   pts.forEach(function(p,i){ var xy=p.split(','); h+="<circle cx='"+xy[0]+"' cy='"+xy[1]+"' r='2.6' fill='#4cc9dc'><title>"+sem[i].lbl+": físico estimado "+sem[i].fis+" u.</title></circle>"; });
   h+="</svg><div style='display:flex;gap:1rem;font-size:.64rem;color:var(--tx3);margin-top:.3rem;flex-wrap:wrap'><span><i style='display:inline-block;width:9px;height:9px;border-radius:2px;background:#4fc38a;margin-right:.3rem'></i>Entraron (proveedor, devoluciones, ajustes +)</span><span><i style='display:inline-block;width:9px;height:9px;border-radius:2px;background:#ef6b7b;margin-right:.3rem'></i>Salieron (ventas, salidas, ajustes −)</span><span><i style='display:inline-block;width:14px;height:2px;background:#4cc9dc;margin-right:.3rem;vertical-align:middle'></i>Físico estimado al cierre de la semana (eje derecho)</span></div>";
+  if(window._stkExactoDesde){ var _fx=window._stkExactoDesde; h+="<div style='font-size:.62rem;color:var(--tx3);margin-top:.35rem'>✅ Desde el "+_repPad(_fx.getDate())+"/"+_repPad(_fx.getMonth()+1)+"/"+_fx.getFullYear()+" los movimientos son exactos (los registra el sistema en cada cambio de stock). Lo anterior es estimado con las anotaciones de la app.</div>"; }
   return h;
 }
 function _repCargarStock(){
@@ -39308,9 +39309,14 @@ function _repCargarStock(){
     apiGetAll("productos","select=id,nombre,empresa,tipo,cat_catalogo,stock_actual,reserva,en_viaje,deposito_m,costo_ind,costo_log,costo_ars,precio_may_ars,precio_med_ars,precio_min_ars,ml,activo,oculto,created_at,ultimo_ingreso_at,reingreso_at&activo=is.true&limit=5000").catch(function(){return [];}),
     apiGetAll("ventas","select=producto_id,producto_nombre,cantidad,total,costo_unit,segmento,created_at&"+_REP_ESTADOS_V+"&created_at=gte."+d90.toISOString()+"&limit=20000").catch(function(){return [];}),
     apiGetAll("movimientos_stock","select=producto_id,tipo,cantidad,stock_antes,stock_despues,created_at&created_at=gte."+d90.toISOString()+"&limit=20000").catch(function(){return [];}),
-    apiGet("combos","select=id,nombre,combo_items(producto_id,cantidad,es_decan)&limit=1000").catch(function(){return [];})
+    apiGet("combos","select=id,nombre,combo_items(producto_id,cantidad,es_decan)&limit=1000").catch(function(){return [];}),
+    // 2026-11-21: historial exacto (lo escribe la base). Desde su primer registro reemplaza a las anotaciones de la app.
+    apiGetAll("stock_historial","select=d_fisico,clase,tipo_app,created_at&d_fisico=neq.0&created_at=gte."+d90.toISOString()).catch(function(){return [];}),
+    apiGet("stock_historial","select=created_at&order=created_at.asc&limit=1").catch(function(){return [];})
   ]).then(function(r){
-    var PR=r[0]||[], VE=r[1]||[], MV=r[2]||[], CO=r[3]||[];
+    var PR=r[0]||[], VE=r[1]||[], MV=r[2]||[], CO=r[3]||[], SH=r[4]||[];
+    var shDesde=(r[5]&&r[5][0]&&r[5][0].created_at)?new Date(r[5][0].created_at):null;
+    window._stkExactoDesde=shDesde;
     var cf=_repCostoFactory(PR,CO), idx=_repIndiceProductos(PR);
     // ── por producto ──
     var byId={}; PR.forEach(function(p){ p._t=_stkTipoDe(p); p._fis=_stkFisico(p); p._disp=parseInt(p.stock_actual)||0; p._res=parseInt(p.reserva)||0; p._viaje=parseInt(p.en_viaje)||0;
@@ -39340,7 +39346,11 @@ function _repCargarStock(){
     // ── evolución 90 días (semanas) ──
     var ing90=0,sal90=0,int90=0, sem=[]; var lunes=new Date(hoy); lunes.setHours(0,0,0,0); lunes.setDate(lunes.getDate()-((lunes.getDay()+6)%7));
     for(var i=12;i>=0;i--){ var a=new Date(lunes); a.setDate(a.getDate()-7*i); var b=new Date(a); b.setDate(b.getDate()+7); sem.push({a:a,b:b,ing:0,sal:0,int:0,lbl:_repPad(a.getDate())+'/'+_repPad(a.getMonth()+1)}); }
-    MV.forEach(function(m){ var f=_stkMovFisico(m); if(!f) return; var t=new Date(m.created_at); ing90+=f.ing; sal90+=f.sal; int90+=f.int; for(var k=0;k<sem.length;k++){ if(t>=sem[k].a&&t<sem[k].b){ sem[k].ing+=f.ing; sem[k].sal+=f.sal+f.int; sem[k].int+=f.int; break; } } });
+    var _acumMov=function(f,t){ ing90+=f.ing; sal90+=f.sal; int90+=f.int; for(var k=0;k<sem.length;k++){ if(t>=sem[k].a&&t<sem[k].b){ sem[k].ing+=f.ing; sem[k].sal+=f.sal+f.int; sem[k].int+=f.int; break; } } };
+    // antes del historial exacto: anotaciones de la app (estimado) · desde entonces: cambios reales de mercadería física
+    MV.forEach(function(m){ var t=new Date(m.created_at); if(shDesde && t>=shDesde) return; var f=_stkMovFisico(m); if(!f) return; _acumMov(f,t); });
+    SH.forEach(function(s){ var d=parseInt(s.d_fisico)||0; if(!d||s.clase==='producto_eliminado') return;
+      _acumMov(d>0?{ing:d,sal:0,int:0}:(s.tipo_app==='costo_producto'?{ing:0,sal:0,int:-d}:{ing:0,sal:-d,int:0}), new Date(s.created_at)); });
     var acum=fis; for(var k=sem.length-1;k>=0;k--){ sem[k].fis=Math.max(0,Math.round(acum)); acum-= (sem[k].ing-sem[k].sal); }
     var fisHace90=sem[0].fis-(sem[0].ing-sem[0].sal), varFis=fis-fisHace90;
     // ── edad del stock (días desde el último ingreso) ──
@@ -47437,11 +47447,46 @@ function adminResetearSaldo(vendedorId,vendedorNombre){
 // ── SUPERPODER: Duplicar producto ────────────────────────────────────
 
 // ── SUPERPODER: Ver log de movimientos de un producto ─────────────────
+// Historial exacto de stock (tabla stock_historial, la escribe la base)
+var _STK_CLASE={reserva:['🔒','Se apartó','var(--yel)'],liberacion:['🔓','Se liberó','var(--acc)'],entrega:['📦','Se entregó','var(--red)'],salida:['↓','Salió','var(--red)'],
+  ingreso:['↑','Entró','var(--green)'],ingreso_proveedor:['🚚','Llegó del proveedor','var(--green)'],en_viaje:['✈️','En viaje','var(--tx3)'],deposito:['·','Depósito (referencial)','var(--tx3)'],
+  alta:['＋','Alta de producto','var(--green)'],producto_eliminado:['✕','Producto eliminado','var(--red)']};
+var _STK_ORIGEN={ajustar_stock:'',directo:'Edición directa (ficha, tabla o importación)',crear_pedido_web:'Pedido del catálogo web',belle_autoheal_reservas:'Corrección automática de reservas',
+  pedido_editar_atomico:'Edición de pedido',reservar_stock_web:'Reserva web'};
+function _stkHistDetalle(s){
+  var o=(_STK_ORIGEN[s.origen]!==undefined)?_STK_ORIGEN[s.origen]:(s.origen||'');
+  return s.detalle||s.motivo||o||'-';
+}
+function _stkHistExactoHTML(lista){
+  if(!Array.isArray(lista)||!lista.length) return '';
+  var esc=function(t){ return String(t==null?'':t).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;'); };
+  var par=function(a,d){ a=parseInt(a)||0; d=parseInt(d)||0; return a===d ? '<span style="color:var(--tx3)">'+d+'</span>' : '<span style="color:var(--tx3)">'+a+' → </span><b>'+d+'</b>'; };
+  var rows=lista.map(function(s){
+    var f=new Date(s.created_at);
+    var fecha=f.toLocaleDateString('es-AR',{day:'2-digit',month:'2-digit',timeZone:"America/Argentina/Buenos_Aires"})+' '+f.toLocaleTimeString('es-AR',{hour:'2-digit',minute:'2-digit',timeZone:"America/Argentina/Buenos_Aires"});
+    var c=_STK_CLASE[s.clase]||['·',s.clase||'-','var(--tx3)'];
+    var df=parseInt(s.d_fisico)||0, ds=parseInt(s.d_stock)||0, n=(s.clase==='reserva'||s.clase==='liberacion')?Math.abs(ds):Math.abs(df);
+    if(s.clase==='en_viaje') n=Math.abs((parseInt(s.en_viaje_despues)||0)-(parseInt(s.en_viaje_antes)||0));
+    if(s.clase==='deposito') n=Math.abs((parseInt(s.deposito_despues)||0)-(parseInt(s.deposito_antes)||0));
+    var det=esc(_stkHistDetalle(s));
+    return '<tr style="border-bottom:1px solid var(--bd)'+(s.clase==='deposito'?';opacity:.7':'')+'">'+
+      '<td style="padding:.3rem .4rem;white-space:nowrap;font-size:.7rem">'+fecha+'</td>'+
+      '<td style="white-space:nowrap"><span style="font-size:.7rem;color:'+c[2]+'">'+c[0]+' '+c[1]+'</span></td>'+
+      '<td style="font-weight:700;color:'+c[2]+';font-size:.8rem;text-align:right;padding-right:.5rem">'+(n||'')+'</td>'+
+      '<td style="font-size:.72rem;white-space:nowrap">'+par(s.stock_antes,s.stock_despues)+'</td>'+
+      '<td style="font-size:.72rem;white-space:nowrap">'+par(s.reserva_antes,s.reserva_despues)+'</td>'+
+      '<td style="color:var(--tx3);font-size:.68rem;max-width:190px;overflow:hidden;text-overflow:ellipsis" title="'+det+'">'+det+'</td>'+
+      '<td style="color:var(--tx3);font-size:.7rem;white-space:nowrap">'+esc(s.usuario||'-')+'</td></tr>';
+  }).join('');
+  return '<div style="font-size:.68rem;font-weight:700;color:var(--tx2);margin-bottom:.3rem">✅ Historial exacto <span style="font-weight:400;color:var(--tx3)">· lo registra el sistema solo, en cada cambio de stock</span></div>'+
+    '<div style="overflow:auto;max-height:46vh;margin-bottom:.8rem"><table style="width:100%;border-collapse:collapse"><thead><tr style="color:var(--tx3);font-size:.63rem;text-align:left">'+
+    '<th style="padding:.3rem .4rem">Fecha</th><th>Qué pasó</th><th style="text-align:right;padding-right:.5rem">Cant</th><th>Disponible</th><th>Apartado</th><th>Detalle</th><th>Quién</th></tr></thead><tbody>'+rows+'</tbody></table></div>';
+}
 function adminVerMovimientos(prodId,prodNombre){
   var mo=document.getElementById('moAdminMovs');
   if(!mo){mo=document.createElement('div');mo.id='moAdminMovs';mo.className='mo';document.body.appendChild(mo);}
   mo.innerHTML='';
-  var wrap=document.createElement('div');wrap.className='md';wrap.style.maxWidth='640px';
+  var wrap=document.createElement('div');wrap.className='md';wrap.style.maxWidth='820px';
   var mh=document.createElement('div');mh.className='mh';
   var tt=document.createElement('div');tt.className='mtt';tt.textContent='Movimientos: '+prodNombre.slice(0,30);
   var xb=document.createElement('button');xb.className='btn btn-g';xb.textContent='X';xb.style.padding='.2rem .5rem';
@@ -47451,9 +47496,18 @@ function adminVerMovimientos(prodId,prodNombre){
   mb.innerHTML='<div class="loading"><div class="spin"></div>Cargando...</div>';
   wrap.appendChild(mh);wrap.appendChild(mb);mo.appendChild(wrap);
   abrirModal('moAdminMovs');
-  apiGet('movimientos_stock','select=*&producto_id=eq.'+prodId+'&order=created_at.desc&limit=50').then(function(data){
+  // 2026-11-21: el historial EXACTO lo escribe la base (stock_historial) en cada cambio de stock, venga de donde venga.
+  // Las anotaciones de la app (movimientos_stock) quedan abajo solo para lo anterior a esa fecha.
+  Promise.all([
+    apiGet('stock_historial','select=*&producto_id=eq.'+prodId+'&order=created_at.desc,id.desc&limit=200').catch(function(){return [];}),
+    apiGet('movimientos_stock','select=*&producto_id=eq.'+prodId+'&order=created_at.desc&limit=50').catch(function(){return [];})
+  ]).then(function(_res){
+    var exactos=Array.isArray(_res[0])?_res[0]:[], data=Array.isArray(_res[1])?_res[1]:[];
     var body=document.getElementById('moAdminMovsBody');if(!body)return;
-    if(!Array.isArray(data)||!data.length){body.innerHTML="<div class='empty'>Sin movimientos</div>";return;}
+    var htmlExacto=_stkHistExactoHTML(exactos);
+    // de las anotaciones viejas solo se muestran las anteriores al primer registro exacto (lo demás ya está arriba, sin huecos)
+    if(exactos.length){ var _t0=exactos[exactos.length-1].created_at; if(exactos.length<200) data=data.filter(function(m){ return m.created_at<_t0; }); else data=[]; }
+    if(!data.length){ body.innerHTML=htmlExacto||"<div class='empty'>Sin movimientos</div>"; return; }
     var rows=data.map(function(m){
       var fecha=new Date(m.created_at).toLocaleDateString('es-AR',{day:'2-digit',month:'2-digit',timeZone:"America/Argentina/Buenos_Aires"});
       var hora=new Date(m.created_at).toLocaleTimeString('es-AR',{hour:'2-digit',minute:'2-digit',timeZone:"America/Argentina/Buenos_Aires"});
@@ -47495,7 +47549,7 @@ function adminVerMovimientos(prodId,prodNombre){
         '<td style="color:var(--tx3);font-size:.68rem;max-width:160px;overflow:hidden;text-overflow:ellipsis">'+(m.motivo||'-')+'</td>'+
         '<td style="color:var(--tx3);font-size:.7rem">'+(m.usuario||'-')+'</td></tr>';
     }).join('');
-    body.innerHTML='<div style="overflow-y:auto;max-height:60vh"><table style="width:100%;border-collapse:collapse"><thead><tr style="color:var(--tx3);font-size:.63rem"><th style="padding:.3rem .4rem;text-align:left">Fecha</th><th style="text-align:left">Tipo</th><th style="text-align:right">Cant</th><th style="text-align:right">Antes</th><th style="text-align:right">Despues</th><th style="text-align:left">Motivo</th><th style="text-align:left">Usuario</th></tr></thead><tbody>'+rows+'</tbody></table></div>';
+    body.innerHTML=htmlExacto+'<div style="font-size:.68rem;font-weight:700;color:var(--tx2);margin:.2rem 0 .3rem">🗒️ Anotaciones anteriores <span style="font-weight:400;color:var(--tx3)">· las cargaba la app, pueden tener huecos</span></div><div style="overflow-y:auto;max-height:'+(htmlExacto?'32vh':'60vh')+'"><table style="width:100%;border-collapse:collapse"><thead><tr style="color:var(--tx3);font-size:.63rem"><th style="padding:.3rem .4rem;text-align:left">Fecha</th><th style="text-align:left">Tipo</th><th style="text-align:right">Cant</th><th style="text-align:right">Antes</th><th style="text-align:right">Despues</th><th style="text-align:left">Motivo</th><th style="text-align:left">Usuario</th></tr></thead><tbody>'+rows+'</tbody></table></div>';
   });
 }
 // ═══════════════════════════════════════════════════════════════════════════

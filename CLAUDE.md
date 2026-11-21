@@ -94,6 +94,12 @@ Se vetearon (sin hooks ocultos ni exfiltración) e instalaron en `.agents/skills
     `trg_ventas_costo` → `_venta_costo_unit`, misma fórmula que `_repCostoFactory`). `venta` = exacto; `estimado` = ventas
     anteriores al 2026-11-21 (costo USD actual × dólar de la fecha, sacado de `rendiciones.cotiz_pagada`). Reportes usa el
     costo guardado si existe → las consultas de ventas que costean tienen que traer `costo_unit`.
+  - **Historial de stock**: tabla `stock_historial`, la escribe la BASE (trigger `_trg_stock_historial` sobre
+    `productos_priv`) en cada cambio de disponible / reserva / en_viaje / deposito_m, venga de donde venga. Guarda
+    antes→después, `clase` (reserva, liberacion, entrega, salida, ingreso, ingreso_proveedor…), `origen` (función que
+    lo hizo; `directo` = edición directa), `motivo` (lo manda la app en `ajustar_stock(…, p_motivo)`), `detalle` (se
+    engancha solo con la fila descriptiva de `movimientos_stock`) y `usuario`. Es la fuente de verdad desde el
+    2026-11-21; `movimientos_stock` (lo anota la app, con huecos) queda solo para lo anterior y como texto descriptivo.
   - **Período cerrado**: el trigger `belle_set_periodo_actual` (ventas, gastos, rendiciones) pasa al período abierto todo
     lo que una app desactualizada mande etiquetado con un período ya cerrado. Una venta `confirmada` = abierta = del período en curso.
 - **Instagram / marketing** (EN CURSO): ver `docs/contexto-marketing.md`. Etapa 1 (32 destacadas)
