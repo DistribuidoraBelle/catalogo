@@ -1,0 +1,7 @@
+F=[('hook','Jawás. La serie más famosa de Rasasi.'),('h4','Parte seis: femeninos dulces.'),
+('p1','Jawás Pink.'),('e1','Dulce, divertida, e imposible de ignorar.'),('n1','Pimienta rosa, pomelo y frutos rojos, con peonía, rosa y almizcle.'),('q1','El rosa nunca olió tan bien.'),('i1','Una creación original de Jawás, pensada para ella.'),
+('p2','Jawás Love.'),('e2','Para enamorar, desde el primer segundo.'),('n2','Mandarina, cardamomo y pimienta rosa, con azahar, jazmín y praliné.'),('q2','Un perfume que sabe a amor.'),('i2','Una creación original, con todo el romanticismo de Rasasi.'),
+('p3','Jawás Glitz.'),('e3','Brillás, aunque no digas nada.'),('n3','Pera y avellana, con rosa e iris, sobre vainilla y caramelo.'),('q3','Glamour en cada gota.'),('i3','Inspirado en Guidance, de Amouage.'),
+('p4','Jawás Dreams.'),('e4','El perfume de las que van por sus sueños.'),('n4','Naranja sanguina y pomelo, con almizcle blanco y jazmín, sobre iris y cedro.'),('q4','Fresco, suave y soñado.'),('i4','Una creación original de Jawás.'),
+('p5','Jawás Éclat.'),('e5','Delicada, chic, y difícil de olvidar.'),('n5','Lichi y pera, con bergamota y rosa turca, sobre vainilla e incienso.'),('q5','Elegancia francesa, con alma árabe.'),('i5','Inspirado en Delina, de Parfums de Marly.'),
+('out','¿Con cuál te quedás?'),('s1','Esta fue la parte seis. No te pierdas las otras partes de la serie:'),('s2','seguinos en nuestro perfil, para no perderte ninguna.'),('web','distribuidora Bel, punto com.'),('fq','¿Y a vos... cuál te gusta más?')]
