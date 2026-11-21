@@ -205,3 +205,8 @@ Más adelante: campañas por fecha (Black Friday/Cyber, Navidad, Día de la Madr
 
 ### Hashtags (2026-11-19)
 - Ger confirmó que **en su cuenta Instagram le deja poner muchos hashtags** (no lo bloquea al límite de 5). Usar **~30 hashtags** por texto (marca + categoría + nicho + virales).
+
+### Fondos animados (2026-11-21)
+- Los escenarios se pueden **animar con IA**: ElevenLabs connector, video `veo-3.1-fast-generate-001`, 9:16 1080p 8 s, sin audio, ~4850 créditos c/u. Usar la **imagen del escenario como start_frame** (se sube por URL pública de raw.githubusercontent del repo) y prompt "locked-off static camera… pedestal perfectly still… only the background animates…". Así el pedestal queda en el mismo lugar y el `ped` medido sigue sirviendo.
+- En el motor: escena `vid_<nombre>` → frames en `fotos/vid_<nombre>/f%04d.jpg` (ffmpeg), reproducidos en cámara lenta 0.5x con ida y vuelta (función `SH()` en scene.js; render espera la carga de cada frame).
+- Ger pidió esto para la Parte 4 (fuego que se mueve, rayos que explotan, etc.) y para los Apex (Parte 8: circuito, F1 híbrido, Gran Turismo).
