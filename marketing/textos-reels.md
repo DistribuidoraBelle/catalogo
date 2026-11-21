@@ -631,3 +631,21 @@ Los Hawas para ella con más flores y carácter 💐
 
 #hawas #rasasi #perfumesarabes #perfumetok #fragrancetok #perfumes #perfume #fragancias #perfumesmujer #perfumesfemeninos #perfumeriaargentina #perfumesimportados #dupes #perfumedupe #perfumelover #fyp #parati #viral #reels #argentina #distribuidorabelle #hawasforher #hawasrouge #hawasdiva #hawasreina #hawasblanche #lavieestbelle #sipassione #borninroma #olympea
 ```
+
+## 26) Serie Hawas · Parte 8 — Lo más nuevo (Apex)
+Portada: `portadas-series/portada_hawas_p8_9x16.png` · Video: `videos/series/hawas-parte8/hawas_parte8_F.mp4`
+
+```
+🏁 HAWAS · PARTE 8: LO MÁS NUEVO — LA LÍNEA APEX
+Lo último de Kenz de Rasasi, inspirado en el automovilismo 🏎️
+
+🧡 Hawas Apex → para los que siempre toman la curva perfecta (el "apex" es el punto ideal de la curva) · inspirado en Pacific Chill (Louis Vuitton)
+💚 Hawas Apex Hybrid → potencia y frescura, con el alma de los motores híbridos de la F1 · inspirado en Torino21 (Xerjoff)
+💛 Hawas Apex GT → lujo y velocidad, el espíritu del Gran Turismo · inspirado en Hacivat (Nishane), muy cercano al Hawas Black
+
+👇 ¿Y a vos cuál te gusta más? Contanos en los comentarios
+📲 Seguinos: mirá la serie Hawas completa (8 partes) y más perfumes en nuestro perfil
+🛒 Los encontrás en distribuidorabelle.com
+
+#hawas #rasasi #kenzderasasi #hawasapex #apex #apexhybrid #apexgt #formula1 #f1 #granturismo #perfumesarabes #perfumetok #fragrancetok #perfumes #perfume #fragancias #perfumeshombre #perfumeriaargentina #perfumesimportados #dupes #perfumedupe #pacificchill #torino21 #hacivat #perfumelover #fyp #parati #viral #reels #distribuidorabelle
+```
