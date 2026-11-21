@@ -38401,6 +38401,9 @@ function _repCostoFactory(productos, combos, cotiz){
   function costoUnit(v){
     var seg = String(v.segmento||"").toLowerCase();
     if(seg === "financiacion") return 0;
+    // 2026-11-21: cada venta guarda su costo del día que se vendió (ventas.costo_unit, lo graba la base).
+    // Si viene, manda ese: el margen histórico ya no cambia cuando se mueve el dólar o el costo del producto.
+    if(v.costo_unit != null && v.costo_unit !== ""){ var cg = parseFloat(v.costo_unit); if(cg > 0) return cg; }
     if(seg === "combo"){
       // 2026-09-29: primero por combo_id (renombrar el combo ya no deja la venta sin costo); el nombre queda de respaldo
       if(v.combo_id!=null && mapComboId[v.combo_id]!=null) return mapComboId[v.combo_id];
@@ -38998,7 +39001,14 @@ function _repCaja(apps, ventas, rango, cf){
   // parte de la venta registrada que NO vino como pago registrado en cc_pagos.
   // Se compara contra el TOTAL DEL PEDIDO (no contra la suma de las ventas): si las ventas registradas
   // cubren solo una parte del pedido (ej. una cuota de financiación), no hay que descontarles de nuevo lo que ya entró por CC.
-  var totNro={}; (ventas||[]).forEach(function(v){ if(v.nro_orden && porNro[v.nro_orden]) totNro[v.nro_orden]=(totNro[v.nro_orden]||0)+(parseFloat(v.total)||0); });
+  var totNro={}, cstNro={}, cstFalta={};
+  (ventas||[]).forEach(function(v){
+    if(!(v.nro_orden && porNro[v.nro_orden])) return;
+    totNro[v.nro_orden]=(totNro[v.nro_orden]||0)+(parseFloat(v.total)||0);
+    var cg=parseFloat(v.costo_unit);
+    if(cg>0) cstNro[v.nro_orden]=(cstNro[v.nro_orden]||0)+cg*(parseInt(v.cantidad)||0);
+    else if(String(v.segmento||"").toLowerCase()!=="financiacion") cstFalta[v.nro_orden]=1;
+  });
   var ratio={}; Object.keys(totNro).forEach(function(n){
     var Tv=totNro[n], Tp=parseFloat(porNro[n].ped.total)||Tv;
     var restante=Math.max(0, Tp-porNro[n].sumApps);           // plata del pedido que NO entró por cc_pagos
@@ -39016,7 +39026,12 @@ function _repCaja(apps, ventas, rango, cf){
         if(a.fecha<dK || a.fecha>=hK) return;
         if(!extraDet[n]) extraDet[n]={nro:n, monto:0, previo:0, pedTotal:T, saldado:false};
         extraDet[n].monto+=a.monto; if(a.cubrio) extraDet[n].saldado=true;
-        if(costoPed===null){ costoPed=_repCostoPedido(o.ped, cf); seg=_repSegmentoPedido(o.ped); }
+        if(costoPed===null){
+          // 2026-11-21: si las ventas del pedido están completas en el rango y traen su costo guardado, se usa ese (costo del día)
+          var _Tv=totNro[n]||0;
+          costoPed=(cstNro[n]>0 && !cstFalta[n] && T>0 && _Tv>=T*0.99) ? cstNro[n] : _repCostoPedido(o.ped, cf);
+          seg=_repSegmentoPedido(o.ped);
+        }
         var prop = T>0 ? a.monto/T : 0;
         var e = { _extra:true, created_at:a.fecha+"T15:00:00.000Z", fecha:a.fecha, total:a.monto, _costo:costoPed*prop, cantidad:0,
                   segmento:seg, producto_id:null, producto_nombre:"💵 Pago "+(a.cubrio?"final":"a cuenta")+" "+n, vendedor_id:a.vendedor_id, nro_orden:n,
@@ -39039,7 +39054,7 @@ function _repCaja(apps, ventas, rango, cf){
 // nota chica para los KPI: cuánto de la facturación entró como pagos registrados de pedidos cobrados por partes
 // ═══ Bases contables de Reportes (2026-09-25) ═══
 function _repGlosarioBases(){
-  return "<div style='font-size:.66rem;color:var(--tx3);margin:-.3rem 0 .8rem;line-height:1.4'>📐 <b>Criterio de caja</b>: la plata cuenta el día que entra, como un cierre de caja. Un pedido cobrado por partes suma cada pago en su fecha (con el costo proporcional de sus productos) y la venta final solo por lo que faltaba; nada se cuenta dos veces. <b>Costo</b> = reposición al dólar de hoy, igual que Stock y precios. <b>Devoluciones</b>: restan de lo cobrado. <b>Capital de socios</b> (sueldo del equipo): va en su propio renglón y también resta de la neta.</div>";
+  return "<div style='font-size:.66rem;color:var(--tx3);margin:-.3rem 0 .8rem;line-height:1.4'>📐 <b>Criterio de caja</b>: la plata cuenta el día que entra, como un cierre de caja. Un pedido cobrado por partes suma cada pago en su fecha (con el costo proporcional de sus productos) y la venta final solo por lo que faltaba; nada se cuenta dos veces. <b>Costo</b> = el del día de cada venta (queda guardado en la venta); en las anteriores al 21/11/2026 es estimado: costo actual en dólares × el dólar de esa fecha. <b>Devoluciones</b>: restan de lo cobrado. <b>Capital de socios</b> (sueldo del equipo): va en su propio renglón y también resta de la neta.</div>";
 }
 function _repNotaCaja(caja, fmtFn){
   if(!caja || !(caja.extraMonto>0)) return "";
@@ -39144,7 +39159,7 @@ function _repCargarPanorama(){
   var r = _repCalcRango(window._repPeriodo);
   var estadosV = "estado=in.(confirmada,archivada_periodo)";
   Promise.all([
-    apiGetAll("ventas", "select=id,vendedor_id,producto_id,producto_nombre,cantidad,total,segmento,created_at,origen,nro_orden,combo_id&"+estadosV+"&created_at=gte."+r.desde.toISOString()+"&created_at=lt."+r.hasta.toISOString()+"&limit=8000").catch(function(){return [];}),
+    apiGetAll("ventas", "select=id,vendedor_id,producto_id,producto_nombre,cantidad,total,costo_unit,segmento,created_at,origen,nro_orden,combo_id&"+estadosV+"&created_at=gte."+r.desde.toISOString()+"&created_at=lt."+r.hasta.toISOString()+"&limit=8000").catch(function(){return [];}),
     _repProdsCosto(),
     apiGet("combos", "select=id,nombre,combo_items(producto_id,cantidad,es_decan)&limit=2000").catch(function(){return [];}),
     _repGastos("&created_at=gte."+r.desde.toISOString()+"&created_at=lt."+r.hasta.toISOString()).catch(function(){return [];}),
@@ -39195,7 +39210,7 @@ function _repResumenRango(rango){
   var r=rango;
   var estadosV="estado=in.(confirmada,archivada_periodo)";
   return Promise.all([
-    apiGetAll("ventas","select=id,vendedor_id,producto_id,producto_nombre,cantidad,total,segmento,created_at,origen,nro_orden,combo_id&"+estadosV+"&created_at=gte."+r.desde.toISOString()+"&created_at=lt."+r.hasta.toISOString()+"&limit=8000").catch(function(){return [];}),
+    apiGetAll("ventas","select=id,vendedor_id,producto_id,producto_nombre,cantidad,total,costo_unit,segmento,created_at,origen,nro_orden,combo_id&"+estadosV+"&created_at=gte."+r.desde.toISOString()+"&created_at=lt."+r.hasta.toISOString()+"&limit=8000").catch(function(){return [];}),
     _repProdsCosto(),
     apiGet("combos","select=id,nombre,combo_items(producto_id,cantidad,es_decan)&limit=2000").catch(function(){return [];}),
     _repGastos("&created_at=gte."+r.desde.toISOString()+"&created_at=lt."+r.hasta.toISOString()).catch(function(){return [];}),
@@ -39215,7 +39230,7 @@ function _repResumenRangos(rangos){
   var desde=null,hasta=null; ks.forEach(function(k){ var r=rangos[k]; if(!desde||r.desde<desde) desde=r.desde; if(!hasta||r.hasta>hasta) hasta=r.hasta; });
   var estadosV="estado=in.(confirmada,archivada_periodo)";
   return Promise.all([
-    apiGetAll("ventas","select=id,vendedor_id,producto_id,producto_nombre,cantidad,total,segmento,created_at,origen,nro_orden,combo_id&"+estadosV+"&created_at=gte."+desde.toISOString()+"&created_at=lt."+hasta.toISOString()+"&limit=20000").catch(function(){return [];}),
+    apiGetAll("ventas","select=id,vendedor_id,producto_id,producto_nombre,cantidad,total,costo_unit,segmento,created_at,origen,nro_orden,combo_id&"+estadosV+"&created_at=gte."+desde.toISOString()+"&created_at=lt."+hasta.toISOString()+"&limit=20000").catch(function(){return [];}),
     _repProdsCosto(),
     apiGet("combos","select=id,nombre,combo_items(producto_id,cantidad,es_decan)&limit=2000").catch(function(){return [];}),
     _repGastos("&created_at=gte."+desde.toISOString()+"&created_at=lt."+hasta.toISOString()).catch(function(){return [];}),
@@ -39291,7 +39306,7 @@ function _repCargarStock(){
   var hoy=new Date(); var d90=new Date(hoy.getTime()-90*864e5), d30=new Date(hoy.getTime()-30*864e5), d7=new Date(hoy.getTime()-7*864e5);
   Promise.all([
     apiGetAll("productos","select=id,nombre,empresa,tipo,cat_catalogo,stock_actual,reserva,en_viaje,deposito_m,costo_ind,costo_log,costo_ars,precio_may_ars,precio_med_ars,precio_min_ars,ml,activo,oculto,created_at,ultimo_ingreso_at,reingreso_at&activo=is.true&limit=5000").catch(function(){return [];}),
-    apiGetAll("ventas","select=producto_id,producto_nombre,cantidad,total,segmento,created_at&"+_REP_ESTADOS_V+"&created_at=gte."+d90.toISOString()+"&limit=20000").catch(function(){return [];}),
+    apiGetAll("ventas","select=producto_id,producto_nombre,cantidad,total,costo_unit,segmento,created_at&"+_REP_ESTADOS_V+"&created_at=gte."+d90.toISOString()+"&limit=20000").catch(function(){return [];}),
     apiGetAll("movimientos_stock","select=producto_id,tipo,cantidad,stock_antes,stock_despues,created_at&created_at=gte."+d90.toISOString()+"&limit=20000").catch(function(){return [];}),
     apiGet("combos","select=id,nombre,combo_items(producto_id,cantidad,es_decan)&limit=1000").catch(function(){return [];})
   ]).then(function(r){
@@ -39871,7 +39886,7 @@ function _repCargarProyeccion(){
   var rAnt = _repRangoAnterior(window._repPeriodo, r); // período anterior de calendario (agosto entero contra septiembre)
   var hace60 = new Date(Date.now() - 60*86400000);
   Promise.all([
-    apiGetAll("ventas", "select=id,vendedor_id,producto_id,producto_nombre,cantidad,total,segmento,created_at,origen,nro_orden,combo_id&estado=in.(confirmada,archivada_periodo)&created_at=gte."+r.desde.toISOString()+"&created_at=lt."+r.hasta.toISOString()+"&limit=8000").catch(function(){return [];}),
+    apiGetAll("ventas", "select=id,vendedor_id,producto_id,producto_nombre,cantidad,total,costo_unit,segmento,created_at,origen,nro_orden,combo_id&estado=in.(confirmada,archivada_periodo)&created_at=gte."+r.desde.toISOString()+"&created_at=lt."+r.hasta.toISOString()+"&limit=8000").catch(function(){return [];}),
     apiGetAll("ventas", "select=id,total,created_at,nro_orden&estado=in.(confirmada,archivada_periodo)&created_at=gte."+rAnt.desde.toISOString()+"&created_at=lt."+rAnt.hasta.toISOString()+"&limit=8000").catch(function(){return [];}),
     _repGastos("&created_at=gte."+r.desde.toISOString()+"&created_at=lt."+r.hasta.toISOString()).catch(function(){return [];}),
     _repGastos("&created_at=gte."+rAnt.desde.toISOString()+"&created_at=lt."+rAnt.hasta.toISOString()).catch(function(){return [];}),
@@ -40396,7 +40411,7 @@ window._repMg = null;
 function _repCargarMargenes(){
   var r=_repCalcRango(window._repPeriodo);
   Promise.all([
-    apiGetAll("ventas","select=producto_id,producto_nombre,cantidad,total,segmento,vendedor_id,created_at&estado=in.(confirmada,archivada_periodo)&limit=60000").catch(function(){return [];}),
+    apiGetAll("ventas","select=producto_id,producto_nombre,cantidad,total,costo_unit,segmento,vendedor_id,created_at&estado=in.(confirmada,archivada_periodo)&limit=60000").catch(function(){return [];}),
     apiGetAll("productos","select=id,nombre,empresa,ml,costo_ind,costo_log,costo_ars&limit=8000").catch(function(){return [];}),
     apiGet("combos","select=id,nombre,combo_items(producto_id,cantidad,es_decan)&limit=2000").catch(function(){return [];}),
     _repGastos("", {conDevol:true, conRetiros:true}).catch(function(){return [];})
@@ -41229,7 +41244,7 @@ function _repCargarBajoRend(){
   var UMBRAL = 30; // días para considerar "dormido" (los más nuevos quedan en gracia)
   Promise.all([
     apiGetAll("productos", "select=id,nombre,empresa,ml,activo,oculto,costo_ind,costo_log,costo_ars,stock_actual,created_at,ultimo_ingreso_at,reingreso_at,gan_usd_may,gan_usd_med,precio_may_ars,precio_med_ars,precio_min_ars,precio_ml,precio_decan&limit=6000").catch(function(){return [];}),
-    apiGetAll("ventas", "select=producto_id,producto_nombre,cantidad,total,segmento,created_at&estado=in.(confirmada,archivada_periodo)&limit=20000").catch(function(){return [];}),
+    apiGetAll("ventas", "select=producto_id,producto_nombre,cantidad,total,costo_unit,segmento,created_at&estado=in.(confirmada,archivada_periodo)&limit=20000").catch(function(){return [];}),
     apiGet("combos", "select=id,nombre,combo_items(producto_id,cantidad,es_decan)&limit=2000").catch(function(){return [];})
   ]).then(function(data){
     var productos = data[0]||[], ventas = data[1]||[], combos = data[2]||[];
@@ -41422,7 +41437,7 @@ function _repCargarRentabilidad(){
     // Ventas del período
     apiGetAll("ventas", "select=*&"+estadosV+"&created_at=gte."+r.desde.toISOString()+"&created_at=lt."+r.hasta.toISOString()+"&limit=5000").catch(function(){return [];}),
     // Ventas del período anterior (mismo tamaño)
-    apiGetAll("ventas", "select=producto_id,producto_nombre,cantidad,total,vendedor_id,segmento,nro_orden,id&"+estadosV+"&created_at=gte."+rAnt.desde.toISOString()+"&created_at=lt."+rAnt.hasta.toISOString()+"&limit=5000").catch(function(){return [];}),
+    apiGetAll("ventas", "select=producto_id,producto_nombre,cantidad,total,costo_unit,vendedor_id,segmento,nro_orden,id&"+estadosV+"&created_at=gte."+rAnt.desde.toISOString()+"&created_at=lt."+rAnt.hasta.toISOString()+"&limit=5000").catch(function(){return [];}),
     // Gastos aprobados del período
     _repGastos("&created_at=gte."+r.desde.toISOString()+"&created_at=lt."+r.hasta.toISOString()).catch(function(){return [];}),
     // Gastos del anterior

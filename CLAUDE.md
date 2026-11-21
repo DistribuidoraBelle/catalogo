@@ -90,6 +90,12 @@ Se vetearon (sin hooks ocultos ni exfiltración) e instalaron en `.agents/skills
     **Criterio de Ger:** el capital de socios es el sueldo fijo semanal del equipo → ES gasto y resta de la ganancia neta,
     pero se muestra en su propio renglón, separado de los gastos operativos. Las devoluciones restan de lo cobrado.
     Toda consulta de ventas que pase por `_repCaja` tiene que traer `id,nro_orden,combo_id` (si no, duplica los pagos de CC).
+  - **Costo por venta**: `ventas.costo_unit` / `cotiz` / `costo_origen` los graba la base al insertar (trigger
+    `trg_ventas_costo` → `_venta_costo_unit`, misma fórmula que `_repCostoFactory`). `venta` = exacto; `estimado` = ventas
+    anteriores al 2026-11-21 (costo USD actual × dólar de la fecha, sacado de `rendiciones.cotiz_pagada`). Reportes usa el
+    costo guardado si existe → las consultas de ventas que costean tienen que traer `costo_unit`.
+  - **Período cerrado**: el trigger `belle_set_periodo_actual` (ventas, gastos, rendiciones) pasa al período abierto todo
+    lo que una app desactualizada mande etiquetado con un período ya cerrado. Una venta `confirmada` = abierta = del período en curso.
 - **Instagram / marketing** (EN CURSO): ver `docs/contexto-marketing.md`. Etapa 1 (32 destacadas)
   entregada; Etapa 2 (historias/videos) en iteración — **leé el doc para saber qué estilos rechazó Ger
   y por qué, así no repetís errores.**
