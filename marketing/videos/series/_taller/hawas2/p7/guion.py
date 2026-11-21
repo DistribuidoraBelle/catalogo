@@ -1,0 +1,7 @@
+F=[('hook','Jawás. La serie más famosa de Rasasi.'),('h4','Parte siete: femeninos florales.'),
+('p1','Jawás For Her.'),('e1','Para la mujer que sabe lo que quiere.'),('n1','Grosella y pera, con iris, jazmín y azahar, sobre praliné y vainilla.'),('q1','La vida es bella, y huele así.'),('i1','Inspirado en La Vie Est Belle, de Lancôme.'),
+('p2','Jawás Rouge.'),('e2','Pasión pura, en cada paso.'),('n2','Mandarina, frambuesa y chocolate, con jazmín y rosa, sobre vainilla.'),('q2','Rojo, intenso, irresistible.'),('i2','Inspirado en Sì Passione, de Giorgio Armani.'),
+('p3','Jawás Diva.'),('e3','Para la que entra, y se roba el show.'),('n3','Jazmín y rosa, con ámbar, almizcle y vainilla bourbon.'),('q3','Una diva no pasa desapercibida.'),('i3','Inspirado en Born in Roma Intense, de Valentino.'),
+('p4','Jawás Reina.'),('e4','Porque vos naciste para reinar.'),('n4','Damasco, pera y canela, con jazmín, coco y café, sobre vainilla y ámbar.'),('q4','Cremosa, frutal y adictiva.'),('i4','Inspirado en Olympéa Absolu, de Rabanne.'),
+('p5','Jawás Blanche.'),('e5','Elegancia limpia, que enamora de cerca.'),('n5','Manzana, mandarina y grosella negra, con albahaca y pachulí, sobre musgo y sándalo.'),('q5','Pureza con carácter.'),('i5','Muchos lo comparan con Blanche, de Byredo, y con Galloway, de Parfums de Marly.'),
+('out','¿Con cuál te quedás?'),('s1','Esta fue la parte siete. No te pierdas las otras partes de la serie:'),('s2','seguinos en nuestro perfil, para no perderte ninguna.'),('web','distribuidora Bel, punto com.'),('fq','¿Y a vos... cuál te gusta más?')]

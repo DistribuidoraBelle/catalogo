@@ -1,0 +1,5 @@
+F=[('hook','Jawás. La serie más famosa de Rasasi.'),('h4','Parte ocho: lo más nuevo.'),
+('p1','Jawás Apex.'),('e1','Para los que siempre toman la curva perfecta.'),('n1','Menta, mandarina y bergamota, con grosella negra e higo, sobre maderas y ámbar.'),('q1','Apex: el punto exacto de la curva perfecta.'),('i1','Inspirado en Pacific Chill, de Louis Vuitton.'),
+('p2','Jawás Apex Hybrid.'),('e2','Potencia y frescura, en un solo perfume.'),('n2','Menta, limón y albahaca, con grosella, lavanda y romero, sobre verbena y almizcle.'),('q2','Con el alma de los motores híbridos de la Fórmula Uno.'),('i2','Inspirado en Torino Veintiuno, de Xerjoff.'),
+('p3','Jawás Apex GT.'),('e3','Lujo y velocidad, para los que viajan a lo grande.'),('n3','Bergamota, ananá y pomelo, con pachulí, cedro y jazmín, sobre musgo de roble.'),('q3','El espíritu del Gran Turismo.'),('i3','Inspirado en Hacivat, de Nishane, muy cercano al Jawás Black.'),
+('out','¿Con cuál te quedás?'),('s1','Esta fue la última parte. No te pierdas las anteriores:'),('s2','seguinos en nuestro perfil, y mirá la serie completa.'),('web','distribuidora Bel, punto com.'),('fq','¿Y a vos... cuál te gusta más?')]
