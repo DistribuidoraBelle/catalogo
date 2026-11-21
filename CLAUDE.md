@@ -83,6 +83,8 @@ Se vetearon (sin hooks ocultos ni exfiltración) e instalaron en `.agents/skills
     (una transacción: todo o nada; `p_dry=true` = vista previa). El panel solo la llama. El automático es
     `cerrar_periodo_auto()` (pg_cron), respeta `periodo_auto_close` / `periodo_pausado` / día / hora de `configuracion`.
     `historial_periodos` guarda los ids tocados (snapshots) para poder auditar o revertir un cierre.
+    `configuracion.periodo_cierre_manual` = nombre de un período que el automático NO toca (Ger lo cierra a mano);
+    cron `belle-cierre-periodo-auto` cada 5 min (actúa solo dentro de las 6 hs posteriores al día/hora configurados).
   - **Reportes**: usar siempre `_repProdsCosto()` (no el global `prods`, que puede no tener costos) y `_repGastos()`
     (devuelve solo gastos operativos; los retiros `CAPITAL *` de socios y las `DEVOLUCION` van aparte, ver `_repAparte`).
     Toda consulta de ventas que pase por `_repCaja` tiene que traer `id,nro_orden,combo_id` (si no, duplica los pagos de CC).
