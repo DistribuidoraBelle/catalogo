@@ -78,6 +78,14 @@ Se vetearon (sin hooks ocultos ni exfiltración) e instalaron en `.agents/skills
   cuenta "llegó todo" en el primer control.
 - **Campanita del cliente** (hecho, 2026-11-11): antes se "borraban" las notis al abrir (filtraba solo
   no leídas y las marcaba leídas). Ahora muestra **todas** (`js/catalogo-2.js`, `_catRenderNotifList`).
+- **Auditoría económica** (2026-11-21): Reportes y cierre de período corregidos.
+  - **Cierre de período**: corre entero en el servidor, función `cerrar_periodo(p_nuevo, p_vendedores, p_dry, p_origen)`
+    (una transacción: todo o nada; `p_dry=true` = vista previa). El panel solo la llama. El automático es
+    `cerrar_periodo_auto()` (pg_cron), respeta `periodo_auto_close` / `periodo_pausado` / día / hora de `configuracion`.
+    `historial_periodos` guarda los ids tocados (snapshots) para poder auditar o revertir un cierre.
+  - **Reportes**: usar siempre `_repProdsCosto()` (no el global `prods`, que puede no tener costos) y `_repGastos()`
+    (devuelve solo gastos operativos; los retiros `CAPITAL *` de socios y las `DEVOLUCION` van aparte, ver `_repAparte`).
+    Toda consulta de ventas que pase por `_repCaja` tiene que traer `id,nro_orden,combo_id` (si no, duplica los pagos de CC).
 - **Instagram / marketing** (EN CURSO): ver `docs/contexto-marketing.md`. Etapa 1 (32 destacadas)
   entregada; Etapa 2 (historias/videos) en iteración — **leé el doc para saber qué estilos rechazó Ger
   y por qué, así no repetís errores.**
