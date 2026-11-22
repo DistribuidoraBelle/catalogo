@@ -12247,11 +12247,18 @@ function _adminGuardarCobro(id){
     // Antes solo en el "primer cobro" (yaCobrado===0): si el primer pago había entrado por FIFO (que no crea
     // ventas hasta saldar) este cobro nunca creaba la venta y el pedido quedaba "cobrado" sin ventas.
     // _pedSaldarItems vende solo lo que falta según items_cobrados, así no se duplica nada.
-    promesas.push(_pedSaldarItems(id, { vendId: vendId, forma: forma, origen:'catalogo', motivo:'Confirmar '+nroOrden }));
+    // 2026-11-22: las ventas y el stock se generan SOLO cuando el pedido queda saldado. Antes un cobro parcial
+    // (ej. $10.000 de $100.000) generaba las ventas del pedido ENTERO: el vendedor pasaba a deber plata que no cobró
+    // y toda la mercadería salía de la reserva. La plata a cuenta se anota como pago del cliente (igual que en la app
+    // del vendedor) y entra al saldo del vendedor por ahí; al saldar se generan las ventas y no se cuenta dos veces.
+    if(!esCobroCompleto && !p.cliente_id){
+      throw new Error('Para registrar un cobro parcial el pedido tiene que tener un cliente asignado (la plata a cuenta se anota en su cuenta). Asignale el cliente o cobralo completo.');
+    }
 
     // === [B] Patch del pedido (estado y montos) ===
     var pedidoPatch={
       cobrado_total:nuevoCobrado,
+      cobrado_parcial:nuevoCobrado,   // gemelo viejo que algunas pantallas leen con Math.max: se mantiene igual
       forma_pago:forma,
       vendedor_id:vendId   // 2026-09-23: el pedido queda a nombre de quien cobró (las ventas y vendido_X van a ese vendedor)
     };
@@ -12271,14 +12278,14 @@ function _adminGuardarCobro(id){
     } else {
       pedidoPatch.estado='cobrado_parcial';
     }
-    promesas.push(apiPatch('pedidos_catalogo',pedidoPatch,'id=eq.'+id));
 
-    // === [C] Si era CC y tiene cliente, registrar pago en cc_pagos ===
+    // === [C] Registrar el pago en cc_pagos: si es cuenta corriente, o si es un cobro parcial (plata a cuenta) ===
     var esCC=p.es_cc||(p.cliente_id&&((window._pedidosClienteCache||{})[p.cliente_id]||{}).cuenta_corriente_habilitada);
-    if(esCC&&p.cliente_id){
+    var pasoPago=function(){ return Promise.resolve(); };
+    if(p.cliente_id && (esCC || !esCobroCompleto)){
       var vendNom=_pedidoVendNom(vendId);
       // Atribución según regla: vendedor cobra → su ID; admin cobra → ID del vendedor seleccionado en dropdown
-      promesas.push(apiPost('cc_pagos',{
+      pasoPago=function(){ return apiPost('cc_pagos',{
         cliente_id:p.cliente_id,
         monto:monto,
         forma_pago:forma,
@@ -12300,10 +12307,18 @@ function _adminGuardarCobro(id){
             });
           });
         }
-      }).catch(function(e){console.error('cc_pagos error',e);}));
+        throw new Error('No se pudo registrar el pago (no se modificó el pedido)');
+      }); };
     }
 
-    return Promise.all(promesas);
+    // Orden (2026-11-22): 1) pago → 2) estado y montos del pedido → 3) ventas + stock, solo si quedó saldado.
+    // Si el pago falla no se toca el pedido (antes iba todo en paralelo y el error del pago se tragaba).
+    return pasoPago().then(function(){
+      return Promise.all(promesas.concat([apiPatch('pedidos_catalogo',pedidoPatch,'id=eq.'+id)]));
+    }).then(function(){
+      if(!esCobroCompleto) return;
+      return _pedSaldarItems(id, { vendId: vendId, forma: forma, origen:'catalogo', motivo:'Confirmar '+nroOrden });
+    });
   }).then(function(){
     var notaLog='Cobro registrado por admin. Cobró: '+_pedidoVendNom(vendId)+'. Forma: '+forma+'. Monto: '+fmt(monto);
     apiPost('pedidos_estados_log',{pedido_id:id,pedido_tabla:'pedidos_catalogo',estado:'cobrado',nota:notaLog,usuario:curUser||'admin'}).catch(function(){});
