@@ -12354,22 +12354,33 @@ function _adminRevertirCobro(id){
     },'id=eq.'+id));
 
     // === [B] Devolver stock vendido → reserva (revertir el descuento del cobro) ===
+    // 2026-11-22: se revierten SOLO los ítems que de verdad se habían cobrado (items_cobrados). Antes se devolvían
+    // todos: en un pedido cobrado en parte, los ítems que seguían apartados quedaban con la reserva DUPLICADA.
+    // Un pedido "cobrado" viejo sin ese detalle se toma como todo cobrado (comportamiento anterior).
+    var _cobIdx=null;
+    try{ var _ic=p.items_cobrados; if(typeof _ic==='string') _ic=JSON.parse(_ic); if(typeof _ic==='string') _ic=JSON.parse(_ic); if(Array.isArray(_ic)) _cobIdx=_ic.map(function(x){ return parseInt(x,10); }); }catch(e){ _cobIdx=null; }
+    var _todoCobrado=(!_cobIdx||!_cobIdx.length) && p.estado==='cobrado';
+    var _estabaCobrado=function(i){ return _todoCobrado || (!!_cobIdx && _cobIdx.indexOf(i)>=0); };
+    // un pedido transferido SIN reserva nunca tuvo la mercadería apartada: lo cobrado vuelve al disponible, no a reserva
+    var _sinRes=(typeof window._pedSinReserva==='function') && window._pedSinReserva(p);
+    var _vuelve=function(q){ return _sinRes ? {stock_actual:+q} : {reserva:+q}; };
     if(Array.isArray(items)){
-      items.forEach(function(it){
+      items.forEach(function(it, _idx){
+        if(!_estabaCobrado(_idx)) return;
         var _cid=comboIdDeItem(it);
         if(_cid){
           promesas.push(_comboComponentes(_cid, it).then(function(ci){
             if(!Array.isArray(ci))return;
             return Promise.all(ci.filter(function(c){return c.producto_id;}).map(function(c){
               var q=(parseInt(c.cantidad)||1)*(parseInt(it.qty)||1);
-              return patchStockFresco(c.producto_id,_dV(p.vendedor_id,-q,{reserva:+q}),'Revertir combo '+nroOrden);
+              return patchStockFresco(c.producto_id,_dV(p.vendedor_id,-q,_vuelve(q)),'Revertir combo '+nroOrden);
             }));
           }));
           return;
         }
         if(it.isDecan||!_esProductoNumerico(it.producto_id))return;
         var qty=(parseInt(it.qty)||parseInt(it.cantidad)||1)*(parseInt(it.cajaCant)||1);
-        promesas.push(patchStockFresco(parseInt(it.producto_id,10),_dV(p.vendedor_id,-qty,{reserva:+qty}),'Revertir cobro '+nroOrden));
+        promesas.push(patchStockFresco(parseInt(it.producto_id,10),_dV(p.vendedor_id,-qty,_vuelve(qty)),'Revertir cobro '+nroOrden));
       });
     }
 
@@ -23158,6 +23169,24 @@ function _admCCExportExcel(clienteId, clienteNombre){
 // Revierte: borra aplicaciones, ajusta cobrado_total de cada pedido, devuelve estado
 // si era cobrado completo, reduce saldo_a_favor, y borra el pago.
 // ═══════════════════════════════════════════════════════════════════
+// 2026-11-22: deja las cuotas de un pedido acordes a lo que REALMENTE lleva cobrado (se usa al borrar un pago).
+// Reparte "totalPagado" entre las cuotas no canceladas, de la más vieja a la más nueva.
+function _ccRedistribuirCuotas(pedidoId, totalPagado){
+  return apiGet("cc_cuotas","select=id,monto,monto_pagado,estado,fecha_pago&pedido_id=eq."+pedidoId+"&estado=neq.cancelada&order=fecha_vencimiento.asc,nro_cuota.asc").then(function(cs){
+    if(!Array.isArray(cs)||!cs.length) return null;
+    var resto=Math.max(0, parseFloat(totalPagado)||0), ps=[];
+    cs.forEach(function(c){
+      var monto=parseFloat(c.monto)||0, pag=Math.min(monto, resto); resto=Math.round((resto-pag)*100)/100;
+      pag=Math.round(pag*100)/100;
+      var est = (monto>0 && pag>=monto-0.01) ? 'pagada' : (pag>0.01 ? 'parcial' : (c.estado==='vencida' ? 'vencida' : 'pendiente'));
+      if(Math.abs((parseFloat(c.monto_pagado)||0)-pag)<0.01 && c.estado===est) return;   // esta cuota ya estaba bien
+      var patch={ monto_pagado:pag, estado:est, updated_at:new Date().toISOString() };
+      if(est!=='pagada') patch.fecha_pago=null;
+      ps.push(apiPatch("cc_cuotas", patch, "id=eq."+c.id));
+    });
+    return Promise.all(ps);
+  });
+}
 function _admBorrarPago(pagoId, clienteId, clienteNombre){
   bellConfirm("⚠️ ¿BORRAR este pago?\n\nEsto va a:\n• Restar el monto de los pedidos a los que se aplicó\n• Si un pedido pasaba a 'cobrado' por este pago, vuelve a 'cobrado_parcial' o 'pendiente'\n• Reducir el saldo a favor del cliente si correspondía\n\nNo se puede deshacer.", function(){
 
@@ -23176,13 +23205,20 @@ function _admBorrarPago(pagoId, clienteId, clienteNombre){
     // Para cada aplicación: restar monto_aplicado de pedidos_catalogo.cobrado_total
     aplics.forEach(function(ap){
       chain = chain.then(function(){
-        return apiGet("pedidos_catalogo","select=id,cobrado_total,total,estado,nro_orden,vendedor_id&id=eq."+ap.pedido_id+"&limit=1");   // 2026-09-23: vendedor_id para descontar vendido_X del vendedor correcto
+        return apiGet("pedidos_catalogo","select=id,cobrado_total,total,estado,nro_orden,vendedor_id,items_cobrados,origen,con_reserva&id=eq."+ap.pedido_id+"&limit=1");   // 2026-09-23: vendedor_id para descontar vendido_X del vendedor correcto
       }).then(function(rows){
         if(!rows||!rows[0]) return null;
         var p = rows[0];
         var nuevoCobrado = Math.max(0, (parseFloat(p.cobrado_total)||0) - (parseFloat(ap.monto_aplicado)||0));
         var totalP = parseFloat(p.total)||0;
-        var patch = { cobrado_total: nuevoCobrado };
+        // 2026-11-22: cobrado_parcial es el gemelo viejo que varias pantallas leen con Math.max(cobrado_parcial, cobrado_total):
+        // si no se baja junto, el próximo cobro arrancaba del número anterior al borrado y se cobraba de menos.
+        var patch = { cobrado_total: nuevoCobrado, cobrado_parcial: nuevoCobrado };
+        // ítems que estaban cobrados ANTES de este borrado (para devolver solo esos)
+        var _cobIdx=null;
+        try{ var _ic=p.items_cobrados; if(typeof _ic==='string') _ic=JSON.parse(_ic); if(typeof _ic==='string') _ic=JSON.parse(_ic); if(Array.isArray(_ic)&&_ic.length) _cobIdx=_ic.map(function(x){ return parseInt(x,10); }); }catch(e){ _cobIdx=null; }
+        var _sinRes=(typeof window._pedSinReserva==='function') && window._pedSinReserva(p);
+        var _vuelve=function(q){ return _sinRes ? {stock_actual:+q} : {reserva:+q}; };
         // Decidir nuevo estado
         var quedaSinCobrar = (nuevoCobrado <= 0.01);
         if(quedaSinCobrar){
@@ -23207,6 +23243,9 @@ function _admBorrarPago(pagoId, clienteId, clienteNombre){
         var revertirTodo = quedaSinCobrar;
         if(revertirTodo) patch.items_cobrados = '[]';   // 2026-09-23: vuelve a pendiente → ningún ítem vendido
         return apiPatch("pedidos_catalogo", patch, "id=eq."+p.id).then(function(){
+          // las cuotas quedan acordes a lo que sigue cobrado (antes seguían "pagadas" aunque se borrara el pago)
+          return _ccRedistribuirCuotas(p.id, nuevoCobrado).catch(function(e){ console.error('[cc] cuotas tras borrar pago:', e); });
+        }).then(function(){
           if(!revertirTodo) return;
           // 1) Revertir stock — SOLO si el pedido tenía ventas (si el pago fue parcial por FIFO, el stock
           //    nunca salió de reserva y "devolverlo" duplicaba la reserva) — 2026-09-23
@@ -23221,8 +23260,9 @@ function _admBorrarPago(pagoId, clienteId, clienteNombre){
             catch(e) { items = []; }
             if(!Array.isArray(items) || !items.length) return;
             var c2 = Promise.resolve();
-            items.forEach(function(it){
+            items.forEach(function(it, _idx){
               if(it.isDecan) return; // decans no tocan stock
+              if(_cobIdx && _cobIdx.indexOf(_idx)<0) return;   // 2026-11-22: ese ítem no se había cobrado → sigue apartado, no se toca
               var qty = (parseInt(it.qty)||parseInt(it.cantidad)||1)*(parseInt(it.cajaCant)||1);
               var _cid=comboIdDeItem(it);
               // Combo: revertir reserva de cada componente
@@ -23234,7 +23274,7 @@ function _admBorrarPago(pagoId, clienteId, clienteNombre){
                     ci.filter(function(x){return x.producto_id;}).forEach(function(cit){
                       var cTot = (cit.cantidad||1)*qty;
                       c3 = c3.then(function(){
-                        return patchStockFresco(cit.producto_id, _dV(p.vendedor_id,-cTot,{reserva:+cTot}), "Reverso combo pago borrado "+(p.nro_orden||"#"+p.id));
+                        return patchStockFresco(cit.producto_id, _dV(p.vendedor_id,-cTot,_vuelve(cTot)), "Reverso combo pago borrado "+(p.nro_orden||"#"+p.id));
                       });
                     });
                     return c3;
@@ -23245,7 +23285,7 @@ function _admBorrarPago(pagoId, clienteId, clienteNombre){
               // Producto normal (id numérico)
               if(_esProductoNumerico(it.producto_id)){
                 c2 = c2.then(function(){
-                  return patchStockFresco(parseInt(it.producto_id,10), _dV(p.vendedor_id,-qty,{reserva:+qty}), "Reverso pago borrado pedido "+(p.nro_orden||"#"+p.id));
+                  return patchStockFresco(parseInt(it.producto_id,10), _dV(p.vendedor_id,-qty,_vuelve(qty)), "Reverso pago borrado pedido "+(p.nro_orden||"#"+p.id));
                 });
               }
             });
