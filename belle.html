@@ -9279,6 +9279,9 @@ function openProdModal(id){
   document.getElementById("fpVJ").value=(p&&p.en_viaje)||0;
   document.getElementById("fpDM").value=(p&&p.deposito_m)||0;
   document.getElementById("fpRE").value=(p&&p.reserva)||0;
+  // 2026-11-22: valores de stock con los que se abrió la ficha (para mandar solo lo que el admin cambie, como ajuste)
+  window._fpStockIni = p ? { id:p.id, sa:parseInt(p.stock_actual)||0, re:parseInt(p.reserva)||0, vj:parseInt(p.en_viaje)||0,
+                             dm:parseInt(p.deposito_m)||0, vd:parseInt(p.vendido_david)||0, vf:parseInt(p.vendido_facu)||0 } : null;
   document.getElementById("fpCI").value=(p&&p.costo_ind)||0;
   document.getElementById("fpCL").value=(p&&p.costo_log)||(!p?2.3:0);
   document.getElementById("fpGM").value=(p&&p.gan_usd_may)||0;
@@ -10421,10 +10424,36 @@ function saveProd(){
   data.fotos_seg=Math.max(1,parseFloat((document.getElementById('fpFotosSeg')||{}).value)||3.5);
   data.fotos_efecto=(document.getElementById('fpFotosEfecto')||{}).value||'fundido';
   if(window._bcModeGenViaje){ data.oculto=true; data.activo=true; }
+  // 2026-11-22: guardar la ficha ya NO pisa el stock. Antes se mandaban stock / reserva / en viaje / vendidos tal como
+  // estaban al ABRIR el formulario: si mientras tanto entraba una venta o un pedido, guardar (aunque fuera solo por una
+  // foto o un precio) los volvía atrás. Ahora los campos de stock que no tocaste no se mandan, y los que sí cambiaste
+  // se aplican como ajuste (+/−) atómico sobre el valor real de ese momento (y quedan en el historial de stock).
+  var _stkDelta=null, _pidEdit=editProdId;
+  if(_pidEdit && window._fpStockIni && window._fpStockIni.id===_pidEdit){
+    var _ini=window._fpStockIni;
+    var _dS={ stock_actual:(data.stock_actual||0)-_ini.sa, reserva:(data.reserva||0)-_ini.re, en_viaje:(data.en_viaje||0)-_ini.vj,
+              vendido_david:(data.vendido_david||0)-_ini.vd, vendido_facu:(data.vendido_facu||0)-_ini.vf };
+    if((data.deposito_m||0)===_ini.dm) delete data.deposito_m;
+    delete data.stock_actual; delete data.reserva; delete data.en_viaje; delete data.vendido_david; delete data.vendido_facu; delete data.stock_orig;
+    if(_dS.stock_actual||_dS.reserva||_dS.en_viaje||_dS.vendido_david||_dS.vendido_facu) _stkDelta=_dS;
+  }
   window._saveProdEnCurso=true;
   var _btnsSave=Array.prototype.slice.call(document.querySelectorAll("#moProd .mf button")); _btnsSave.forEach(function(b){ b.disabled=true; });
   var _soltar=function(){ window._saveProdEnCurso=false; _btnsSave.forEach(function(b){ b.disabled=false; }); };
-  var prom=(_rgPend||Promise.resolve()).then(function(){ return editProdId?apiPatch("productos",data,"id=eq."+editProdId):apiPost("productos",data); });
+  var prom=(_rgPend||Promise.resolve()).then(function(){ return editProdId?apiPatch("productos",data,"id=eq."+editProdId):apiPost("productos",data); })
+    .then(function(res){
+      if(!_stkDelta) return res;
+      return patchStockFresco(_pidEdit, _stkDelta, 'Ajuste desde la ficha del producto').then(function(r){
+        var so=(parseInt(r.stock_actual)||0)+(parseInt(r.reserva)||0);
+        var fila=(Array.isArray(res)&&res[0])?res[0]:null;
+        if(fila){ ['stock_actual','reserva','en_viaje','vendido_david','vendido_facu'].forEach(function(k){ if(r[k]!==undefined) fila[k]=r[k]; }); fila.stock_orig=so; }
+        if(window._fpStockIni && window._fpStockIni.id===_pidEdit){ window._fpStockIni.sa=parseInt(r.stock_actual)||0; window._fpStockIni.re=parseInt(r.reserva)||0; window._fpStockIni.vj=parseInt(r.en_viaje)||0; window._fpStockIni.vd=parseInt(r.vendido_david)||0; window._fpStockIni.vf=parseInt(r.vendido_facu)||0; }
+        return apiPatch("productos",{stock_orig:so},"id=eq."+_pidEdit).then(function(){ return res; }, function(){ return res; });
+      }, function(e){
+        toast('La ficha se guardó, pero NO se pudo ajustar el stock: '+((e&&e.message)||e),'terr');
+        return res;
+      });
+    });
   prom.then(_soltar,_soltar);
   prom.then(function(res){
     if(res&&!Array.isArray(res)&&res.error){toast("Error: "+(res.message||res.error),"terr");return;}
