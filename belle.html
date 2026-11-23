@@ -27847,6 +27847,81 @@ function cargarFotoContacto(input){
 
 
 
+// 2026-11-23: listas tipo CATÁLOGO con fotos (ej. Epic "Black Friday"): no traen código; cada renglón es
+//   "PERFUME AFNAN 9PM EDP 100ML   US$ 22.00  US$ 19.99"   (precio tachado + precio promo, o un solo precio)
+// con la marca como título de sección arriba de "Foto  Descrição  Preço". Se toma el precio MÁS BAJO del renglón
+// y el tachado queda como precio original (se muestra tachado y cuenta como oferta).
+function _bcParseCatalogoUSD(text){
+  var out=[], seen={};
+  var nonPerfume=/^(DESODORANTE|BODY|COSMETICO|SPRAY|CREME|CREMA|OIL|SHAMPOO|CONDICIONADOR|MASCARA|LOTION|KIT\s)/i;
+  var precioDe=function(s){ var m=/(\d{1,4}(?:[.,]\d{1,2})?)\s*$/.exec(s); return m?parseFloat(m[1].replace(',','.')):NaN; };
+  var paginas=String(text||'').split(/[\r\n]+/);
+  var marcaActual='';
+  var emitir=function(desc, precios, marca){
+    desc=String(desc||'').replace(/\s{2,}/g,' ').trim();
+    var ps=(precios||[]).filter(function(p){ return p>=0.5 && p<=2000; });
+    if(!desc || desc.length<4 || !ps.length || nonPerfume.test(desc)) return;
+    var precio=Math.min.apply(null,ps), orig=Math.max.apply(null,ps);
+    var k=desc.toUpperCase(); if(seen[k]) return; seen[k]=1;
+    var m2=marca;
+    if(!m2){ var bm=desc.match(/^([A-Z][A-Z\s&'.]{1,25}?)\s+(?:EDP|EDT|EAU|EXTRAIT|PARFUM|\d)/); m2=bm?bm[1].trim():desc.split(' ').slice(0,2).join(' '); }
+    var o={nombre_proveedor:desc,nombre_norm:bcNormalizarNombre(desc),precio_usd:precio,codigo:'',marca:m2,proveedor:'EPIC'};
+    if(orig-precio>=0.01){ o._precioOriginal=orig; o._precioBajo=true; }
+    out.push(o);
+  };
+  paginas.forEach(function(pag){
+    var t=pag.replace(/\s+/g,' ');
+    if(t.indexOf('PERFUME')<0) return;
+    // marcadores en orden: inicio de descripción, precio, encabezado de tabla (antes del cual va la marca)
+    var re=/\bPERFUME\s+|US\s*\$\s*\d{1,4}(?:[.,]\d{1,2})?|Foto\s+Descri\S*\s+Pre\S*/g, m, marks=[];
+    while((m=re.exec(t))!==null){
+      var tipo = /^PERFUME/.test(m[0]) ? 'D' : (/^US/.test(m[0]) ? 'P' : 'H');
+      marks.push({tipo:tipo, ini:m.index, fin:m.index+m[0].length, txt:m[0]});
+    }
+    var filas=[], precios=[], grupoAbierto=null;
+    for(var i=0;i<marks.length;i++){
+      var mk=marks[i], sig=marks[i+1];
+      if(mk.tipo==='H'){
+        // la marca es el tramo en MAYÚSCULAS justo antes del encabezado
+        var antes=t.slice(i>0?marks[i-1].fin:0, mk.ini);
+        var bm=/([A-Z0-9][A-Z0-9 &'.\-]{1,34})\s*$/.exec(antes);
+        if(bm) marcaActual=bm[1].trim();
+        grupoAbierto=null; continue;
+      }
+      if(mk.tipo==='D'){
+        filas.push({desc:t.slice(mk.fin, sig?sig.ini:t.length).trim(), marca:marcaActual, pos:mk.ini});
+        grupoAbierto=null; continue;
+      }
+      // precio: los precios pegados (solo espacios entre ellos) son del mismo renglón
+      var pv=precioDe(mk.txt);
+      if(grupoAbierto && /^\s*$/.test(t.slice(marks[i-1].fin, mk.ini))) grupoAbierto.vals.push(pv);
+      else { grupoAbierto={vals:[pv], pos:mk.ini}; precios.push(grupoAbierto); }
+    }
+    if(!filas.length || !precios.length) return;
+    if(filas.length===precios.length){
+      // caso normal: tantos grupos de precio como renglones (sirve si vienen intercalados o en columnas)
+      filas.forEach(function(f,ix){ emitir(f.desc, precios[ix].vals, f.marca); });
+    } else {
+      var planos=[]; precios.forEach(function(g){ planos=planos.concat(g.vals); });
+      if(planos.length===filas.length*2){
+        // por columnas: todas las descripciones juntas y después todos los precios, de a dos (tachado + promo)
+        filas.forEach(function(f,ix){ emitir(f.desc, [planos[ix*2], planos[ix*2+1]], f.marca); });
+      } else if(planos.length===filas.length){
+        filas.forEach(function(f,ix){ emitir(f.desc, [planos[ix]], f.marca); });
+      } else {
+        // no coinciden: a cada descripción, el primer grupo de precios que aparece después (antes de la siguiente).
+        // Un grupo con más de 2 precios no se puede asignar con seguridad a un renglón: se descarta antes que inventar un precio.
+        filas.forEach(function(f,ix){
+          var hasta=(filas[ix+1]||{pos:Infinity}).pos, g=null;
+          for(var j=0;j<precios.length;j++){ if(precios[j].pos>f.pos && precios[j].pos<hasta){ g=precios[j]; break; } }
+          if(g && g.vals.length<=2) emitir(f.desc, g.vals, f.marca);
+        });
+      }
+    }
+  });
+  return out;
+}
+
 function comprasParseText(text){
   var productos=[];
   var seen={};
@@ -27933,6 +28008,12 @@ function comprasParseText(text){
       var marca3=bm3?bm3[1].trim():desc2.split(' ').slice(0,2).join(' ');
       productos.push({nombre_proveedor:desc2,nombre_norm:bcNormalizarNombre(desc2),precio_usd:price2,codigo:cod2,marca:marca3,proveedor:'EPIC'});
     }
+  }
+
+  // Strategy 3 (2026-11-23): catálogo con fotos y precios "US$" sin código (lista Black Friday de Epic)
+  if(productos.length<3 && /US\s*\$/.test(text)){
+    var _cat=_bcParseCatalogoUSD(text);
+    if(_cat.length>productos.length) productos=_cat;
   }
 
   return productos;
@@ -31272,7 +31353,7 @@ function bcCargarArchivo(input, modo){
               return;
             }
             var parsed=comprasParseText(txt);
-            var items=parsed.map(function(p){return{nombre_proveedor:p.nombre_proveedor,nombre_norm:bcNormalizarNombre(p.nombre_proveedor),precio_usd:p.precio_usd,proveedor:nombre,codigo:p.codigo||'',marca:p.marca||''};});
+            var items=parsed.map(function(p){var o={nombre_proveedor:p.nombre_proveedor,nombre_norm:bcNormalizarNombre(p.nombre_proveedor),precio_usd:p.precio_usd,proveedor:nombre,codigo:p.codigo||'',marca:p.marca||''}; if(p._precioBajo){o._precioBajo=true;o._precioOriginal=p._precioOriginal;} return o;});
             if(!items.length){items=comprasParseAnyText(txt,nombre).map(function(p){p.nombre_norm=p.nombre_norm||bcNormalizarNombre(p.nombre_proveedor);return p;});}
             bcGuardarProveedor(nombre,items,_modo);
           }).catch(function(err){
