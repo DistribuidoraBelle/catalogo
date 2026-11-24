@@ -108,6 +108,12 @@ Se vetearon (sin hooks ocultos ni exfiltración) e instalaron en `.agents/skills
     idempotencia (tabla `ventas_lotes`; el mismo carrito reintentado reusa token y nro de orden → no duplica).
     Ajuste `{pid, desde_reserva:N}` = sale primero de lo apartado y el resto del disponible (lo calcula el servidor).
     Para probar sin dejar rastro: correr la función como David dentro de un `DO $$ … raise exception` (rollback).
+  - **Chequeo diario (2026-11-24)**: `belle_chequeo_diario(p_avisar)` por pg_cron (`belle-chequeo-diario`, 11:10 UTC = 08:10 AR).
+    Revisa 14 cosas (cobrados vs ventas, sobrecobros, parciales sin registrar, pagos que no cierran, stock negativo, stock vs
+    historial, reservas corregidas por el autoheal, ventas sin costo / con período viejo, posibles duplicados, crons caídos,
+    período abierto de más, respaldo). Guarda el resultado en `chequeos_diarios` y avisa al admin SOLO si hay problemas.
+  - **Seguridad (2026-11-24, aplicado)**: `reservar_stock_web` y `belle_vigilar_salud` ya no son ejecutables por anon/authenticated,
+    `belle_salud` con RLS, y las funciones de trigger sin EXECUTE público (los triggers disparan igual). SQL en `docs/sql/`.
   - **Período cerrado**: el trigger `belle_set_periodo_actual` (ventas, gastos, rendiciones) pasa al período abierto todo
     lo que una app desactualizada mande etiquetado con un período ya cerrado. Una venta `confirmada` = abierta = del período en curso.
 - **Instagram / marketing** (EN CURSO): ver `docs/contexto-marketing.md`. Etapa 1 (32 destacadas)
