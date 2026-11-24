@@ -7294,92 +7294,117 @@ function executeVenta(items,reservaDecs){
   });
   var allItems=items.concat(decans);
   var promises=[];
-  var nroOrden=genOrden(); // Un solo numero de orden para toda la venta
+  // ── 2026-11-24: la venta viaja ENTERA en un solo pedido al servidor (venta_directa_atomica): líneas de venta +
+  // ajustes de stock + anotaciones, todo o nada. Antes eran N requests sueltos: si uno fallaba, el carrito se
+  // restauraba y el reintento mandaba todo de nuevo con OTRO número de orden → duplicaba lo que sí había entrado.
+  // Además lleva un identificador único: si la venta llegó al servidor pero la respuesta se perdió (corte de red,
+  // doble toque), el reintento del MISMO carrito reusa el identificador y el servidor no la carga dos veces.
+  var _usuarioMov=VENDEDOR_ID===1?"David":VENDEDOR_ID===2?"Facu":"Vendedor "+VENDEDOR_ID;
+  var _firma=JSON.stringify(allItems.map(function(it){ return [it.id,it.prodId||null,it.qty,it.price,it.descuento||0,it.isDecan?1:0,it.isCombo?1:0,it.isBonificado?1:0,it.isCosm?1:0,reservaDecs[it.id]?1:0]; }))
+            +'|'+((_carritoCliente&&_carritoCliente.id)||'')+'|'+getFormaCobro()+'|'+VENDEDOR_ID;
+  var _reint=null;
+  try{ _reint=window._ventaReintento||JSON.parse(localStorage.getItem('belle_venta_reintento')||'null'); }catch(e){ _reint=null; }
+  if(!(_reint && _reint.firma===_firma && _reint.token && _reint.nroOrden && (Date.now()-(_reint.t||0))<30*60000)){
+    var _no=genOrden();
+    _reint={ firma:_firma, nroOrden:_no, token:_no+'-'+Date.now()+'-'+Math.random().toString(36).slice(2,10), t:Date.now() };
+  }
+  window._ventaReintento=_reint;
+  try{ localStorage.setItem('belle_venta_reintento', JSON.stringify(_reint)); }catch(e){}
+  var nroOrden=_reint.nroOrden; // Un solo numero de orden para toda la venta (el mismo si se reintenta)
+  var _lote={ ventas:[], ajustes:[], movs:[] };
 
   allItems.forEach(function(item){
     if(item.isBonificado){
       // Regalo bonificado: línea a $0 + descuenta stock del producto regalado.
-      promises.push(apiPost("ventas",{
+      _lote.ventas.push({
         vendedor_id:VENDEDOR_ID,nro_orden:nroOrden,
         producto_id:item.prodId,producto_nombre:item.nombre,cantidad:item.qty,
         precio_unitario:0,segmento:"bonificado",total:0,periodo:periodoActual,estado:"confirmada",
         forma_cobro:getFormaCobro(),origen:"vendedor",descuento:0,descuento_motivo:"Regalo por compra"
-      }));
-      promises.push(patchStockFresco(item.prodId,{stock_actual:-item.qty},'Bonificado'));
-      try{promises.push(api("POST","movimientos_stock",{
+      });
+      _lote.ajustes.push({pid:item.prodId,stock_actual:-item.qty,motivo:'Bonificado '+nroOrden});
+      _lote.movs.push({
         producto_id:item.prodId,producto_nombre:item.nombre,tipo:"venta",cantidad:item.qty,
-        motivo:"Bonificado (regalo por compra) — vendedor "+VENDEDOR_ID,
-        usuario:VENDEDOR_ID===1?"David":VENDEDOR_ID===2?"Facu":"Vendedor "+VENDEDOR_ID,
+        motivo:"Bonificado (regalo por compra) — vendedor "+VENDEDOR_ID+" — "+nroOrden,
+        usuario:_usuarioMov,
         periodo:periodoActual||"general"
-      },null));}catch(e){}
+      });
       return;
     }
     if(item.isCombo){
       // ── COMBO: register venta + reduce stock of each component ──
       var sub=(item.price*item.qty)-(item.descuento||0);
-      promises.push(apiPost("ventas",{
+      _lote.ventas.push({
         vendedor_id:VENDEDOR_ID,producto_id:null,combo_id:item.comboId||null,
         producto_nombre:item.nombre,cantidad:item.qty,
         precio_unitario:item.price,segmento:"combo",nro_orden:nroOrden,
-        total:sub,periodo:periodoActual,nro_orden:nroOrden,estado:"confirmada",
+        total:sub,periodo:periodoActual,estado:"confirmada",
         forma_cobro:getFormaCobro(),origen:"vendedor",descuento:item.descuento||0,
         descuento_motivo:item.descMotivo||""
-      }));
-      // 2026-09-29: el descuento de cada componente se espera (antes quedaba suelto: si fallaba, venta sin stock) y deja movimiento
+      });
       _comboCompSync(item).forEach(function(ci){
         var prodId=ci.producto_id;
         var cantComp=(ci.cantidad||1)*item.qty;
-        promises.push(patchStockFresco(prodId,_dV(VENDEDOR_ID,+cantComp,{stock_actual:-cantComp}),'Venta combo').then(function(r){
-          try{ _logMovStock({pid:prodId,nombre:ci.producto_nombre||((prods.find(function(p){return p.id===prodId;})||{}).nombre),tipo:'venta',cantidad:cantComp,motivo:'Venta combo '+(item.nombre||'')+' — '+nroOrden}); }catch(e){}
-          return r;
-        }));
+        _lote.ajustes.push(Object.assign({pid:prodId,motivo:'Venta combo '+nroOrden}, _dV(VENDEDOR_ID,+cantComp,{stock_actual:-cantComp})));
+        _lote.movs.push({
+          producto_id:prodId,
+          producto_nombre:ci.producto_nombre||((prods.find(function(p){return p.id===prodId;})||{}).nombre)||('Prod #'+prodId),
+          tipo:'venta',cantidad:cantComp,
+          motivo:'Venta combo '+(item.nombre||'')+' — '+nroOrden,
+          usuario:(typeof VENDEDOR_NOMBRE!=='undefined'&&VENDEDOR_NOMBRE)?VENDEDOR_NOMBRE:_usuarioMov,
+          periodo:periodoActual||"general"
+        });
       });
     } else {
       // ── NORMAL PRODUCT ──
       var sub=(item.price*item.qty)-(item.descuento||0);
-      promises.push(apiPost("ventas",{
+      _lote.ventas.push({
         vendedor_id:VENDEDOR_ID,nro_orden:nroOrden,
         producto_id:(item.isDecan||item.isCosm)?(item.prodId||null):item.id,
         producto_nombre:item.nombre,cantidad:item.qty,
         precio_unitario:item.price,
         segmento:item.isDecan?"decan":item.precioManual?"especial":item.seg,
-        total:sub,periodo:periodoActual,nro_orden:nroOrden,estado:"confirmada",
+        total:sub,periodo:periodoActual,estado:"confirmada",
         forma_cobro:getFormaCobro(),origen:"vendedor",descuento:item.descuento||0,
         descuento_motivo:item.descMotivo||""
-      }));
+      });
       if(!item.isDecan){
         var _spid=item.isCosm?item.prodId:item.id;
         var qty=item.qty*(item.isCosm?(item.cajaCant||1):1);
         var usadoDeReserva=reservaDecs[item.id]?qty:0;
-        // Si el vendedor confirmó usar reserva → solo liberar reserva (stock ya fue descontado)
+        // Si el vendedor confirmó usar reserva → sale primero de lo apartado; si la cantidad SUPERA la reserva real,
+        // el excedente sale del disponible (esa cuenta la hace el servidor con el valor del momento: desde_reserva).
         // Si no → descontar stock directamente
         if(usadoDeReserva>0){
-          // 🐛 FIX 2026-08-08: si la cantidad vendida SUPERA la reserva real, el excedente
-          // debe salir de stock_actual. Antes se restaba todo de reserva, el clamp en 0 lo
-          // ocultaba y quedaban unidades fantasma en el sistema.
-          promises.push(apiGet("productos","select=id,reserva&id=eq."+_spid).then(function(_rw){
-            var _resReal=(_rw&&_rw[0]&&(_rw[0].reserva||0))||0;
-            var _deRes=Math.min(qty,_resReal), _deStock=qty-_deRes;
-            var _delta=_dV(VENDEDOR_ID,+qty,{});
-            if(_deRes>0)_delta.reserva=-_deRes;
-            if(_deStock>0)_delta.stock_actual=-_deStock;
-            return patchStockFresco(_spid,_delta,'Venta desde reserva');
-          }));
+          _lote.ajustes.push(Object.assign({pid:_spid,desde_reserva:qty,motivo:'Venta desde reserva '+nroOrden}, _dV(VENDEDOR_ID,+qty,{})));
         } else {
-          promises.push(patchStockFresco(_spid,_dV(VENDEDOR_ID,+qty,{stock_actual:-qty}),'Venta directa'));
+          _lote.ajustes.push(Object.assign({pid:_spid,motivo:'Venta directa '+nroOrden}, _dV(VENDEDOR_ID,+qty,{stock_actual:-qty})));
         }
-        try{promises.push(api("POST","movimientos_stock",{
+        _lote.movs.push({
           producto_id:_spid,
           producto_nombre:item.nombre,
           tipo:"venta",
           cantidad:qty,
-          motivo:"Venta "+(item.seg||"")+" — vendedor "+VENDEDOR_ID,
-          usuario:VENDEDOR_ID===1?"David":VENDEDOR_ID===2?"Facu":"Vendedor "+VENDEDOR_ID,
+          motivo:"Venta "+(item.seg||"")+" — vendedor "+VENDEDOR_ID+" — "+nroOrden,
+          usuario:_usuarioMov,
           periodo:periodoActual||"general"
-        },null));}catch(e){}
+        });
       }
     }
   });
+
+  window._ventaLoteUltimo={ token:_reint.token, lote:_lote };   // para diagnóstico
+  promises.push(apiPost('rpc/venta_directa_atomica',{ p_token:_reint.token, p_ventas:_lote.ventas, p_ajustes:_lote.ajustes, p_movs:_lote.movs }).then(function(res){
+    if(!res || res.ok!==true) throw new Error((res&&(res.error||res.message))||'respuesta inesperada del servidor');
+    // venta confirmada por el servidor: se olvida el identificador (una venta igual después es una venta NUEVA)
+    window._ventaReintento=null; try{ localStorage.removeItem('belle_venta_reintento'); }catch(e){}
+    (res.stocks||[]).forEach(function(s){
+      var pm=prods.find(function(p){ return p.id===s.pid; });
+      if(pm) ['stock_actual','reserva','vendido_david','vendido_facu','en_viaje'].forEach(function(k){ if(s[k]!==undefined) pm[k]=s[k]; });
+    });
+    if(res.repetida) console.warn('[venta] el servidor ya tenía esta venta ('+nroOrden+'): no se duplicó');
+    return res;
+  }));
 
   // Handle reserva records
   Object.keys(reservaDecs).forEach(function(prodId){

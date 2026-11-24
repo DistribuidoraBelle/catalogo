@@ -103,6 +103,11 @@ Se vetearon (sin hooks ocultos ni exfiltración) e instalaron en `.agents/skills
   - **Reglas de plata/stock (2026-11-22)**: la ficha de producto NO manda campos de stock salvo los que el admin cambió,
     y como ajuste (+/−) por `patchStockFresco`. Un cobro PARCIAL (admin o vendedor) no genera ventas ni mueve stock: se
     anota como `cc_pagos` + aplicación; las ventas (`_pedSaldarItems`) se crean recién cuando el pedido queda saldado.
+  - **Venta directa del vendedor (2026-11-24)**: `ventas.html › executeVenta` arma un lote (ventas + ajustes + movs) y lo
+    manda en UNA llamada a `venta_directa_atomica(p_token, p_ventas, p_ajustes, p_movs)`: todo o nada, y con token de
+    idempotencia (tabla `ventas_lotes`; el mismo carrito reintentado reusa token y nro de orden → no duplica).
+    Ajuste `{pid, desde_reserva:N}` = sale primero de lo apartado y el resto del disponible (lo calcula el servidor).
+    Para probar sin dejar rastro: correr la función como David dentro de un `DO $$ … raise exception` (rollback).
   - **Período cerrado**: el trigger `belle_set_periodo_actual` (ventas, gastos, rendiciones) pasa al período abierto todo
     lo que una app desactualizada mande etiquetado con un período ya cerrado. Una venta `confirmada` = abierta = del período en curso.
 - **Instagram / marketing** (EN CURSO): ver `docs/contexto-marketing.md`. Etapa 1 (32 destacadas)
