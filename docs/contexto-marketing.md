@@ -146,6 +146,7 @@ Más adelante: campañas por fecha (Black Friday/Cyber, Navidad, Día de la Madr
 ## Voces ElevenLabs (plan Starter desde 2026-11-15, uso comercial incluido)
 - **Dante** (masculina) — voice_id `DzZyY3xqjLUXGaT9wykC`. Voz de la Academia 01–06 y del Especial 01.
 - **Belle Femenina (AR)** (diseñada, rioplatense con voseo) — voice_id `7hwWxK75z20rN4syVI8W`. Elegida por Ger (opción B) para los próximos videos.
+- **Belle Amigo (AR)** (diseñada 2026-11-26, masculina, rioplatense, cercana, tono de amigo, NO locutor) — voice_id `lblwNVaHPGL4uKNo501H`. Elegida por Ger para Black Friday (rechazó las voces de locutor de radio/TV: "hacela más amigable y no tan locutor").
 - Modelo `eleven_v4`, flow `W8ZOFVuCySGeyTjKmjMC`, 1 toma por bloque.
 
 ## Música — REGLA DE GER: NUNCA repetir música entre videos (cada video lleva una pista nueva y distinta)
@@ -210,3 +211,10 @@ Más adelante: campañas por fecha (Black Friday/Cyber, Navidad, Día de la Madr
 - Los escenarios se pueden **animar con IA**: ElevenLabs connector, video `veo-3.1-fast-generate-001`, 9:16 1080p 8 s, sin audio, ~4850 créditos c/u. Usar la **imagen del escenario como start_frame** (se sube por URL pública de raw.githubusercontent del repo) y prompt "locked-off static camera… pedestal perfectly still… only the background animates…". Así el pedestal queda en el mismo lugar y el `ped` medido sigue sirviendo.
 - En el motor: escena `vid_<nombre>` → frames en `fotos/vid_<nombre>/f%04d.jpg` (ffmpeg), reproducidos en cámara lenta 0.5x con ida y vuelta (función `SH()` en scene.js; render espera la carga de cada frame).
 - Ger pidió esto para la Parte 4 (fuego que se mueve, rayos que explotan, etc.) y para los Apex (Parte 8: circuito, F1 híbrido, Gran Turismo).
+
+
+## Black Friday 2026 — audiovisual (2026-11-26)
+- Piezas en `marketing/videos/blackfriday-2026/` (1080x1920, reel + historia). Estética = la del sitio: negro + rojo #e4000f, Archivo Black / Oswald, piso negro brillante con humo rojo (fondo Seedream + Veo animado).
+- Imagen 1 y Video 1 ("esta noche 00 hs") entregados. Voz: Belle Amigo. Música: ElevenLabs Music electro (m1).
+- Titular "HASTA 50% OFF": el 78% de la base es falso (Shirley May de Swiss Arabian con precio de lista mal cargado). Máximo real 57%.
+- Pendientes: Video 2 (ofertas con precio tachado: Bottled Night, Light Blue PH, Le Beau Paradise Garden, Azzaro PH, Hawas Atlantis, Kit Asad) e Imagen 2 ("último día", sábado).
