@@ -114,6 +114,14 @@ Se vetearon (sin hooks ocultos ni exfiltración) e instalaron en `.agents/skills
     período abierto de más, respaldo). Guarda el resultado en `chequeos_diarios` y avisa al admin SOLO si hay problemas.
   - **Seguridad (2026-11-24, aplicado)**: `reservar_stock_web` y `belle_vigilar_salud` ya no son ejecutables por anon/authenticated,
     `belle_salud` con RLS, y las funciones de trigger sin EXECUTE público (los triggers disparan igual). SQL en `docs/sql/`.
+  - **Respaldo diario por tandas (2026-11-26)**: `respaldo-diario` se quedaba sin CPU (2 s por pedido) y la fila quedaba
+    `en_curso`. Ahora cada llamada hace una tanda, anota el avance en `respaldos_log.progreso` / `turno` y la base la vuelve a
+    llamar (`fn_respaldo_continuar`); si se corta, `fn_respaldo_vigia` (cron `belle-respaldo-vigia`, cada 5 min) la retoma.
+    Para probar que un respaldo se LEE: llamar a la función con `{"verificar":"AAAA-MM-DD","tablas":[…]}`.
+  - **Autoheal de reservas (2026-11-26)**: `belle_autoheal_reservas` ya NO corrige una diferencia la primera vez que la ve: la
+    anota en `autoheal_vistos` y solo la corrige si en la pasada siguiente sigue idéntica. Motivo: el 24/11 corrió justo en el
+    medio de un cobro CC FIFO (el pedido ya "cobrado", las reservas todavía sin soltar) y se soltaron reservas dos veces.
+    Los cobros siguen siendo de varios pasos en el cliente: pendiente pasarlos a una función atómica como la venta directa.
   - **Período cerrado**: el trigger `belle_set_periodo_actual` (ventas, gastos, rendiciones) pasa al período abierto todo
     lo que una app desactualizada mande etiquetado con un período ya cerrado. Una venta `confirmada` = abierta = del período en curso.
 - **Instagram / marketing** (EN CURSO): ver `docs/contexto-marketing.md`. Etapa 1 (32 destacadas)
