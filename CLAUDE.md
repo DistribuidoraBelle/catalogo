@@ -124,6 +124,13 @@ Se vetearon (sin hooks ocultos ni exfiltración) e instalaron en `.agents/skills
     Los cobros siguen siendo de varios pasos en el cliente: pendiente pasarlos a una función atómica como la venta directa.
   - **Período cerrado**: el trigger `belle_set_periodo_actual` (ventas, gastos, rendiciones) pasa al período abierto todo
     lo que una app desactualizada mande etiquetado con un período ya cerrado. Una venta `confirmada` = abierta = del período en curso.
+- **Black Friday 2026** (campaña creada 2026-11-26, **PAUSADA hasta que Ger la active**): campaña `blackfriday`
+  (`ofertas_campanias` id `91668d44-06be-472e-82a1-341ebeac5004`, pestaña id 13, oferta `precio_unico` del 27/11 00:00 al
+  29/11 00:00 AR, 210 productos con `precio_unico` en `ofertas_campania_productos`; fuera a pedido de Ger: 2114, 2219, 2151).
+  El diseño rojo vive en `index.html` (`#bfEdCss` + `#bfEdJs`): es **inerte** si la campaña no está activa; lee productos,
+  precios y fechas de la base. Se activa desde el panel (Ofertas → "Campaña activa"); si se activa antes de la hora, el inicio
+  muestra la cuenta regresiva y la pestaña/precios arrancan solos. Vista previa: `index.html?vista=blackfriday`.
+  `black-friday-prueba.html` es la maqueta vieja (datos inyectados a mano), no la toca nadie.
 - **Instagram / marketing** (EN CURSO): ver `docs/contexto-marketing.md`. Etapa 1 (32 destacadas)
   entregada; Etapa 2 (historias/videos) en iteración — **leé el doc para saber qué estilos rechazó Ger
   y por qué, así no repetís errores.**
