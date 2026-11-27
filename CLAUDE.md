@@ -124,9 +124,12 @@ Se vetearon (sin hooks ocultos ni exfiltración) e instalaron en `.agents/skills
     Los cobros siguen siendo de varios pasos en el cliente: pendiente pasarlos a una función atómica como la venta directa.
   - **Período cerrado**: el trigger `belle_set_periodo_actual` (ventas, gastos, rendiciones) pasa al período abierto todo
     lo que una app desactualizada mande etiquetado con un período ya cerrado. Una venta `confirmada` = abierta = del período en curso.
-- **Black Friday 2026** (campaña creada 2026-11-26, **PAUSADA hasta que Ger la active**): campaña `blackfriday`
+- **Black Friday 2026** (campaña creada 2026-11-26; **se activa sola el 27/11 00:00 AR** por el cron `belle-bf2026-activar` →
+  `bf2026_activar()`, que actúa una sola vez y se borra; termina sola el 29/11 00:00 por `fn_campanias_mantenimiento`): campaña `blackfriday`
   (`ofertas_campanias` id `91668d44-06be-472e-82a1-341ebeac5004`, pestaña id 13, oferta `precio_unico` del 27/11 00:00 al
-  29/11 00:00 AR, 210 productos con `precio_unico` en `ofertas_campania_productos`; fuera a pedido de Ger: 2114, 2219, 2151).
+  29/11 00:00 AR, **180 productos** con `precio_unico` en `ofertas_campania_productos`: se cargaron 210 y Ger sacó 30 desde el panel
+  —Shirley May, Tubbees, Lattafa Kids, body lotion VS—; fuera desde antes: 2114, 2219, 2151). Los precios se pasaron del dólar 1650
+  al de 1750 (×1750/1650, redondeo a 500; los de 1650 quedaron en la tabla `_bf2026_precios_1650`).
   El diseño rojo vive en `index.html` (`#bfEdCss` + `#bfEdJs`): es **inerte** si la campaña no está activa; lee productos,
   precios y fechas de la base. Se activa desde el panel (Ofertas → "Campaña activa"); si se activa antes de la hora, el inicio
   muestra la cuenta regresiva y la pestaña/precios arrancan solos. Vista previa: `index.html?vista=blackfriday`.
