@@ -234,8 +234,12 @@
       var s=q.edad, sl=s*L, x=vjX(sl,q.k)+q.lat*Math.sin(s*4.2+q.fase)*Math.min(1,s*3), y=440-420*sl*0.95, op=q.po*Math.min(1,s*7)*Math.pow(1-s,0.9);
       q.el.setAttribute('cx',x.toFixed(1)); q.el.setAttribute('cy',y.toFixed(1)); var gordo=1+0.9*(1-Math.min(1,VJ.mov||0)); q.el.setAttribute('r',(q.r0*(0.45+1.6*s)*gordo).toFixed(1)); q.el.setAttribute('opacity',(op*(1+0.35*(gordo-1))).toFixed(3)); }
   }
-  function vjScroll(){ if(!VJ.raf) VJ.raf=requestAnimationFrame(vjPaso); }
+  function vjScroll(){ VJ.quieto=false; if(!VJ.raf) VJ.raf=requestAnimationFrame(vjPaso); }
   function vjPaso(ts){
+    // (rendimiento 2026-11-27) con el frasco quieto y el color ya asentado, la nube se redibuja a ~30 cuadros por segundo
+    // en vez de 60 (la mitad de trabajo; va a la misma velocidad porque avanza por tiempo). Al scrollear vuelve a 60.
+    if(VJ.quieto && !document.hidden && ts-(VJ.ultT||0)<30){ VJ.raf=requestAnimationFrame(vjPaso); return; }
+    VJ.ultT=ts;
     VJ.raf=0; var v=VJ.el, c=VJ.cont; if(!v||!c||!c.isConnected||html.classList.contains('cyber')){ if(v) v.style.opacity='0'; return; }
     var hayCards=c.querySelector('.card'); var rect=c.getBoundingClientRect(), vh=window.innerHeight;
     var minY=60, maxY=Math.max(minY,c.offsetHeight-80);
@@ -266,6 +270,7 @@
     var objMov=Math.min(1,VJ.vel*2.6); VJ.mov+=(objMov-VJ.mov)*(objMov>VJ.mov?0.04:0.012); vjColores();
     var esc=9+Math.min(9,VJ.vel*11); VJ.esc=(VJ.esc||esc)*0.9+esc*0.1;
     if(VJ.d1&&Math.abs((VJ.escUlt||0)-VJ.esc)>0.4){ VJ.escUlt=VJ.esc; VJ.d1.setAttribute('scale',VJ.esc.toFixed(1)); }
+    VJ.quieto=(!moviendo && Math.abs(d)<0.6 && VJ.vel<0.012 && VJ.mov<0.02 && Math.abs(VJ.esc-esc)<0.4);
     if(!fuera) VJ.raf=requestAnimationFrame(vjPaso);
   }
   // ── vistas del listado: tarjetas (la de siempre) · renglones · recuadros; la elección queda guardada en el navegador ──
