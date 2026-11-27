@@ -146,7 +146,7 @@ Más adelante: campañas por fecha (Black Friday/Cyber, Navidad, Día de la Madr
 ## Voces ElevenLabs (plan Starter desde 2026-11-15, uso comercial incluido)
 - **Dante** (masculina) — voice_id `DzZyY3xqjLUXGaT9wykC`. Voz de la Academia 01–06 y del Especial 01.
 - **Belle Femenina (AR)** (diseñada, rioplatense con voseo) — voice_id `7hwWxK75z20rN4syVI8W`. Elegida por Ger (opción B) para los próximos videos.
-- **Belle Amigo (AR)** (diseñada 2026-11-26, masculina, rioplatense, cercana, tono de amigo, NO locutor) — voice_id `lblwNVaHPGL4uKNo501H`. Elegida por Ger para Black Friday (rechazó las voces de locutor de radio/TV: "hacela más amigable y no tan locutor").
+- **Belle Amigo (AR)** (diseñada 2026-11-26, masculina, rioplatense, cercana, tono de amigo, NO locutor) — voice_id `lblwNVaHPGL4uKNo501H`. Elegida por Ger para Black Friday (rechazó las voces de locutor de radio/TV: "hacela más amigable y no tan locutor"). **A Ger LE ENCANTÓ en el video 3 de Black Friday ("Descuentos de verdad") → guardarla para usar a futuro.** Ajustes que se usaron: eleven_v4, stability 0.6, similarity 0.85, style 0.15. Para el arranque "Black Friday" la toma aguda le sonó afeminada: usar stability alta / style bajo.
 - Modelo `eleven_v4`, flow `W8ZOFVuCySGeyTjKmjMC`, 1 toma por bloque.
 
 ## Música — REGLA DE GER: NUNCA repetir música entre videos (cada video lleva una pista nueva y distinta)
@@ -218,3 +218,9 @@ Más adelante: campañas por fecha (Black Friday/Cyber, Navidad, Día de la Madr
 - Imagen 1 y Video 1 ("esta noche 00 hs") entregados. Voz: Belle Amigo. Música: ElevenLabs Music electro (m1).
 - Titular "HASTA 50% OFF": el 78% de la base es falso (Shirley May de Swiss Arabian con precio de lista mal cargado). Máximo real 57%.
 - Pendientes: Video 2 (ofertas con precio tachado: Bottled Night, Light Blue PH, Le Beau Paradise Garden, Azzaro PH, Hawas Atlantis, Kit Asad) e Imagen 2 ("último día", sábado).
+
+
+## Contenido para seguidores (2026-11-27)
+- Ger eligió 2 formatos: **"Frená en tu signo"** (versión hombre y mujer, 12 signos, 3 perfumes por signo) y la serie **"El perfume para…"** (cita, gym, oficina, boliche, casamiento, verano, entrevista, día a día).
+- Maquetas con motion graphics planos le parecieron "berretas": quiere **video IA real** que actúe lo que se relata (ej. cita: pareja que se abraza cuando la voz dice "que te quieran abrazar").
+- Voz de "El perfume para…": **Dante con un toque seductor**.
