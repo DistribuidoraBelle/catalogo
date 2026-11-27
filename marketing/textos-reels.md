@@ -649,3 +649,55 @@ Lo último de Kenz de Rasasi, inspirado en el automovilismo 🏎️
 
 #hawas #rasasi #kenzderasasi #hawasapex #apex #apexhybrid #apexgt #formula1 #f1 #granturismo #perfumesarabes #perfumetok #fragrancetok #perfumes #perfume #fragancias #perfumeshombre #perfumeriaargentina #perfumesimportados #dupes #perfumedupe #pacificchill #torino21 #hacivat #perfumelover #fyp #parati #viral #reels #distribuidorabelle
 ```
+
+---
+
+## 27. Frená en tu signo — VERSIÓN HOMBRE
+
+✨ Tu signo ya eligió tu perfume ✨
+Frená en el tuyo y descubrí qué fragancia va con vos 👇
+
+♈ Aries: Club de Nuit Intense · Afnan 9pm · Hawas Fire
+♉ Tauro: Khamrah Qahwa · Liquid Brun · Asad Bourbon
+♊ Géminis: Mandarin Sky · Hawas Ice · Jean Lowe Immortal
+♋ Cáncer: Amber Oud Aqua Dubai · Hawas For Him · Odyssey Homme
+♌ Leo: Amber Oud Gold · Bharara King · The Kingdom
+♍ Virgo: Club de Nuit Urban · Fakhar Black · Philos Pura
+♎ Libra: Stronger With You Intensely · Hawas Malibu · Bade'e Al Oud Honor & Glory
+♏ Escorpio: Asad · Hayaati Gold Elixir · Hawas Black
+♐ Sagitario: 9pm Rebel · Vulcan Feu · Hawas Tropical
+♑ Capricornio: 9pm Night Out · Club de Nuit Untold · Rayhaan Obsidian
+♒ Acuario: Sceptre Malachite · Riiffs Momento · Hawas Verde
+♓ Piscis: 9am Dive · Odyssey Bahamas · Rayhaan Aquatica
+
+¿Y vos… de qué signo sos? Comentalo 👇 y etiquetá a ese amigo que no para de hablar de su signo 😏
+Los encontrás todos en 👉 distribuidorabelle.com
+Seguinos, que se vienen muchos más 🔥
+
+#signoszodiacales #horoscopo #astrologia #zodiaco #aries #tauro #geminis #cancer #leo #virgo #libra #escorpio #sagitario #capricornio #acuario #piscis #perfumes #perfumeshombre #perfumesarabes #perfumesoriginales #fragancias #perfumeria #lattafa #armaf #rasasi #hawas #afnan #perfumelovers #perfumescordoba #distribuidorabelle
+
+---
+
+## 28. Frená en tu signo — VERSIÓN MUJER
+
+✨ Tu signo ya eligió tu perfume ✨
+Frená en el tuyo y descubrí tu fragancia ideal 👇
+
+♈ Aries: Mayar Cherry Intense · Bad Femme · Khamrah Qahwa
+♉ Tauro: Yara Candy · Eclaire Banoffi · Sabah Al Ward Sugar
+♊ Géminis: Yara Tous · Yum Yum · Odyssey Candee
+♋ Cáncer: Fakhar Rose · Emaan · Sabah Al Ward
+♌ Leo: Yara Elixir · Ajayeb Dubai Portrait · Amber Oud Gold
+♍ Virgo: Mayar Natural Intense · 9am White · L'Intrude
+♎ Libra: Yara Rosa · Angham Second Song · Delilah
+♏ Escorpio: Club de Nuit Maleka · 9pm Pour Femme · Hayaati Gold Elixir
+♐ Sagitario: Mayar Rose · Sakeena · Watani
+♑ Capricornio: Yara Moi · Habik · Club de Nuit Imperiale
+♒ Acuario: Opulent Dubai · Odyssey Marshmallow · Riiffs Momento
+♓ Piscis: Ana Abiyedh Rouge · Noble Blush · Rayhaan Italia
+
+¿Y vos… de qué signo sos? Contanos en los comentarios 💕 y etiquetá a tu amiga del mismo signo 👯‍♀️
+Los encontrás todos en 👉 distribuidorabelle.com
+Seguinos, que se vienen muchos más ✨
+
+#signoszodiacales #horoscopo #astrologia #zodiaco #aries #tauro #geminis #cancer #leo #virgo #libra #escorpio #sagitario #capricornio #acuario #piscis #perfumes #perfumesmujer #perfumesarabes #perfumesoriginales #fragancias #perfumeria #lattafa #yara #armaf #perfumelovers #perfumesdulces #perfumescordoba #regalosparaella #distribuidorabelle
