@@ -8011,7 +8011,7 @@ function _avisoSinStockModal(fallas, opts){
       "<div style='font-size:.84rem;color:#555;margin-bottom:.8rem;line-height:1.45'>"+_catEsc(opts.intro||'Estos productos no tienen stock en este momento:')+"</div>"+
       "<div style='background:#faf6ee;border:1px solid #f0e7d6;border-radius:10px;padding:.3rem .7rem;margin-bottom:1rem;max-height:40vh;overflow-y:auto'>"+lista+"</div>"+
       (opts.nota?"<div style='font-size:.8rem;color:#7a6a50;margin-bottom:1rem;line-height:1.45'>"+_catEsc(opts.nota)+"</div>":"")+
-      "<button onclick=\"var m=document.getElementById('_catMoSinStock');if(m)m.remove();\" style='background:var(--accent,#c4965a);color:#fff;border:none;padding:.65rem 1.6rem;border-radius:9px;font-size:.88rem;font-weight:700;cursor:pointer;font-family:inherit;box-shadow:0 2px 8px rgba(196,150,90,.3)'>Entendido</button>"+
+      "<button onclick=\"var m=document.getElementById('_catMoSinStock');if(m)m.remove();\" style='background:var(--accent,#c4965a);color:#fff;border:none;padding:.65rem 1.6rem;border-radius:9px;font-size:.88rem;font-weight:700;cursor:pointer;font-family:inherit;box-shadow:0 2px 8px rgba(196,150,90,.3)'>"+_catEsc(opts.boton||'Entendido')+"</button>"+
     "</div>";
   document.body.appendChild(mo);
 }
@@ -9975,9 +9975,10 @@ function _sendWAOriginal(){
         try{
           _avisoSinStockModal(_fallasM,{
             icono:'📦',
-            titulo:'Falta stock para tu pedido',
-            intro:'Tu pedido '+nroOrden+' no se envió porque estos productos no tienen stock suficiente:',
-            nota:'Ajustá las cantidades y volvé a intentar.'
+            titulo:(_fallasM.length>1?'Se agotaron productos de tu pedido':'Se agotó un producto de tu pedido'),
+            intro:'Otro cliente confirmó su compra unos segundos antes y ya no tenemos stock suficiente de lo siguiente. Tu pedido todavía no se envió:',
+            nota:'Volvé al carrito, quitalo o elegí otro perfume en su lugar, y enviá el pedido de nuevo. El resto de tu carrito sigue tal como lo dejaste.',
+            boton:'Volver al carrito'
           });
         }catch(eN){ console.warn('[belle-cat] aviso sin stock:',eN); }
         _logAct('pedido_web_sin_stock', {nro_orden:nroOrden, faltantes:_fallasM}, {exito:false, error_msg:'sin stock'});
