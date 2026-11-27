@@ -134,6 +134,11 @@ Se vetearon (sin hooks ocultos ni exfiltración) e instalaron en `.agents/skills
   precios y fechas de la base. Se activa desde el panel (Ofertas → "Campaña activa"); si se activa antes de la hora, el inicio
   muestra la cuenta regresiva y la pestaña/precios arrancan solos. Vista previa: `index.html?vista=blackfriday`.
   `black-friday-prueba.html` es la maqueta vieja (datos inyectados a mano), no la toca nadie.
+- **Estadísticas de campaña** (panel → Ofertas → 📊, rehechas 2026-11-27): `_campStatsCargar` / `_campStatsHTML` en `belle.html`
+  cuentan **todo lo pedido con productos de la campaña**: renglones de `pedidos_catalogo` (web y vendedores, cobrados o no, sin
+  cancelados) + `ventas` que NO vienen de un pedido (venta directa). Antes miraban solo `ventas`, que se llena recién al cobrar,
+  y con pedidos reservados/pendientes no mostraban casi nada. `pedidos_catalogo.items` puede venir como texto JSON o como
+  arreglo (`_campStatsItems` contempla los dos). Black Friday: los internacionales van primero en la selección (`orden` 1–30).
 - **Instagram / marketing** (EN CURSO): ver `docs/contexto-marketing.md`. Etapa 1 (32 destacadas)
   entregada; Etapa 2 (historias/videos) en iteración — **leé el doc para saber qué estilos rechazó Ger
   y por qué, así no repetís errores.**
