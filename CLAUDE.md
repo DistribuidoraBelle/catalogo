@@ -139,6 +139,12 @@ Se vetearon (sin hooks ocultos ni exfiltración) e instalaron en `.agents/skills
   cancelados) + `ventas` que NO vienen de un pedido (venta directa). Antes miraban solo `ventas`, que se llena recién al cobrar,
   y con pedidos reservados/pendientes no mostraban casi nada. `pedidos_catalogo.items` puede venir como texto JSON o como
   arreglo (`_campStatsItems` contempla los dos). Black Friday: los internacionales van primero en la selección (`orden` 1–30).
+- **Reclamos de proveedor** (2026-11-28): la pantalla "Reclamos pendientes" NO tiene tabla propia: lista los renglones de
+  `pedidos_proveedor_items` con `estado_item` en (`pendiente_catalogo`, `nuevo`, `faltante`, `fallado`, `parcial`). Eliminar un
+  pedido en viaje borra sus renglones → se van sus reclamos y lo pendiente "en viaje" (ahora `eliminarPedidoProveedor` avisa).
+  Para recuperar algo borrado: edge function **`respaldo-leer`** (`{"fecha":"AAAA-MM-DD","tabla":…}`, solo las tablas de su
+  lista), llamada desde la base con `net.http_post` y el secreto `belle_cron_secret` del Vault; las filas se copian a
+  `_recupero_respaldo` y de ahí se reinsertan (`overriding system value`) + `ajustar_stock(p_en_viaje…)` por los `parcial`.
 - **Instagram / marketing** (EN CURSO): ver `docs/contexto-marketing.md`. Etapa 1 (32 destacadas)
   entregada; Etapa 2 (historias/videos) en iteración — **leé el doc para saber qué estilos rechazó Ger
   y por qué, así no repetís errores.**
